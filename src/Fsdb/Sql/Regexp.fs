@@ -48,10 +48,14 @@ let private negateClass (target: string) =
 
 let private scalarAtom = @"(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|[\s\S])"
 
+let private scalarNegatedAtom (atom: string) =
+    // Test the positive atom before consuming a complete scalar. Reject a
+    // low surrogate preceded by its high surrogate: .NET may retry there
+    // after a failed lookahead at the start of a matching pair.
+    "(?:(?<![\\uD800-\\uDBFF])(?!(?:" + atom + "))" + scalarAtom + ")"
+
 let private scalarNegatedClass (target: string) =
-    // A .NET negated class can match only the high surrogate of a scalar.
-    // Test the positive class first, then consume the complete scalar.
-    "(?:(?!" + negateClass target + ")" + scalarAtom + ")"
+    scalarNegatedAtom (negateClass target)
 
 let private characterEscape = function
     | 'h' -> Some horizontalClass
@@ -139,6 +143,12 @@ let private binaryClassMembers =
     |> List.collect (fun (aliases, members) -> aliases |> List.map (fun alias -> alias, members))
     |> Map.ofList
 
+let private supplementaryBinaryAtoms =
+    [ [ "REGIONAL_INDICATOR"; "RI" ], @"\uD83C[\uDDE6-\uDDFF]"
+      [ "EMOJI_MODIFIER"; "EMOD" ], @"\uD83C[\uDFFB-\uDFFF]" ]
+    |> List.collect (fun (aliases, atom) -> aliases |> List.map (fun alias -> alias, atom))
+    |> Map.ofList
+
 let private unicodePropertyNameAt (pattern: string) index =
     if index + 3 >= pattern.Length
        || (pattern[index + 1] <> 'p' && pattern[index + 1] <> 'P')
@@ -163,6 +173,9 @@ let private unicodePropertyAt (pattern: string) index =
     | None -> None
     | Some(nextIndex, "ANY") ->
         Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then "(?!)" else scalarAtom))
+    | Some(nextIndex, name) when Map.containsKey name supplementaryBinaryAtoms ->
+        let atom = Map.find name supplementaryBinaryAtoms
+        Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then scalarNegatedAtom atom else atom))
     | Some(nextIndex, name) ->
         let categoryName =
             if name.StartsWith("GC=", StringComparison.Ordinal) then name.Substring(3)
@@ -246,7 +259,7 @@ let private mixedNegatedClassAt (pattern: string) start =
         // A bracket expression is one atom, so keep quantifiers attached to
         // the whole union. The outer ^ complements that one-character union.
         let rewritten =
-            if outerNegated then "(?:(?!(?:" + union + "))" + scalarAtom + ")"
+            if outerNegated then scalarNegatedAtom union
             else "(?:" + union + ")"
         Some(Ok(index - start, rewritten))
 

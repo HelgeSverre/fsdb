@@ -3235,6 +3235,35 @@ let tests =
                               (call "REGEXP_SUBSTR" [ VString "😀"; VString "\\P{Bidi_C}"; VInt 1L; VInt 1L; VString "c" ])
                               (VString "😀")
                               "negated Bidi_Control consumes one Unicode scalar"
+                      testCase "REGEXP supplementary binary properties consume complete scalars"
+                      <| fun _ ->
+                          for property, alias, matchingScalar, other in
+                              [ "Regional_Indicator", "RI", "🇳", "🏽"
+                                "Emoji_Modifier", "EMod", "🏽", "🇳" ] do
+                              for pattern in [ "\\p{" + property + "}"; "\\p{" + alias + "}"; "[\\p{" + property + "}]" ] do
+                                  Expect.equal
+                                      (call "REGEXP_SUBSTR" [ VString matchingScalar; VString pattern; VInt 1L; VInt 1L; VString "c" ])
+                                      (VString matchingScalar)
+                                      (sprintf "%s matches one scalar" pattern)
+
+                              for pattern in [ "\\P{" + property + "}"; "[\\P{" + property + "}]"; "[^\\p{" + property + "}]" ] do
+                                  Expect.equal
+                                      (call "REGEXP_SUBSTR" [ VString other; VString pattern; VInt 1L; VInt 1L; VString "c" ])
+                                      (VString other)
+                                      (sprintf "%s complements one scalar" pattern)
+                                  Expect.equal
+                                      (call "REGEXP_LIKE" [ VString matchingScalar; VString pattern; VString "c" ])
+                                      (VInt 0L)
+                                      (sprintf "%s excludes its member" pattern)
+
+                          Expect.equal
+                              (call "REGEXP_INSTR" [ VString "a🇳🏽b"; VString "\\p{Regional_Indicator}"; VInt 1L; VInt 1L; VInt 1L; VString "c" ])
+                              (VInt 3L)
+                              "regional indicator end position is scalar based"
+                          Expect.equal
+                              (call "REGEXP_INSTR" [ VString "a🇳🏽b"; VString "\\p{Emoji_Modifier}"; VInt 1L; VInt 1L; VInt 1L; VString "c" ])
+                              (VInt 4L)
+                              "emoji modifier end position is scalar based"
                       testCase "REGEXP Any property consumes one Unicode scalar"
                       <| fun _ ->
                           for pattern in [ "\\p{Any}"; "[\\p{Any}]"; "[a\\p{Any}]"; "[^\\P{Any}]" ] do

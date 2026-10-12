@@ -10788,6 +10788,12 @@ module ContractCatalog =
                Contract.query "bidi-control-negation"
                    "SELECT REGEXP_LIKE(CONVERT(0xE2808C USING utf8mb4),'\\\\p{Bidi_Control}','c'),REGEXP_LIKE(CONVERT(0xE281A0 USING utf8mb4),'\\\\p{Bidi_Control}','c'),REGEXP_LIKE(CONVERT(0xE281AA USING utf8mb4),'\\\\P{Bidi_Control}','c'),HEX(REGEXP_SUBSTR('😀','\\\\P{Bidi_C}',1,1,'c'))"
                    |> Contract.comparingValues
+               Contract.query "supplementary-binary-properties"
+                   "SELECT HEX(REGEXP_SUBSTR('🇳','\\\\p{Regional_Indicator}',1,1,'c')),HEX(REGEXP_SUBSTR('🇴','[\\\\p{RI}]',1,1,'c')),HEX(REGEXP_SUBSTR('🏽','\\\\p{Emoji_Modifier}',1,1,'c')),HEX(REGEXP_SUBSTR('🏽','[\\\\p{EMod}]',1,1,'c')),REGEXP_INSTR('a🇳🏽b','\\\\p{Regional_Indicator}',1,1,1,'c'),REGEXP_INSTR('a🇳🏽b','\\\\p{Emoji_Modifier}',1,1,1,'c')"
+                   |> Contract.comparingValues
+               Contract.query "supplementary-binary-negation"
+                   "SELECT REGEXP_LIKE('🇳','\\\\P{Regional_Indicator}','c'),REGEXP_LIKE('🏽','\\\\P{Emoji_Modifier}','c'),HEX(REGEXP_SUBSTR('🏽','[\\\\P{RI}]',1,1,'c')),HEX(REGEXP_SUBSTR('🇳','[^\\\\p{Emoji_Modifier}]',1,1,'c')),HEX(REGEXP_SUBSTR('😀','\\\\P{RI}',1,1,'c'))"
+                   |> Contract.comparingValues
                Contract.query "whitespace-escapes"
                    "SELECT REGEXP_LIKE(' ','\\\\h','c'),REGEXP_LIKE('\\n','\\\\h','c'),REGEXP_LIKE(' ','\\\\H','c'),REGEXP_LIKE('\\n','\\\\v','c'),REGEXP_LIKE(' ','\\\\v','c'),REGEXP_LIKE('A','\\\\V','c'),REGEXP_LIKE('\\n','[a\\\\H]','c'),REGEXP_LIKE(' ','[a\\\\H]','c')"
                    |> Contract.comparingValues
