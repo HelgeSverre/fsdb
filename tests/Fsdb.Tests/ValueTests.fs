@@ -3264,6 +3264,38 @@ let tests =
                               (call "REGEXP_INSTR" [ VString "a🇳🏽b"; VString "\\p{Emoji_Modifier}"; VInt 1L; VInt 1L; VInt 1L; VString "c" ])
                               (VInt 4L)
                               "emoji modifier end position is scalar based"
+                      testCase "REGEXP Greek script property distinguishes script from block"
+                      <| fun _ ->
+                          let matches pattern codePoint =
+                              call "REGEXP_LIKE" [ VString(Char.ConvertFromUtf32 codePoint); VString pattern; VString "c" ]
+
+                          for codePoint in [ 0x03a9; 0x1f00; 0x10140; 0x1d200 ] do
+                              Expect.equal (matches "\\p{Greek}" codePoint) (VInt 1L) (sprintf "U+%X is Greek" codePoint)
+
+                          for codePoint in [ 0x0041; 0x03e2; 0x00b5 ] do
+                              Expect.equal (matches "\\p{Greek}" codePoint) (VInt 0L) (sprintf "U+%X is not Greek" codePoint)
+
+                          for alias in [ "\\p{Script=Greek}"; "\\p{sc=Grek}"; "\\p{IsGreek}" ] do
+                              Expect.equal (matches alias 0x03a9) (VInt 1L) (sprintf "%s alias" alias)
+
+                          Expect.equal
+                              (call "REGEXP_LIKE" [ VString "µ"; VString "\\p{Greek}"; VString "i" ])
+                              (VInt 1L)
+                              "case-insensitive matching folds micro sign to Greek mu"
+
+                          Expect.equal (matches "[\\p{Greek}]" 0x10140) (VInt 1L) "bracket property consumes a supplementary scalar"
+                          Expect.equal (matches "[A\\p{Greek}]" 0x03a9) (VInt 1L) "mixed bracket property"
+                          Expect.equal (matches "\\P{Greek}" 0x10140) (VInt 0L) "negation excludes a Greek scalar"
+                          Expect.equal (matches "[\\P{Greek}]" 0x1f600) (VInt 1L) "bracket complement includes emoji"
+                          Expect.equal (matches "[^\\p{Greek}]" 0x10140) (VInt 0L) "negated bracket excludes a Greek scalar"
+                          Expect.equal
+                              (call "REGEXP_SUBSTR" [ VString "😀"; VString "\\P{Greek}"; VInt 1L; VInt 1L; VString "c" ])
+                              (VString "😀")
+                              "negation consumes a complete supplementary scalar"
+                          Expect.equal
+                              (call "REGEXP_INSTR" [ VString "a𐅀b"; VString "\\p{Greek}"; VInt 1L; VInt 1L; VInt 1L; VString "c" ])
+                              (VInt 3L)
+                              "end position counts supplementary Greek as one scalar"
                       testCase "REGEXP Any property consumes one Unicode scalar"
                       <| fun _ ->
                           for pattern in [ "\\p{Any}"; "[\\p{Any}]"; "[a\\p{Any}]"; "[^\\P{Any}]" ] do

@@ -10875,6 +10875,12 @@ module ContractCatalog =
                Contract.query "supplementary-binary-negation"
                    "SELECT REGEXP_LIKE('🇳','\\\\P{Regional_Indicator}','c'),REGEXP_LIKE('🏽','\\\\P{Emoji_Modifier}','c'),HEX(REGEXP_SUBSTR('🏽','[\\\\P{RI}]',1,1,'c')),HEX(REGEXP_SUBSTR('🇳','[^\\\\p{Emoji_Modifier}]',1,1,'c')),HEX(REGEXP_SUBSTR('😀','\\\\P{RI}',1,1,'c'))"
                    |> Contract.comparingValues
+               Contract.query "greek-script-properties"
+                   "SELECT REGEXP_LIKE('Ω','\\\\p{Greek}','c'),REGEXP_LIKE('Ϣ','\\\\p{Greek}','c'),REGEXP_LIKE('ἀ','\\\\p{Script=Greek}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF0908580 USING utf8mb4),'\\\\p{sc=Grek}',1,1,'c')),HEX(REGEXP_SUBSTR(CONVERT(0xF09D8880 USING utf8mb4),'[\\\\p{Greek}]',1,1,'c'))"
+                   |> Contract.comparingValues
+               Contract.query "greek-script-case-and-negation"
+                   "SELECT REGEXP_LIKE('µ','\\\\p{Greek}','c'),REGEXP_LIKE('µ','\\\\p{Greek}','i'),REGEXP_LIKE('Ω','\\\\P{Greek}','c'),HEX(REGEXP_SUBSTR('😀','\\\\P{Greek}',1,1,'c')),REGEXP_LIKE('😀','[\\\\P{Greek}]','c')"
+                   |> Contract.comparingValues
                Contract.query "whitespace-escapes"
                    "SELECT REGEXP_LIKE(' ','\\\\h','c'),REGEXP_LIKE('\\n','\\\\h','c'),REGEXP_LIKE(' ','\\\\H','c'),REGEXP_LIKE('\\n','\\\\v','c'),REGEXP_LIKE(' ','\\\\v','c'),REGEXP_LIKE('A','\\\\V','c'),REGEXP_LIKE('\\n','[a\\\\H]','c'),REGEXP_LIKE(' ','[a\\\\H]','c')"
                    |> Contract.comparingValues

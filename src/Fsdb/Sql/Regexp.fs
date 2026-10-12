@@ -149,6 +149,33 @@ let private supplementaryBinaryAtoms =
     |> List.collect (fun (aliases, atom) -> aliases |> List.map (fun alias -> alias, atom))
     |> Map.ofList
 
+// ICU's Greek script includes Greek Extended and supplementary symbols, but
+// excludes Coptic letters within the Greek and Coptic block.
+let private greekBmpRanges =
+    [ 0x0370, 0x0373; 0x0375, 0x0377; 0x037A, 0x037D; 0x037F, 0x037F
+      0x0384, 0x0384; 0x0386, 0x0386; 0x0388, 0x038A; 0x038C, 0x038C
+      0x038E, 0x03A1; 0x03A3, 0x03E1; 0x03F0, 0x03FF
+      0x1D26, 0x1D2A; 0x1D5D, 0x1D61; 0x1D66, 0x1D6A; 0x1DBF, 0x1DBF
+      0x1F00, 0x1F15; 0x1F18, 0x1F1D; 0x1F20, 0x1F45; 0x1F48, 0x1F4D
+      0x1F50, 0x1F57; 0x1F59, 0x1F59; 0x1F5B, 0x1F5B; 0x1F5D, 0x1F5D
+      0x1F5F, 0x1F7D; 0x1F80, 0x1FB4; 0x1FB6, 0x1FC4; 0x1FC6, 0x1FD3
+      0x1FD6, 0x1FDB; 0x1FDD, 0x1FEF; 0x1FF2, 0x1FF4; 0x1FF6, 0x1FFE
+      0x2126, 0x2126; 0xAB65, 0xAB65 ]
+
+let private greekScriptAtom =
+    let bmpMembers =
+        greekBmpRanges
+        |> List.map (fun (first, last) ->
+            if first = last then sprintf "\\u%04X" first
+            else sprintf "\\u%04X-\\u%04X" first last)
+        |> String.concat ""
+    "(?:[" + bmpMembers + "]|\\uD800[\\uDD40-\\uDD8E\\uDDA0]|\\uD834[\\uDE00-\\uDE45])"
+
+let private greekScriptFoldedAtom = "(?:" + greekScriptAtom + "|[\\u00B5\\u0345])"
+
+let private greekScriptAliases =
+    set [ "GREEK"; "GREK"; "ISGREEK"; "SC=GREEK"; "SC=GREK"; "SCRIPT=GREEK"; "SCRIPT=GREK" ]
+
 let private unicodePropertyNameAt (pattern: string) index =
     if index + 3 >= pattern.Length
        || (pattern[index + 1] <> 'p' && pattern[index + 1] <> 'P')
@@ -168,13 +195,16 @@ type private UnicodePropertyReplacement =
     | ClassMember of atom: string * memberSyntax: string
     | ScalarAlternative of string
 
-let private unicodePropertyAt (pattern: string) index =
+let private unicodePropertyAt ignoreCase (pattern: string) index =
     match unicodePropertyNameAt pattern index with
     | None -> None
     | Some(nextIndex, "ANY") ->
         Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then "(?!)" else scalarAtom))
     | Some(nextIndex, name) when Map.containsKey name supplementaryBinaryAtoms ->
         let atom = Map.find name supplementaryBinaryAtoms
+        Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then scalarNegatedAtom atom else atom))
+    | Some(nextIndex, name) when Set.contains name greekScriptAliases ->
+        let atom = if ignoreCase then greekScriptFoldedAtom else greekScriptAtom
         Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then scalarNegatedAtom atom else atom))
     | Some(nextIndex, name) ->
         let categoryName =
@@ -200,7 +230,7 @@ let private unicodePropertyAt (pattern: string) index =
             if pattern[index + 1] = 'P' then ScalarAlternative(scalarNegatedClass ("[^" + memberSyntax + "]"))
             else ClassMember(atom, memberSyntax))
 
-let private mixedNegatedClassAt (pattern: string) start =
+let private mixedNegatedClassAt ignoreCase (pattern: string) start =
     let outerNegated = start + 1 < pattern.Length && pattern[start + 1] = '^'
     let ordinary = StringBuilder()
     let alternatives = ResizeArray<string>()
@@ -215,7 +245,7 @@ let private mixedNegatedClassAt (pattern: string) start =
             index <- nextIndex
         elif pattern[index] = '\\' && index + 1 < pattern.Length then
             invalidMember <- invalidMember || rejectedEscapeAt pattern index
-            match unicodePropertyAt pattern index with
+            match unicodePropertyAt ignoreCase pattern index with
             | Some(nextIndex, ClassMember(_, memberSyntax)) ->
                 ordinary.Append memberSyntax |> ignore
                 index <- nextIndex
@@ -265,7 +295,7 @@ let private mixedNegatedClassAt (pattern: string) start =
 
 let private literalLetterEscapes = "CFKLqy"
 
-let private normalizePosixClasses (pattern: string) =
+let private normalizePosixClasses ignoreCase (pattern: string) =
     let builder = StringBuilder(pattern.Length)
     let mutable index = 0
     let mutable escaped = false
@@ -287,7 +317,7 @@ let private normalizePosixClasses (pattern: string) =
                 index <- index + 2
             else
                 invalid <- invalid || rejectedEscapeAt pattern index
-                match unicodePropertyAt pattern index with
+                match unicodePropertyAt ignoreCase pattern index with
                 | Some(nextIndex, property) ->
                     let replacement =
                         match property with
@@ -322,7 +352,7 @@ let private normalizePosixClasses (pattern: string) =
                 builder.Append(if target[1] = '^' then scalarNegatedClass target else target) |> ignore
                 index <- index + source.Length
             | None ->
-                match if not inClass && pattern[index] = '[' then mixedNegatedClassAt pattern index else None with
+                match if not inClass && pattern[index] = '[' then mixedNegatedClassAt ignoreCase pattern index else None with
                 | Some(Ok(length, rewritten)) ->
                     builder.Append rewritten |> ignore
                     index <- index + length
@@ -683,13 +713,18 @@ let private parseError (pattern: string) (error: RegexParseException) =
     | _ -> InvalidPattern(3691, "Invalid regular expression.")
 
 let compile (collation: Collation.Collation) (matchType: string option) (pattern: string) : Result<Regex, RegexError> =
-    let posix, invalidPosix = normalizePosixClasses pattern
+    let selectedOptions = optionsFor collation matchType
+    let ignoreCase =
+        match selectedOptions with
+        | Ok options -> options &&& RegexOptions.IgnoreCase <> RegexOptions.None
+        | Error _ -> false
+    let posix, invalidPosix = normalizePosixClasses ignoreCase pattern
     match invalidPattern posix with
     | Some(code, message) -> Error(InvalidPattern(code, message))
     | None ->
         if invalidPosix then Error(InvalidPattern(3685, "Illegal argument to a regular expression."))
         else
-            optionsFor collation matchType
+            selectedOptions
             |> Result.bind (fun options ->
                 normalizePossessiveQuantifiers (normalizePattern options posix)
                 |> Result.bind (fun normalized ->
