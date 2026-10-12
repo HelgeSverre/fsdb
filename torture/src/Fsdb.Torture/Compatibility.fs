@@ -1326,6 +1326,8 @@ module ContractCatalog =
                yield Contract.query "char-json-cte-null-first-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.execute "char-json-view-source-create" "CREATE TABLE char_view_source(id INT PRIMARY KEY,payload JSON)"
                yield Contract.execute "char-json-view-source-insert" "INSERT INTO char_view_source VALUES (1,'\"12.5\"'),(2,'null')"
+               yield Contract.execute "char-json-view-aux-create" "CREATE TABLE char_view_aux(id INT PRIMARY KEY)"
+               yield Contract.execute "char-json-view-aux-insert" "INSERT INTO char_view_aux VALUES (1),(2)"
                yield Contract.execute "char-json-view-direct-create" "CREATE VIEW char_direct_v AS SELECT id,payload FROM char_view_source"
                yield Contract.execute "char-json-view-extract-create" "CREATE VIEW char_extract_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
                yield Contract.execute "char-json-view-nested-create" "CREATE VIEW char_nested_v AS SELECT id,extracted AS nested_payload FROM char_extract_v"
@@ -1353,6 +1355,9 @@ module ContractCatalog =
                yield Contract.query "char-json-view-mixed-star-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.query "char-json-view-mixed-nested" "SELECT id,HEX(CHAR(renamed)) FROM char_mixed_nested_v ORDER BY id DESC" |> Contract.comparingValues
                yield Contract.query "char-json-view-mixed-nested-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-view-left-join" "SELECT v.id,HEX(CHAR(v.extracted)) FROM char_extract_v v JOIN char_view_aux a ON a.id=v.id ORDER BY v.id DESC" |> Contract.comparingValues
+               yield Contract.query "char-json-view-left-join-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               yield Contract.query "char-json-view-right-join" "SELECT a.id,HEX(CHAR(v.extracted)) FROM char_view_aux a JOIN char_extract_v v ON v.id=a.id ORDER BY a.id DESC" |> Contract.comparingValues
                yield Contract.execute "char-json-storage-create" "CREATE TABLE char_json_probe(id INT PRIMARY KEY,payload JSON)"
                yield Contract.execute "char-json-storage-insert"
                    "INSERT INTO char_json_probe VALUES (1,'12'),(2,'\"12.5\"'),(3,'true'),(4,'null'),(5,'[1,2]'),(6,'\"-1\"'),(7,'18446744073709551616')"

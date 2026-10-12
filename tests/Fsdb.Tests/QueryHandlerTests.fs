@@ -3567,6 +3567,8 @@ let tests =
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE TABLE char_view_source (id INT PRIMARY KEY,payload JSON)"
               let session, _ = handle session "INSERT INTO char_view_source VALUES (1,'\"12.5\"'),(2,'null')"
+              let session, _ = handle session "CREATE TABLE char_view_aux (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO char_view_aux VALUES (1),(2)"
               let session, _ = handle session "CREATE VIEW char_direct_v AS SELECT id,payload FROM char_view_source"
               let session, _ = handle session "CREATE VIEW char_extract_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
               let session, _ = handle session "CREATE VIEW char_nested_v AS SELECT id,extracted AS nested_payload FROM char_extract_v"
@@ -3596,6 +3598,27 @@ let tests =
                                 3156, sprintf "Invalid JSON value for CAST to INTEGER from column %s at row %d" warningSource row ]
                           sql
                   | _, result -> failtestf "expected CHAR JSON view result for %s, got %A" sql result
+              let joinedSql = "SELECT v.id,HEX(CHAR(v.extracted)) FROM char_extract_v v JOIN char_view_aux a ON a.id=v.id ORDER BY v.id DESC"
+              match handle session joinedSql with
+              | session, ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "2"; Some "00" ]; [ Some "1"; Some "0C" ] ] joinedSql
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ for row in 1 .. 2 ->
+                            3156, sprintf "Invalid JSON value for CAST to INTEGER from column json_extract at row %d" row ]
+                      joinedSql
+              | _, result -> failtestf "expected joined CHAR JSON view result for %s, got %A" joinedSql result
+              let rightJoinedSql = "SELECT a.id,HEX(CHAR(v.extracted)) FROM char_view_aux a JOIN char_extract_v v ON v.id=a.id ORDER BY a.id DESC"
+              match handle session rightJoinedSql with
+              | session, ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "2"; Some "00" ]; [ Some "1"; Some "0C" ] ] rightJoinedSql
+                  Expect.equal (session.Diagnostics |> List.map _.Code) [ 3156; 3156 ] rightJoinedSql
+                  Expect.isTrue
+                      (session.Diagnostics
+                       |> List.forall (fun condition ->
+                           condition.Message.StartsWith("Invalid JSON value for CAST to INTEGER from column json_extract at row ")))
+                      "right-side view warning source"
+              | _, result -> failtestf "expected joined CHAR JSON view result for %s, got %A" rightJoinedSql result
               match handle session "SELECT id,HEX(CHAR(payload)),HEX(CHAR(computed)) FROM char_mixed_star_v ORDER BY id DESC" with
               | session, ResultSet(_, rows) ->
                   Expect.equal rows [ [ Some "2"; Some "00"; Some "00" ]; [ Some "1"; Some "0C"; Some "00" ] ] "mixed star view rows"

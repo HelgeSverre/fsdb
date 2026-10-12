@@ -7667,7 +7667,12 @@ and private isBuiltinCharFunction registry (name: string) =
      || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase))
     && Functions.isUnmodifiedBuiltinScalar name registry
 
-and private viewJsonSourceNames (store: Store) (dbName: string) (columns: ColumnDef list) (projections: Projection list) (select: SelectStmt) =
+and private viewJsonSourceNames
+    (store: Store)
+    (dbName: string)
+    (qualifiers: Map<string, ColumnDef list * int>)
+    (projections: Projection list)
+    (select: SelectStmt) =
     if not (containsCharProjection projections) then Map.empty
     else
         let rec sources (seen: Set<string * string>) (viewDb: string) (viewName: string) =
@@ -7718,17 +7723,23 @@ and private viewJsonSourceNames (store: Store) (dbName: string) (columns: Column
                             |> Map.ofList
                         | _ -> Map.empty
                     | _ -> Map.empty
-        match select.From, select.Joins with
-        | Some(FromTable viewRef), [] ->
-            let viewDb = viewRef.Database |> Option.defaultValue dbName
-            let sourceNames = sources Set.empty viewDb viewRef.Table
-            columns
-            |> List.mapi (fun index column ->
-                Map.tryFind (column.Name.ToLowerInvariant()) sourceNames
-                |> Option.map (fun source -> index, source))
-            |> List.choose id
-            |> Map.ofList
-        | _ -> Map.empty
+        ((select.From |> Option.toList) @ (select.Joins |> List.map _.Table))
+        |> List.collect FromItem.leaves
+        |> List.collect (function
+            | FromTable viewRef ->
+                let qualifier = viewRef.Alias |> Option.defaultValue viewRef.Table
+                match Map.tryFind (qualifier.ToLowerInvariant()) qualifiers with
+                | None -> []
+                | Some(columns, offset) ->
+                    let viewDb = viewRef.Database |> Option.defaultValue dbName
+                    let sourceNames = sources Set.empty viewDb viewRef.Table
+                    columns
+                    |> List.mapi (fun index column ->
+                        Map.tryFind (column.Name.ToLowerInvariant()) sourceNames
+                        |> Option.map (fun source -> offset + index, source))
+                    |> List.choose id
+            | _ -> [])
+        |> Map.ofList
 
 and private charComputedDoubleOverflow (number: double) =
     // The signed lower bound is accepted here; a stored DOUBLE at that
@@ -16684,7 +16695,7 @@ and private runGroupedSelect
         select.OrderBy |> List.map fst
         |> prepareOrderProjectionAliases registry columnIndex qualifiers orderProjections
 
-    let jsonViewSourceNames = viewJsonSourceNames store dbName columns select.Projections select
+    let jsonViewSourceNames = viewJsonSourceNames store dbName qualifiers select.Projections select
     let baseCtxFor = contextFactory store registry dbName columnIndex qualifiers outer
     let ctxFor =
         if Map.isEmpty jsonViewSourceNames then baseCtxFor
@@ -19401,7 +19412,7 @@ and private runSelect
         runGroupedSelect store registry dbName columns qualifiers rows groupInputOrder { select with OrderBy = originalOrderBy } outer
     else
 
-    let jsonViewSourceNames = viewJsonSourceNames store dbName columns projections select
+    let jsonViewSourceNames = viewJsonSourceNames store dbName qualifiers projections select
     let baseCtxFor = contextFactory store registry dbName columnIndex qualifiers outer
     let ctxFor =
         if Map.isEmpty jsonViewSourceNames then baseCtxFor
