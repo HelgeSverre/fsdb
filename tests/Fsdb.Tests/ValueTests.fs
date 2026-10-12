@@ -3142,6 +3142,25 @@ let tests =
                               Expect.throws
                                   (fun () -> call "REGEXP_LIKE" [ VString "A"; VString pattern; VString "c" ] |> ignore)
                                   (sprintf "%s is not an ICU property spelling" pattern)
+                      testCase "REGEXP ASCII hex digit property follows ICU aliases and negation"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "\\p{ASCII_Hex_Digit}", "F", 1L
+                                "\\p{AHex}", "9", 1L
+                                "\\p{ASCII_Hex_Digit}", "é", 0L
+                                "\\p{ASCII_Hex_Digit}", "Ｆ", 0L
+                                "[\\p{ASCII_Hex_Digit}]", "F", 1L
+                                "\\P{ASCII_Hex_Digit}", "é", 1L
+                                "[\\P{ASCII_Hex_Digit}]", "é", 1L
+                                "\\P{AHex}", "😀", 1L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+                          Expect.equal
+                              (call "REGEXP_SUBSTR" [ VString "😀"; VString "\\P{AHex}"; VInt 1L; VInt 1L; VString "c" ])
+                              (VString "😀")
+                              "negated ASCII hex property consumes one Unicode scalar"
                       testCase "REGEXP Any property consumes one Unicode scalar"
                       <| fun _ ->
                           for pattern in [ "\\p{Any}"; "[\\p{Any}]"; "[a\\p{Any}]"; "[^\\P{Any}]" ] do

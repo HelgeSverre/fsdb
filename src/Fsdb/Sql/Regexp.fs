@@ -131,6 +131,8 @@ let private unicodeCategoryAliases =
 let private basicLatinAliases =
     set [ "ASCII"; "BLK=BASIC_LATIN"; "BLOCK=BASIC_LATIN"; "INBASICLATIN" ]
 
+let private asciiHexDigitAliases = set [ "ASCII_HEX_DIGIT"; "AHEX" ]
+
 let private unicodePropertyNameAt (pattern: string) index =
     if index + 3 >= pattern.Length
        || (pattern[index + 1] <> 'p' && pattern[index + 1] <> 'P')
@@ -147,7 +149,7 @@ let private rejectedEscapeAt (pattern: string) index =
         |> Option.exists (fun (_, name) -> name = "ISBASICLATIN"))
 
 type private UnicodePropertyReplacement =
-    | ClassMember of string
+    | ClassMember of atom: string * memberSyntax: string
     | ScalarAlternative of string
 
 let private unicodePropertyAt (pattern: string) index =
@@ -162,17 +164,21 @@ let private unicodePropertyAt (pattern: string) index =
             else name
         let positive =
             if name = "WHITE_SPACE" then
-                Some "\\s"
+                Some("\\s", "\\s")
             elif Set.contains name basicLatinAliases then
-                Some "\\p{IsBasicLatin}"
+                Some("\\p{IsBasicLatin}", "\\p{IsBasicLatin}")
+            elif Set.contains name asciiHexDigitAliases then
+                Some("[0-9A-Fa-f]", "0-9A-Fa-f")
             else
                 Map.tryFind categoryName unicodeCategoryAliases
-                |> Option.map (fun category -> "\\p{" + category + "}")
+                |> Option.map (fun category ->
+                    let property = "\\p{" + category + "}"
+                    property, property)
         positive
-        |> Option.map (fun property ->
+        |> Option.map (fun (atom, memberSyntax) ->
             nextIndex,
-            if pattern[index + 1] = 'P' then ScalarAlternative(scalarNegatedClass ("[^" + property + "]"))
-            else ClassMember property)
+            if pattern[index + 1] = 'P' then ScalarAlternative(scalarNegatedClass ("[^" + memberSyntax + "]"))
+            else ClassMember(atom, memberSyntax))
 
 let private mixedNegatedClassAt (pattern: string) start =
     let outerNegated = start + 1 < pattern.Length && pattern[start + 1] = '^'
@@ -190,8 +196,8 @@ let private mixedNegatedClassAt (pattern: string) start =
         elif pattern[index] = '\\' && index + 1 < pattern.Length then
             invalidMember <- invalidMember || rejectedEscapeAt pattern index
             match unicodePropertyAt pattern index with
-            | Some(nextIndex, ClassMember property) ->
-                ordinary.Append property |> ignore
+            | Some(nextIndex, ClassMember(_, memberSyntax)) ->
+                ordinary.Append memberSyntax |> ignore
                 index <- nextIndex
             | Some(nextIndex, ScalarAlternative property) ->
                 alternatives.Add property
@@ -265,7 +271,7 @@ let private normalizePosixClasses (pattern: string) =
                 | Some(nextIndex, property) ->
                     let replacement =
                         match property with
-                        | ClassMember memberPattern
+                        | ClassMember(atom, memberSyntax) -> if inClass then memberSyntax else atom
                         | ScalarAlternative memberPattern -> memberPattern
                     builder.Append replacement |> ignore
                     index <- nextIndex
