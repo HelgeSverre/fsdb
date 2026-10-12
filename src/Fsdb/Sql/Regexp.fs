@@ -132,6 +132,8 @@ let private basicLatinAliases =
     set [ "ASCII"; "BLK=BASIC_LATIN"; "BLOCK=BASIC_LATIN"; "INBASICLATIN" ]
 
 let private asciiHexDigitAliases = set [ "ASCII_HEX_DIGIT"; "AHEX" ]
+let private hexDigitAliases = set [ "HEX_DIGIT"; "HEX"; "XDIGIT" ]
+let private hexDigitMembers = "0-9A-Fa-f\\uFF10-\\uFF19\\uFF21-\\uFF26\\uFF41-\\uFF46"
 
 let private unicodePropertyNameAt (pattern: string) index =
     if index + 3 >= pattern.Length
@@ -169,6 +171,8 @@ let private unicodePropertyAt (pattern: string) index =
                 Some("\\p{IsBasicLatin}", "\\p{IsBasicLatin}")
             elif Set.contains name asciiHexDigitAliases then
                 Some("[0-9A-Fa-f]", "0-9A-Fa-f")
+            elif Set.contains name hexDigitAliases then
+                Some("[" + hexDigitMembers + "]", hexDigitMembers)
             else
                 Map.tryFind categoryName unicodeCategoryAliases
                 |> Option.map (fun category ->

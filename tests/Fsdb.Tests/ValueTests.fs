@@ -3161,6 +3161,27 @@ let tests =
                               (call "REGEXP_SUBSTR" [ VString "😀"; VString "\\P{AHex}"; VInt 1L; VInt 1L; VString "c" ])
                               (VString "😀")
                               "negated ASCII hex property consumes one Unicode scalar"
+                      testCase "REGEXP Unicode hex digit property includes fullwidth forms"
+                      <| fun _ ->
+                          for pattern, value, expected in
+                              [ "\\p{Hex_Digit}", "Ｆ", 1L
+                                "\\p{Hex}", "ｆ", 1L
+                                "\\p{XDigit}", "９", 1L
+                                "[\\p{Hex_Digit}]", "Ｆ", 1L
+                                "\\p{Hex_Digit}", "é", 0L
+                                "\\p{Hex_Digit}", "١", 0L
+                                "\\p{Hex_Digit}", "①", 0L
+                                "\\p{Hex_Digit}", "𝟡", 0L
+                                "\\P{Hex_Digit}", "é", 1L
+                                "[\\P{Hex_Digit}]", "é", 1L ] do
+                              Expect.equal
+                                  (call "REGEXP_LIKE" [ VString value; VString pattern; VString "c" ])
+                                  (VInt expected)
+                                  (sprintf "%s matches %A" pattern value)
+                          Expect.equal
+                              (call "REGEXP_SUBSTR" [ VString "😀"; VString "\\P{Hex_Digit}"; VInt 1L; VInt 1L; VString "c" ])
+                              (VString "😀")
+                              "negated Unicode hex property consumes one Unicode scalar"
                       testCase "REGEXP Any property consumes one Unicode scalar"
                       <| fun _ ->
                           for pattern in [ "\\p{Any}"; "[\\p{Any}]"; "[a\\p{Any}]"; "[^\\P{Any}]" ] do

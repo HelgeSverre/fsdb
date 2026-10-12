@@ -10770,6 +10770,12 @@ module ContractCatalog =
                Contract.query "ascii-hex-digit-brackets"
                    "SELECT REGEXP_LIKE('F','[\\\\p{ASCII_Hex_Digit}]','c'),REGEXP_LIKE('é','[\\\\P{ASCII_Hex_Digit}]','c'),REGEXP_SUBSTR('😀','\\\\P{AHex}',1,1,'c')"
                    |> Contract.comparingValues
+               Contract.query "unicode-hex-digit-properties"
+                   "SELECT REGEXP_LIKE('Ｆ','\\\\p{Hex_Digit}','c'),REGEXP_LIKE('ｆ','\\\\p{Hex}','c'),REGEXP_LIKE('９','\\\\p{XDigit}','c'),REGEXP_LIKE('é','\\\\p{Hex_Digit}','c'),REGEXP_LIKE('١','\\\\p{Hex_Digit}','c'),REGEXP_LIKE('①','\\\\p{Hex_Digit}','c'),REGEXP_LIKE('𝟡','\\\\p{Hex_Digit}','c')"
+                   |> Contract.comparingValues
+               Contract.query "unicode-hex-digit-brackets"
+                   "SELECT REGEXP_LIKE('Ｆ','[\\\\p{Hex_Digit}]','c'),REGEXP_LIKE('é','[\\\\P{Hex_Digit}]','c'),REGEXP_SUBSTR('😀','\\\\P{Hex_Digit}',1,1,'c')"
+                   |> Contract.comparingValues
                Contract.query "whitespace-escapes"
                    "SELECT REGEXP_LIKE(' ','\\\\h','c'),REGEXP_LIKE('\\n','\\\\h','c'),REGEXP_LIKE(' ','\\\\H','c'),REGEXP_LIKE('\\n','\\\\v','c'),REGEXP_LIKE(' ','\\\\v','c'),REGEXP_LIKE('A','\\\\V','c'),REGEXP_LIKE('\\n','[a\\\\H]','c'),REGEXP_LIKE(' ','[a\\\\H]','c')"
                    |> Contract.comparingValues
