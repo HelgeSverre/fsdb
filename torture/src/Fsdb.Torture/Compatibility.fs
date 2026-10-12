@@ -5978,6 +5978,32 @@ module ContractCatalog =
                "DROP TABLE ifnull_unsigned" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private nullifFunctionalIndex =
+        { Name = "nullif-functional-index"
+          Setup =
+            [| "CREATE TABLE nullif_probe(id INT PRIMARY KEY,v INT,UNIQUE KEY ux ((NULLIF(v,0))))"
+               "INSERT INTO nullif_probe VALUES(1,0),(2,NULL),(3,5)"
+               "CREATE TABLE nullif_unsigned(id INT PRIMARY KEY,v BIGINT UNSIGNED,KEY ix ((NULLIF(v,0))))"
+               "INSERT INTO nullif_unsigned VALUES(1,0),(2,18446744073709551615)"
+               "CREATE TABLE nullif_tiny(id INT PRIMARY KEY,v TINYINT NOT NULL,KEY ix ((NULLIF(v,5))))"
+               "INSERT INTO nullif_tiny VALUES(1,5),(2,0),(3,-1)"
+               "CREATE TABLE nullif_abs(id INT PRIMARY KEY,v INT,KEY ix ((ABS(NULLIF(v,0)))))"
+               "INSERT INTO nullif_abs VALUES(1,0),(2,-5)" |]
+          Steps =
+            [| Contract.query "nonzero" "SELECT id FROM nullif_probe WHERE NULLIF(v,0)=5"
+               Contract.query "null-result" "SELECT id FROM nullif_probe WHERE NULLIF(v,0) IS NULL ORDER BY id"
+               Contract.execute "duplicate" "INSERT INTO nullif_probe VALUES(4,5)" |> Contract.fails 1062 "23000"
+               Contract.execute "another-zero" "INSERT INTO nullif_probe VALUES(4,0)"
+               Contract.query "unsigned-maximum" "SELECT id FROM nullif_unsigned WHERE NULLIF(v,0)=18446744073709551615"
+               Contract.query "nonzero-comparison" "SELECT id FROM nullif_tiny WHERE NULLIF(v,5)=0"
+               Contract.query "nonzero-null" "SELECT id FROM nullif_tiny WHERE NULLIF(v,5) IS NULL"
+               Contract.query "composed-absolute" "SELECT id FROM nullif_abs WHERE ABS(NULLIF(v,0))=5"
+               Contract.execute "update" "UPDATE nullif_probe SET v=7 WHERE id=3"
+               Contract.query "old-key" "SELECT id FROM nullif_probe WHERE NULLIF(v,0)=5"
+               Contract.query "new-key" "SELECT id FROM nullif_probe WHERE NULLIF(v,0)=7" |]
+          Cleanup = [| "DROP TABLE nullif_probe"; "DROP TABLE nullif_unsigned"; "DROP TABLE nullif_tiny"; "DROP TABLE nullif_abs" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private bitCountFunctionalIndex =
         { Name = "bit-count-functional-index"
           Setup =
@@ -11188,6 +11214,7 @@ module ContractCatalog =
            signFunctionalIndex
            coalesceFunctionalIndex
            ifnullFunctionalIndex
+           nullifFunctionalIndex
            bitCountFunctionalIndex
            crc32FunctionalIndex
            exactIntegerFunctionalBounds

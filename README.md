@@ -469,6 +469,9 @@ different access pattern:
   ordinary integer sources produce a signed `BIGINT` result, while
   `BIGINT UNSIGNED` with a signed fallback produces `DECIMAL(20,0)`. The
   function name is part of the key identity.
+  `NULLIF(integer_column, integer_literal)` has a nullable physical key:
+  narrow integer sources promote to `INT`, while `BIGINT` retains its width.
+  Equality and unique-key checks use the projected result.
 
   Text and binary values use MySQL's leading-number conversion and
   diagnostics. Arithmetic and other general expression keys retain their DDL

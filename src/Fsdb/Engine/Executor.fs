@@ -14990,6 +14990,8 @@ and private transformUsesStoredSemantics (registry: Registry) expression = funct
             callsUnmodified
             && (requested.NullFallback
                 |> Option.forall (fun fallback -> Functions.isUnmodifiedBuiltinScalar fallback.Name registry))
+            && (requested.NullComparison.IsNone
+                || Functions.isUnmodifiedBuiltinScalar "NULLIF" registry)
         | _ -> false
     | Some transform ->
         match expression with
@@ -20688,7 +20690,7 @@ let private explainIndexKeyLen
             transforms
             |> Option.bind (List.tryItem position)
             |> Option.flatten
-            |> Option.bind (FunctionalIndex.tryIntegerFallbackKeyLength column.Type)
+            |> Option.bind (FunctionalIndex.tryIntegerExpressionKeyLength column.Type)
 
         functionalLength |> Option.orElseWith (fun () -> explainPrefixKeyLen column prefixLength))
     |> traverse (function

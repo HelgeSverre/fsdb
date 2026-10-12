@@ -8840,6 +8840,56 @@ let tests =
                         |> explainRow
                     Expect.equal unsignedPlan.KeyLength (Some "9") "the decimal key uses nine bytes"
 
+                testCase "NULLIF integer functional keys promote narrow widths and preserve nullable uniqueness"
+                <| fun _ ->
+                    let store = newStore ()
+                    Expect.equal
+                        (runDefault store "CREATE TABLE nullif_int (id INT PRIMARY KEY, value INT, UNIQUE INDEX ux ((NULLIF(value, 0))))")
+                        (Affected 0UL)
+                        "MySQL accepts a unique NULLIF key"
+                    Expect.equal
+                        (runDefault store "INSERT INTO nullif_int VALUES (1, 0), (2, NULL), (3, 5)")
+                        (Affected 3UL)
+                        "the NULL result admits multiple rows"
+                    match runDefault store "INSERT INTO nullif_int VALUES (4, 5)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "duplicate nonzero NULLIF key must fail; got %A" other
+                    let intPlan =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_int WHERE NULLIF(value, 0) = 5"
+                        |> explainRow
+                    Expect.equal intPlan.Key (Some "ux") "the expression uses its physical key"
+                    Expect.equal intPlan.KeyLength (Some "5") "the nullable INT key has five bytes"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM nullif_int WHERE NULLIF(value, 0) IS NULL ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "zero and source NULL produce NULL"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE nullif_big (id INT PRIMARY KEY, value BIGINT UNSIGNED, INDEX ix ((NULLIF(value, 0))))")
+                        (Affected 0UL)
+                        "the unsigned source retains its type"
+                    Expect.equal
+                        (runDefault store "INSERT INTO nullif_big VALUES (1, 18446744073709551615)")
+                        (Affected 1UL)
+                        "the unsigned maximum remains exact"
+                    let bigPlan =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_big WHERE NULLIF(value, 0) = 18446744073709551615"
+                        |> explainRow
+                    Expect.equal bigPlan.KeyLength (Some "9") "the nullable BIGINT key has nine bytes"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE nullif_tiny (id INT PRIMARY KEY, value TINYINT NOT NULL, INDEX ix ((NULLIF(value, 5))))")
+                        (Affected 0UL)
+                        "a narrow non-null source can yield a nullable result"
+                    Expect.equal
+                        (runDefault store "INSERT INTO nullif_tiny VALUES (1, 5), (2, 0)")
+                        (Affected 2UL)
+                        "the comparison value becomes NULL"
+                    let tinyPlan =
+                        runDefault store "EXPLAIN SELECT id FROM nullif_tiny WHERE NULLIF(value, 5) = 0"
+                        |> explainRow
+                    Expect.equal tinyPlan.KeyLength (Some "5") "MySQL promotes TINYINT to nullable INT"
+
                 testCase "TRIM expression indexes enforce uniqueness and narrow predicates"
                 <| fun _ ->
                     let store = newStore ()

@@ -160,14 +160,18 @@ type PhysicalExpression =
     { Qualifier: string option
       Column: string
       NullFallback: NullFallback option
+      NullComparison: Value option
       Calls: (string * IndexTransform) list
       Transform: IndexTransform }
 
-let private canonicalExpression (column: string) fallback (calls: (string * IndexTransform) list) =
+let private canonicalExpression (column: string) fallback nullComparison (calls: (string * IndexTransform) list) =
     let source =
-        match fallback with
-        | Some fallback -> FuncCall(fallback.Name, [ Col(column.ToLowerInvariant()); Lit fallback.Value ])
-        | None -> Col(column.ToLowerInvariant())
+        let column = Col(column.ToLowerInvariant())
+        match fallback, nullComparison with
+        | Some fallback, None -> FuncCall(fallback.Name, [ column; Lit fallback.Value ])
+        | None, Some value -> FuncCall("NULLIF", [ column; Lit value ])
+        | None, None -> column
+        | Some _, Some _ -> invalidArg (nameof nullComparison) "An index source cannot have two NULL rules"
 
     calls
     |> List.fold
@@ -178,31 +182,37 @@ let private canonicalExpression (column: string) fallback (calls: (string * Inde
 
 let tryPhysicalExpression expression =
     let rec collect calls = function
-        | Col column -> Some(None, column, None, calls)
-        | QualifiedCol(qualifier, column) -> Some(Some qualifier, column, None, calls)
+        | Col column -> Some(None, column, None, None, calls)
+        | QualifiedCol(qualifier, column) -> Some(Some qualifier, column, None, None, calls)
         | FuncCall(name, [ Col column; Lit fallback ])
             when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
                  || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase) ->
-            Some(None, column, Some { Name = name.ToUpperInvariant(); Value = fallback }, calls)
+            Some(None, column, Some { Name = name.ToUpperInvariant(); Value = fallback }, None, calls)
         | FuncCall(name, [ QualifiedCol(qualifier, column); Lit fallback ])
             when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
                  || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase) ->
-            Some(Some qualifier, column, Some { Name = name.ToUpperInvariant(); Value = fallback }, calls)
+            Some(Some qualifier, column, Some { Name = name.ToUpperInvariant(); Value = fallback }, None, calls)
+        | FuncCall(name, [ Col column; Lit comparison ]) when name.Equals("NULLIF", StringComparison.OrdinalIgnoreCase) ->
+            Some(None, column, None, Some comparison, calls)
+        | FuncCall(name, [ QualifiedCol(qualifier, column); Lit comparison ])
+            when name.Equals("NULLIF", StringComparison.OrdinalIgnoreCase) ->
+            Some(Some qualifier, column, None, Some comparison, calls)
         | FuncCall(name, [ argument ]) ->
             tryBuiltin name
             |> Option.bind (fun transform -> collect ((name, transform) :: calls) argument)
         | _ -> None
 
     collect [] expression
-    |> Option.bind (fun (qualifier, column, fallback, calls) ->
-        if fallback.IsNone && calls.IsEmpty then None
+    |> Option.bind (fun (qualifier, column, fallback, nullComparison, calls) ->
+        if fallback.IsNone && nullComparison.IsNone && calls.IsEmpty then None
         else
             Some
                 { Qualifier = qualifier
                   Column = column
                   NullFallback = fallback
+                  NullComparison = nullComparison
                   Calls = calls
-                  Transform = Expression(canonicalExpression column fallback calls) })
+                  Transform = Expression(canonicalExpression column fallback nullComparison calls) })
 
 let tryKeyPart (column: IndexColumn) =
     match column.Transform with
@@ -279,7 +289,8 @@ let rec hasTextResult = function
 let tryRebaseColumn column = function
     | Expression expression ->
         tryPhysicalExpression expression
-        |> Option.map (fun physical -> Expression(canonicalExpression column physical.NullFallback physical.Calls))
+        |> Option.map (fun physical ->
+            Expression(canonicalExpression column physical.NullFallback physical.NullComparison physical.Calls))
     | transform -> Some transform
 
 let private isTextOrBinary =
@@ -399,6 +410,16 @@ let private tryIntegerFallbackKey columnType fallback =
         Some UnsignedInt64
     | _ -> None
 
+let private nullIfIntegerWidth = function
+    | TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ -> Some 4
+    | TBigInt _ -> Some 8
+    | _ -> None
+
+let private supportsNullIf columnType comparison =
+    match nullIfIntegerWidth columnType, comparison with
+    | Some _, (VInt _ | VUInt _) -> true
+    | _ -> false
+
 let supportsColumnType transform columnType =
     match transform with
     | Expression expression ->
@@ -406,13 +427,15 @@ let supportsColumnType transform columnType =
         |> Option.exists (fun physical ->
             let transforms = physical.Calls |> List.map snd
             let sourceSupported =
-                physical.NullFallback
-                |> Option.forall (fun fallback -> tryIntegerFallbackKey columnType fallback |> Option.isSome)
+                (physical.NullFallback
+                 |> Option.forall (fun fallback -> tryIntegerFallbackKey columnType fallback |> Option.isSome))
+                && (physical.NullComparison
+                    |> Option.forall (supportsNullIf columnType))
 
             if not sourceSupported then false
             else
                 match transforms, List.rev transforms with
-                | [], [] -> physical.NullFallback.IsSome
+                | [], [] -> physical.NullFallback.IsSome || physical.NullComparison.IsSome
                 | first :: _, textResult :: inner
                     when (isTextToIntegerTransform textResult
                           || textResult = DecodedHex
@@ -445,9 +468,10 @@ let rec private integerKeyLength = function
     | _ -> None
 
 /// The hidden result type depends on both source signedness and literal width.
-let tryIntegerFallbackKeyLength columnType = function
+let tryIntegerExpressionKeyLength columnType = function
     | Expression expression ->
         match tryPhysicalExpression expression with
+        | Some { NullComparison = Some _; Calls = [] } -> nullIfIntegerWidth columnType |> Option.map ((+) 1)
         | Some { NullFallback = Some fallback; Calls = [] } ->
             match tryIntegerFallbackKey columnType fallback with
             | Some SignedInt32 -> Some 4
@@ -459,7 +483,7 @@ let tryIntegerFallbackKeyLength columnType = function
     | _ -> None
 
 let fixedKeyLength columnType transform =
-    tryIntegerFallbackKeyLength columnType transform
+    tryIntegerExpressionKeyLength columnType transform
     |> Option.orElseWith (fun () -> integerKeyLength transform)
 
 let rec hasNumericResult = function
@@ -467,6 +491,7 @@ let rec hasNumericResult = function
         tryPhysicalExpression expression
         |> Option.exists (fun physical ->
             physical.NullFallback.IsSome
+            || physical.NullComparison.IsSome
             || (physical.Calls |> List.tryLast |> Option.exists (snd >> hasNumericResult)))
     | transform ->
         match transformFamily transform with
@@ -678,6 +703,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
 
             match List.tryLast transforms with
             | None when physical.NullFallback.IsSome -> tryIntegerFallbackProbe columnType physical.NullFallback value
+            | None when physical.NullComparison.IsSome -> normalizeStored value
             | Some transform when isTextToIntegerTransform transform -> tryExactInt64 value |> Option.map VInt
             | Some DecodedHex -> tryBinaryProbe value
             | Some transform when isEncodedTextTransform transform -> tryTextResultProbe value
@@ -854,6 +880,11 @@ let rec projectValueWithStatus encodeText transform value =
                 match value, physical.NullFallback with
                 | VNull, Some fallback -> fallback.Value
                 | _ -> value
+
+            let source =
+                match physical.NullComparison with
+                | Some comparison when Fsdb.Value.equals source comparison = Some true -> VNull
+                | _ -> source
 
             physical.Calls
             |> List.fold
