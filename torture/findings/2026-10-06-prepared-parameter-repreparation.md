@@ -138,8 +138,17 @@ value still creates a BIGINT column and stores the retained integer value
 2. All 46 added steps matched MySQL 8.4.11 in the pinned
 `20261012T054457239-18098/contracts` run. Across 139 cases and 18,941
 steps, the ten differences were the previously recorded signatures; none
-came from these histories. Other expression families, mutation statements,
-and values beyond System.Decimal precision remain unaudited here.
+came from these histories.
+
+A separate `prepared-direct-variable-mutations` contract prepares UPDATE,
+DELETE, and INSERT SELECT with an initially signed-integer user variable.
+After decimal 1.75, text '1', and NULL assignments, it compares affected
+rows and stored values, including the rounded integer value 2 in both the
+indexed UPDATE target and inserted row. All 21 steps passed in the pinned
+`20261012T055149833-19412/contracts` run. The expanded contract has 140
+cases and 18,962 steps; its ten differences are unchanged. Other mutation
+shapes, expression families, and values beyond System.Decimal precision
+remain unaudited here.
 
 Remaining boundaries:
 

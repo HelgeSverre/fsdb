@@ -4600,6 +4600,39 @@ module ContractCatalog =
           Cleanup = [| "DEALLOCATE PREPARE user_assignment"; "DEALLOCATE PREPARE delayed_assignment"; "DEALLOCATE PREPARE mixed_assignment"; "DEALLOCATE PREPARE failing_assignment" |]
           Coverage = [| "statement:set", [| "text-differential" |] |] }
 
+    let private preparedDirectVariableMutations =
+        { Name = "prepared-direct-variable-mutations"
+          Setup = [||]
+          Steps =
+            [| Contract.execute "create" "CREATE TABLE direct_mutation(id INT PRIMARY KEY,hits BIGINT)"
+               Contract.execute "seed" "INSERT INTO direct_mutation VALUES(1,0),(2,0)"
+               Contract.execute "initial" "SET @mutation_value=-2"
+               Contract.execute "prepare-update"
+                   "PREPARE direct_update FROM 'UPDATE direct_mutation SET hits=@mutation_value WHERE id=@mutation_value'"
+               Contract.execute "prepare-delete"
+                   "PREPARE direct_delete FROM 'DELETE FROM direct_mutation WHERE id=@mutation_value'"
+               Contract.execute "prepare-insert"
+                   "PREPARE direct_insert FROM 'INSERT INTO direct_mutation(id,hits) SELECT 3,@mutation_value'"
+               for name, value in [ "decimal", "1.75"; "text", "'1'"; "null", "NULL" ] do
+                   Contract.execute (name + "-set") ("SET @mutation_value=" + value)
+                   Contract.execute (name + "-update") "EXECUTE direct_update"
+                   Contract.query (name + "-rows") "SELECT id,hits FROM direct_mutation ORDER BY id"
+               Contract.execute "insert-set" "SET @mutation_value=1.75"
+               Contract.execute "insert" "EXECUTE direct_insert"
+               Contract.query "insert-rows" "SELECT id,hits FROM direct_mutation ORDER BY id"
+               Contract.execute "delete-set" "SET @mutation_value=1.75"
+               Contract.execute "delete" "EXECUTE direct_delete"
+               Contract.query "delete-rows" "SELECT id,hits FROM direct_mutation ORDER BY id" |]
+          Cleanup =
+            [| "DEALLOCATE PREPARE direct_update"
+               "DEALLOCATE PREPARE direct_delete"
+               "DEALLOCATE PREPARE direct_insert"
+               "DROP TABLE IF EXISTS direct_mutation" |]
+          Coverage =
+            [| "statement:update", [| "text-differential" |]
+               "statement:delete", [| "text-differential" |]
+               "statement:insert", [| "text-differential" |] |] }
+
     let private preparedMixedAssignments =
         { Name = "prepared-mixed-variable-assignments"
           Setup = [||]
@@ -11109,6 +11142,7 @@ module ContractCatalog =
            preparedTypeHistory
            preparedUserVariables
            preparedUserAssignments
+           preparedDirectVariableMutations
            preparedMixedAssignments
            preparedDecimalDivision
            divisionPrecisionIncrement
