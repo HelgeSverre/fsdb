@@ -7,14 +7,14 @@ MySQL excludes Coptic characters in that block, includes Greek Extended and
 supplementary Greek symbols, and matches complete Unicode scalars inside
 bracket expressions.
 
-The native [`regexp-greek-script-oracle.py`](../scripts/regexp-greek-script-oracle.py)
+The native [`regexp-unicode-property-oracle.py`](../scripts/regexp-unicode-property-oracle.py)
 enumerates every Unicode scalar through MySQL's ICU `REGEXP_REPLACE` in
 case-sensitive and case-insensitive modes. It excludes surrogate code units
 and hashes the matching code points as little-endian 32-bit integers. The
 case-sensitive set has 518 scalars in 36 ranges. Case-insensitive matching
 adds only U+00B5 MICRO SIGN and U+0345 COMBINING GREEK YPOGEGRAMMENI, for
 520 scalars. The maintained
-[`regexp-greek-fsdb-scan.fsx`](../scripts/regexp-greek-fsdb-scan.fsx)
+[`regexp-unicode-property-fsdb-scan.fsx`](../scripts/regexp-unicode-property-fsdb-scan.fsx)
 checks the same full-set counts and hashes against Fsdb's compiled regex.
 
 MySQL's `\p{scx=Grek}` and `\p{Script_Extensions=Greek}` are distinct

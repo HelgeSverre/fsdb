@@ -1,4 +1,4 @@
-"""Check MySQL 8.4.11 Greek-script membership over every Unicode scalar."""
+"""Check selected MySQL 8.4.11 Unicode properties over every scalar."""
 
 import hashlib
 import pathlib
@@ -12,6 +12,8 @@ EXPECTED = {
     ("Greek", "i"): (520, "82287ee86552cbedfd2f2c835940cb24d64b0689e552d7c67e0b08cd13b81992"),
     ("scx=Grek", "c"): (531, "f1470937ece85b43a8e303fc71222a830754d6c0d9c9335c72906f793dd29e56"),
     ("scx=Grek", "i"): (532, "32befcff5012c57221a15aa5c24bcd98b177bd452b6273cf1db3e50ff43a91f1"),
+    ("Variation_Selector", "c"): (260, "c539c99975ea71b6bc652c0d4bc1327c0e68e46ca369951847b0c2fef1aa5b77"),
+    ("Variation_Selector", "i"): (260, "c539c99975ea71b6bc652c0d4bc1327c0e68e46ca369951847b0c2fef1aa5b77"),
 }
 
 

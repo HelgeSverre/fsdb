@@ -3317,6 +3317,20 @@ let tests =
                               (call "REGEXP_LIKE" [ VString "µ"; VString "\\p{scx=Grek}"; VString "i" ])
                               (VInt 1L)
                               "case folding includes micro sign"
+                      testCase "REGEXP variation selectors include supplementary scalars"
+                      <| fun _ ->
+                          let matches pattern codePoint =
+                              call "REGEXP_LIKE" [ VString(Char.ConvertFromUtf32 codePoint); VString pattern; VString "c" ]
+
+                          for codePoint in [ 0x180b; 0x180f; 0xfe00; 0xfe0f; 0xe0100; 0xe01ef ] do
+                              Expect.equal (matches "\\p{Variation_Selector}" codePoint) (VInt 1L) (sprintf "U+%X is a variation selector" codePoint)
+
+                          for codePoint in [ 0x180e; 0xfe10; 0xe00ff; 0xe01f0 ] do
+                              Expect.equal (matches "\\p{VS}" codePoint) (VInt 0L) (sprintf "U+%X is not a variation selector" codePoint)
+
+                          Expect.equal (matches "[\\p{VS}]" 0xe0100) (VInt 1L) "bracket includes supplementary selector"
+                          Expect.equal (matches "\\P{VS}" 0xe0100) (VInt 0L) "negation excludes supplementary selector"
+                          Expect.equal (matches "\\P{VS}" 0xe01f0) (VInt 1L) "negation includes adjacent scalar"
                       testCase "REGEXP Any property consumes one Unicode scalar"
                       <| fun _ ->
                           for pattern in [ "\\p{Any}"; "[\\p{Any}]"; "[a\\p{Any}]"; "[^\\P{Any}]" ] do

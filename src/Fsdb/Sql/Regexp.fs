@@ -143,9 +143,10 @@ let private binaryClassMembers =
     |> List.collect (fun (aliases, members) -> aliases |> List.map (fun alias -> alias, members))
     |> Map.ofList
 
-let private supplementaryBinaryAtoms =
+let private scalarBinaryAtoms =
     [ [ "REGIONAL_INDICATOR"; "RI" ], @"\uD83C[\uDDE6-\uDDFF]"
-      [ "EMOJI_MODIFIER"; "EMOD" ], @"\uD83C[\uDFFB-\uDFFF]" ]
+      [ "EMOJI_MODIFIER"; "EMOD" ], @"\uD83C[\uDFFB-\uDFFF]"
+      [ "VARIATION_SELECTOR"; "VS" ], @"(?:[\u180B-\u180D\u180F\uFE00-\uFE0F]|\uDB40[\uDD00-\uDDEF])" ]
     |> List.collect (fun (aliases, atom) -> aliases |> List.map (fun alias -> alias, atom))
     |> Map.ofList
 
@@ -212,8 +213,8 @@ let private unicodePropertyAt ignoreCase (pattern: string) index =
     | None -> None
     | Some(nextIndex, "ANY") ->
         Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then "(?!)" else scalarAtom))
-    | Some(nextIndex, name) when Map.containsKey name supplementaryBinaryAtoms ->
-        let atom = Map.find name supplementaryBinaryAtoms
+    | Some(nextIndex, name) when Map.containsKey name scalarBinaryAtoms ->
+        let atom = Map.find name scalarBinaryAtoms
         Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then scalarNegatedAtom atom else atom))
     | Some(nextIndex, name) when Set.contains name greekScriptExtensionAliases ->
         let atom = greekScriptExtensionsAtom ignoreCase

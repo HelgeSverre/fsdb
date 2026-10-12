@@ -10887,6 +10887,12 @@ module ContractCatalog =
                Contract.query "greek-script-extensions-negation"
                    "SELECT REGEXP_LIKE('µ','\\\\p{scx=Grek}','i'),REGEXP_LIKE(CONVERT(0xCC80 USING utf8mb4),'\\\\P{scx=Grek}','c'),REGEXP_LIKE('😀','[^\\\\p{scx=Grek}]','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF0908580 USING utf8mb4),'\\\\p{scx=Grek}',1,1,'c'))"
                    |> Contract.comparingValues
+               Contract.query "variation-selector-properties"
+                   "SELECT REGEXP_LIKE(CONVERT(0xE1A08B USING utf8mb4),'\\\\p{VS}','c'),REGEXP_LIKE(CONVERT(0xEFB88F USING utf8mb4),'\\\\p{Variation_Selector}','c'),HEX(REGEXP_SUBSTR(CONVERT(0xF3A08480 USING utf8mb4),'[\\\\p{VS}]',1,1,'c')),REGEXP_LIKE(CONVERT(0xE1A08E USING utf8mb4),'\\\\p{VS}','c')"
+                   |> Contract.comparingValues
+               Contract.query "variation-selector-negation"
+                   "SELECT REGEXP_LIKE(CONVERT(0xF3A087AF USING utf8mb4),'\\\\P{VS}','c'),REGEXP_LIKE(CONVERT(0xF3A087B0 USING utf8mb4),'\\\\P{VS}','c'),HEX(REGEXP_SUBSTR('😀','[^\\\\p{VS}]',1,1,'c')),REGEXP_LIKE(CONVERT(0xEFB88F USING utf8mb4),'\\\\p{VS}','i')"
+                   |> Contract.comparingValues
                Contract.query "whitespace-escapes"
                    "SELECT REGEXP_LIKE(' ','\\\\h','c'),REGEXP_LIKE('\\n','\\\\h','c'),REGEXP_LIKE(' ','\\\\H','c'),REGEXP_LIKE('\\n','\\\\v','c'),REGEXP_LIKE(' ','\\\\v','c'),REGEXP_LIKE('A','\\\\V','c'),REGEXP_LIKE('\\n','[a\\\\H]','c'),REGEXP_LIKE(' ','[a\\\\H]','c')"
                    |> Contract.comparingValues
