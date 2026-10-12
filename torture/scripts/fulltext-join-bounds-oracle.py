@@ -179,8 +179,10 @@ def verify(client, second_client):
             native["expect"]("costed numeric IN without hash join", client.query(query), "1\n2")
             client.query("SET SESSION optimizer_switch='default'")
             second_client.query("USE probe")
+            native["expect"]("costed numeric IN second connection opens indexed source",
+                             second_client.query(f"SELECT COUNT(*) FROM {name_table}"), "3")
+            native["expect"]("costed numeric IN after indexed source opens", client.query(query), "2")
             native["expect"]("costed numeric IN on another connection", second_client.query(query), "2")
-            native["expect"]("costed numeric IN after another connection", client.query(query), "2")
 
     native["expect"]("direct names IN", client.query(
         "SELECT id,k IN (1,NULL) FROM names ORDER BY id"), "1\tNULL\n2\t1\n3\tNULL")

@@ -276,6 +276,14 @@ before and after the second connection was identical: a hash join with a
 filter on `d.k` and the same displayed costs and row estimates. The maintained
 native oracle now asserts both connection outcomes.
 
+The second connection need only open the indexed `names` table: `SELECT
+COUNT(*) FROM names` causes the first connection's next result to become ID
+2. A new connection running `SELECT 1` or reading only `labels` does not.
+The transition also occurs when `names` has `KEY(k)` without a FULLTEXT index;
+without that secondary key, the initial two-ID result does not occur. These
+controlled probes narrow the state dependency to opening the indexed source,
+without yet identifying the internal MySQL state responsible for it.
+
 A fresh 139-case, 18,895-step pinned contract run at
 `20261012T052916142-16388/contracts` still has ten differences. Its
 long-lived connection returns IDs 1 and 2 for this step, while fsdb returns
