@@ -6928,6 +6928,31 @@ let tests =
                         Expect.equal plan.AccessType (Some "range") "a Unicode prefix uses a range"
                         Expect.equal plan.Key (Some "ix_v") "the Unicode prefix uses the text key"
 
+                testCase "pad-space binary LIKE ranges preserve trailing-space matching"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE like_legacy (id INT PRIMARY KEY, v VARCHAR(20) COLLATE utf8mb4_bin, KEY ix_v(v))" |> ignore
+                    let values =
+                        [ "ab"; "ab "; "ab c"; "abc"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁"; "ab  "; "ab  c" ]
+                        @ [ for id in 13..38 -> sprintf "zz%02d" id ]
+                        |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
+                        |> String.concat ","
+                    Expect.equal (runDefault store $"INSERT INTO like_legacy VALUES {values}") (Affected 38UL) "seed pad-space prefixes"
+
+                    for pattern, expected in
+                        [ "ab%", [ 1; 2; 3; 4; 11; 12 ]
+                          "ab %", [ 2; 3; 11; 12 ]
+                          "é%", [ 5; 6 ]
+                          "😀%", [ 8; 9 ]
+                          "ab", [ 1 ] ] do
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM like_legacy WHERE v LIKE '{pattern}' ORDER BY id")
+                            (ResultSet([ "id" ], expected |> List.map (fun id -> [ Some(string id) ])))
+                            "the range retains the full LIKE match"
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM like_legacy WHERE v LIKE '{pattern}'" |> explainRow
+                        Expect.equal plan.AccessType (Some "range") "a selective pad-space prefix uses a range"
+                        Expect.equal plan.Key (Some "ix_v") "the pad-space index supplies the range"
+
                 testCase "competing index families choose the lowest-cardinality access"
                 <| fun _ ->
                     let store = newStore ()

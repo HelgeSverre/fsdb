@@ -6084,6 +6084,11 @@ module ContractCatalog =
             @ [ for id in 10..34 -> sprintf "zz%02d" id ]
             |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
             |> String.concat ","
+        let padSpaceValues =
+            [ "ab"; "ab "; "ab c"; "abc"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁"; "ab  "; "ab  c" ]
+            @ [ for id in 13..38 -> sprintf "zz%02d" id ]
+            |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
+            |> String.concat ","
 
         { Name = "binary-like-prefix-range"
           Setup =
@@ -6092,7 +6097,9 @@ module ContractCatalog =
                "CREATE TABLE like_prefix_short_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_bin,KEY ix_v(v(2)))"
                "INSERT INTO like_prefix_short_probe VALUES " + values
                "CREATE TABLE like_unicode_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_bin,KEY ix_v(v))"
-               "INSERT INTO like_unicode_probe VALUES " + unicodeValues |]
+               "INSERT INTO like_unicode_probe VALUES " + unicodeValues
+               "CREATE TABLE like_pad_space_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_bin,KEY ix_v(v))"
+               "INSERT INTO like_pad_space_probe VALUES " + padSpaceValues |]
           Steps =
             [| Contract.query "prefix" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab%' ORDER BY id"
                Contract.query "prefix-and-single-character" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab_%' ORDER BY id"
@@ -6103,8 +6110,13 @@ module ContractCatalog =
                Contract.query "exact-pattern" "SELECT id FROM like_prefix_probe WHERE v LIKE 'abc' ORDER BY id"
                Contract.query "truncated-key" "SELECT id FROM like_prefix_short_probe WHERE v LIKE 'abc%' ORDER BY id"
                Contract.query "unicode-bmp" "SELECT id FROM like_unicode_probe WHERE v LIKE 'é%' ORDER BY id"
-               Contract.query "unicode-supplementary" "SELECT id FROM like_unicode_probe WHERE v LIKE '😀%' ORDER BY id" |]
-          Cleanup = [| "DROP TABLE like_prefix_probe"; "DROP TABLE like_prefix_short_probe"; "DROP TABLE like_unicode_probe" |]
+               Contract.query "unicode-supplementary" "SELECT id FROM like_unicode_probe WHERE v LIKE '😀%' ORDER BY id"
+               Contract.query "pad-space-prefix" "SELECT id FROM like_pad_space_probe WHERE v LIKE 'ab%' ORDER BY id"
+               Contract.query "pad-space-trailing-space" "SELECT id FROM like_pad_space_probe WHERE v LIKE 'ab %' ORDER BY id"
+               Contract.query "pad-space-bmp" "SELECT id FROM like_pad_space_probe WHERE v LIKE 'é%' ORDER BY id"
+               Contract.query "pad-space-supplementary" "SELECT id FROM like_pad_space_probe WHERE v LIKE '😀%' ORDER BY id"
+               Contract.query "pad-space-exact" "SELECT id FROM like_pad_space_probe WHERE v LIKE 'ab' ORDER BY id" |]
+          Cleanup = [| "DROP TABLE like_prefix_probe"; "DROP TABLE like_prefix_short_probe"; "DROP TABLE like_unicode_probe"; "DROP TABLE like_pad_space_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private textIfNullBranchFunctionalIndex =

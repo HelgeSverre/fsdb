@@ -1,9 +1,10 @@
 # Indexed binary-collated LIKE prefixes
 
-Native MySQL 8.4.11 uses `range` access on an indexed
-`VARCHAR(20) COLLATE utf8mb4_0900_bin` column for `LIKE 'ab%'`,
-`LIKE 'ab_%'`, `LIKE 'é%'`, and `LIKE '😀%'`. The ASCII probes return the
-same rows as a table without the index:
+Native MySQL 8.4.11 uses `range` access on indexed `VARCHAR(20)` columns
+with `utf8mb4_0900_bin` or `utf8mb4_bin` for `LIKE 'ab%'`,
+`LIKE 'é%'`, and `LIKE '😀%'`. The 0900 collation also uses a range for
+`LIKE 'ab_%'`. The ASCII probes return the same rows as a table without
+the index:
 `ab` matches only the first pattern, while `abc`, `abZ`, `ab `, and
 `ab%` match both. A leading wildcard cannot supply a lower bound.
 
@@ -12,10 +13,14 @@ before the first unescaped wildcard. The query still evaluates its full
 `LIKE` predicate on candidates, so `_` and later pattern characters retain
 their normal meaning. The upper bound advances the last Unicode scalar with
 room for a successor, skipping the surrogate range; an all-maximum prefix has
-only a lower bound. The planner chooses the range only when its observed
+only a lower bound. Fsdb's `utf8mb4_bin` ordered index sorts longer
+trailing-space variants before the bare prefix, so its lower bound uses the
+preceding significant scalar.
+The residual `LIKE` test distinguishes `ab` from `ab ` even though indexed
+comparison pads spaces. The planner chooses the range only when its observed
 candidate count beats a scan. This path covers literal patterns with default
 backslash or explicit `ESCAPE` semantics, including escaped wildcard characters
-and exact patterns, on `utf8mb4_0900_bin` `VARCHAR` keys.
+and exact patterns, on both binary-collated `VARCHAR` key variants.
 For a prefix-length key such as `v(2)`, storage widens the interval to
 include every row sharing the truncated key; the residual `LIKE` test
 selects `abc` from an `abc%` probe. Other
@@ -24,15 +29,15 @@ remain open.
 
 The focused Expecto tests first reported `ALL` where MySQL chose `range`.
 They now check both ASCII prefix patterns, BMP and supplementary Unicode
-prefixes, escaped `_` and `%`, an explicit escape
-character, an exact pattern, result parity with a scan, the
-leading-wildcard control, and the truncated-index candidate range. The
+prefixes, escaped `_` and `%`, an explicit escape character, an exact pattern,
+trailing-space variants under the legacy binary collation, result parity with
+a scan, the leading-wildcard control, and the truncated-index candidate range. The
 `binary-like-prefix-range` differential contract compares the returned
 rows with native MySQL.
 
-All ten contract steps matched in `20261012T180958894-17978/contracts`
+All fifteen contract steps matched in `20261012T181907320-24734/contracts`
 against native MySQL 8.4.11, and the case restored its database objects.
-The full 150-case, 19,102-step run retained two previously documented
+The full 150-case, 19,107-step run retained two previously documented
 row differences in the Han REGEXP property and mixed-type join cases.
 
 The [focused quick benchmark](../../benchmarks/results/2cf93f5d-quick.md)

@@ -2702,6 +2702,13 @@ let private likeLiteralPrefix (escape: char) (pattern: string) =
 
     prefix.ToString()
 
+let private unicodePrefixThrough (runes: System.Text.Rune[]) last (scalar: int) =
+    let result = System.Text.StringBuilder()
+    for index in 0 .. last - 1 do
+        result.Append(runes[index].ToString()) |> ignore
+    result.Append(System.Text.Rune(scalar).ToString()) |> ignore
+    result.ToString()
+
 let private likePrefixUpperBound (prefix: string) =
     let runes = prefix.EnumerateRunes() |> Seq.toArray
     let mutable last = runes.Length - 1
@@ -2711,13 +2718,20 @@ let private likePrefixUpperBound (prefix: string) =
 
     if last < 0 then None
     else
-        let upper = System.Text.StringBuilder()
-        for index in 0 .. last - 1 do
-            upper.Append(runes[index].ToString()) |> ignore
-
         let next = if runes[last].Value = 0xD7FF then 0xE000 else runes[last].Value + 1
-        upper.Append(System.Text.Rune(next).ToString()) |> ignore
-        Some(upper.ToString())
+        Some(unicodePrefixThrough runes last next)
+
+let private likePadSpaceLowerBound (prefix: string) =
+    let significant = prefix.TrimEnd(' ')
+    let runes = significant.EnumerateRunes() |> Seq.toArray
+    if runes.Length = 0 then None
+    else
+        let last = runes.Length - 1
+        let scalar = runes[last].Value
+        if scalar = 0 then None
+        else
+            let previous = if scalar = 0xE000 then 0xD7FF else scalar - 1
+            Some(unicodePrefixThrough runes last previous)
 
 let private likeOp (coll: Collation.Collation option) (caseSensitive: bool) (escape: char option) (subject: Value) (pattern: Value) : Value =
     match subject, pattern with
@@ -13424,7 +13438,7 @@ and private plannerRangePredicatesFor
         | [] -> rangePredicatesFor numericColumnName tryNumericConstant expression
         | predicates -> predicates
 
-/// A fixed UTF-8 prefix is a byte-order interval under utf8mb4_0900_bin.
+/// Binary UTF-8 collations keep fixed LIKE prefixes within a byte-order interval.
 and private likePrefixRangePredicate scope (table: Table) tref expression =
     match expression with
     | Like(source, LiteralValue(VString pattern), _, escape) ->
@@ -13436,15 +13450,23 @@ and private likePrefixRangePredicate scope (table: Table) tref expression =
                 match column.Type with
                 | TVarchar _ ->
                     column.Collation
-                    |> Option.exists (fun collation -> equalsIgnoreCase collation "utf8mb4_0900_bin")
+                    |> Option.exists (fun collation ->
+                        equalsIgnoreCase collation "utf8mb4_0900_bin"
+                        || equalsIgnoreCase collation "utf8mb4_bin")
                 | _ -> false)
             |> Option.bind (fun column ->
                 let prefix = likeLiteralPrefix (escape |> Option.defaultValue '\\') pattern
                 if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
                 else
+                    // PAD SPACE sorts longer trailing-space variants before the bare prefix.
+                    let lower =
+                        if column.Collation |> Option.exists (fun collation -> equalsIgnoreCase collation "utf8mb4_bin") then
+                            likePadSpaceLowerBound prefix
+                        else
+                            Some prefix
                     Some
                         { Column = column.Name
-                          Lower = Some(VString prefix, true)
+                          Lower = lower |> Option.map (fun value -> VString value, true)
                           Upper = likePrefixUpperBound prefix |> Option.map (fun successor -> VString successor, false) }))
     | _ -> None
 
