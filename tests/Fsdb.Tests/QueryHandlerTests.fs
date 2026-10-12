@@ -3510,6 +3510,17 @@ let tests =
                       "JSON mutation and search warning sources"
               | _, result -> failtestf "expected CHAR JSON mutation result, got %A" result
 
+          testCase "CHAR names JSON schema report sources"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              match handle session "SELECT HEX(CHAR(JSON_SCHEMA_VALIDATION_REPORT('{}','{}')))" with
+              | session, ResultSet(_, [ [ Some "00" ] ]) ->
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      [ 3156, "Invalid JSON value for CAST to INTEGER from column json_schema_validation_report at row 1" ]
+                      "JSON schema report warning source"
+              | _, result -> failtestf "expected CHAR JSON schema report result, got %A" result
+
           testCase "CHAR rejects computed integer overflow before byte assembly"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

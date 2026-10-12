@@ -257,9 +257,11 @@ its warning. JSON argument values and diagnostics now match the audited
 scalar, array, object, and overflow
 expressions. Stored JSON values and warning row numbers match the audited
 full, filtered, descending, bounded, and grouped projections; audited
-JSON_EXTRACT, JSON_SET, JSON_MERGE_PATCH, JSON_KEYS, and audited JSON mutation
-and search function origins also match. Less common JSON source forms and
-other expression-origin overflow cases remain open.
+JSON_EXTRACT, JSON_SET, JSON_MERGE_PATCH, JSON_KEYS, audited JSON mutation and
+search functions, and JSON_SCHEMA_VALIDATION_REPORT origins also match. Every
+registered JSON-returning builtin has at least one audited `CHAR()` source
+case; nested, derived, and user-defined JSON origins, and other
+expression-origin overflow cases remain open.
 
 | Missing family | Functions | Impact |
 |---|---|---|
