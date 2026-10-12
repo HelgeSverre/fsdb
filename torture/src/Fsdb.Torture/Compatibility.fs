@@ -6058,6 +6058,19 @@ module ContractCatalog =
                "DROP TABLE text_coalesce_unique" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private equivalentTextFallbackFunctionalIndex =
+        { Name = "equivalent-text-fallback-functional-index"
+          Setup =
+            [| "CREATE TABLE equivalent_fallback_probe(id INT PRIMARY KEY,v VARCHAR(4) COLLATE utf8mb4_0900_ai_ci,KEY ix_co ((COALESCE(v,_utf8mb4'x'))),KEY ix_if ((IFNULL(v,_utf8mb4'x'))))"
+               "INSERT INTO equivalent_fallback_probe VALUES(1,NULL),(2,'a'),(3,'X')" |]
+          Steps =
+            [| Contract.query "coalesce-cross-charset" "SELECT id FROM equivalent_fallback_probe WHERE COALESCE(v,_latin1'X')='x' ORDER BY id"
+               Contract.query "ifnull-cross-charset" "SELECT id FROM equivalent_fallback_probe WHERE IFNULL(v,_latin1'X')='x' ORDER BY id"
+               Contract.query "coalesce-different-text" "SELECT id FROM equivalent_fallback_probe WHERE COALESCE(v,_latin1'y')='x' ORDER BY id"
+               Contract.query "ifnull-binary-text" "SELECT id FROM equivalent_fallback_probe WHERE IFNULL(v,_binary'x')='x' ORDER BY id" |]
+          Cleanup = [| "DROP TABLE equivalent_fallback_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private textIfNullBranchFunctionalIndex =
         { Name = "text-if-null-branch-functional-index"
           Setup =
@@ -11367,6 +11380,7 @@ module ContractCatalog =
            ifnullFunctionalIndex
            ifNullBranchFunctionalIndex
            textNullFallbackFunctionalIndex
+           equivalentTextFallbackFunctionalIndex
            textIfNullBranchFunctionalIndex
            nullifFunctionalIndex
            textNullifFunctionalIndex

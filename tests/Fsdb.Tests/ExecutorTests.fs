@@ -8766,6 +8766,40 @@ let tests =
                     Expect.equal ifnullPlan.Key (Some "ix_ifnull") "IFNULL uses its own key"
                     Expect.equal ifnullPlan.KeyLength (Some "82") "IFNULL has the same non-null VARCHAR width"
 
+                testCase "folded text fallback keys accept equivalent introduced literals"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE folded_fallback (id INT PRIMARY KEY, value VARCHAR(4) COLLATE utf8mb4_0900_ai_ci, KEY ix_co ((COALESCE(value,_utf8mb4'x'))), KEY ix_if ((IFNULL(value,_utf8mb4'x'))))")
+                        (Affected 0UL)
+                        "MySQL accepts both folded fallback keys"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO folded_fallback VALUES (1,NULL),(2,'a'),(3,'X')")
+                        (Affected 3UL)
+                        "seed fallback and stored values"
+
+                    for functionName, key in [ "COALESCE", "ix_co"; "IFNULL", "ix_if" ] do
+                        let expression = $"{functionName}(value,_latin1'X')"
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM folded_fallback WHERE {expression}='a'" |> explainRow
+                        Expect.equal plan.Key (Some key) "an equivalent cross-charset fallback uses its key"
+
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM folded_fallback WHERE {expression}='x' ORDER BY id")
+                            (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "3" ] ]))
+                            "the aliased lookup retains folded fallback rows"
+
+                        let different =
+                            runDefault store $"EXPLAIN SELECT id FROM folded_fallback WHERE {functionName}(value,_latin1'y')='a'"
+                            |> explainRow
+                        Expect.equal different.Key None "a distinct fallback text does not share the key"
+
+                        let binary =
+                            runDefault store $"EXPLAIN SELECT id FROM folded_fallback WHERE {functionName}(value,_binary'x')='a'"
+                            |> explainRow
+                        Expect.equal binary.Key None "binary fallback text does not share the key"
+
                 testCase "text IF NULL-branch keys retain charset identity and nullable width"
                 <| fun _ ->
                     let store = newStore ()
