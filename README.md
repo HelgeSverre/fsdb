@@ -449,7 +449,7 @@ different access pattern:
   `EXP`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, unary `ATAN`/`ATAN2`, `COT`, `DEGREES`,
   `RADIANS`, `LOG`, `LN`, `LOG2`, and `LOG10` parts.
   Compatible unary parts can be composed, such as `UPPER(TRIM(name))`,
-  `BIT_LENGTH(REVERSE(name))`, or `SQRT(ABS(amount))`. These keys participate in equality,
+  `BIT_LENGTH(REVERSE(name))`, or `SQRT(ABS(amount))`. These unary keys participate in equality,
   uniqueness, ordering, grouping, mutation, recovery, and correlated probes.
   Numeric-result keys serve direct and correlated comparison ranges and
   `BETWEEN`; text-result keys do the same when the comparison uses the key's
@@ -457,6 +457,11 @@ different access pattern:
   CTE projections. Function aliases share a canonical physical identity,
   while an embedding override of any function in the chain keeps execution on
   the ordinary scan path.
+
+  For signed integer columns, `COALESCE(column, integer_literal)` also has a
+  maintained physical key, including when the fallback exceeds the source
+  column's range. Equality, uniqueness, grouping, mutation, and recovery use
+  that key; an embedding override uses a scan.
 
   Text and binary values use MySQL's leading-number conversion and
   diagnostics. Arithmetic and other general expression keys retain their DDL

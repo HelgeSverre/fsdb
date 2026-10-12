@@ -8563,6 +8563,133 @@ let tests =
                     | ResultSet(_, []) -> ()
                     | other -> failtestf "expected the updated row to leave its transformed bucket, got %A" other
 
+                testCase "COALESCE expression keys index NULL fallback values"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE coalesced (id INT PRIMARY KEY, value INT, INDEX ix_fallback ((COALESCE(value, 0))))")
+                        (Affected 0UL)
+                        "MySQL accepts a non-unique COALESCE key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO coalesced VALUES (1, NULL), (2, 0), (3, 5)")
+                        (Affected 3UL)
+                        "seed NULL, fallback-equivalent, and distinct values"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM coalesced WHERE COALESCE(value, 0) = 0 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "the fallback and stored zero match"
+
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM coalesced WHERE COALESCE(value, 0) = 0"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "ref") "MySQL uses the functional key for equality"
+                    Expect.equal plan.Key (Some "ix_fallback") "the COALESCE key is reported"
+
+                    let differentFallbackPlan =
+                        runDefault store "EXPLAIN SELECT id FROM coalesced WHERE COALESCE(value, 1) = 1"
+                        |> explainRow
+
+                    Expect.equal differentFallbackPlan.Key None "a different fallback is a different expression"
+
+                    Expect.equal
+                        (runDefault store "SELECT COALESCE(value, 0), COUNT(*) FROM coalesced GROUP BY COALESCE(value, 0) ORDER BY COALESCE(value, 0)")
+                        (ResultSet([ "COALESCE(value, 0)"; "COUNT(*)" ], [ [ Some "0"; Some "2" ]; [ Some "5"; Some "1" ] ]))
+                        "NULL and zero share the functional grouping key"
+
+                    let groupedPlan =
+                        runDefault store "EXPLAIN SELECT COALESCE(value, 0), COUNT(*) FROM coalesced GROUP BY COALESCE(value, 0) ORDER BY COALESCE(value, 0)"
+                        |> explainRow
+
+                    Expect.equal groupedPlan.Key (Some "ix_fallback") "MySQL groups through the ordered functional key"
+                    Expect.equal groupedPlan.KeyLength (Some "4") "the ordered key reports the expression width"
+
+                    Expect.equal
+                        (runDefault store "UPDATE coalesced SET value = 7 WHERE id = 1")
+                        (Affected 1UL)
+                        "updating a NULL source maintains the key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM coalesced WHERE COALESCE(value, 0) = 0 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "the old fallback bucket loses the updated row"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE unique_coalesced (id INT PRIMARY KEY, value INT, UNIQUE INDEX ux_fallback ((COALESCE(value, 0))))")
+                        (Affected 0UL)
+                        "MySQL accepts a unique COALESCE key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO unique_coalesced VALUES (1, NULL)")
+                        (Affected 1UL)
+                        "the NULL source occupies the fallback key"
+
+                    match runDefault store "INSERT INTO unique_coalesced VALUES (2, 0)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "MySQL rejects a fallback-equivalent unique value; got %A" other
+
+                    let overridden = builtins |> registerScalar "COALESCE" (fun _ -> VInt 42L)
+
+                    Expect.equal
+                        (run store overridden "SELECT id FROM coalesced WHERE COALESCE(value, 0) = 42 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]))
+                        "an overridden function cannot use the built-in index values"
+
+                    let overriddenPlan =
+                        run store overridden "EXPLAIN SELECT id FROM coalesced WHERE COALESCE(value, 0) = 42"
+                        |> explainRow
+
+                    Expect.equal overriddenPlan.Key None "an override does not claim the COALESCE key"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE narrow_coalesced (id INT PRIMARY KEY, value TINYINT, INDEX ix_large_fallback ((COALESCE(value, 500))))")
+                        (Affected 0UL)
+                        "MySQL permits an expression result beyond the source column range"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO narrow_coalesced VALUES (1, NULL), (2, 5)")
+                        (Affected 2UL)
+                        "seed a narrow source and wider fallback"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM narrow_coalesced WHERE COALESCE(value, 500) = 500")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "the expression probe is not clamped to TINYINT"
+
+                    let narrowPlan =
+                        runDefault store "EXPLAIN SELECT id FROM narrow_coalesced WHERE COALESCE(value, 500) = 500"
+                        |> explainRow
+
+                    Expect.equal narrowPlan.Key (Some "ix_large_fallback") "the wide fallback uses its key"
+                    Expect.equal narrowPlan.KeyLength (Some "4") "MySQL indexes the INT expression result"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE bigint_coalesced (id INT PRIMARY KEY, value BIGINT, INDEX ix_big_fallback ((COALESCE(value, 0))))")
+                        (Affected 0UL)
+                        "create a BIGINT-result key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO bigint_coalesced VALUES (1, NULL), (2, 7)")
+                        (Affected 2UL)
+                        "seed BIGINT sources"
+
+                    let bigPlan =
+                        runDefault store "EXPLAIN SELECT id FROM bigint_coalesced WHERE COALESCE(value, 0) = 0"
+                        |> explainRow
+
+                    Expect.equal bigPlan.KeyLength (Some "8") "MySQL indexes the BIGINT expression result"
+
+                    match
+                        runDefault
+                            store
+                            "CREATE TABLE unsupported_coalesced (id INT PRIMARY KEY, value INT UNSIGNED, UNIQUE INDEX ux_fallback ((COALESCE(value, 0))))"
+                    with
+                    | Err(1235, _) -> ()
+                    | other -> failtestf "an unsupported unique expression must be refused; got %A" other
+
                 testCase "TRIM expression indexes enforce uniqueness and narrow predicates"
                 <| fun _ ->
                     let store = newStore ()

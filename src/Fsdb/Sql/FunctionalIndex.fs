@@ -154,36 +154,47 @@ let tryBuiltinName transform =
 type PhysicalExpression =
     { Qualifier: string option
       Column: string
+      NullFallback: Value option
       Calls: (string * IndexTransform) list
       Transform: IndexTransform }
 
-let private canonicalExpression (column: string) (calls: (string * IndexTransform) list) =
+let private canonicalExpression (column: string) fallback (calls: (string * IndexTransform) list) =
+    let source =
+        match fallback with
+        | Some value -> FuncCall("COALESCE", [ Col(column.ToLowerInvariant()); Lit value ])
+        | None -> Col(column.ToLowerInvariant())
+
     calls
     |> List.fold
         (fun expression (_, transform) ->
             let name = transform |> tryBuiltinName |> Option.defaultWith (fun () -> invalidArg (nameof transform) "Not a built-in index transform")
             FuncCall(name, [ expression ]))
-        (Col(column.ToLowerInvariant()))
+        source
 
 let tryPhysicalExpression expression =
     let rec collect calls = function
-        | Col column -> Some(None, column, calls)
-        | QualifiedCol(qualifier, column) -> Some(Some qualifier, column, calls)
+        | Col column -> Some(None, column, None, calls)
+        | QualifiedCol(qualifier, column) -> Some(Some qualifier, column, None, calls)
+        | FuncCall(name, [ Col column; Lit fallback ]) when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase) ->
+            Some(None, column, Some fallback, calls)
+        | FuncCall(name, [ QualifiedCol(qualifier, column); Lit fallback ])
+            when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase) ->
+            Some(Some qualifier, column, Some fallback, calls)
         | FuncCall(name, [ argument ]) ->
             tryBuiltin name
             |> Option.bind (fun transform -> collect ((name, transform) :: calls) argument)
         | _ -> None
 
     collect [] expression
-    |> Option.bind (fun (qualifier, column, calls) ->
-        match calls with
-        | [] -> None
-        | calls ->
+    |> Option.bind (fun (qualifier, column, fallback, calls) ->
+        if fallback.IsNone && calls.IsEmpty then None
+        else
             Some
                 { Qualifier = qualifier
                   Column = column
+                  NullFallback = fallback
                   Calls = calls
-                  Transform = Expression(canonicalExpression column calls) })
+                  Transform = Expression(canonicalExpression column fallback calls) })
 
 let tryKeyPart (column: IndexColumn) =
     match column.Transform with
@@ -260,7 +271,7 @@ let rec hasTextResult = function
 let tryRebaseColumn column = function
     | Expression expression ->
         tryPhysicalExpression expression
-        |> Option.map (fun physical -> Expression(canonicalExpression column physical.Calls))
+        |> Option.map (fun physical -> Expression(canonicalExpression column physical.NullFallback physical.Calls))
     | transform -> Some transform
 
 let private isTextOrBinary =
@@ -355,27 +366,42 @@ let private numericKeyResult columnType transforms =
             | _ -> result)
         sourceResult
 
+let private supportsNullFallback columnType = function
+    | VInt _ ->
+        match columnType with
+        | TBool
+        | TTinyInt false
+        | TSmallInt false
+        | TMediumInt false
+        | TInt false
+        | TBigInt false -> true
+        | _ -> false
+    | _ -> false
+
 let supportsColumnType transform columnType =
     match transform with
     | Expression expression ->
         tryPhysicalExpression expression
         |> Option.exists (fun physical ->
             let transforms = physical.Calls |> List.map snd
+            let sourceSupported = physical.NullFallback |> Option.forall (supportsNullFallback columnType)
 
-            match transforms, List.rev transforms with
-            | first :: _, textResult :: inner
-                when (isTextToIntegerTransform textResult
-                      || textResult = DecodedHex
-                      || isEncodedTextTransform textResult)
-                     && List.forall isTextTransform inner ->
-                if inner.IsEmpty then
-                    supportsSingleTransform textResult columnType
-                else
-                    supportsSingleTransform first columnType
-            | first :: _, _ when List.forall isTextTransform transforms -> supportsSingleTransform first columnType
-            | first :: _, _ when List.forall isNumericTransform transforms ->
-                supportsSingleTransform first columnType
-            | _ -> false)
+            if not sourceSupported then false
+            else
+                match transforms, List.rev transforms with
+                | [], [] -> physical.NullFallback.IsSome
+                | first :: _, textResult :: inner
+                    when (isTextToIntegerTransform textResult
+                          || textResult = DecodedHex
+                          || isEncodedTextTransform textResult)
+                         && List.forall isTextTransform inner ->
+                    if inner.IsEmpty then
+                        supportsSingleTransform textResult columnType
+                    else
+                        supportsSingleTransform first columnType
+                | first :: _, _ when List.forall isTextTransform transforms -> supportsSingleTransform first columnType
+                | first :: _, _ when List.forall isNumericTransform transforms -> supportsSingleTransform first columnType
+                | _ -> false)
     | transform -> supportsSingleTransform transform columnType
 
 /// These transforms return exact integer values; their encoded key width also
@@ -395,13 +421,28 @@ let rec private integerKeyLength = function
         |> Option.bind (fun physical -> physical.Calls |> List.tryLast |> Option.bind (snd >> integerKeyLength))
     | _ -> None
 
-let fixedKeyLength = integerKeyLength
+/// MySQL promotes a signed integer COALESCE with an integer literal to INT,
+/// except that a BIGINT source keeps its eight-byte result.
+let tryCoalesceKeyLength columnType = function
+    | Expression expression ->
+        match tryPhysicalExpression expression with
+        | Some { NullFallback = Some(VInt _); Calls = [] } ->
+            match columnType with
+            | TBigInt false -> Some 8
+            | _ -> Some 4
+        | _ -> None
+    | _ -> None
+
+let fixedKeyLength columnType transform =
+    tryCoalesceKeyLength columnType transform
+    |> Option.orElseWith (fun () -> integerKeyLength transform)
 
 let rec hasNumericResult = function
     | Expression expression ->
         tryPhysicalExpression expression
-        |> Option.bind (_.Calls >> List.tryLast)
-        |> Option.exists (snd >> hasNumericResult)
+        |> Option.exists (fun physical ->
+            physical.NullFallback.IsSome
+            || (physical.Calls |> List.tryLast |> Option.exists (snd >> hasNumericResult)))
     | transform ->
         match transformFamily transform with
         | IntegerFromText | NumericGeneral | NumericDoubleResult | NullIndicator -> true
@@ -489,6 +530,11 @@ let private tryExactUInt64 =
     | VBytes bytes -> bytes |> Text.Encoding.Latin1.GetString |> ofText
     | _ -> None
 
+let private tryNullFallbackProbe fallback value =
+    match fallback with
+    | Some(VInt _) -> tryExactInt64 value |> Option.map VInt
+    | _ -> None
+
 let private tryRoundedProbe columnType value =
     let exactDoubleLimit = 1L <<< 53
 
@@ -557,6 +603,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
             let transforms = physical.Calls |> List.map snd
 
             match List.tryLast transforms with
+            | None when physical.NullFallback.IsSome -> tryNullFallbackProbe physical.NullFallback value
             | Some transform when isTextToIntegerTransform transform -> tryExactInt64 value |> Option.map VInt
             | Some DecodedHex -> tryBinaryProbe value
             | Some transform when isEncodedTextTransform transform -> tryTextResultProbe value
@@ -565,6 +612,8 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
                 | SignedInteger, _ -> tryExactInt64 value |> Option.map VInt
                 | Approximate, VDouble number when Double.IsFinite number -> Some(VDouble number)
                 | Approximate, _ -> None
+                | ExactSource, _ when physical.NullFallback.IsSome ->
+                    tryNullFallbackProbe physical.NullFallback value
                 | ExactSource, _ -> tryNormalizeProbe columnType (Some AbsoluteValue) normalizeStored value
             | Some _ -> normalizeStored value
             | None -> None)
@@ -723,6 +772,21 @@ let rec projectValueWithStatus encodeText transform value =
     match transform, value with
     | Some IsNullResult, VNull -> VInt 1L, None
     | Some IsNullResult, _ -> VInt 0L, None
+    | Some(Expression expression), value ->
+        match tryPhysicalExpression expression with
+        | None -> value, None
+        | Some physical ->
+            let source =
+                match value, physical.NullFallback with
+                | VNull, Some fallback -> fallback
+                | _ -> value
+
+            physical.Calls
+            |> List.fold
+                (fun (current, firstTruncation) (_, step) ->
+                    let projected, truncated = projectValueWithStatus encodeText (Some step) current
+                    projected, (firstTruncation |> Option.orElse truncated))
+                (source, None)
     | Some _, VNull -> VNull, None
     | Some Lowercase, value -> mapTextOrBytes _.ToLowerInvariant() id value, None
     | Some Uppercase, value -> mapTextOrBytes _.ToUpperInvariant() id value, None
@@ -799,16 +863,6 @@ let rec projectValueWithStatus encodeText transform value =
     | Some AbsoluteValue, value ->
         let number, truncated = numericInputWithStatus value
         VDouble(abs number), truncated
-    | Some(Expression expression), value ->
-        match tryPhysicalExpression expression with
-        | None -> value, None
-        | Some physical ->
-            physical.Calls
-            |> List.fold
-                (fun (current, firstTruncation) (_, step) ->
-                    let projected, truncated = projectValueWithStatus encodeText (Some step) current
-                    projected, (firstTruncation |> Option.orElse truncated))
-                (value, None)
     | _ -> value, None
 
 let projectValueWith encodeText transform value =

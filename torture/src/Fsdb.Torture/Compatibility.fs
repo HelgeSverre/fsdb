@@ -5896,6 +5896,26 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE sign_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private coalesceFunctionalIndex =
+        { Name = "coalesce-functional-index"
+          Setup =
+            [| "CREATE TABLE coalesce_probe(id INT PRIMARY KEY,v INT,KEY ix_fallback ((COALESCE(v,0))))"
+               "INSERT INTO coalesce_probe VALUES(1,NULL),(2,0),(3,5)"
+               "CREATE TABLE coalesce_unique_probe(id INT PRIMARY KEY,v INT,UNIQUE KEY ux_fallback ((COALESCE(v,0))))"
+               "INSERT INTO coalesce_unique_probe VALUES(1,NULL)"
+               "CREATE TABLE coalesce_narrow_probe(id INT PRIMARY KEY,v TINYINT,KEY ix_wide ((COALESCE(v,500))))"
+               "INSERT INTO coalesce_narrow_probe VALUES(1,NULL),(2,5)" |]
+          Steps =
+            [| Contract.query "fallback-equality" "SELECT id FROM coalesce_probe WHERE COALESCE(v,0)=0 ORDER BY id"
+               Contract.query "distinct-equality" "SELECT id FROM coalesce_probe WHERE COALESCE(v,0)=5 ORDER BY id"
+               Contract.query "wide-fallback" "SELECT id FROM coalesce_narrow_probe WHERE COALESCE(v,500)=500 ORDER BY id"
+               Contract.execute "duplicate-fallback" "INSERT INTO coalesce_unique_probe VALUES(2,0)" |> Contract.fails 1062 "23000"
+               Contract.execute "update" "UPDATE coalesce_probe SET v=7 WHERE id=1"
+               Contract.query "old-key" "SELECT id FROM coalesce_probe WHERE COALESCE(v,0)=0 ORDER BY id"
+               Contract.query "new-key" "SELECT id FROM coalesce_probe WHERE COALESCE(v,0)=7 ORDER BY id" |]
+          Cleanup = [| "DROP TABLE coalesce_probe"; "DROP TABLE coalesce_unique_probe"; "DROP TABLE coalesce_narrow_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private bitCountFunctionalIndex =
         { Name = "bit-count-functional-index"
           Setup =
@@ -11104,6 +11124,7 @@ module ContractCatalog =
            missingFunctionViewDefinitions
            integralDoubleIndexProbes
            signFunctionalIndex
+           coalesceFunctionalIndex
            bitCountFunctionalIndex
            crc32FunctionalIndex
            exactIntegerFunctionalBounds

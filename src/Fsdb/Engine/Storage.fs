@@ -6655,10 +6655,12 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
                 when transform
                      |> Option.exists (fun transform -> FunctionalIndex.supportsColumnType transform definition.Type) ->
                 transform
-                |> Option.bind FunctionalIndex.fixedKeyLength
+                |> Option.bind (FunctionalIndex.fixedKeyLength definition.Type)
                 |> Option.orElseWith (fun () -> fullLength definition)
                 |> Option.defaultValue 0
                 |> Ok
+            | Some _ when index.Unique && (transform |> Option.exists (function Expression _ -> true | _ -> false)) ->
+                Error(ExpressionError(1235, "This version of fsdb doesn't yet support this unique expression index"))
             | Some _
                 when transform
                      |> Option.exists (function

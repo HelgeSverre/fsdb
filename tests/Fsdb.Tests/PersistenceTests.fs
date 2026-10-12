@@ -3921,6 +3921,8 @@ let tests =
                     "INSERT INTO lookup_bits VALUES (1, 'é'), (2, 'Other')"
                     "CREATE TABLE lookup_abs (id INT PRIMARY KEY, value BIGINT, UNIQUE INDEX ix_abs_value ((ABS(value))))"
                     "INSERT INTO lookup_abs VALUES (1, -5), (2, 9)"
+                    "CREATE TABLE lookup_coalesced (id INT PRIMARY KEY, value INT, UNIQUE INDEX ix_fallback ((COALESCE(value, 0))))"
+                    "INSERT INTO lookup_coalesced VALUES (1, NULL), (2, 5)"
                     "CREATE TABLE lookup_sign (id INT PRIMARY KEY, value INT, INDEX ix_sign_value ((SIGN(value))))"
                     "INSERT INTO lookup_sign VALUES (1, -5), (2, 0), (3, 9)"
                     "CREATE TABLE lookup_isnull (id INT PRIMARY KEY, value INT, INDEX ix_isnull_value ((ISNULL(value))))"
@@ -4025,6 +4027,17 @@ let tests =
               match handle (Fsdb.Session.create 13 reloaded) "SELECT id FROM lookup_abs WHERE ABS(value) = 5" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the recovered absolute-value bucket returns its row"
               | other -> failtestf "expected recovered absolute-value lookup rows, got %A" other
+
+              let coalescedPlan =
+                  handle (Fsdb.Session.create 58 reloaded) "EXPLAIN SELECT id FROM lookup_coalesced WHERE COALESCE(value, 0) = 0"
+                  |> snd
+                  |> TestSupport.Sql.explainRow
+
+              Expect.equal coalescedPlan.Key (Some "ix_fallback") "WAL recovery rebuilds the NULL fallback key"
+
+              match handle (Fsdb.Session.create 58 reloaded) "INSERT INTO lookup_coalesced VALUES (3, 0)" |> snd with
+              | Err(1062, _) -> ()
+              | other -> failtestf "expected the recovered fallback key to reject zero, got %A" other
 
               match handle (Fsdb.Session.create 20 reloaded) "SELECT id FROM lookup_sign WHERE SIGN(value) = -1" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the recovered sign bucket returns its row"

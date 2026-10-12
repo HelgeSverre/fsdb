@@ -14939,8 +14939,13 @@ and private transformUsesStoredSemantics (registry: Registry) expression = funct
     | Some(Expression storedExpression) ->
         match FunctionalIndex.tryPhysicalExpression expression, FunctionalIndex.tryPhysicalExpression storedExpression with
         | Some requested, Some stored when requested.Transform = stored.Transform ->
-            requested.Calls
-            |> List.forall (fun (name, _) -> Functions.isUnmodifiedBuiltinScalar name registry)
+            let callsUnmodified =
+                requested.Calls
+                |> List.forall (fun (name, _) -> Functions.isUnmodifiedBuiltinScalar name registry)
+
+            callsUnmodified
+            && (requested.NullFallback.IsNone
+                || Functions.isUnmodifiedBuiltinScalar "COALESCE" registry)
         | _ -> false
     | Some transform ->
         match expression with
@@ -20601,15 +20606,6 @@ let private explainKeyLen (col: ColumnDef) : int option =
     // for it), so only a genuinely nullable unique column pays the null flag.
     baseLen |> Option.map (fun n -> if col.Nullable && not col.PrimaryKey then n + 1 else n)
 
-let private explainCompositeKeyLen (columns: ColumnDef list) (indices: int list) : int option =
-    indices
-    |> traverse (fun index ->
-        match explainKeyLen columns.[index] with
-        | Some length -> Ok length
-        | None -> Error())
-    |> Result.toOption
-    |> Option.map List.sum
-
 let private explainPrefixKeyLen (column: ColumnDef) (prefixLength: int option) =
     let narrowed =
         match prefixLength, column.Type with
@@ -20629,10 +20625,29 @@ let private explainPrefixKeyLen (column: ColumnDef) (prefixLength: int option) =
 
     explainKeyLen narrowed
 
-let private explainIndexKeyLen (columns: ColumnDef list) (indices: int list) (prefixLengths: int option list) =
+let private explainIndexKeyLen
+    (table: Table option)
+    keyName
+    (columns: ColumnDef list)
+    (indices: int list)
+    (prefixLengths: int option list)
+    =
+    let transforms =
+        table
+        |> Option.bind (fun table -> table.Indexes |> List.tryFind (fun index -> equalsIgnoreCase index.Name keyName))
+        |> Option.map (fun index -> index.KeyColumns |> List.map _.Transform)
+
     List.zip indices prefixLengths
-    |> traverse (fun (index, prefixLength) ->
-        match explainPrefixKeyLen columns.[index] prefixLength with
+    |> List.mapi (fun position (index, prefixLength) ->
+        let column = columns.[index]
+        let functionalLength =
+            transforms
+            |> Option.bind (List.tryItem position)
+            |> Option.flatten
+            |> Option.bind (FunctionalIndex.tryCoalesceKeyLength column.Type)
+
+        functionalLength |> Option.orElseWith (fun () -> explainPrefixKeyLen column prefixLength))
+    |> traverse (function
         | Some length -> Ok length
         | None -> Error())
     |> Result.toOption
@@ -20793,6 +20808,12 @@ let rec private explainJoinBlock
               Extra = (if idx = tableCount - 1 then extra else []) }
 
     let tryExplainIndexedAccess accessExtra (whereExpr: Expr option) (tref: TableRef) : bool =
+        let sourceTable = physicalFastPathTable store dbName tref
+
+        let sourceKey name columns indices prefixLengths =
+            explainIndexKeyLen sourceTable name columns indices prefixLengths
+            |> explainKey name
+
         let tryExplainIndexOrder () =
             match indexOrderPlan with
             | None -> false
@@ -20814,7 +20835,7 @@ let rec private explainJoinBlock
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some(if hasBounds then "range" else "index")
-                      Key = explainKey plan.KeyName (explainCompositeKeyLen plan.Columns plan.ColumnIndices)
+                      Key = sourceKey plan.KeyName plan.Columns plan.ColumnIndices (List.replicate plan.ColumnIndices.Length None)
                       Ref = None
                       Rows = Some(uint64 plan.EstimatedRows)
                       Extra = accessExtra }
@@ -20851,7 +20872,7 @@ let rec private explainJoinBlock
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some(if plan.Unique then "const" else "ref")
-                      Key = explainKey plan.KeyName (explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
+                      Key = sourceKey plan.KeyName plan.Columns plan.ColumnIndices plan.PrefixLengths
                       Ref = Some(String.concat "," (List.replicate plan.ColumnIndices.Length "const"))
                       Rows = Some(uint64 plan.CandidateCount)
                       Extra = if plan.Unique then accessExtra |> List.filter ((<>) "Using where") else accessExtra }
@@ -20861,7 +20882,7 @@ let rec private explainJoinBlock
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some "range"
-                      Key = explainKey plan.KeyName (explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
+                      Key = sourceKey plan.KeyName plan.Columns plan.ColumnIndices plan.PrefixLengths
                       Ref = None
                       Rows = Some(uint64 plan.CandidateCount)
                       Extra = accessExtra }
@@ -20881,10 +20902,7 @@ let rec private explainJoinBlock
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some "range"
-                      Key =
-                        explainKey
-                            plan.RangeIndexName
-                            (explainPrefixKeyLen plan.RangeColumns.[plan.RangeColumnIndex] plan.RangePrefixLength)
+                      Key = sourceKey plan.RangeIndexName plan.RangeColumns [ plan.RangeColumnIndex ] [ plan.RangePrefixLength ]
                       Ref = None
                       Rows = Some(uint64 plan.RangeRowCount)
                       Extra = accessExtra }
@@ -20945,7 +20963,10 @@ let rec private explainJoinBlock
                           SelectType = selectType
                           Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                           Type = Some(if plan.Unique then "eq_ref" else "ref")
-                          Key = explainKey plan.KeyName (explainIndexKeyLen plan.Table.Columns plan.ColumnIndices plan.PrefixLengths)
+                          Key =
+                            explainKey
+                                plan.KeyName
+                                (explainIndexKeyLen (Some plan.Table) plan.KeyName plan.Table.Columns plan.ColumnIndices plan.PrefixLengths)
                           Ref = Some(String.concat "," plan.References)
                           Rows = Some 1UL
                           Extra =
