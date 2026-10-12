@@ -478,8 +478,11 @@ different access pattern:
   narrow integer sources promote to `INT`, while `BIGINT` retains its width.
   Equality and unique-key checks use the projected result.
   `IF(column IS NULL, integer_literal, column)` has a distinct nullable
-  physical key for signed `INT` columns and fitting integer literals. Equality
-  and unique-key checks use its projected result. The equivalent
+  physical key for `BOOLEAN`, narrow integer columns, `INT`, and signed
+  `BIGINT` with a fitting signed literal. The hidden key uses a four-byte
+  integer plus a NULL byte through `INT`, or eight plus one for signed
+  `BIGINT`; a source value outside that hidden range fails in strict mode.
+  Equality and unique-key checks use the projected result. The equivalent
   `IF(column IS NOT NULL, column, integer_literal)` form has its own key
   identity, matching MySQL's expression-based lookup.
 

@@ -8926,6 +8926,49 @@ let tests =
                     Expect.equal plan.Key (Some "ux") "the reversed expression uses its own key"
                     Expect.equal plan.KeyLength (Some "5") "the reversed form keeps MySQL's nullable width"
 
+                testCase "IF NULL-branch keys follow integer source widths"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    for name, columnType, keyLength in
+                        [ "bool", "BOOLEAN", "5"
+                          "tiny", "TINYINT", "5"
+                          "small", "SMALLINT", "5"
+                          "medium", "MEDIUMINT", "5"
+                          "unsigned", "INT UNSIGNED", "5"
+                          "big", "BIGINT", "9" ] do
+                        let table = "if_width_" + name
+
+                        Expect.equal
+                            (runDefault store $"CREATE TABLE {table} (id INT PRIMARY KEY, value {columnType}, UNIQUE KEY ux ((IF(value IS NULL,7,value))))")
+                            (Affected 0UL)
+                            $"MySQL accepts the {columnType} conditional key"
+
+                        Expect.equal
+                            (runDefault store $"INSERT INTO {table} VALUES (1,NULL),(2,9)")
+                            (Affected 2UL)
+                            $"the {columnType} key stores both branches"
+
+                        match runDefault store $"INSERT INTO {table} VALUES (3,7)" with
+                        | Err(1062, _) -> ()
+                        | other -> failtestf "the %s fallback must collide; got %A" columnType other
+
+                        let plan =
+                            runDefault store $"EXPLAIN SELECT id FROM {table} WHERE IF(value IS NULL,7,value)=7"
+                            |> explainRow
+
+                        Expect.equal plan.Key (Some "ux") $"the {columnType} key is physical"
+                        Expect.equal plan.KeyLength (Some keyLength) $"the {columnType} key has MySQL's width"
+
+                    match runDefault store "INSERT INTO if_width_unsigned VALUES (3,4294967295)" with
+                    | Err(3752, _) -> ()
+                    | other -> failtestf "unsigned INT beyond the hidden signed key must fail; got %A" other
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO if_width_big VALUES (3,9223372036854775807)")
+                        (Affected 1UL)
+                        "the signed BIGINT maximum fits its conditional key"
+
                 testCase "IFNULL integer functional keys retain their distinct result types"
                 <| fun _ ->
                     let store = newStore ()

@@ -478,9 +478,11 @@ let private tryIntegerFallbackKey columnType fallback =
     let wideLiteral value = value >= 10_000_000_000L || value <= -10_000_000_000L
 
     match columnType, fallback.Function, fallback.Value with
-    | TInt false, (IfNullBranch | IfNotNullBranch), VInt value
+    | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _),
+      (IfNullBranch | IfNotNullBranch), VInt value
         when value >= int64 Int32.MinValue && value <= int64 Int32.MaxValue ->
         Some SignedInt32
+    | TBigInt false, (IfNullBranch | IfNotNullBranch), VInt _ -> Some SignedInt64
     | (TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt false), IfNullFunction, VInt _ ->
         Some SignedInt64
     | TBigInt true, IfNullFunction, VInt _ -> Some ExactDecimal20
@@ -584,7 +586,7 @@ let tryIntegerExpressionKeyLength columnType = function
             match tryIntegerFallbackKey columnType fallback with
             | Some SignedInt32 ->
                 Some(if isConditionalFallback fallback.Function then 5 else 4)
-            | Some SignedInt64
+            | Some SignedInt64 -> Some(if isConditionalFallback fallback.Function then 9 else 8)
             | Some UnsignedInt64 -> Some 8
             | Some ExactDecimal20 -> Some 9
             | None -> None
