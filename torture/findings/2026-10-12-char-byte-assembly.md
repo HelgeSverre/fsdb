@@ -112,6 +112,15 @@ gives rows 1 and 2. Projecting `CHAR()` from both tables gives row 1 for all
 four warnings. Fsdb currently numbers those warnings by final output row. A
 correct fix needs join-evaluation diagnostic provenance rather than a
 source-name substitution or a constant right-table row number.
+An additional MySQL 8.4.11 three-row equijoin probe confirms that this is not
+specific to views or to which JSON operand `CHAR()` reads. With `l` and `r`
+each holding IDs 1–3 and JSON `null`, `SELECT l.id, HEX(CHAR(r.payload))
+... ORDER BY l.id DESC` warns at rows 1, 2, 3, while `SELECT r.id,
+HEX(CHAR(l.payload)) ... ORDER BY r.id DESC` warns at row 1 three times.
+Putting the `CHAR()` expression before the projected ID leaves those sequences
+unchanged; projecting both IDs starts with the first projected ID's pattern.
+The source of the first projected ID, rather than the source of the `CHAR()`
+operand alone, influences MySQL's warning-row context in this audited join.
 
 Pass-through derived queries over a stored JSON view retain its defining
 `json_extract` warning source through both `SELECT *` and an additional alias.
