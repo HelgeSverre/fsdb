@@ -150,9 +150,52 @@ let private scalarBinaryAtoms =
     |> List.collect (fun (aliases, atom) -> aliases |> List.map (fun alias -> alias, atom))
     |> Map.ofList
 
+let private codeUnitAtom first last =
+    if first = last then sprintf "\\u%04X" first
+    else sprintf "[\\u%04X-\\u%04X]" first last
+
+let private scalarRangesAtom ranges =
+    let bmpRanges =
+        ranges
+        |> List.choose (fun (first, last) ->
+            if first <= 0xFFFF then Some(first, min last 0xFFFF) else None)
+
+    let bmpAtom =
+        bmpRanges
+        |> List.map (fun (first, last) ->
+            if first = last then sprintf "\\u%04X" first
+            else sprintf "\\u%04X-\\u%04X" first last)
+        |> String.concat ""
+        |> fun members -> if members = "" then [] else [ "[" + members + "]" ]
+
+    let pairAtom firstHigh lastHigh firstLow lastLow =
+        codeUnitAtom firstHigh lastHigh + codeUnitAtom firstLow lastLow
+
+    let supplementaryAtoms =
+        ranges
+        |> List.collect (fun (first, last) ->
+            if last < 0x10000 then []
+            else
+                let highAndLow scalar =
+                    let offset = scalar - 0x10000
+                    0xD800 + offset / 0x400, 0xDC00 + offset % 0x400
+
+                let firstHigh, firstLow = highAndLow (max first 0x10000)
+                let lastHigh, lastLow = highAndLow last
+
+                if firstHigh = lastHigh then
+                    [ pairAtom firstHigh lastHigh firstLow lastLow ]
+                else
+                    [ pairAtom firstHigh firstHigh firstLow 0xDFFF
+                      if lastHigh > firstHigh + 1 then
+                          pairAtom (firstHigh + 1) (lastHigh - 1) 0xDC00 0xDFFF
+                      pairAtom lastHigh lastHigh 0xDC00 lastLow ])
+
+    "(?:" + String.concat "|" (bmpAtom @ supplementaryAtoms) + ")"
+
 // ICU's Greek script includes Greek Extended and supplementary symbols, but
 // excludes Coptic letters within the Greek and Coptic block.
-let private greekBmpRanges =
+let private greekScriptRanges =
     [ 0x0370, 0x0373; 0x0375, 0x0377; 0x037A, 0x037D; 0x037F, 0x037F
       0x0384, 0x0384; 0x0386, 0x0386; 0x0388, 0x038A; 0x038C, 0x038C
       0x038E, 0x03A1; 0x03A3, 0x03E1; 0x03F0, 0x03FF
@@ -161,16 +204,11 @@ let private greekBmpRanges =
       0x1F50, 0x1F57; 0x1F59, 0x1F59; 0x1F5B, 0x1F5B; 0x1F5D, 0x1F5D
       0x1F5F, 0x1F7D; 0x1F80, 0x1FB4; 0x1FB6, 0x1FC4; 0x1FC6, 0x1FD3
       0x1FD6, 0x1FDB; 0x1FDD, 0x1FEF; 0x1FF2, 0x1FF4; 0x1FF6, 0x1FFE
-      0x2126, 0x2126; 0xAB65, 0xAB65 ]
+      0x2126, 0x2126; 0xAB65, 0xAB65
+      0x10140, 0x1018E; 0x101A0, 0x101A0; 0x1D200, 0x1D245 ]
 
 let private greekScriptAtom =
-    let bmpMembers =
-        greekBmpRanges
-        |> List.map (fun (first, last) ->
-            if first = last then sprintf "\\u%04X" first
-            else sprintf "\\u%04X-\\u%04X" first last)
-        |> String.concat ""
-    "(?:[" + bmpMembers + "]|\\uD800[\\uDD40-\\uDD8E\\uDDA0]|\\uD834[\\uDE00-\\uDE45])"
+    scalarRangesAtom greekScriptRanges
 
 let private greekScriptFoldedAtom = "(?:" + greekScriptAtom + "|[\\u00B5\\u0345])"
 
