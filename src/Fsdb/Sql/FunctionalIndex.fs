@@ -208,6 +208,11 @@ let private canonicalExpression (column: string) fallback nullComparison (calls:
         source
 
 let tryPhysicalExpression expression =
+    let columnSource = function
+        | Col column -> Some(None, column)
+        | QualifiedCol(qualifier, column) -> Some(Some qualifier, column)
+        | _ -> None
+
     let literal = function
         | Lit value
         | ConnectionLiteral(value, _) as expression -> Some(expression, value)
@@ -248,31 +253,25 @@ let tryPhysicalExpression expression =
     let rec collect calls = function
         | Col column -> Some(None, column, None, None, calls)
         | QualifiedCol(qualifier, column) -> Some(Some qualifier, column, None, None, calls)
-        | FuncCall(name, [ Col column; argument ])
+        | FuncCall(name, [ source; argument ])
             when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
                  || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase) ->
-            literal argument
-            |> Option.map (fun (expression, value) ->
-                None, column, Some { Function = coalescingFunction name; Value = value; Literal = expression }, None, calls)
-        | FuncCall(name, [ QualifiedCol(qualifier, column); argument ])
-            when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
-                 || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase) ->
-            literal argument
-            |> Option.map (fun (expression, value) ->
-                Some qualifier, column, Some { Function = coalescingFunction name; Value = value; Literal = expression }, None, calls)
+            columnSource source
+            |> Option.bind (fun (qualifier, column) ->
+                literal argument
+                |> Option.map (fun (expression, value) ->
+                    qualifier, column, Some { Function = coalescingFunction name; Value = value; Literal = expression }, None, calls))
         | FuncCall(name, [ IsNull tested; argument; source ])
             when name.Equals("IF", StringComparison.OrdinalIgnoreCase) ->
             conditionalFallback IfNullBranch tested argument source calls
         | FuncCall(name, [ IsNotNull tested; source; argument ])
             when name.Equals("IF", StringComparison.OrdinalIgnoreCase) ->
             conditionalFallback IfNotNullBranch tested argument source calls
-        | FuncCall(name, [ Col column; argument ]) when name.Equals("NULLIF", StringComparison.OrdinalIgnoreCase) ->
-            conditionalLiteral argument
-            |> Option.map (fun (literal, value) -> None, column, None, Some { Value = value; Literal = literal }, calls)
-        | FuncCall(name, [ QualifiedCol(qualifier, column); argument ])
-            when name.Equals("NULLIF", StringComparison.OrdinalIgnoreCase) ->
-            conditionalLiteral argument
-            |> Option.map (fun (literal, value) -> Some qualifier, column, None, Some { Value = value; Literal = literal }, calls)
+        | FuncCall(name, [ source; argument ]) when name.Equals("NULLIF", StringComparison.OrdinalIgnoreCase) ->
+            columnSource source
+            |> Option.bind (fun (qualifier, column) ->
+                conditionalLiteral argument
+                |> Option.map (fun (literal, value) -> qualifier, column, None, Some { Value = value; Literal = literal }, calls))
         | FuncCall(name, [ argument ]) ->
             tryBuiltin name
             |> Option.bind (fun transform -> collect ((name, transform) :: calls) argument)
