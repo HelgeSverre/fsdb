@@ -3422,15 +3422,23 @@ let private publishRowsWithDocumentRules rulesFor (before: Table) (after: Table)
         else
             { after with RowsArray = compactedRows }
 
-    if before.Indexes <> after.Indexes || before.Columns <> after.Columns then
+    let schemaUnchanged = before.Indexes = after.Indexes && before.Columns = after.Columns
+    let fullTextGroups = if schemaUnchanged then fullTextKeyGroups after else []
+    let spatialGroups = if schemaUnchanged then spatialKeyGroups after else []
+
+    if not schemaUnchanged then
         { after with
             FullTextIndexes = buildFullTextIndexes rulesFor after
             SpatialIndexes = rebuildSpatialIndexes after }
+    elif fullTextGroups.IsEmpty && spatialGroups.IsEmpty then
+        { after with
+            FullTextIndexes = before.FullTextIndexes
+            SpatialIndexes = before.SpatialIndexes }
     else
         let changes = after.RowsArray.ChangesFrom before.RowsArray |> Array.ofSeq
 
         let indexes =
-            fullTextKeyGroups after
+            fullTextGroups
             |> List.fold
                 (fun indexes group ->
                     let update index (rowId, removed: Value[] option, added: Value[] option) =
@@ -3454,7 +3462,7 @@ let private publishRowsWithDocumentRules rulesFor (before: Table) (after: Table)
                 before.FullTextIndexes
 
         let spatialIndexes =
-            spatialKeyGroups after
+            spatialGroups
             |> List.fold
                 (fun indexes group ->
                     let update index (rowId, removed: Value[] option, added: Value[] option) =

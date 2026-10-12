@@ -46,7 +46,38 @@ after that change, against **7,324 / 9,865 ops/sec** in the recorded baseline.
 The eight-writer result did not improve; the single-writer change is within
 the short-run variation and unrelated to lock parallelism. I removed the
 candidate fast path rather than retain complexity without a demonstrated gain.
-The next useful profile should separate time waiting for the database slot
-from work done while holding it, and inspect statement/protocol costs outside
-that section. A 16-writer regression now checks that keyless autocommit inserts
-remain visible exactly once.
+A 16-writer regression now checks that keyless autocommit inserts remain visible
+exactly once.
+
+## Indexless publication shortcut
+
+Temporary timing counters around `withDatabasePublishing` separated slot wait,
+slot hold, row operation, and root swap for 10-second eight-writer runs. One
+run averaged **104 µs waiting** and **63 µs holding** the slot over 90,000
+recorded writes; a one-writer run averaged effectively no wait and **32 µs
+holding** over 70,000 writes. A second eight-writer run split the **59 µs
+hold** into about **57 µs in the insert operation**, **0.2 µs in the catalog
+root swap**, and roughly **2 µs elsewhere**. These are instrumented runs, so
+their absolute rates are not the uninstrumented benchmark rates. The
+diagnostic counters were removed after measurement.
+
+For a table with unchanged columns and indexes and no full-text or spatial
+indexes before or after the write, `publishRowsWithDocumentRules` no longer
+enumerates row changes solely to update absent document indexes. On a direct
+Release `Storage.insertRows` fixture with 1,000 warmup inserts followed by
+20,000 measured single-row inserts, managed allocation fell from **24,789.5
+to 16,057.5 bytes per insert**. The first after version repeated at **16,088.4
+bytes**; the final version, which explicitly carries forward the preexisting
+empty document-index maps, measured **16,325.9 bytes**. That fixture bypasses
+SQL parsing and wire handling; its elapsed time was 465 ms before and
+271–296 ms across the after runs, which is a local engine result, not server
+throughput.
+
+The uninstrumented wire load run with the same one/eight-writer, three-trial
+settings measured **8,107 / 10,208 ops/sec** with the shortcut. The earlier
+baseline was **7,324 / 9,865**; a later baseline rerun measured **6,717 /
+9,950** with 9.2% relative standard deviation at one writer. The eight-writer
+difference is small relative to trial variation, so this does not establish
+a wire-level throughput gain. All runs checked row retention and reported no
+retryable lock/deadlock errors. The indexless shortcut is retained for its
+clear allocation reduction; the database-slot serialization gap remains.
