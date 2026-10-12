@@ -165,3 +165,16 @@ IDs 1 and 2. These are row-membership differences, not only EXPLAIN or cost
 differences. The next fix must couple the chosen driving source, its filter
 ownership, and physical execution; a row-count-based WHERE rewrite is not
 sufficient.
+
+### Recheck on 2026-10-12
+
+The maintained `mixed-type-join-in` contract now compares costed joins with
+the numeric `IN` written on each key after resetting `labels` to one row,
+then adding a second, nonmatching label. On fsdb revision `62adbc22`,
+MySQL 8.4.11 returns IDs 1 and 2 for both predicate owners at both
+cardinalities. Fsdb agrees when the predicate is written on `o.k`, but
+returns only ID 2 when it is written on `d.k`. The run at
+`20261012T040412071-2626/contracts` has 139 cases / 18,872 steps and 11
+differences: the previous nine signatures are unchanged, and these two
+costed-join probes account for the increase. Recent index and write-path
+changes have not closed this result-membership gap.

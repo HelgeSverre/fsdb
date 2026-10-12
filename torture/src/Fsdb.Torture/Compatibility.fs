@@ -10884,7 +10884,18 @@ module ContractCatalog =
                Contract.execute "grow-filtered-source"
                    "INSERT INTO join_labels VALUES('other1'),('other2'),('other3'),('other4')"
                Contract.query "filtered-source-still-drives"
-                   "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE o.k IN (1,NULL) ORDER BY d.id" |]
+                   "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE o.k IN (1,NULL) ORDER BY d.id"
+               Contract.execute "reset-filtered-source"
+                   "DELETE FROM join_labels WHERE k <> '1'"
+               for owner in [ "d"; "o" ] do
+                   Contract.query
+                       (sprintf "costed-%s-one-label" owner)
+                       (sprintf "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE %s.k IN (1,NULL) ORDER BY d.id" owner)
+               Contract.execute "add-second-label" "INSERT INTO join_labels VALUES('other')"
+               for owner in [ "d"; "o" ] do
+                   Contract.query
+                       (sprintf "costed-%s-two-labels" owner)
+                       (sprintf "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE %s.k IN (1,NULL) ORDER BY d.id" owner) |]
           Cleanup = [| "DROP TABLE IF EXISTS join_labels"; "DROP TABLE IF EXISTS join_names" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
