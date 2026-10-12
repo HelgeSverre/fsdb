@@ -250,3 +250,16 @@ differences disappeared and no new mismatch appeared. Of 139 cases and
 and this equal-cardinality costed-join result mismatch. A fuller
 access-path and predicate-placement model is needed before expanding this
 rule to the remaining costed shapes.
+
+The ordinary query and its plan instrumentation must be kept separate for
+this counterexample. On a disposable native MySQL 8.4.11 server with fresh
+three-by-three tables, ordinary `SELECT` returns IDs 1 and 2 repeatedly.
+`EXPLAIN ANALYZE` for the same SQL reports **one** actual row from its hash
+join and the filter on `d.k`; `d.k IN (1,NULL)` is NULL for the circled-digit
+row when evaluated directly. Forcing the `names` primary index makes the
+ordinary joined query return only ID 2. Disabling `block_nested_loop`
+still leaves the ordinary result at IDs 1 and 2, so the difference cannot
+be attributed solely to hash-join execution. The native oracle script now
+asserts these observations. This is an observed MySQL execution-path
+inconsistency, not evidence that TREE or ANALYZE row counts can substitute
+for the ordinary query result when deciding Fsdb compatibility.

@@ -168,6 +168,16 @@ def verify(client, _):
         query = (f"SELECT d.id FROM {name_table} d JOIN {label_table} o ON o.k=d.k "
                  "WHERE d.k IN (1,NULL) ORDER BY d.id")
         native["expect"]("costed numeric IN " + label, client.query(query), expected)
+        if label == "unindexed-three-by-three":
+            forced = query.replace(f"FROM {name_table} d", f"FROM {name_table} d FORCE INDEX(PRIMARY)")
+            native["expect"]("costed numeric IN forced primary", client.query(forced), "2")
+            analyzed = client.query("EXPLAIN ANALYZE " + query)
+            native["expect"](
+                "costed numeric IN ANALYZE reports one join row",
+                bool(re.search(r"join.*actual.*rows=1 loops=1", analyzed, re.IGNORECASE)), True)
+            client.query("SET SESSION optimizer_switch='block_nested_loop=off'")
+            native["expect"]("costed numeric IN without hash join", client.query(query), "1\n2")
+            client.query("SET SESSION optimizer_switch='default'")
 
     native["expect"]("direct names IN", client.query(
         "SELECT id,k IN (1,NULL) FROM names ORDER BY id"), "1\tNULL\n2\t1\n3\tNULL")
