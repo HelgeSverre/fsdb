@@ -7670,22 +7670,42 @@ and private isBuiltinCharFunction registry (name: string) =
 and private viewJsonSourceNames (store: Store) (dbName: string) (columns: ColumnDef list) (projections: Projection list) (select: SelectStmt) =
     if not (containsCharProjection projections) then Map.empty
     else
+        let rec sources (seen: Set<string * string>) (viewDb: string) (viewName: string) =
+            let key = viewDb.ToLowerInvariant(), viewName.ToLowerInvariant()
+            if Set.contains key seen then Map.empty
+            else
+                match tryStoredView store viewDb viewName with
+                | None -> Map.empty
+                | Some view ->
+                    match parseStoredViewStatement view with
+                    | Ok(Select definition) when definition.Projections.Length = view.Columns.Length ->
+                        let upstream =
+                            match definition.From, definition.Joins with
+                            | Some(FromTable source), [] ->
+                                sources (Set.add key seen) (source.Database |> Option.defaultValue viewDb) source.Table
+                            | _ -> Map.empty
+                        List.zip view.Columns definition.Projections
+                        |> List.choose (fun (outputName, projection) ->
+                            let sourceName =
+                                match projection.Expression with
+                                | FuncCall(functionName, _) -> Some(functionName.ToLowerInvariant())
+                                | Col columnName
+                                | QualifiedCol(_, columnName) ->
+                                    Some(Map.tryFind (columnName.ToLowerInvariant()) upstream |> Option.defaultValue columnName)
+                                | _ -> None
+                            sourceName |> Option.map (fun name -> outputName.ToLowerInvariant(), name))
+                        |> Map.ofList
+                    | _ -> Map.empty
         match select.From, select.Joins with
         | Some(FromTable viewRef), [] ->
             let viewDb = viewRef.Database |> Option.defaultValue dbName
-            match tryStoredView store viewDb viewRef.Table with
-            | Some view ->
-                match parseStoredViewStatement view with
-                | Ok(Select definition) when definition.Projections.Length = columns.Length ->
-                    definition.Projections
-                    |> List.mapi (fun index projection ->
-                        match projection.Expression with
-                        | FuncCall(functionName, _) -> Some(index, functionName.ToLowerInvariant())
-                        | _ -> None)
-                    |> List.choose id
-                    |> Map.ofList
-                | _ -> Map.empty
-            | None -> Map.empty
+            let sourceNames = sources Set.empty viewDb viewRef.Table
+            columns
+            |> List.mapi (fun index column ->
+                Map.tryFind (column.Name.ToLowerInvariant()) sourceNames
+                |> Option.map (fun source -> index, source))
+            |> List.choose id
+            |> Map.ofList
         | _ -> Map.empty
 
 and private charComputedDoubleOverflow (number: double) =

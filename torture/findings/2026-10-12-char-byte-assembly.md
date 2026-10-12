@@ -91,15 +91,16 @@ type.
 Stored views retain a distinct warning source rule. A direct view column and
 an audited UNION view warn under the exposed column name `payload`, while a
 view expression `JSON_EXTRACT(payload, '$') AS extracted` warns under
-`json_extract`. Fsdb previously used `extracted`; it now retains the defining
-function name for the audited view projection. Descending view queries also
-match the warning row numbers.
+`json_extract`. A second view renaming `extracted` retains `json_extract`;
+renaming the direct `payload` column retains `payload`. Fsdb previously used
+the outer alias for these warning sources. Descending view queries also match
+the warning row numbers.
 
 Stored JSON values and warning row numbers now match the audited seven-row
 table with all rows, a `WHERE` filter, descending ordering with and without
 `LIMIT`, and grouping by the row ID. The projection row number follows the
 selected result order: a filtered or descending warning refers to its output
 position rather than the physical table position. More deeply nested,
-view-nested or user-defined JSON origins, more complex ordering and grouping
+other view shapes or user-defined JSON origins, more complex ordering and grouping
 shapes, and floating overflow in other expression forms remain outside this
 audit.

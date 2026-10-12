@@ -1328,10 +1328,14 @@ module ContractCatalog =
                yield Contract.execute "char-json-view-source-insert" "INSERT INTO char_view_source VALUES (1,'\"12.5\"'),(2,'null')"
                yield Contract.execute "char-json-view-direct-create" "CREATE VIEW char_direct_v AS SELECT id,payload FROM char_view_source"
                yield Contract.execute "char-json-view-extract-create" "CREATE VIEW char_extract_v AS SELECT id,JSON_EXTRACT(payload,'$') AS extracted FROM char_view_source"
+               yield Contract.execute "char-json-view-nested-create" "CREATE VIEW char_nested_v AS SELECT id,extracted AS nested_payload FROM char_extract_v"
+               yield Contract.execute "char-json-view-renamed-create" "CREATE VIEW char_renamed_v AS SELECT id,payload AS renamed FROM char_view_source"
                yield Contract.execute "char-json-view-union-create" "CREATE VIEW char_union_v AS SELECT 1 AS id,CAST('\"12.5\"' AS JSON) AS payload UNION ALL SELECT 2,CAST('null' AS JSON)"
                for name, sql in
                    [ "direct", "SELECT id,HEX(CHAR(payload)) FROM char_direct_v ORDER BY id DESC"
                      "extract", "SELECT id,HEX(CHAR(extracted)) FROM char_extract_v ORDER BY id DESC"
+                     "nested", "SELECT id,HEX(CHAR(nested_payload)) FROM char_nested_v ORDER BY id DESC"
+                     "renamed", "SELECT id,HEX(CHAR(renamed)) FROM char_renamed_v ORDER BY id DESC"
                      "union", "SELECT id,HEX(CHAR(payload)) FROM char_union_v ORDER BY id DESC" ] do
                    yield Contract.query (sprintf "char-json-view-%s" name) sql |> Contract.comparingValues
                    yield Contract.query (sprintf "char-json-view-%s-warnings" name) "SHOW WARNINGS" |> Contract.comparingValues
