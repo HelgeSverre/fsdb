@@ -6079,13 +6079,20 @@ module ContractCatalog =
             @ [ for id in 8..32 -> sprintf "zz%02d" id ]
             |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
             |> String.concat ","
+        let unicodeValues =
+            [ "é"; "éa"; "ê"; "é"; "😀"; "😀a"; "😁"; "éÿ"; "é " ]
+            @ [ for id in 10..34 -> sprintf "zz%02d" id ]
+            |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
+            |> String.concat ","
 
         { Name = "binary-like-prefix-range"
           Setup =
             [| "CREATE TABLE like_prefix_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_bin,KEY ix_v(v))"
                "INSERT INTO like_prefix_probe VALUES " + values
                "CREATE TABLE like_prefix_short_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_bin,KEY ix_v(v(2)))"
-               "INSERT INTO like_prefix_short_probe VALUES " + values |]
+               "INSERT INTO like_prefix_short_probe VALUES " + values
+               "CREATE TABLE like_unicode_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_0900_bin,KEY ix_v(v))"
+               "INSERT INTO like_unicode_probe VALUES " + unicodeValues |]
           Steps =
             [| Contract.query "prefix" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab%' ORDER BY id"
                Contract.query "prefix-and-single-character" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab_%' ORDER BY id"
@@ -6094,8 +6101,10 @@ module ContractCatalog =
                Contract.query "escaped-percent" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab\\\\%%' ORDER BY id"
                Contract.query "escaped-explicit" "SELECT id FROM like_prefix_probe WHERE v LIKE 'ab#_%' ESCAPE '#' ORDER BY id"
                Contract.query "exact-pattern" "SELECT id FROM like_prefix_probe WHERE v LIKE 'abc' ORDER BY id"
-               Contract.query "truncated-key" "SELECT id FROM like_prefix_short_probe WHERE v LIKE 'abc%' ORDER BY id" |]
-          Cleanup = [| "DROP TABLE like_prefix_probe"; "DROP TABLE like_prefix_short_probe" |]
+               Contract.query "truncated-key" "SELECT id FROM like_prefix_short_probe WHERE v LIKE 'abc%' ORDER BY id"
+               Contract.query "unicode-bmp" "SELECT id FROM like_unicode_probe WHERE v LIKE 'é%' ORDER BY id"
+               Contract.query "unicode-supplementary" "SELECT id FROM like_unicode_probe WHERE v LIKE '😀%' ORDER BY id" |]
+          Cleanup = [| "DROP TABLE like_prefix_probe"; "DROP TABLE like_prefix_short_probe"; "DROP TABLE like_unicode_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private textIfNullBranchFunctionalIndex =

@@ -6907,6 +6907,27 @@ let tests =
                     Expect.equal truncated.AccessType (Some "range") "a truncated key still narrows the candidates"
                     Expect.equal truncated.Key (Some "ix_v") "the prefix key supplies the broad range"
 
+                testCase "binary text LIKE indexes Unicode prefixes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE like_unicode (id INT PRIMARY KEY, v VARCHAR(20) COLLATE utf8mb4_0900_bin, KEY ix_v(v))" |> ignore
+                    let values =
+                        [ "é"; "éa"; "ê"; "é"; "😀"; "😀a"; "😁"; "éÿ"; "é " ]
+                        @ [ for id in 10..34 -> sprintf "zz%02d" id ]
+                        |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
+                        |> String.concat ","
+                    Expect.equal (runDefault store $"INSERT INTO like_unicode VALUES {values}") (Affected 34UL) "seed Unicode prefixes"
+
+                    for pattern, expected in [ "é%", [ 1; 2; 8; 9 ]; "😀%", [ 5; 6 ] ] do
+                        let rows = expected |> List.map (fun id -> [ Some(string id) ])
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM like_unicode WHERE v LIKE '{pattern}' ORDER BY id")
+                            (ResultSet([ "id" ], rows))
+                            "Unicode range candidates retain LIKE results"
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM like_unicode WHERE v LIKE '{pattern}'" |> explainRow
+                        Expect.equal plan.AccessType (Some "range") "a Unicode prefix uses a range"
+                        Expect.equal plan.Key (Some "ix_v") "the Unicode prefix uses the text key"
+
                 testCase "competing index families choose the lowest-cardinality access"
                 <| fun _ ->
                     let store = newStore ()

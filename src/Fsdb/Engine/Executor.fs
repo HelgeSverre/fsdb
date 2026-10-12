@@ -2702,6 +2702,23 @@ let private likeLiteralPrefix (escape: char) (pattern: string) =
 
     prefix.ToString()
 
+let private likePrefixUpperBound (prefix: string) =
+    let runes = prefix.EnumerateRunes() |> Seq.toArray
+    let mutable last = runes.Length - 1
+
+    while last >= 0 && runes[last].Value = 0x10FFFF do
+        last <- last - 1
+
+    if last < 0 then None
+    else
+        let upper = System.Text.StringBuilder()
+        for index in 0 .. last - 1 do
+            upper.Append(runes[index].ToString()) |> ignore
+
+        let next = if runes[last].Value = 0xD7FF then 0xE000 else runes[last].Value + 1
+        upper.Append(System.Text.Rune(next).ToString()) |> ignore
+        Some(upper.ToString())
+
 let private likeOp (coll: Collation.Collation option) (caseSensitive: bool) (escape: char option) (subject: Value) (pattern: Value) : Value =
     match subject, pattern with
     | VNull, _
@@ -13407,7 +13424,7 @@ and private plannerRangePredicatesFor
         | [] -> rangePredicatesFor numericColumnName tryNumericConstant expression
         | predicates -> predicates
 
-/// A fixed ASCII prefix is a byte-order interval under utf8mb4_0900_bin.
+/// A fixed UTF-8 prefix is a byte-order interval under utf8mb4_0900_bin.
 and private likePrefixRangePredicate scope (table: Table) tref expression =
     match expression with
     | Like(source, LiteralValue(VString pattern), _, escape) ->
@@ -13423,15 +13440,12 @@ and private likePrefixRangePredicate scope (table: Table) tref expression =
                 | _ -> false)
             |> Option.bind (fun column ->
                 let prefix = likeLiteralPrefix (escape |> Option.defaultValue '\\') pattern
-                if prefix.Length = 0 then None
+                if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
                 else
-                    if prefix |> Seq.exists (fun character -> character < ' ' || character >= '\u007f') then None
-                    else
-                        let successor = prefix.Substring(0, prefix.Length - 1) + string (char (int prefix[prefix.Length - 1] + 1))
-                        Some
-                            { Column = column.Name
-                              Lower = Some(VString prefix, true)
-                              Upper = Some(VString successor, false) }))
+                    Some
+                        { Column = column.Name
+                          Lower = Some(VString prefix, true)
+                          Upper = likePrefixUpperBound prefix |> Option.map (fun successor -> VString successor, false) }))
     | _ -> None
 
 and private collectClassifiedRangeBounds classify (whereExpr: Expr option) =
