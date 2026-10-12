@@ -10919,7 +10919,10 @@ module ContractCatalog =
                for owner in [ "d"; "o" ] do
                    Contract.query
                        (sprintf "costed-%s-two-labels" owner)
-                       (sprintf "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE %s.k IN (1,NULL) ORDER BY d.id" owner) |]
+                       (sprintf "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE %s.k IN (1,NULL) ORDER BY d.id" owner)
+               Contract.execute "index-competing-key" "CREATE INDEX labels_k ON join_labels(k)"
+               Contract.query "costed-d-two-indexes"
+                   "SELECT d.id FROM join_names d JOIN join_labels o ON o.k=d.k WHERE d.k IN (1,NULL) ORDER BY d.id" |]
           Cleanup = [| "DROP TABLE IF EXISTS join_labels"; "DROP TABLE IF EXISTS join_names" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 

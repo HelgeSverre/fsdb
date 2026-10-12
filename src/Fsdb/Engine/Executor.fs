@@ -12569,25 +12569,132 @@ and private reorderNullRejectedLeftJoin
         | _ -> select, None
     | _ -> select, None
 
+and private transferableNumericJoinCandidates (candidates: Expr list) =
+    let isNumericLiteral = function
+        | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VDouble _) -> true
+        | _ -> false
+
+    candidates.Length > 1
+    && List.forall (function LiteralValue _ -> true | _ -> false) candidates
+    && List.exists isNumericLiteral candidates
+
+and private tryTextJoinEquality
+    (leftQualifier: string)
+    (leftTable: Table)
+    (rightQualifier: string)
+    (rightTable: Table)
+    (on: Expr)
+    =
+    let normalized (name: string) = name.ToLowerInvariant()
+    let leftQualifier = normalized leftQualifier
+    let rightQualifier = normalized rightQualifier
+
+    let columns =
+        on
+        |> conjuncts
+        |> List.choose (function
+            | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, rightName)) ->
+                match normalized leftOwner, normalized rightOwner with
+                | left, right when left = leftQualifier && right = rightQualifier -> Some(leftName, rightName)
+                | left, right when left = rightQualifier && right = leftQualifier -> Some(rightName, leftName)
+                | _ -> None
+            | _ -> None)
+        |> function
+            | [ pair ] -> Some pair
+            | _ -> None
+
+    let textColumn (table: Table) name =
+        table.Columns
+        |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+
+    columns
+    |> Option.bind (fun (leftName, rightName) ->
+        match textColumn leftTable leftName, textColumn rightTable rightName with
+        | Some left, Some right when compatibleEqualityColumns left right ->
+            match left.Type with
+            | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
+                Some(left.Name, right.Name)
+            | _ -> None
+        | _ -> None)
+
+/// For this audited numeric-IN shape, start at the smaller unindexed source
+/// when the other equality key has an index. A competing index leaves the
+/// costed owner unresolved. Simple projections keep source order invisible.
+and private chooseNumericJoinBase (store: Store) (dbName: string) (select: SelectStmt) =
+    let physical tableRef =
+        tryPhysicalTableRef store dbName tableRef
+        |> Result.toOption
+        |> Option.flatten
+
+    let simpleProjection (projection: Projection) =
+        match projection.Expression with
+        | QualifiedCol _ | LiteralValue _ -> true
+        | _ -> false
+
+    let simpleOrdering (expression, _) =
+        match expression with
+        | QualifiedCol _ -> true
+        | _ -> false
+
+    match select.From, select.Joins with
+    | Some(FromTable leftRef as leftSource), [ join ]
+        when join.Kind = InnerJoin
+             && not select.StraightJoin
+             && join.Using.IsEmpty
+             && select.Locking.IsEmpty
+             && select.Limit.IsNone
+             && select.Offset.IsNone
+             && select.GroupBy.IsEmpty
+             && select.Having.IsNone
+             && not select.Distinct
+             && (match select.Where with
+                 | Some(In(QualifiedCol _, candidates)) -> transferableNumericJoinCandidates candidates
+                 | _ -> false)
+             && leftRef.IndexHints.IsEmpty
+             && (select.Projections |> List.forall simpleProjection)
+             && (select.OrderBy |> List.forall simpleOrdering) ->
+        match join.Table, physical leftRef with
+        | FromTable rightRef, Some leftTable when rightRef.IndexHints.IsEmpty ->
+            match physical rightRef, join.On with
+            | Some rightTable, BinOp(Eq, _, _) ->
+                let leftQualifier = leftRef.Alias |> Option.defaultValue leftRef.Table
+                let rightQualifier = rightRef.Alias |> Option.defaultValue rightRef.Table
+                let equalityColumns =
+                    tryTextJoinEquality leftQualifier leftTable rightQualifier rightTable join.On
+
+                let indexed table column =
+                    Storage.tryEqualityIndexCoveredByColumns table [ column ] |> Option.isSome
+
+                let transferableKeys leftName rightName =
+                    match select.Where with
+                    | Some(In(QualifiedCol(owner, name), _)) ->
+                        (equalsIgnoreCase owner leftQualifier && equalsIgnoreCase name leftName)
+                        || (equalsIgnoreCase owner rightQualifier && equalsIgnoreCase name rightName)
+                    | _ -> false
+
+                match equalityColumns with
+                | Some(leftName, rightName)
+                    when rightTable.RowsArray.Count < leftTable.RowsArray.Count
+                         && transferableKeys leftName rightName
+                         && indexed leftTable leftName
+                         && not (indexed rightTable rightName) ->
+                    { select with From = Some join.Table; Joins = [ { join with Table = leftSource } ] },
+                    Some(rightQualifier.ToLowerInvariant())
+                | _ -> select, None
+            | _ -> select, None
+        | _ -> select, None
+    | _ -> select, None
+
 /// MySQL attaches a multi-value IN condition on equal text keys to the first
 /// source chosen for the join. Numeric members expose that placement because
 /// collation-equal strings need not have equal numeric conversions.
 and private transferNumericJoinIn
     (store: Store)
     (dbName: string)
+    (costedFilterOwner: string option)
     (select: SelectStmt)
     =
     let normalized (name: string) = name.ToLowerInvariant()
-    let isNumericLiteral = function
-        | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VDouble _) -> true
-        | _ -> false
-
-    let isLiteral = function
-        | LiteralValue _ -> true
-        | _ -> false
-
-    let hasTransferableCandidates (candidates: Expr list) =
-        candidates.Length > 1 && List.forall isLiteral candidates && List.exists isNumericLiteral candidates
 
     let physical tableRef =
         tryPhysicalTableRef store dbName tableRef
@@ -12600,6 +12707,7 @@ and private transferNumericJoinIn
              && (join.Kind = InnerJoin || join.Kind = StraightJoin)
              && (select.StraightJoin
                  || join.Kind = StraightJoin
+                 || costedFilterOwner.IsSome
                  || (select.Where |> Option.exists (collectMatchAgainst >> List.isEmpty >> not))) ->
         match join.Table, physical baseRef with
         | FromTable rightRef, Some baseTable ->
@@ -12608,33 +12716,8 @@ and private transferNumericJoinIn
             | Some rightTable ->
                 let baseQualifier = normalized (baseRef.Alias |> Option.defaultValue baseRef.Table)
                 let rightQualifier = normalized (rightRef.Alias |> Option.defaultValue rightRef.Table)
-                let equalityColumns =
-                    join.On
-                    |> conjuncts
-                    |> List.choose (function
-                        | BinOp(Eq, QualifiedCol(leftOwner, leftName), QualifiedCol(rightOwner, rightName)) ->
-                            match normalized leftOwner, normalized rightOwner with
-                            | left, right when left = baseQualifier && right = rightQualifier -> Some(leftName, rightName)
-                            | left, right when left = rightQualifier && right = baseQualifier -> Some(rightName, leftName)
-                            | _ -> None
-                        | _ -> None)
-                    |> function
-                        | [ columns ] -> Some columns
-                        | _ -> None
-
                 let columns =
-                    equalityColumns
-                    |> Option.bind (fun (baseName, rightName) ->
-                        match
-                            baseTable.Columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name baseName),
-                            rightTable.Columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name rightName)
-                        with
-                        | Some baseColumn, Some rightColumn when compatibleEqualityColumns baseColumn rightColumn ->
-                            match baseColumn.Type with
-                            | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
-                                Some(baseColumn.Name, rightColumn.Name)
-                            | _ -> None
-                        | _ -> None)
+                    tryTextJoinEquality baseQualifier baseTable rightQualifier rightTable join.On
 
                 let matchOwners =
                     select.Where
@@ -12649,15 +12732,17 @@ and private transferNumericJoinIn
                 let filterOwner =
                     if select.StraightJoin || join.Kind = StraightJoin then Some baseQualifier
                     else
-                        match matchOwners with
-                        | [ owner ] when owner = baseQualifier || owner = rightQualifier -> Some owner
-                        | _ -> None
+                        costedFilterOwner
+                        |> Option.orElseWith (fun () ->
+                            match matchOwners with
+                            | [ owner ] when owner = baseQualifier || owner = rightQualifier -> Some owner
+                            | _ -> None)
 
                 match columns, filterOwner, select.Where with
                 | Some(baseName, rightName), Some filterOwner, Some where ->
                     let rewritePredicate = function
                         | In(QualifiedCol(owner, column), candidates) as predicate
-                            when hasTransferableCandidates candidates ->
+                            when transferableNumericJoinCandidates candidates ->
                             let owner = normalized owner
                             let isJoinKey =
                                 (owner = baseQualifier && equalsIgnoreCase column baseName)
@@ -12680,7 +12765,8 @@ and private runUnlockedSelectStmt
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
-    let select = transferNumericJoinIn store dbName select
+    let select, costedFilterOwner = chooseNumericJoinBase store dbName select
+    let select = transferNumericJoinIn store dbName costedFilterOwner select
     let select, preferredBaseRows = reorderNullRejectedLeftJoin store registry dbName select
     let matchNodes =
         (select.Projections |> List.collect (_.Expression >> collectMatchAgainst))

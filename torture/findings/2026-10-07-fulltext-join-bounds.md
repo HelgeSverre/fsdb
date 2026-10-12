@@ -200,3 +200,23 @@ TREE plan or a row-count heuristic into a general predicate-ownership rule.
 The costed fix needs an explicit source-choice decision that accounts for
 competing equality access paths and retains the original `IN` semantics
 when that choice is not established.
+
+### Audited costed-source fix on 2026-10-12
+
+Fsdb now chooses the smaller unindexed source first for a simple two-table
+inner equality join when its partner has an equality index and the query has
+the audited literal multi-value numeric `IN` on a compatible text join key.
+The same source choice drives physical execution and the numeric filter
+transfer. A competing equality index leaves the written base in place. The
+scope is deliberately limited to simple qualified projections and ordering;
+other costed joins still need a fuller access-path model.
+
+The focused regression failed on the one-label costed query before this fix.
+It now covers one and two labels and the competing-index counterprobe. After
+sharing text-key validation between the source choice and transfer paths,
+`just check` passed 3,478 tests with no build warnings or errors. The pinned
+MySQL 8.4.11 run at `20261012T045938983-12044/contracts` passed every
+`mixed-type-join-in` step, including the new indexed counterprobe. Across
+139 cases and 18,882 steps, the two costed result mismatches disappeared;
+the remaining nine signatures are exactly the previous identifier-case
+differences, with no new mismatch.

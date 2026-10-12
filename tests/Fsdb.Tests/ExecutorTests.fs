@@ -3393,6 +3393,7 @@ let tests =
                     check "labels o STRAIGHT_JOIN names d" "o" "(1,NULL)" "" [ "1"; "2" ]
                     check "labels o STRAIGHT_JOIN names d" "d" "(1,NULL)" "" [ "1"; "2" ]
                     check "names d JOIN labels o" "o" "(1,NULL)" "" [ "1"; "2" ]
+                    check "names d JOIN labels o" "d" "(1,NULL)" "" [ "1"; "2" ]
                     check "names d JOIN labels o" "o" "(1,NULL)" " AND MATCH(d.body) AGAINST('needle')" [ "2" ]
                     check "names d JOIN labels o" "d" "(1,NULL)" " AND MATCH(d.body) AGAINST('needle')" [ "2" ]
                     check "names d STRAIGHT_JOIN labels o" "o" "(1)" "" [ "1"; "2" ]
@@ -3404,6 +3405,11 @@ let tests =
                     | other -> failtestf "expected numeric IN to follow a join key inside a compound ON condition, got %A" other
                     runDefault store "INSERT INTO labels VALUES('other1'),('other2'),('other3'),('other4')" |> ignore
                     check "names d JOIN labels o" "o" "(1,NULL)" "" [ "1"; "2" ]
+                    runDefault store "DELETE FROM labels WHERE k <> '1'" |> ignore
+                    runDefault store "INSERT INTO labels VALUES('other')" |> ignore
+                    check "names d JOIN labels o" "d" "(1,NULL)" "" [ "1"; "2" ]
+                    runDefault store "CREATE INDEX labels_k ON labels(k)" |> ignore
+                    check "names d JOIN labels o" "d" "(1,NULL)" "" [ "2" ]
 
                 testCase "outer hash joins preserve the retained side's scan order"
                 <| fun _ ->
