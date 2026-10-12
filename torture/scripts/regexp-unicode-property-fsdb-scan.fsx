@@ -11,7 +11,11 @@ let expected =
       "scx=Grek", "c", 531, "f1470937ece85b43a8e303fc71222a830754d6c0d9c9335c72906f793dd29e56"
       "scx=Grek", "i", 532, "32befcff5012c57221a15aa5c24bcd98b177bd452b6273cf1db3e50ff43a91f1"
       "Variation_Selector", "c", 260, "c539c99975ea71b6bc652c0d4bc1327c0e68e46ca369951847b0c2fef1aa5b77"
-      "Variation_Selector", "i", 260, "c539c99975ea71b6bc652c0d4bc1327c0e68e46ca369951847b0c2fef1aa5b77" ]
+      "Variation_Selector", "i", 260, "c539c99975ea71b6bc652c0d4bc1327c0e68e46ca369951847b0c2fef1aa5b77"
+      "Han", "c", 99030, "4d88d555fa81ea31035361dab2fa6c61d20de0fb7f044f7f2decec7b306c5f8c"
+      "Han", "i", 99030, "4d88d555fa81ea31035361dab2fa6c61d20de0fb7f044f7f2decec7b306c5f8c"
+      "scx=Hani", "c", 99338, "c2244d16981124663e29f8a1c552acd9a8f057b5a5ac718d1208033a1dfc8574"
+      "scx=Hani", "i", 99338, "c2244d16981124663e29f8a1c552acd9a8f057b5a5ac718d1208033a1dfc8574" ]
 
 for propertyName, mode, expectedCount, expectedDigest in expected do
     let pattern =

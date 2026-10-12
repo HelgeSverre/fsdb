@@ -227,6 +227,43 @@ let private greekScriptAliases =
 let private greekScriptExtensionAliases =
     set [ "SCX=GREEK"; "SCX=GREK"; "SCRIPT_EXTENSIONS=GREEK"; "SCRIPT_EXTENSIONS=GREK" ]
 
+let private hanScriptRanges =
+    [ 0x2E80, 0x2E99; 0x2E9B, 0x2EF3; 0x2F00, 0x2FD5
+      0x3005, 0x3005; 0x3007, 0x3007; 0x3021, 0x3029; 0x3038, 0x303B
+      0x3400, 0x4DBF; 0x4E00, 0x9FFF; 0xF900, 0xFA6D; 0xFA70, 0xFAD9
+      0x16FE2, 0x16FE3; 0x16FF0, 0x16FF1
+      0x20000, 0x2A6DF; 0x2A700, 0x2B739; 0x2B740, 0x2B81D
+      0x2B820, 0x2CEA1; 0x2CEB0, 0x2EBE0; 0x2EBF0, 0x2EE5D
+      0x2F800, 0x2FA1D; 0x30000, 0x3134A; 0x31350, 0x323AF ]
+
+let private hanScriptExtensionMembers =
+    [ 0x00B7, 0x00B7; 0x2FF0, 0x2FFF
+      0x3001, 0x3003; 0x3006, 0x3006; 0x3008, 0x3011; 0x3013, 0x301F
+      0x302A, 0x302D; 0x3030, 0x3030; 0x3037, 0x3037; 0x303C, 0x303F
+      0x30FB, 0x30FB; 0x3190, 0x319F; 0x31C0, 0x31E5; 0x31EF, 0x31EF
+      0x3220, 0x3247; 0x3280, 0x32B0; 0x32C0, 0x32CB; 0x32FF, 0x32FF
+      0x3358, 0x3370; 0x337B, 0x337F; 0x33E0, 0x33FE
+      0xA700, 0xA707; 0xFE45, 0xFE46; 0xFF61, 0xFF65
+      0x1D360, 0x1D371; 0x1F250, 0x1F251 ]
+
+let private hanScriptAtom = scalarRangesAtom hanScriptRanges
+let private hanScriptExtensionsAtom = "(?:" + hanScriptAtom + "|" + scalarRangesAtom hanScriptExtensionMembers + ")"
+
+let private hanScriptAliases =
+    set [ "HAN"; "HANI"; "ISHAN"; "SC=HAN"; "SC=HANI"; "SCRIPT=HAN"; "SCRIPT=HANI" ]
+
+let private hanScriptExtensionAliases =
+    set [ "SCX=HAN"; "SCX=HANI"; "SCRIPT_EXTENSIONS=HAN"; "SCRIPT_EXTENSIONS=HANI" ]
+
+let private scriptAtoms =
+    [ greekScriptAliases, greekScriptAtom, greekScriptFoldedAtom
+      greekScriptExtensionAliases, greekScriptExtensionsAtom false, greekScriptExtensionsAtom true
+      hanScriptAliases, hanScriptAtom, hanScriptAtom
+      hanScriptExtensionAliases, hanScriptExtensionsAtom, hanScriptExtensionsAtom ]
+    |> List.collect (fun (aliases, sensitive, insensitive) ->
+        aliases |> Set.toList |> List.map (fun name -> name, (sensitive, insensitive)))
+    |> Map.ofList
+
 let private unicodePropertyNameAt (pattern: string) index =
     if index + 3 >= pattern.Length
        || (pattern[index + 1] <> 'p' && pattern[index + 1] <> 'P')
@@ -254,11 +291,9 @@ let private unicodePropertyAt ignoreCase (pattern: string) index =
     | Some(nextIndex, name) when Map.containsKey name scalarBinaryAtoms ->
         let atom = Map.find name scalarBinaryAtoms
         Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then scalarNegatedAtom atom else atom))
-    | Some(nextIndex, name) when Set.contains name greekScriptExtensionAliases ->
-        let atom = greekScriptExtensionsAtom ignoreCase
-        Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then scalarNegatedAtom atom else atom))
-    | Some(nextIndex, name) when Set.contains name greekScriptAliases ->
-        let atom = greekScriptAtomFor ignoreCase
+    | Some(nextIndex, name) when Map.containsKey name scriptAtoms ->
+        let sensitive, insensitive = Map.find name scriptAtoms
+        let atom = if ignoreCase then insensitive else sensitive
         Some(nextIndex, ScalarAlternative(if pattern[index + 1] = 'P' then scalarNegatedAtom atom else atom))
     | Some(nextIndex, name) ->
         let categoryName =

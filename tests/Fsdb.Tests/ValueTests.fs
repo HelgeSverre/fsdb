@@ -3317,6 +3317,24 @@ let tests =
                               (call "REGEXP_LIKE" [ VString "µ"; VString "\\p{scx=Grek}"; VString "i" ])
                               (VInt 1L)
                               "case folding includes micro sign"
+                      testCase "REGEXP Han script and shared extension marks"
+                      <| fun _ ->
+                          let matches pattern codePoint =
+                              call "REGEXP_LIKE" [ VString(Char.ConvertFromUtf32 codePoint); VString pattern; VString "c" ]
+
+                          for codePoint in [ 0x3005; 0x4e2d; 0x20000; 0x2ebf0; 0x323af ] do
+                              Expect.equal (matches "\\p{Han}" codePoint) (VInt 1L) (sprintf "U+%X has Han script" codePoint)
+
+                          for codePoint in [ 0x3001; 0x30fb; 0x1d360 ] do
+                              Expect.equal (matches "\\p{Han}" codePoint) (VInt 0L) (sprintf "U+%X lacks Han script" codePoint)
+                              Expect.equal (matches "\\p{scx=Hani}" codePoint) (VInt 1L) (sprintf "U+%X has Han script extension" codePoint)
+
+                          for alias in [ "\\p{Hani}"; "\\p{IsHan}"; "\\p{sc=Han}"; "\\p{Script=Hani}" ] do
+                              Expect.equal (matches alias 0x4e2d) (VInt 1L) (sprintf "%s alias" alias)
+
+                          Expect.equal (matches "[\\p{Han}]" 0x323af) (VInt 1L) "bracket includes supplementary Han"
+                          Expect.equal (matches "\\P{scx=Han}" 0x3001) (VInt 0L) "negation excludes shared mark"
+                          Expect.equal (matches "\\P{Han}" 0x323b0) (VInt 1L) "negation includes adjacent scalar"
                       testCase "REGEXP variation selectors include supplementary scalars"
                       <| fun _ ->
                           let matches pattern codePoint =
