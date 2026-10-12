@@ -20686,13 +20686,18 @@ let private explainIndexKeyLen
     List.zip indices prefixLengths
     |> List.mapi (fun position (index, prefixLength) ->
         let column = columns.[index]
-        let functionalLength =
+        let transform =
             transforms
             |> Option.bind (List.tryItem position)
             |> Option.flatten
-            |> Option.bind (FunctionalIndex.tryIntegerExpressionKeyLength column.Type)
+        let functionalLength = transform |> Option.bind (FunctionalIndex.tryIntegerExpressionKeyLength column.Type)
+        let resultColumn =
+            if transform |> Option.exists FunctionalIndex.hasNonNullableTextFallback then
+                { column with Nullable = false }
+            else
+                column
 
-        functionalLength |> Option.orElseWith (fun () -> explainPrefixKeyLen column prefixLength))
+        functionalLength |> Option.orElseWith (fun () -> explainPrefixKeyLen resultColumn prefixLength))
     |> traverse (function
         | Some length -> Ok length
         | None -> Error())

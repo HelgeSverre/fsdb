@@ -8682,6 +8682,90 @@ let tests =
 
                     Expect.equal bigPlan.KeyLength (Some "8") "MySQL indexes the BIGINT expression result"
 
+                testCase "VARCHAR COALESCE keys preserve charset-resolved expression identity"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE text_fallback (id INT PRIMARY KEY, value VARCHAR(20) COLLATE utf8mb4_bin, KEY ix_fallback ((COALESCE(value,_utf8mb4'x'))))")
+                        (Affected 0UL)
+                        "MySQL accepts a text fallback key"
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE unique_text_fallback (id INT PRIMARY KEY, value VARCHAR(20) COLLATE utf8mb4_bin, UNIQUE KEY ux_fallback ((COALESCE(value,_utf8mb4'x'))))")
+                        (Affected 0UL)
+                        "MySQL accepts a unique text fallback key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO text_fallback VALUES (1,NULL),(2,'x'),(3,'X'),(4,'other')")
+                        (Affected 4UL)
+                        "seed NULL, fallback, case-distinct, and other values"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM text_fallback WHERE COALESCE(value,_utf8mb4'x')='x' ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "the fallback and stored text share the result key"
+
+                    let indexed =
+                        runDefault store "EXPLAIN SELECT id FROM text_fallback WHERE COALESCE(value,_utf8mb4'x')='x'"
+                        |> explainRow
+
+                    Expect.equal indexed.Key (Some "ix_fallback") "the charset-resolved expression uses the key"
+                    Expect.equal indexed.KeyLength (Some "82") "the non-null hidden VARCHAR result has no null flag"
+
+                    let plain =
+                        runDefault store "EXPLAIN SELECT id FROM text_fallback WHERE COALESCE(value,'x')='x'"
+                        |> explainRow
+
+                    Expect.equal plain.Key None "a connection literal is not the indexed expression"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO text_fallback VALUES (5,'1'),(6,'01'),(7,'1x')")
+                        (Affected 3UL)
+                        "seed text with distinct spellings but equal numeric prefixes"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM text_fallback WHERE COALESCE(value,_utf8mb4'x')=1 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "5" ]; [ Some "6" ]; [ Some "7" ] ]))
+                        "numeric comparison cannot narrow to one text key"
+
+                    let numericPlan =
+                        runDefault store "EXPLAIN SELECT id FROM text_fallback WHERE COALESCE(value,_utf8mb4'x')=1"
+                        |> explainRow
+
+                    Expect.equal numericPlan.Key None "numeric comparison scans the text expression"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO unique_text_fallback VALUES (1,NULL)")
+                        (Affected 1UL)
+                        "the NULL source occupies the fallback key"
+
+                    match runDefault store "INSERT INTO unique_text_fallback VALUES (2,'x')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected fallback-equivalent text to conflict; got %A" other
+
+                    Expect.equal
+                        (runDefault store "CREATE TABLE text_ifnull (id INT PRIMARY KEY, value VARCHAR(20) COLLATE utf8mb4_bin, KEY ix_ifnull ((IFNULL(value,_utf8mb4'x'))))")
+                        (Affected 0UL)
+                        "MySQL accepts the distinct IFNULL expression key"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO text_ifnull VALUES (1,NULL),(2,'x'),(3,'X')")
+                        (Affected 3UL)
+                        "seed the IFNULL key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM text_ifnull WHERE IFNULL(value,_utf8mb4'x')='x' ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "IFNULL finds both fallback-equivalent values"
+
+                    let ifnullPlan =
+                        runDefault store "EXPLAIN SELECT id FROM text_ifnull WHERE IFNULL(value,_utf8mb4'x')='x'"
+                        |> explainRow
+
+                    Expect.equal ifnullPlan.Key (Some "ix_ifnull") "IFNULL uses its own key"
+                    Expect.equal ifnullPlan.KeyLength (Some "82") "IFNULL has the same non-null VARCHAR width"
+
                 testCase "unsigned COALESCE keys use MySQL's signed or decimal result type"
                 <| fun _ ->
                     let store = newStore ()

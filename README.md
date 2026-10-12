@@ -469,6 +469,11 @@ different access pattern:
   ordinary integer sources produce a signed `BIGINT` result, while
   `BIGINT UNSIGNED` with a signed fallback produces `DECIMAL(20,0)`. The
   function name is part of the key identity.
+  For `VARCHAR`, text `COALESCE` and `IFNULL` fallbacks that fit the declared
+  width and use the source charset also have physical equality and unique
+  keys. The fallback's resolved charset is part of the expression identity:
+  an explicitly introduced literal can match the stored key where an ordinary
+  connection literal does not. Both forms retain the same scalar result.
   `NULLIF(integer_column, integer_literal)` has a nullable physical key:
   narrow integer sources promote to `INT`, while `BIGINT` retains its width.
   Equality and unique-key checks use the projected result.

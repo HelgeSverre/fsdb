@@ -5978,6 +5978,32 @@ module ContractCatalog =
                "DROP TABLE ifnull_unsigned" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private textNullFallbackFunctionalIndex =
+        { Name = "text-null-fallback-functional-index"
+          Setup =
+            [| "CREATE TABLE text_coalesce_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_bin,KEY ix ((COALESCE(v,'x'))))"
+               "INSERT INTO text_coalesce_probe VALUES(1,NULL),(2,'x'),(3,'X'),(4,'other'),(5,'1'),(6,'01'),(7,'1x')"
+               "CREATE TABLE text_ifnull_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_bin,KEY ix ((IFNULL(v,'x'))))"
+               "INSERT INTO text_ifnull_probe VALUES(1,NULL),(2,'x'),(3,'X'),(4,'other')"
+               "CREATE TABLE text_coalesce_unique(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_bin,UNIQUE KEY ux ((COALESCE(v,'x'))))"
+               "INSERT INTO text_coalesce_unique VALUES(1,NULL)" |]
+          Steps =
+            [| Contract.query "coalesce-fallback" "SELECT id FROM text_coalesce_probe WHERE COALESCE(v,_utf8mb4'x')='x' ORDER BY id"
+               Contract.query "coalesce-case" "SELECT id FROM text_coalesce_probe WHERE COALESCE(v,_utf8mb4'x')='X' ORDER BY id"
+               Contract.query "coalesce-plain-literal" "SELECT id FROM text_coalesce_probe WHERE COALESCE(v,'x')='x' ORDER BY id"
+               Contract.query "coalesce-numeric-comparison" "SELECT id FROM text_coalesce_probe WHERE COALESCE(v,_utf8mb4'x')=1 ORDER BY id"
+               Contract.query "ifnull-fallback" "SELECT id FROM text_ifnull_probe WHERE IFNULL(v,_utf8mb4'x')='x' ORDER BY id"
+               Contract.query "ifnull-case" "SELECT id FROM text_ifnull_probe WHERE IFNULL(v,_utf8mb4'x')='X' ORDER BY id"
+               Contract.execute "duplicate-fallback" "INSERT INTO text_coalesce_unique VALUES(2,'x')" |> Contract.fails 1062 "23000"
+               Contract.execute "update" "UPDATE text_coalesce_probe SET v='new' WHERE id=1"
+               Contract.query "old-key" "SELECT id FROM text_coalesce_probe WHERE COALESCE(v,_utf8mb4'x')='x' ORDER BY id"
+               Contract.query "new-key" "SELECT id FROM text_coalesce_probe WHERE COALESCE(v,_utf8mb4'x')='new' ORDER BY id" |]
+          Cleanup =
+            [| "DROP TABLE text_coalesce_probe"
+               "DROP TABLE text_ifnull_probe"
+               "DROP TABLE text_coalesce_unique" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private nullifFunctionalIndex =
         { Name = "nullif-functional-index"
           Setup =
@@ -11214,6 +11240,7 @@ module ContractCatalog =
            signFunctionalIndex
            coalesceFunctionalIndex
            ifnullFunctionalIndex
+           textNullFallbackFunctionalIndex
            nullifFunctionalIndex
            bitCountFunctionalIndex
            crc32FunctionalIndex

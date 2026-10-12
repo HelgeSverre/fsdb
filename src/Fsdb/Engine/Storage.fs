@@ -2728,7 +2728,7 @@ let private tryIndexKeyGroup (table: Table) (index: IndexDef) =
             |> Option.filter (fun resolved ->
                 transform
                 |> Option.forall (fun physical ->
-                    FunctionalIndex.supportsColumnType physical table.Columns.[resolved].Type))
+                    FunctionalIndex.supportsColumn physical table.Columns.[resolved]))
             |> Option.map (fun resolved ->
                 resolved,
                 { column with
@@ -6670,7 +6670,7 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
             | None -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" columnName))
             | Some definition
                 when transform
-                     |> Option.exists (fun transform -> FunctionalIndex.supportsColumnType transform definition.Type) ->
+                     |> Option.exists (fun transform -> FunctionalIndex.supportsColumn transform definition) ->
                 transform
                 |> Option.bind (FunctionalIndex.fixedKeyLength definition.Type)
                 |> Option.orElseWith (fun () -> fullLength definition)

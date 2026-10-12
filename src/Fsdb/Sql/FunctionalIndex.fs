@@ -154,7 +154,8 @@ let tryBuiltinName transform =
 
 type NullFallback =
     { Name: string
-      Value: Value }
+      Value: Value
+      Literal: Expr }
 
 type PhysicalExpression =
     { Qualifier: string option
@@ -168,7 +169,7 @@ let private canonicalExpression (column: string) fallback nullComparison (calls:
     let source =
         let column = Col(column.ToLowerInvariant())
         match fallback, nullComparison with
-        | Some fallback, None -> FuncCall(fallback.Name, [ column; Lit fallback.Value ])
+        | Some fallback, None -> FuncCall(fallback.Name, [ column; fallback.Literal ])
         | None, Some value -> FuncCall("NULLIF", [ column; Lit value ])
         | None, None -> column
         | Some _, Some _ -> invalidArg (nameof nullComparison) "An index source cannot have two NULL rules"
@@ -181,17 +182,33 @@ let private canonicalExpression (column: string) fallback nullComparison (calls:
         source
 
 let tryPhysicalExpression expression =
+    let literal = function
+        | Lit value
+        | ConnectionLiteral(value, _) as expression -> Some(expression, value)
+        | IntroducedLiteral((VString _ | VEncodedString _) as value, charset, _) ->
+            value
+            |> toText
+            |> Option.map (fun text ->
+                let text = VString text
+                IntroducedLiteral(text, Fsdb.Charset.canonicalName charset, ResolvedIntroducer), text)
+        | IntroducedLiteral(value, _, _) as expression -> Some(expression, value)
+        | _ -> None
+
     let rec collect calls = function
         | Col column -> Some(None, column, None, None, calls)
         | QualifiedCol(qualifier, column) -> Some(Some qualifier, column, None, None, calls)
-        | FuncCall(name, [ Col column; Lit fallback ])
+        | FuncCall(name, [ Col column; argument ])
             when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
                  || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase) ->
-            Some(None, column, Some { Name = name.ToUpperInvariant(); Value = fallback }, None, calls)
-        | FuncCall(name, [ QualifiedCol(qualifier, column); Lit fallback ])
+            literal argument
+            |> Option.map (fun (expression, value) ->
+                None, column, Some { Name = name.ToUpperInvariant(); Value = value; Literal = expression }, None, calls)
+        | FuncCall(name, [ QualifiedCol(qualifier, column); argument ])
             when name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase)
                  || name.Equals("IFNULL", StringComparison.OrdinalIgnoreCase) ->
-            Some(Some qualifier, column, Some { Name = name.ToUpperInvariant(); Value = fallback }, None, calls)
+            literal argument
+            |> Option.map (fun (expression, value) ->
+                Some qualifier, column, Some { Name = name.ToUpperInvariant(); Value = value; Literal = expression }, None, calls)
         | FuncCall(name, [ Col column; Lit comparison ]) when name.Equals("NULLIF", StringComparison.OrdinalIgnoreCase) ->
             Some(None, column, None, Some comparison, calls)
         | FuncCall(name, [ QualifiedCol(qualifier, column); Lit comparison ])
@@ -279,12 +296,31 @@ let private transformFamily = function
 let rec hasTextResult = function
     | Expression expression ->
         tryPhysicalExpression expression
-        |> Option.bind (_.Calls >> List.tryLast)
-        |> Option.exists (snd >> hasTextResult)
+        |> Option.exists (fun physical ->
+            match List.tryLast physical.Calls with
+            | Some(_, transform) -> hasTextResult transform
+            | None ->
+                physical.NullFallback
+                |> Option.exists (fun fallback ->
+                    match fallback.Value with
+                    | VString _ | VEncodedString _ -> true
+                    | _ -> false))
     | transform ->
         match transformFamily transform with
         | TextOperation | EncodedTextResult -> true
         | _ -> false
+
+let hasNonNullableTextFallback = function
+    | Expression expression ->
+        tryPhysicalExpression expression
+        |> Option.exists (fun physical ->
+            physical.Calls.IsEmpty
+            && (physical.NullFallback
+                |> Option.exists (fun fallback ->
+                    match fallback.Value with
+                    | VString _ | VEncodedString _ -> true
+                    | _ -> false)))
+    | _ -> false
 
 let tryRebaseColumn column = function
     | Expression expression ->
@@ -410,6 +446,22 @@ let private tryIntegerFallbackKey columnType fallback =
         Some UnsignedInt64
     | _ -> None
 
+let private fitsTextFallbackWidth columnType fallback =
+    match columnType, fallback.Literal, fallback.Value with
+    | TVarchar width, IntroducedLiteral _, (VString _ | VEncodedString _) ->
+        fallback.Value
+        |> toText
+        |> Option.exists (fun text -> text.EnumerateRunes() |> Seq.length <= width)
+    | _ -> false
+
+let private supportsTextFallback (column: ColumnDef) fallback =
+    let sourceCharset = column.Charset |> Option.defaultValue "utf8mb4" |> Fsdb.Charset.canonicalName
+
+    fitsTextFallbackWidth column.Type fallback
+    && (match fallback.Literal with
+        | IntroducedLiteral(_, charset, _) -> Fsdb.Charset.canonicalName charset = sourceCharset
+        | _ -> false)
+
 let private nullIfIntegerWidth = function
     | TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ -> Some 4
     | TBigInt _ -> Some 8
@@ -420,15 +472,18 @@ let private supportsNullIf columnType comparison =
     | Some _, (VInt _ | VUInt _) -> true
     | _ -> false
 
-let supportsColumnType transform columnType =
+let supportsColumn transform (column: ColumnDef) =
     match transform with
     | Expression expression ->
         tryPhysicalExpression expression
         |> Option.exists (fun physical ->
+            let columnType = column.Type
             let transforms = physical.Calls |> List.map snd
             let sourceSupported =
                 (physical.NullFallback
-                 |> Option.forall (fun fallback -> tryIntegerFallbackKey columnType fallback |> Option.isSome))
+                 |> Option.forall (fun fallback ->
+                     tryIntegerFallbackKey columnType fallback |> Option.isSome
+                     || (transforms.IsEmpty && supportsTextFallback column fallback)))
                 && (physical.NullComparison
                     |> Option.forall (supportsNullIf columnType))
 
@@ -448,7 +503,7 @@ let supportsColumnType transform columnType =
                 | first :: _, _ when List.forall isTextTransform transforms -> supportsSingleTransform first columnType
                 | first :: _, _ when List.forall isNumericTransform transforms -> supportsSingleTransform first columnType
                 | _ -> false)
-    | transform -> supportsSingleTransform transform columnType
+    | transform -> supportsSingleTransform transform column.Type
 
 /// These transforms return exact integer values; their encoded key width also
 /// supplies metadata for the hidden functional column.
@@ -490,7 +545,11 @@ let rec hasNumericResult = function
     | Expression expression ->
         tryPhysicalExpression expression
         |> Option.exists (fun physical ->
-            physical.NullFallback.IsSome
+            (physical.NullFallback
+             |> Option.exists (fun fallback ->
+                 match fallback.Value with
+                 | VInt _ | VUInt _ -> true
+                 | _ -> false))
             || physical.NullComparison.IsSome
             || (physical.Calls |> List.tryLast |> Option.exists (snd >> hasNumericResult)))
     | transform ->
@@ -702,7 +761,13 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
             let transforms = physical.Calls |> List.map snd
 
             match List.tryLast transforms with
-            | None when physical.NullFallback.IsSome -> tryIntegerFallbackProbe columnType physical.NullFallback value
+            | None when physical.NullFallback.IsSome ->
+                match physical.NullFallback with
+                | Some fallback when fitsTextFallbackWidth columnType fallback ->
+                    match value with
+                    | VString _ | VEncodedString _ -> value |> toText |> Option.map VString
+                    | _ -> None
+                | _ -> tryIntegerFallbackProbe columnType physical.NullFallback value
             | None when physical.NullComparison.IsSome -> normalizeStored value
             | Some transform when isTextToIntegerTransform transform -> tryExactInt64 value |> Option.map VInt
             | Some DecodedHex -> tryBinaryProbe value
