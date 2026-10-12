@@ -333,8 +333,7 @@ let sameLookupTransform (column: ColumnDef) requested stored =
                         requestedComparison.Value storedComparison.Value
                         requestedComparison.Literal storedComparison.Literal
                 | Some requestedFallback, Some storedFallback, None, None
-                    when requestedFallback.Function = storedFallback.Function
-                         && not (isConditionalFallback requestedFallback.Function) ->
+                    when requestedFallback.Function = storedFallback.Function ->
                     equivalentIntroducedText
                         requestedFallback.Value storedFallback.Value
                         requestedFallback.Literal storedFallback.Literal

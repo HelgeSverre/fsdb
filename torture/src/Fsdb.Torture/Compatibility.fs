@@ -6077,15 +6077,27 @@ module ContractCatalog =
             [| "CREATE TABLE text_if_branch_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_bin,UNIQUE KEY ux ((IF(v IS NULL,_utf8mb4'x',v))))"
                "INSERT INTO text_if_branch_probe VALUES(1,NULL),(2,'X'),(3,'1'),(4,'01'),(5,'1x')"
                "CREATE TABLE text_if_reversed_probe(id INT PRIMARY KEY,v VARCHAR(20) COLLATE utf8mb4_bin,KEY ix ((IF(v IS NOT NULL,v,_utf8mb4'x'))))"
-               "INSERT INTO text_if_reversed_probe VALUES(1,NULL),(2,'x')" |]
+               "INSERT INTO text_if_reversed_probe VALUES(1,NULL),(2,'x')"
+               "CREATE TABLE text_if_folded_probe(id INT PRIMARY KEY,v VARCHAR(4) COLLATE utf8mb4_0900_ai_ci,KEY ix ((IF(v IS NULL,_utf8mb4'x',v))))"
+               "INSERT INTO text_if_folded_probe VALUES(1,NULL),(2,'a'),(3,'X')"
+               "CREATE TABLE text_if_folded_reversed(id INT PRIMARY KEY,v VARCHAR(4) COLLATE utf8mb4_0900_ai_ci,KEY ix ((IF(v IS NOT NULL,v,_utf8mb4'x'))))"
+               "INSERT INTO text_if_folded_reversed VALUES(1,NULL),(2,'a'),(3,'X')" |]
           Steps =
             [| Contract.query "introduced-fallback" "SELECT id FROM text_if_branch_probe WHERE IF(v IS NULL,_utf8mb4'x',v)='x'"
                Contract.query "connection-fallback" "SELECT id FROM text_if_branch_probe WHERE IF(v IS NULL,'x',v)='x'"
                Contract.query "other-charset" "SELECT id FROM text_if_branch_probe WHERE IF(v IS NULL,_latin1'x',v)='x'"
                Contract.query "numeric-comparison" "SELECT id FROM text_if_branch_probe WHERE IF(v IS NULL,_utf8mb4'x',v)=1 ORDER BY id"
                Contract.execute "duplicate" "INSERT INTO text_if_branch_probe VALUES(6,'x')" |> Contract.fails 1062 "23000"
-               Contract.query "reversed-fallback" "SELECT id FROM text_if_reversed_probe WHERE IF(v IS NOT NULL,v,'x')='x' ORDER BY id" |]
-          Cleanup = [| "DROP TABLE text_if_branch_probe"; "DROP TABLE text_if_reversed_probe" |]
+               Contract.query "reversed-fallback" "SELECT id FROM text_if_reversed_probe WHERE IF(v IS NOT NULL,v,'x')='x' ORDER BY id"
+               Contract.query "folded-cross-charset" "SELECT id FROM text_if_folded_probe WHERE IF(v IS NULL,_latin1'X',v)='x' ORDER BY id"
+               Contract.query "folded-reversed-cross-charset" "SELECT id FROM text_if_folded_reversed WHERE IF(v IS NOT NULL,v,_latin1'X')='x' ORDER BY id"
+               Contract.query "folded-binary-fallback" "SELECT id FROM text_if_folded_probe WHERE IF(v IS NULL,_binary'x',v)='x' ORDER BY id"
+               Contract.query "folded-reversed-binary-fallback" "SELECT id FROM text_if_folded_reversed WHERE IF(v IS NOT NULL,v,_binary'x')='x' ORDER BY id" |]
+          Cleanup =
+            [| "DROP TABLE text_if_branch_probe"
+               "DROP TABLE text_if_reversed_probe"
+               "DROP TABLE text_if_folded_probe"
+               "DROP TABLE text_if_folded_reversed" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private nullifFunctionalIndex =

@@ -47,6 +47,19 @@ forms, where the plain literal misses the physical expression identity.
 `_latin1'x'` remains a different expression and scans. Numeric comparison
 also scans, preserving MySQL's matches for text `1`, `01`, and `1x`.
 
+On `utf8mb4_0900_ai_ci`, MySQL 8.4.11 uses the `_utf8mb4'x'` key for
+either IF branch order when a query supplies `_latin1'X'`. The fallbacks
+compare equal under the source collation. A binary introducer still scans.
+Fsdb's shared functional-key lookup rule now permits the equivalent
+cross-charset probe for both IF forms. The focused regression checks their
+EXPLAIN keys and rows; the expanded text-branch contract compares four
+cross-charset and binary-fallback results with native MySQL.
+All four new contract steps matched in the native MySQL 8.4.11 run at
+`20261012T173144960-83633/contracts`. The full 149-case, 19,092-step
+run reported the existing Han-property mismatch and four
+connection-sensitive mixed-type join mismatches. The introduced-literal
+case also reported an object-cleanup failure on both targets.
+
 Fsdb now maintains equality and unique keys for fitting text branches on
 `VARCHAR` with a matching charset. The focused Expecto regression covers
 both branch orders, literal identity, nullable key length, uniqueness, and

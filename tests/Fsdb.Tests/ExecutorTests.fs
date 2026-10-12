@@ -8864,6 +8864,37 @@ let tests =
                     Expect.equal reversed.Key (Some "ix") "the reversed form also matches the connection literal"
                     Expect.equal reversed.KeyLength (Some "83") "the reversed text result remains nullable"
 
+                testCase "folded IF fallback keys accept equivalent introduced literals"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    for name, storedBranch, requestedBranch in
+                        [ "null", "value IS NULL,_utf8mb4'x',value", "value IS NULL,_latin1'X',value"
+                          "not_null", "value IS NOT NULL,value,_utf8mb4'x'", "value IS NOT NULL,value,_latin1'X'" ] do
+                        let table = "folded_if_" + name
+                        Expect.equal
+                            (runDefault store $"CREATE TABLE {table} (id INT PRIMARY KEY, value VARCHAR(4) COLLATE utf8mb4_0900_ai_ci, KEY ix ((IF({storedBranch}))))")
+                            (Affected 0UL)
+                            "MySQL accepts the folded IF branch key"
+                        Expect.equal
+                            (runDefault store $"INSERT INTO {table} VALUES (1,NULL),(2,'a'),(3,'X')")
+                            (Affected 3UL)
+                            "seed both IF branches"
+
+                        let expression = $"IF({requestedBranch})"
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM {table} WHERE {expression}='x'" |> explainRow
+                        Expect.equal plan.Key (Some "ix") "an equivalent cross-charset IF fallback uses its key"
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM {table} WHERE {expression}='x' ORDER BY id")
+                            (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "3" ] ]))
+                            "the IF key retains folded fallback rows"
+
+                        let binaryExpression = expression.Replace("_latin1'X'", "_binary'x'")
+                        let binary =
+                            runDefault store $"EXPLAIN SELECT id FROM {table} WHERE {binaryExpression}='x'"
+                            |> explainRow
+                        Expect.equal binary.Key None "a binary fallback does not share the IF key"
+
                 testCase "unsigned COALESCE keys use MySQL's signed or decimal result type"
                 <| fun _ ->
                     let store = newStore ()
