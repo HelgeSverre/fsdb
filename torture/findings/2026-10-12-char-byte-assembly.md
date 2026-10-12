@@ -52,6 +52,13 @@ with that value yields the same bytes and warning 1292. A negative stored
 overflow yields `00` and the same warning kind. Focused and differential
 tests cover both sources and warning order.
 
+Computed large DOUBLE arguments take a different path. MySQL raises error
+1690 before byte assembly for audited arithmetic, negation, `ABS`, `COALESCE`,
+and `CAST(... AS DOUBLE)` origins, while a direct positive large literal
+remains quiet and a stored DOUBLE column warns. A failing Fsdb regression
+exposed a previously clamped computed value; it now checks this source
+boundary before invoking the builtin. Other expression origins remain open.
+
 JSON arguments have a separate integer cast path. Audited JSON numbers round
 ties to even, JSON strings truncate an integer prefix and warn 3156 for a
 fraction or trailing junk, booleans become one or zero, and JSON null,

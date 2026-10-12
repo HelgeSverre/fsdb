@@ -1251,6 +1251,13 @@ module ContractCatalog =
                yield Contract.query "char-stored-double-warnings" "SHOW WARNINGS" |> Contract.comparingValues
                yield Contract.query "char-large-double-literal" "SELECT HEX(CHAR(1e30))" |> Contract.comparingValues
                yield Contract.query "char-large-double-literal-warnings" "SHOW WARNINGS" |> Contract.comparingValues
+               for index, sql in
+                   [ "SELECT HEX(CHAR(1e30 + 0e0))"
+                     "SELECT HEX(CHAR(ABS(-1e30)))"
+                     "SELECT HEX(CHAR(-1e30))"
+                     "SELECT HEX(CHAR(COALESCE(1e30,0)))"
+                     "SELECT HEX(CHAR(CAST('1e30' AS DOUBLE)))" ] |> List.indexed do
+                   yield Contract.query (sprintf "char-computed-overflow-%d" index) sql |> Contract.fails 1690 "22003"
                yield Contract.query "char-json-scalars"
                    "SELECT HEX(CHAR(CAST('12' AS JSON))),HEX(CHAR(CAST('\"12\"' AS JSON))),HEX(CHAR(CAST('12.5' AS JSON))),HEX(CHAR(CAST('\"12.5\"' AS JSON))),HEX(CHAR(CAST('true' AS JSON))),HEX(CHAR(CAST('false' AS JSON))),HEX(CHAR(CAST('null' AS JSON)))"
                    |> Contract.comparingValues

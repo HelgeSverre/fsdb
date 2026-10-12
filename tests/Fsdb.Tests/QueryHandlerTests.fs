@@ -3487,6 +3487,19 @@ let tests =
                       "JSON expression source names"
               | _, result -> failtestf "expected CHAR JSON expression result, got %A" result
 
+          testCase "CHAR rejects computed integer overflow before byte assembly"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql, expectedMessage in
+                  [ "SELECT HEX(CHAR(1e30 + 0e0))", "BIGINT value is out of range in '(1e30 + 0e0)'"
+                    "SELECT HEX(CHAR(ABS(-1e30)))", "BIGINT value is out of range in 'abs(-(1e30))'"
+                    "SELECT HEX(CHAR(-1e30))", "BIGINT value is out of range in '-(1e30)'"
+                    "SELECT HEX(CHAR(COALESCE(1e30,0)))", "BIGINT value is out of range in 'coalesce(1e30,0)'"
+                    "SELECT HEX(CHAR(CAST('1e30' AS DOUBLE)))", "BIGINT value is out of range in 'cast('1e30' as double)'" ] do
+                  match handle session sql with
+                  | _, Err(1690, message) -> Expect.equal message expectedMessage sql
+                  | _, result -> failtestf "expected computed CHAR overflow for %s, got %A" sql result
+
           testCase "CHAR reports stored JSON warnings at filtered result rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -6014,6 +6014,9 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     validateConcatEncoding ctx name descriptor args values
                     |> Result.map (fun () -> values))
                 |> Result.bind (fun values ->
+                    validateCharComputedOverflow ctx name args values
+                    |> Result.map (fun () -> values))
+                |> Result.bind (fun values ->
                     try
                         let values = prepareScalarArguments ctx name args values
 
@@ -7655,9 +7658,30 @@ and private validateConcatEncoding ctx name descriptor expressions values =
                     right.Collation.Name (coercibilityName right.Coercibility)))
     | _ -> Ok ()
 
+and private isBuiltinCharFunction registry (name: string) =
+    (name.Equals("CHAR", System.StringComparison.OrdinalIgnoreCase)
+     || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase))
+    && Functions.isUnmodifiedBuiltinScalar name registry
+
+and private charDoubleOutsideIntegerRange (number: double) =
+    number >= 18446744073709551616.0 || number <= -9223372036854775808.0
+
+and private validateCharComputedOverflow ctx name expressions values : Result<unit, EvalError> =
+    if not (isBuiltinCharFunction ctx.Registry name) then Ok ()
+    else
+        List.zip expressions values
+        |> List.tryPick (fun (expression, value) ->
+            match expression, value with
+            | (ApproximateLiteral _ | Lit _ | Col _ | QualifiedCol _), _ -> None
+            | _, VDouble number when charDoubleOutsideIntegerRange number ->
+                Some(1690, sprintf "BIGINT value is out of range in '%s'" (InformationSchema.exprToSql expression))
+            | _ -> None)
+        |> Option.map Error
+        |> Option.defaultValue (Ok ())
+
 and private prepareCharArgument ctx expression value =
     match value with
-    | VDouble number when number >= 18446744073709551616.0 || number <= -9223372036854775808.0 ->
+    | VDouble number when charDoubleOutsideIntegerRange number ->
         match tryColumnDefForExpr ctx expression with
         | Some column when (match column.Type with TDouble _ | TFloat _ -> true | _ -> false) ->
             Diagnostics.numericConversion "INTEGER" (Value.toText value |> Option.defaultValue "")
@@ -7680,10 +7704,7 @@ and private prepareCharArgument ctx expression value =
     | _ -> value
 
 and private prepareScalarArguments ctx name expressions values =
-    let charBuiltin =
-        (name.Equals("CHAR", System.StringComparison.OrdinalIgnoreCase)
-         || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase))
-        && Functions.isUnmodifiedBuiltinScalar name ctx.Registry
+    let charBuiltin = isBuiltinCharFunction ctx.Registry name
 
     List.zip expressions values
     |> List.mapi (fun index (expression, value) ->
