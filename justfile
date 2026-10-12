@@ -131,8 +131,13 @@ build:
 # Clean build artifacts
 [group('build')]
 clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
     dotnet clean -v q
-    rm -rf src/Fsdb/bin src/Fsdb/obj src/Fsdb.Cli/bin src/Fsdb.Cli/obj tests/Fsdb.Tests/bin tests/Fsdb.Tests/obj
+    while IFS= read -r -d '' project; do
+        project_dir="$(dirname "$project")"
+        rm -rf "$project_dir/bin" "$project_dir/obj"
+    done < <(find src tests examples benchmarks torture/src torture/tests -type f -name '*.fsproj' -print0)
 
 # Pack the library and consume it from a clean F# project
 [group('qa')]
