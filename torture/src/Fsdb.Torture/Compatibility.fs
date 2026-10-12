@@ -6074,31 +6074,17 @@ module ContractCatalog =
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private binaryLikePrefixRange =
-        let values =
-            [ "ab"; "abc"; "abZ"; "ab "; "ab%"; "ab_"; "ab_foo" ]
-            @ [ for id in 8..32 -> sprintf "zz%02d" id ]
+        let renderValues seed lastId =
+            seed @ [ for id in List.length seed + 1 .. lastId -> sprintf "zz%02d" id ]
             |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
             |> String.concat ","
-        let unicodeValues =
-            [ "é"; "éa"; "ê"; "é"; "😀"; "😀a"; "😁"; "éÿ"; "é " ]
-            @ [ for id in 10..34 -> sprintf "zz%02d" id ]
-            |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
-            |> String.concat ","
+
+        let values = renderValues [ "ab"; "abc"; "abZ"; "ab "; "ab%"; "ab_"; "ab_foo" ] 32
+        let unicodeValues = renderValues [ "é"; "éa"; "ê"; "é"; "😀"; "😀a"; "😁"; "éÿ"; "é " ] 34
         let padSpaceValues =
-            [ "ab"; "ab "; "ab c"; "abc"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁"; "ab  "; "ab  c" ]
-            @ [ for id in 13..38 -> sprintf "zz%02d" id ]
-            |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
-            |> String.concat ","
-        let textValues =
-            [ "ab"; "abc"; "abcd"; "abx"; "ac"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁" ]
-            @ [ for id in 12..37 -> sprintf "zz%02d" id ]
-            |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
-            |> String.concat ","
-        let charValues =
-            [ "ab"; "ab "; "ab c"; "abc"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁" ]
-            @ [ for id in 11..36 -> sprintf "zz%02d" id ]
-            |> List.mapi (fun index value -> sprintf "(%d,'%s')" (index + 1) value)
-            |> String.concat ","
+            renderValues [ "ab"; "ab "; "ab c"; "abc"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁"; "ab  "; "ab  c" ] 38
+        let textValues = renderValues [ "ab"; "abc"; "abcd"; "abx"; "ac"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁" ] 37
+        let charValues = renderValues [ "ab"; "ab "; "ab c"; "abc"; "é"; "éa"; "ê"; "😀"; "😀a"; "😁" ] 36
 
         { Name = "binary-like-prefix-range"
           Setup =
