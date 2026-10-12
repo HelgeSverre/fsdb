@@ -1,5 +1,12 @@
 # Introduced binary-literal encoding
 
+The expanded `introduced-literal-encoding` contract creates tables and
+views for its stored-value and `CHAR()` probes. Its cleanup now removes
+those objects. In the native MySQL 8.4.11 run at
+`20261012T173501340-86594/contracts`, all steps passed and both targets
+returned to their pre-case object state. The full run still had five
+previously documented row differences in REGEXP and mixed-type joins.
+
 Native MySQL 8.4.11 rejects malformed UTF-8, UTF-16, and UTF-32 hex or bit
 literals with 1300 / HY000 before evaluating the query. The same errors occur
 in SQL PREPARE and binary preparation, in unused IF branches, and with a

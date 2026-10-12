@@ -2291,7 +2291,9 @@ module ContractCatalog =
                    for step, fragment in sql.Split(';') |> Array.indexed do
                        yield Contract.query (sprintf "quoted-legacy-%d-%d" index step) fragment
                yield Contract.execute "encoded-storage-mode" "SET sql_mode=DEFAULT" |]
-          Cleanup = [||]
+          Cleanup =
+            [| "DROP VIEW IF EXISTS char_cast_nested_v,char_cast_v,char_direct_v,char_extract_v,char_limited_v,char_mixed_nested_v,char_mixed_star_v,char_nested_v,char_renamed_v,char_star_renamed_v,char_star_v,char_temp_v,char_union_v"
+               "DROP TABLE IF EXISTS char_json_probe,char_stored_double,char_view_aux,char_view_source,time_cast_sources" |]
           Coverage = [| "statement:select", [| "text-differential"; "prepared-differential"; "error-contract" |] |] }
 
     let private exactErrors =
