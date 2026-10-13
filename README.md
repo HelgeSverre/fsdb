@@ -686,8 +686,8 @@ thresholds with `wal_rotate_bytes` and `wal_rotate_entries`.
 
 ## Embedding & extensibility
 
-`Fsdb` is also built as a .NET 10 library package. The first NuGet release,
-`0.1.0-preview.1`, is [published on nuget.org](https://www.nuget.org/packages/Fsdb/).
+`Fsdb` is also built as a .NET 10 library package. Preview releases are
+[published on nuget.org](https://www.nuget.org/packages/Fsdb/).
 Run `just package-check` to pack the current source
 and exercise it through the package-only F# example with an isolated NuGet
 cache. The command-line server lives in the separate `Fsdb.Cli` project. See

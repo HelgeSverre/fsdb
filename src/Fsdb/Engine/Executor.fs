@@ -13477,8 +13477,14 @@ and private likePrefixRangePredicate constantValue textCharset scope (table: Tab
         | Expression.CollationOverride _ -> true
         | _ -> Expression.children expression |> List.exists hasExplicitCollation
 
+    let rec usesOnlyCollation expected expression =
+        match expression with
+        | Expression.CollationOverride(value, name) ->
+            equalsIgnoreCase name expected && usesOnlyCollation expected value
+        | _ -> Expression.children expression |> List.forall (usesOnlyCollation expected)
+
     match expression with
-    | Like(source, patternExpression, _, escape) when not (hasExplicitCollation patternExpression) ->
+    | Like(source, patternExpression, _, escape) ->
         let pattern =
             match patternExpression with
             | LiteralValue value -> Some value
@@ -13497,8 +13503,9 @@ and private likePrefixRangePredicate constantValue textCharset scope (table: Tab
                         | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText), VString text
                             when column.Collation
                                  |> Option.exists (fun collation ->
-                                     equalsIgnoreCase collation "utf8mb4_0900_bin"
-                                     || equalsIgnoreCase collation "utf8mb4_bin") ->
+                                     (equalsIgnoreCase collation "utf8mb4_0900_bin"
+                                      || equalsIgnoreCase collation "utf8mb4_bin")
+                                     && usesOnlyCollation collation patternExpression) ->
                             let prefix = likeLiteralPrefix escape text
                             if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
                             else
@@ -13511,7 +13518,7 @@ and private likePrefixRangePredicate constantValue textCharset scope (table: Tab
                                     lower |> Option.map (fun value -> VString value, true),
                                     likePrefixUpperBound prefix |> Option.map (fun value -> VString value, false))
                         | (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob), _
-                            when escape <= '\u007F' ->
+                            when escape <= '\u007F' && not (hasExplicitCollation patternExpression) ->
                             let bytes =
                                 tryRawBytes pattern
                                 |> Option.orElseWith (fun () ->

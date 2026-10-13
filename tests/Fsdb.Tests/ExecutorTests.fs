@@ -6916,7 +6916,22 @@ let tests =
                             (ResultSet([ "id" ], [ for id in 1..8 -> [ Some(string id) ] ]))
                             "an explicit pattern collation cannot use the binary prefix range"
                         let plan = runDefault store $"EXPLAIN SELECT id FROM like_indexed WHERE v LIKE {pattern}" |> explainRow
-                        Expect.isFalse (plan.AccessType = Some "range") "a collated pattern cannot use the binary range"
+                        Expect.isFalse (plan.AccessType = Some "range") "a differently collated pattern cannot use the binary range"
+
+                    for pattern in
+                        [ "('ab%' COLLATE utf8mb4_0900_bin)"
+                          "(CONCAT('ab','%') COLLATE utf8mb4_0900_bin)" ] do
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM like_indexed WHERE v LIKE {pattern} ORDER BY id")
+                            (ResultSet([ "id" ], [ for id in 1..7 -> [ Some(string id) ] ]))
+                            "the matching explicit collation keeps the LIKE result"
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM like_indexed WHERE v LIKE {pattern}" |> explainRow
+                        Expect.equal plan.AccessType (Some "range") "a matching explicit collation keeps the binary range"
+
+                    let legacyOverride =
+                        runDefault store "EXPLAIN SELECT id FROM like_indexed WHERE v LIKE ('ab%' COLLATE utf8mb4_bin)"
+                        |> explainRow
+                    Expect.isFalse (legacyOverride.AccessType = Some "range") "a different binary collation scans"
 
                     Expect.equal
                         (runDefault store "SELECT id FROM like_prefix_indexed WHERE v LIKE 'abc%' ORDER BY id")

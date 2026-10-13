@@ -6127,6 +6127,9 @@ module ContractCatalog =
                Contract.query "constant-coalesce" "SELECT id FROM like_prefix_probe WHERE v LIKE COALESCE(NULL,'ab%') ORDER BY id"
                Contract.query "explicit-pattern-collation" "SELECT id FROM like_prefix_probe WHERE v LIKE ('ab%' COLLATE utf8mb4_0900_ai_ci) ORDER BY id"
                Contract.query "constant-explicit-collation" "SELECT id FROM like_prefix_probe WHERE v LIKE (CONCAT('ab','%') COLLATE utf8mb4_0900_ai_ci) ORDER BY id"
+               Contract.query "matching-binary-collation" "SELECT id FROM like_prefix_probe WHERE v LIKE ('ab%' COLLATE utf8mb4_0900_bin) ORDER BY id"
+               Contract.query "constant-matching-binary-collation" "SELECT id FROM like_prefix_probe WHERE v LIKE (CONCAT('ab','%') COLLATE utf8mb4_0900_bin) ORDER BY id"
+               Contract.query "different-binary-collation" "SELECT id FROM like_prefix_probe WHERE v LIKE ('ab%' COLLATE utf8mb4_bin) ORDER BY id"
                Contract.query "binary-utf8-literal" "SELECT _binary 0xC3A9 LIKE 'é',_binary 0xC3A9 LIKE _binary 0xC3A9" |> Contract.comparingValues
                Contract.query "binary-introduced-literal" "SELECT _binary 0xE9 LIKE _latin1 0xE9,_binary 0xC3A9 LIKE _latin1 0xE9" |> Contract.comparingValues
                Contract.query "varbinary-prefix" "SELECT id FROM like_binary_probe WHERE v LIKE 'ab%' ORDER BY id"
