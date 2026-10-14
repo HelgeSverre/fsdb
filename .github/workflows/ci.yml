@@ -19,7 +19,7 @@ jobs:
       - name: Build
         run: dotnet build Fsdb.slnx -c Release --nologo
       - name: Test
-        run: dotnet run --project tests/Fsdb.Tests -c Release --no-build -- --no-spinner --debug
+        run: dotnet run --project tests/Fsdb.Tests -c Release --no-build -- --no-spinner
       - name: Verify package consumer
         run: bash scripts/verify-package.sh
       - name: Branch coverage
