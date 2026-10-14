@@ -1,12 +1,12 @@
 # Response to the October 14 independent review
 
 The review inspected `ffb9e71d`. This response checks its actionable findings
-against `de493f5d` and distinguishes completed work from remaining limits. Its
+against the current implementation and distinguishes completed work from remaining limits. Its
 scores are the reviewer's judgment, not a current measured rating.
 
 | Review finding | Current state | Evidence and next action |
 |---|---|---|
-| No PR or main CI | Resolved for the current workflow | `.github/workflows/ci.yml` runs a Release build and package verification alongside a required Coverlet job that executes the complete test suite and enforces 65% branch coverage on pushes to main and pull requests. [The `a86b70a7` run](https://github.com/HelgeSverre/fsdb/actions/runs/38565823447) passed both jobs: 3,534 tests passed, branch coverage was 77.6%, and the package consumer passed. CI runs the suite once through Coverlet; the release workflow still runs ordinary tests. Earlier runner cancellations remain unexplained, so keep watching future runs rather than assuming the instability has been eliminated. The MySQL differential suite remains a separate gate. |
+| No PR or main CI | Resolved for the current workflow | `.github/workflows/ci.yml` runs a Release build, a separate ordinary regression suite, package verification, and a Coverlet job enforcing 65% branch coverage on pushes to main and pull requests. [The `a86b70a7` run](https://github.com/HelgeSverre/fsdb/actions/runs/38565823447) passed the earlier two-job gate: 3,534 tests passed, branch coverage was 77.6%, and the package consumer passed. Later Coverlet runs were canceled by the runner after starting tests; the independent regression job keeps ordinary test evidence available even if that repeats, but the coverage job must still pass before a change is considered fully green. The MySQL differential suite remains a separate gate. |
 | Observer exceptions can turn committed writes into reported failures | Resolved after the reviewed revision | `Storage.preparePublishedEvents` catches and logs each observer exception and continues to later observers. `EmbeddingIntegrationTests` checks successful write acknowledgement and continued delivery. A synchronous observer can still delay a commit or deadlock by writing back to the store; use the queued subscription for application work. |
 | Unbounded commit subscriptions | Resolved after the reviewed revision | `Db.subscribeCommits` defaults to 1024 events; `subscribeCommitsWithCapacity` accepts a positive limit. Overflow drops new events and increments `DroppedCount`, which requires the consumer to resynchronize. The queue is in-process and is not a durable change stream. |
 | Hardcoded `version_compile_os` | Resolved after the reviewed revision | `Session.fs` selects Windows, macOS, or Linux at runtime. |
