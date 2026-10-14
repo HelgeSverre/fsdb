@@ -1424,6 +1424,9 @@ implementation effort:
    timing](benchmarks/results/2026-10-15-wire-write-stage-timing.md) measured
    WAL completion inside the handler rising from about 53 to 273 µs per call;
    handler time outside that completion also rose from about 68 to 211 µs.
+   An [async MySqlConnector control](benchmarks/results/2026-10-15-async-wire-client-control.md)
+   kept FSDB near 12,000 eight-writer inserts/sec while lowering the MySQL
+   control; changing the client call path did not close FSDB's wire gap.
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition
