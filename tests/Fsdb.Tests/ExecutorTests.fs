@@ -16460,6 +16460,7 @@ let tests =
                           "LINESTRING(0 1,0 2)", exterior, [ Some "0"; Some "1"; Some "0"; Some "0" ]
                           "LINESTRING(1 1,0 1)", exterior, [ Some "0"; Some "0"; Some "1"; Some "1" ]
                           "LINESTRING(0.5 1,0.5 3)", hole, [ Some "0"; Some "0"; Some "1"; Some "1" ]
+                          "LINESTRING(1.5 0.5,3.0 0.5)", hole, [ Some "0"; Some "1"; Some "0"; Some "0" ]
                           "LINESTRING(0.25 2,0.75 2)", hole, [ Some "1"; Some "0"; Some "0"; Some "0" ] ]
                     for lineText, polygonText, expected in cases do
                         let line = sprintf "ST_GeomFromText('%s',4326)" lineText

@@ -580,6 +580,14 @@ type internal GeographicLinePolygonTopology =
       LineWithinPolygon: bool }
 
 let internal geographicLinePolygonTopology referenceSystem lines polygons =
+    let boundarySegments = polygons |> List.collect id |> List.collect List.pairwise
+    let lineSegments = lines |> List.collect List.pairwise
+    let liesOnBoundary (start, endpoint) =
+        boundarySegments
+        |> List.exists (fun segment ->
+            geographicPointOnLineSegment referenceSystem start segment
+            && geographicPointOnLineSegment referenceSystem endpoint segment)
+    let boundaryOnly = not lineSegments.IsEmpty && (lineSegments |> List.forall liesOnBoundary)
     let positions =
         lines
         |> List.collect (fun line ->
@@ -591,16 +599,20 @@ let internal geographicLinePolygonTopology referenceSystem lines polygons =
     let hasInterior =
         positions
         |> List.exists (function
-            | GeographicPointPolygonPosition.Interior
-            | GeographicPointPolygonPosition.HoleBoundary -> true
+            | GeographicPointPolygonPosition.Interior -> true
             | _ -> false)
     let hasOutside =
         positions
         |> List.exists (function GeographicPointPolygonPosition.Outside _ -> true | _ -> false)
     let intersects = geographicLinePolygonDistance referenceSystem lines polygons = Some 0.0
-    { Crosses = hasInterior && hasOutside
-      Touches = intersects && not hasInterior
-      LineWithinPolygon = hasInterior && not hasOutside }
+    if boundaryOnly then
+        { Crosses = false
+          Touches = true
+          LineWithinPolygon = false }
+    else
+        { Crosses = hasInterior && hasOutside
+          Touches = intersects && not hasInterior
+          LineWithinPolygon = hasInterior && not hasOutside }
 
 let internal geographicPolygonPolygonDistance referenceSystem firstPolygons secondPolygons =
     let firstRings = firstPolygons |> List.collect id

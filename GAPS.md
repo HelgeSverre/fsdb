@@ -1341,7 +1341,9 @@ implementation effort:
    covers audited holes, antimeridian crossings, and polar caps. [Line-to-polygon distance](torture/findings/2026-10-11-geographic-line-polygon-distance.md)
    covers audited crossings, containment, holes, and multipart shapes.
    [Polygon-to-polygon distance](torture/findings/2026-10-11-geographic-polygon-polygon-distance.md)
-   covers audited overlap, containment, holes, and multipart shapes. Near-boundary
+   covers audited overlap, containment, holes, and multipart shapes. A line
+   exactly following a [geographic polygon hole edge](torture/findings/2026-10-14-geographic-hole-edge-touch.md)
+   now reports boundary contact rather than crossing. Near-boundary
    sampling and broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
 
