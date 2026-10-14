@@ -456,7 +456,9 @@ single-table full-scan writes, claim row ownership before applying changes.
 Full scans conservatively claim the rows visible when the statement begins,
 then refresh and recheck selected row identities after a wait
 ([MySQL 8.4 oracle and regressions](torture/findings/2026-10-14-full-scan-write-scheduling.md)).
-They do not claim gaps or later inserted rows. Unique-key claims, incremental index validation, and merged-result
+They do not claim gaps or later inserted rows. A [focused unindexed-write load
+probe](benchmarks/results/92b019ff-full-scan-write-load.md) records the current
+worker-scaling slope. Unique-key claims, incremental index validation, and merged-result
 foreign-key validation protect publication.
 
 Savepoints follow MySQL establishment order. Autocommit uses implicit
