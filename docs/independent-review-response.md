@@ -63,7 +63,9 @@ release-blocking defect that can be closed by adding another SQL feature:
 
 1. Keep the durable-write gate in use and profile the combined wire/client path
    before changing write scheduling. The embedded control narrows the target,
-   but does not identify a particular server function or lock.
+   but does not identify a particular server function or lock. A connection-
+   owned disconnect timer passed cancellation tests but did not improve the
+   repeated load, so it was reverted.
 2. Continue extracting one cohesive executor responsibility at a time when a
    real edit exposes its boundary. Preserve the existing behavior with tests
    and avoid a file-size-driven rewrite.

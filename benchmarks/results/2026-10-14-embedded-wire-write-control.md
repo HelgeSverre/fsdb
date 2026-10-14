@@ -47,3 +47,14 @@ which part dominates, and it is not evidence that embedded execution and the
 wire protocol have identical semantics or resource ownership. A focused
 wire-path profile and a measured before/after change are needed before moving
 locks or changing cancellation behavior.
+
+An isolated scheduling experiment replaced the per-statement detached socket
+disconnect watcher with one timer owned by each connection, armed only while a
+statement ran. The existing disconnect and `MySqlCommand.Cancel()` integration
+tests passed. Repeating the same load gave 6,441, 10,592, and 11,879 FSDB
+inserts/sec at one, four, and eight writers; the accompanying durable MySQL
+control gave 16,362, 32,080, and 46,149. These numbers are effectively level
+with the baseline, so the timer experiment was reverted. Per-statement watcher
+startup is not the dominant explanation for the embedded-versus-wire gap under
+this workload. The next profile should examine active protocol processing,
+response construction, client behavior, and connection scheduling.
