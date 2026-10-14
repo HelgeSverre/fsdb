@@ -1001,6 +1001,65 @@ let tests =
                   expectOk (run store ("UPDATE " + view + " SET n=n+1 WHERE aid=1")) view
               Expect.equal (rows store "SELECT id,n FROM grouped_star_target") [ [ Some "1"; Some "3" ] ] "base row changed"
 
+          testCase "join views update a target inside a grouped source"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE grouped_target_a(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE grouped_target_b(id INT PRIMARY KEY,flag INT)"
+                    "CREATE TABLE grouped_target_c(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO grouped_target_a VALUES(1,0)"
+                    "INSERT INTO grouped_target_b VALUES(1,7)"
+                    "INSERT INTO grouped_target_c VALUES(1,9)"
+                    "CREATE VIEW grouped_target AS SELECT a.id AS aid,a.n,b.flag,c.aux FROM (grouped_target_b b JOIN grouped_target_a a ON b.id=a.id) JOIN grouped_target_c c ON c.id=a.id"
+                    "CREATE VIEW grouped_derived_target AS SELECT a.id AS aid,a.n,d.flag,c.aux FROM ((SELECT id,flag FROM grouped_target_b) d JOIN grouped_target_a a ON d.id=a.id) JOIN grouped_target_c c ON c.id=a.id"
+                    "CREATE VIEW two_derived_first AS SELECT a.id AS aid,a.n,d1.flag,d2.aux FROM (SELECT id,flag FROM grouped_target_b) d1 JOIN (SELECT id,aux FROM grouped_target_c) d2 ON d2.id=d1.id JOIN grouped_target_a a ON a.id=d1.id AND a.id=d2.id"
+                    "CREATE VIEW two_aggregate_first AS SELECT a.id AS aid,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) AS flag FROM grouped_target_b GROUP BY id) d1 JOIN (SELECT id,SUM(aux) AS aux FROM grouped_target_c GROUP BY id) d2 ON d2.id=d1.id JOIN grouped_target_a a ON a.id=d1.id AND a.id=d2.id"
+                    "CREATE VIEW two_aggregate_filtered AS SELECT a.id AS aid,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) AS flag FROM grouped_target_b GROUP BY id) d1 JOIN (SELECT id,SUM(aux) AS aux FROM grouped_target_c GROUP BY id) d2 ON d2.id=d1.id JOIN grouped_target_a a ON a.id=d1.id AND a.n<d2.aux" ] do
+                  expectOk (run store sql) sql
+
+              for view in [ "grouped_target"; "grouped_derived_target"; "two_derived_first"; "two_aggregate_first" ] do
+                  Expect.equal
+                      (rows store ("SELECT is_updatable FROM information_schema.views WHERE table_name='" + view + "'"))
+                      [ [ Some "YES" ] ] (view + " remains updatable")
+                  expectOk (run store ("UPDATE " + view + " SET n=n+1 WHERE aid=1")) view
+
+              Expect.equal (rows store "SELECT n FROM grouped_target_a") [ [ Some "4" ] ] "each update reaches the grouped target"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='two_aggregate_filtered'")
+                  [ [ Some "YES" ] ] "a moved join predicate can refer to the second derived source"
+              expectOk (run store "UPDATE two_aggregate_filtered SET n=n+1 WHERE aid=1") "update through the filtered view"
+              Expect.equal (rows store "SELECT n FROM grouped_target_a") [ [ Some "5" ] ] "visible row updated"
+              expectOk (run store "UPDATE grouped_target_a SET n=20 WHERE id=1") "move the row outside the join predicate"
+              Expect.equal
+                  (run store "UPDATE two_aggregate_filtered SET n=n+1 WHERE aid=1")
+                  (Affected 0UL) "the moved join predicate still filters the write"
+              Expect.equal (rows store "SELECT n FROM grouped_target_a") [ [ Some "20" ] ] "invisible row is unchanged"
+
+              for sql in
+                  [ "CREATE SQL SECURITY INVOKER VIEW multiple_derived_invoker AS SELECT a.id AS aid,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) AS flag FROM grouped_target_b GROUP BY id) d1 JOIN (SELECT id,SUM(aux) AS aux FROM grouped_target_c GROUP BY id) d2 ON d2.id=d1.id JOIN grouped_target_a a ON a.id=d1.id AND a.id=d2.id"
+                    "CREATE USER grouped_view_reader"
+                    "GRANT SELECT,UPDATE ON fsdb.grouped_target_a TO grouped_view_reader"
+                    "GRANT SELECT,UPDATE ON fsdb.multiple_derived_invoker TO grouped_view_reader" ] do
+                  expectOk (run store sql) sql
+
+              let reader = { Fsdb.Session.create 1 store with User = "grouped_view_reader" }
+              let update () =
+                  Fsdb.QueryHandler.handle reader "UPDATE multiple_derived_invoker SET n=n+1 WHERE aid=1" |> snd
+
+              match update () with
+              | Err(1356, _) -> ()
+              | other -> failtestf "missing source grants must invalidate the view, got %A" other
+
+              expectOk (run store "GRANT SELECT ON fsdb.grouped_target_b TO grouped_view_reader") "grant first source read"
+              match update () with
+              | Err(1356, _) -> ()
+              | other -> failtestf "the second missing source grant must still deny the update, got %A" other
+
+              expectOk (run store "GRANT SELECT ON fsdb.grouped_target_c TO grouped_view_reader") "grant second source read"
+              Expect.equal (update ()) (Affected 1UL) "both source grants permit the update"
+              Expect.equal (rows store "SELECT n FROM grouped_target_a") [ [ Some "21" ] ] "authorized update reaches the base row"
+
           testCase "join views update mergeable components beside union views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

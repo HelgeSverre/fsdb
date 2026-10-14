@@ -1979,6 +1979,42 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                         On = rewriteSources join.On }
                                 let authorizationJoin = { join with Table = derived.Reference }
                                 Some(physical, reordered :: List.tail rewrittenJoins, physical, authorizationJoin :: trailing)
+                            | FromSubquery _, _, _ ->
+                                match InformationSchema.tryLeadingDerivedWritableTarget source select.Joins with
+                                | Some leadingCount when leadingCount >= 2 && leadingCount < sources.Length ->
+                                    match sources.[leadingCount].Reference with
+                                    | FromTable physical ->
+                                        let leadingDerived = sources |> List.take leadingCount
+                                        let reorder (joins: Join list) =
+                                            let targetJoin = joins.[leadingCount - 1]
+                                            let before = joins |> List.take (leadingCount - 1)
+                                            let after = joins |> List.skip leadingCount
+                                            let first =
+                                                { targetJoin with
+                                                    Kind = CrossJoin
+                                                    Table = leadingDerived.Head.Reference
+                                                    On = Lit(VInt 1L) }
+                                            let before =
+                                                before
+                                                |> List.mapi (fun index join ->
+                                                    // The target join can refer to every leading source.
+                                                    // Evaluate it once the last of those sources is bound.
+                                                    if index = leadingCount - 2 then
+                                                        { join with On = BinOp(And, join.On, targetJoin.On) }
+                                                    else
+                                                        join)
+                                            first :: (before @ after)
+
+                                        let authorizationJoins =
+                                            List.map2
+                                                (fun (join: Join) (source: WritableViewSource) ->
+                                                    { join with Table = source.Reference })
+                                                select.Joins
+                                                (List.tail sources)
+
+                                        Some(physical, reorder rewrittenJoins, physical, reorder authorizationJoins)
+                                    | _ -> None
+                                | _ -> None
                             | _ -> None
 
                         let sourcePredicate =

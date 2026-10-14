@@ -641,7 +641,10 @@ Invoker views still require read access to the derived source's tables.
 Grouped derived-star sources now preserve their logical `USING`/natural
 columns and allow an outer joined view to update its physical component
 ([MySQL oracle and regression](torture/findings/2026-10-14-grouped-derived-star-view.md)).
-Broader join-source reorderings remain open.
+[Multiple leading read-only derived sources](torture/findings/2026-10-15-multiple-derived-join-view.md)
+now also precede a writable physical target in audited inner-join views;
+the moved target predicate is applied after all its source aliases are bound.
+Broader join-source reorderings and lateral or outer-join writes remain open.
 
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
 refused with MySQL-compatible errors.

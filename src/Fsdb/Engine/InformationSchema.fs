@@ -1532,6 +1532,37 @@ let private viewsColumns =
       strCol "CHARACTER_SET_CLIENT"
       strCol "COLLATION_CONNECTION" ]
 
+/// Number of leading derived sources before a table that can anchor a joined write.
+let internal tryLeadingDerivedWritableTarget (source: FromItem) (joins: Join list) =
+    match source with
+    | FromSubquery _ ->
+        let leadingJoins =
+            joins
+            |> List.takeWhile (fun join ->
+                match join.Table with
+                | FromSubquery _ -> true
+                | _ -> false)
+        let count = leadingJoins.Length
+
+        match joins |> List.tryItem count with
+        | Some targetJoin when (match targetJoin.Table with FromTable _ -> true | _ -> false) ->
+            let canMove =
+                if count = 0 then
+                    (targetJoin.Kind = InnerJoin
+                     || targetJoin.Kind = StraightJoin
+                     || targetJoin.Kind = CrossJoin)
+                    && targetJoin.Using.IsEmpty
+                else
+                    joins
+                    |> List.take (count + 1)
+                    |> List.forall (fun join ->
+                        (join.Kind = InnerJoin || join.Kind = CrossJoin)
+                        && join.Using.IsEmpty)
+
+            if canMove then Some(count + 1) else None
+        | _ -> None
+    | _ -> None
+
 let private isUpdatableView (catalog: Catalog) (schema: string) (definition: string) =
     let views = viewCatalogEntries catalog
 
@@ -1567,10 +1598,8 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                 let sourceOrderAllowsUpdates =
                     match source, select.Joins with
                     | FromTable _, _ -> true
-                    | FromSubquery _, first :: _ ->
-                        (first.Kind = InnerJoin || first.Kind = StraightJoin || first.Kind = CrossJoin)
-                        && first.Using.IsEmpty
-                        && (match first.Table with FromTable _ -> true | _ -> false)
+                    | FromSubquery _, _ :: _ ->
+                        tryLeadingDerivedWritableTarget source select.Joins |> Option.isSome
                     | _ -> false
                 let joinsSupported =
                     select.Joins
