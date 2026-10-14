@@ -1368,6 +1368,9 @@ implementation effort:
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in
    the eight-writer keyless-insert path; that experiment was reverted.
+   A [completion-option check](benchmarks/results/2026-10-14-write-completion-check.md)
+   likewise found no eight-writer gain from changing group-commit task
+   continuations; the candidate was reverted.
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition
