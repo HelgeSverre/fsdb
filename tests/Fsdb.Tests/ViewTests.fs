@@ -890,6 +890,74 @@ let tests =
                   [ [ Some "1"; Some "11" ]; [ Some "2"; Some "21" ] ]
                   "only the mergeable component changes"
 
+          testCase "join views update a physical table beside a derived aggregate"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE derived_view_a(id INT PRIMARY KEY,n INT)") "create target"
+              expectOk (run store "CREATE TABLE derived_view_b(id INT,marker INT)") "create source"
+              expectOk (run store "INSERT INTO derived_view_a VALUES(1,10),(2,20)") "seed targets"
+              expectOk (run store "INSERT INTO derived_view_b VALUES(1,100),(2,200)") "seed source"
+              let aggregate = "(SELECT id,SUM(marker) AS marker FROM derived_view_b GROUP BY id)"
+              expectOk
+                  (run store ("CREATE VIEW derived_forward AS SELECT a.id,a.n,a.n*2 AS doubled,d.marker FROM derived_view_a a JOIN " + aggregate + " d ON d.id=a.id"))
+                  "create forward view"
+              expectOk
+                  (run store ("CREATE VIEW derived_reverse AS SELECT a.id,a.n,d.marker FROM " + aggregate + " d JOIN derived_view_a a ON d.id=a.id"))
+                  "create reverse view"
+              expectOk
+                  (run store ("CREATE VIEW derived_extra AS SELECT a.id,a.n,d.marker FROM " + aggregate + " d JOIN derived_view_a a ON d.id=a.id JOIN derived_view_b b ON b.id=a.id"))
+                  "create three-source view"
+              expectOk
+                  (run store ("CREATE VIEW derived_straight AS SELECT a.id,a.n,d.marker FROM " + aggregate + " d STRAIGHT_JOIN derived_view_a a ON d.id=a.id"))
+                  "create straight join view"
+              Expect.equal
+                  (rows store "SELECT table_name,is_updatable FROM information_schema.views WHERE table_name IN ('derived_extra','derived_forward','derived_reverse','derived_straight') ORDER BY table_name")
+                  [ [ Some "derived_extra"; Some "YES" ]; [ Some "derived_forward"; Some "YES" ]; [ Some "derived_reverse"; Some "YES" ]; [ Some "derived_straight"; Some "YES" ] ]
+                  "derived joins retain their writable physical component"
+              expectOk (run store "UPDATE derived_forward SET n=11 WHERE id=1") "update forward view"
+              expectOk (run store "UPDATE derived_reverse SET n=21 WHERE id=2") "update reverse view"
+              expectOk (run store "UPDATE derived_extra SET n=12 WHERE id=1") "update three-source view"
+              expectOk (run store "UPDATE derived_straight SET n=13 WHERE id=1") "update straight join view"
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_view_a ORDER BY id")
+                  [ [ Some "1"; Some "13" ]; [ Some "2"; Some "21" ] ]
+                  "only physical target rows change"
+              match run store "UPDATE derived_forward SET doubled=24 WHERE id=1" with
+              | Err(1348, _) -> ()
+              | other -> failtestf "expected computed-column refusal, got %A" other
+              match run store "UPDATE derived_forward SET marker=300 WHERE id=1" with
+              | Err(1288, _) -> ()
+              | other -> failtestf "expected derived column refusal, got %A" other
+              match run store "INSERT INTO derived_forward(id,n) VALUES(3,30)" with
+              | Err(1471, _) -> ()
+              | other -> failtestf "expected noninsertable derived join, got %A" other
+
+          testCase "invoker update through a derived join requires its source read grant"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE derived_grant_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE derived_grant_source(id INT,marker INT)"
+                    "INSERT INTO derived_grant_target VALUES(1,10)"
+                    "INSERT INTO derived_grant_source VALUES(1,100)"
+                    "CREATE SQL SECURITY INVOKER VIEW derived_grant_view AS SELECT a.id,a.n,d.marker FROM derived_grant_target a JOIN (SELECT id,SUM(marker) AS marker FROM derived_grant_source GROUP BY id) d ON d.id=a.id"
+                    "CREATE USER derived_grant_reader"
+                    "GRANT SELECT,UPDATE ON fsdb.derived_grant_target TO derived_grant_reader"
+                    "GRANT SELECT,UPDATE ON fsdb.derived_grant_view TO derived_grant_reader" ] do
+                  expectOk (run store sql) sql
+
+              let reader = { Fsdb.Session.create 1 store with User = "derived_grant_reader" }
+              let update () = Fsdb.QueryHandler.handle reader "UPDATE derived_grant_view SET n=11 WHERE id=1" |> snd
+
+              match update () with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the missing derived-source grant to deny the update, got %A" other
+
+              Expect.equal (rows store "SELECT n FROM derived_grant_target") [ [ Some "10" ] ] "denied update leaves the target unchanged"
+              expectOk (run store "GRANT SELECT ON fsdb.derived_grant_source TO derived_grant_reader") "grant derived-source read"
+              expectOk (update ()) "authorized update through derived join"
+              Expect.equal (rows store "SELECT n FROM derived_grant_target") [ [ Some "11" ] ] "authorized update reaches the physical target"
+
           testCase "join views update mergeable components beside union views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -982,7 +982,7 @@ let private viewTargetKey (target: ViewColumnTarget) =
 type private ViewTargetKey = string * string * string
 
 type private WritableViewSource =
-    { Reference: TableRef
+    { Reference: FromItem
       Qualifier: string
       Columns: string list
       Expressions: Map<string, Expr>
@@ -1599,7 +1599,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 underlying |> Option.map _.ReadAccessPaths |> Option.defaultValue []
                               Definer = view.Definer
                               SecurityType = view.SecurityType }
-            | Some(FromTable source)
+            | Some source
                 when not select.Joins.IsEmpty
                      && (select.Joins
                          |> List.forall (fun join ->
@@ -1607,32 +1607,31 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                              || join.Kind = StraightJoin
                              || join.Kind = CrossJoin
                              || join.Kind = NaturalJoin))
-                     && (select.Joins |> List.forall (fun join -> match join.Table with FromTable _ -> true | _ -> false))
+                     && (source :: (select.Joins |> List.map _.Table)
+                         |> List.forall (function FromTable _ | FromSubquery _ -> true | _ -> false))
                      && hasWritableShape select ->
-                let tableRefs =
+                let sourceItems =
                     source
-                    :: (select.Joins
-                        |> List.choose (fun join ->
-                            match join.Table with
-                            | FromTable table -> Some table
-                            | _ -> None))
+                    :: (select.Joins |> List.map _.Table)
+
+                let projectedNames projections =
+                    projections
+                    |> List.map (fun ({ Expression = expression; Alias = alias } as projection) ->
+                        alias
+                        |> Option.orElse projection.SourceName
+                        |> Option.orElseWith (fun () ->
+                            match expression with
+                            | Col column
+                            | QualifiedCol(_, column) -> Some column
+                            | Star _ -> None
+                            | _ -> Some(InformationSchema.exprToSql expression)))
 
                 let resolveSource (tableRef: TableRef) : WritableViewSource option =
                     let database = tableRef.Database |> Option.defaultValue view.Schema
                     let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
 
                     let readOnlySource (stored: StoredView) statement projections =
-                        let projectedNames =
-                            projections
-                            |> List.map (fun ({ Expression = expression; Alias = alias } as projection) ->
-                                alias
-                                |> Option.orElse projection.SourceName
-                                |> Option.orElseWith (fun () ->
-                                    match expression with
-                                    | Col column
-                                    | QualifiedCol(_, column) -> Some column
-                                    | Star _ -> None
-                                    | _ -> Some(InformationSchema.exprToSql expression)))
+                        let projectedNames = projectedNames projections
 
                         if projectedNames |> List.exists Option.isNone then
                             None
@@ -1649,7 +1648,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                     |> Map.ofList
 
                                 Some
-                                    { Reference = { tableRef with Database = Some database }
+                                    { Reference = FromTable { tableRef with Database = Some database }
                                       Qualifier = qualifier
                                       Columns = columns
                                       Expressions = expressions
@@ -1701,8 +1700,9 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                                     Some
                                         { Reference =
-                                            { nested.UpdateFrom with
-                                                Alias = Some qualifier }
+                                            FromTable
+                                                { nested.UpdateFrom with
+                                                    Alias = Some qualifier }
                                           Qualifier = qualifier
                                           Columns = nested.OrderedColumns
                                           Expressions = nested.Expressions |> Map.map (fun _ expression -> qualify expression)
@@ -1746,7 +1746,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                       ComponentColumn = None })
                                 |> Map.ofList
 
-                            { Reference = { tableRef with Database = Some database }
+                            { Reference = FromTable { tableRef with Database = Some database }
                               Qualifier = qualifier
                               Columns = table.Columns |> List.map _.Name
                               Expressions = expressions
@@ -1758,11 +1758,37 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               ReadAccessPaths = []
                               Mergeable = true })
 
-                let sources =
-                    tableRefs
-                    |> List.choose resolveSource
+                let resolveSourceItem = function
+                    | FromTable tableRef -> resolveSource tableRef
+                    | FromSubquery(body, qualifier) as reference ->
+                        let projections =
+                            match body with
+                            | PlainSelect definition -> definition.Projections
+                            | UnionSelect(first, _, _, _, _) -> first.Projections
 
-                if sources.Length <> tableRefs.Length then
+                        projectedNames projections
+                        |> tryAllSome
+                        |> Option.filter (fun columns -> tryDuplicateIgnoreCase id columns |> Option.isNone)
+                        |> Option.map (fun columns ->
+                            { Reference = reference
+                              Qualifier = qualifier
+                              Columns = columns
+                              Expressions =
+                                columns
+                                |> List.map (fun column -> column.ToLowerInvariant(), QualifiedCol(qualifier, column))
+                                |> Map.ofList
+                              Targets = Map.empty
+                              Predicate = None
+                              CheckPredicates = Map.empty
+                              InsertableTargets = Set.empty
+                              AccessPath = []
+                              ReadAccessPaths = []
+                              Mergeable = false })
+                    | _ -> None
+
+                let sources = sourceItems |> List.choose resolveSourceItem
+
+                if sources.Length <> sourceItems.Length then
                     None
                 else
                     let coalescedNames =
@@ -1876,10 +1902,25 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             List.map2
                                 (fun join source ->
                                     { join with
-                                        Table = FromTable source.Reference
+                                        Table = source.Reference
                                         On = rewriteSources join.On })
                                 select.Joins
                                 (List.tail sources)
+
+                        let updateSources =
+                            match source, sources, select.Joins with
+                            | FromTable original, { Reference = FromTable physical } :: _, _ ->
+                                Some(physical, rewrittenJoins, original, select.Joins)
+                            | FromSubquery _, derived :: { Reference = FromTable physical } :: _, join :: trailing
+                                when (join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin)
+                                     && join.Using.IsEmpty ->
+                                let reordered =
+                                    { join with
+                                        Table = derived.Reference
+                                        On = rewriteSources join.On }
+                                let authorizationJoin = { join with Table = derived.Reference }
+                                Some(physical, reordered :: List.tail rewrittenJoins, physical, authorizationJoin :: trailing)
+                            | _ -> None
 
                         let sourcePredicate =
                             sources
@@ -1893,7 +1934,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             |> List.collect (fun source -> Map.toList source.CheckPredicates)
                             |> Map.ofList
 
-                        Some
+                        updateSources
+                        |> Option.map (fun (updateFrom, updateJoins, authorizationFrom, authorizationJoins) ->
                             { ViewDatabase = view.Schema
                               ViewName = view.Name
                               Database = firstTarget.Database
@@ -1910,9 +1952,9 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               CheckPredicates = checkPredicates
                               Insertable = not insertableTargets.IsEmpty
                               InsertableTargets = insertableTargets
-                              UpdateFrom = (List.head sources).Reference
-                              UpdateJoins = rewrittenJoins
-                              AuthorizationSources = Some(source, select.Joins)
+                              UpdateFrom = updateFrom
+                              UpdateJoins = updateJoins
+                              AuthorizationSources = Some(authorizationFrom, authorizationJoins)
                               AccessPath =
                                 [ { SecurityType = view.SecurityType
                                     Definer = view.Definer
@@ -1928,7 +1970,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 |> Map.ofList
                               ReadAccessPaths = sources |> List.collect _.ReadAccessPaths
                               Definer = view.Definer
-                              SecurityType = view.SecurityType }
+                              SecurityType = view.SecurityType })
             | _ -> None
 
     classify Set.empty view select
@@ -26963,7 +27005,19 @@ let rec executeAs
                     match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets with
                     | Some target -> Ok(assignment, target)
                     | None when view.OrderedColumns |> List.exists (fun name -> name.Equals(assignment.Column, System.StringComparison.OrdinalIgnoreCase)) ->
-                        Error(1348, sprintf "Column '%s' is not updatable" assignment.Column)
+                        let derivedQualifiers =
+                            view.UpdateJoins
+                            |> List.choose (fun join -> match join.Table with FromSubquery(_, qualifier) -> Some qualifier | _ -> None)
+                        let belongsToDerived =
+                            match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Expressions with
+                            | Some(QualifiedCol(qualifier, _)) ->
+                                derivedQualifiers
+                                |> List.exists (fun derived -> derived.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
+                            | _ -> false
+                        if belongsToDerived then
+                            Error(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
+                        else
+                            Error(1348, sprintf "Column '%s' is not updatable" assignment.Column)
                     | None -> Error(1054, sprintf "Unknown column '%s' in field list" assignment.Column))
             with
             | Error(code, message) -> ids, Err(code, message)

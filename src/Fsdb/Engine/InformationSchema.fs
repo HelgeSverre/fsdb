@@ -1560,16 +1560,29 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
         match Fsdb.Parser.parse definition with
         | Ok(Select select) ->
             match select.From with
-            | Some(FromTable source) ->
+            | Some source ->
+                let sourceAllowsUpdates = function
+                    | FromTable table -> sourceAllowsUpdates table
+                    | _ -> false
+                let sourceOrderAllowsUpdates =
+                    match source, select.Joins with
+                    | FromTable _, _ -> true
+                    | FromSubquery _, first :: _ ->
+                        (first.Kind = InnerJoin || first.Kind = StraightJoin || first.Kind = CrossJoin)
+                        && first.Using.IsEmpty
+                        && (match first.Table with FromTable _ -> true | _ -> false)
+                    | _ -> false
+                let joinsSupported =
+                    select.Joins
+                    |> List.forall (fun join ->
+                        (join.Kind = InnerJoin
+                         || join.Kind = StraightJoin
+                         || join.Kind = CrossJoin
+                         || join.Kind = NaturalJoin)
+                        && (match join.Table with FromTable _ | FromSubquery _ -> true | _ -> false))
                 let shapeAllowsUpdates =
-                    (select.Joins.IsEmpty
-                     || (select.Joins
-                         |> List.forall (fun join ->
-                             (join.Kind = InnerJoin
-                              || join.Kind = StraightJoin
-                              || join.Kind = CrossJoin
-                              || join.Kind = NaturalJoin)
-                             && match join.Table with FromTable _ -> true | _ -> false)))
+                    ((select.Joins.IsEmpty && match source with FromTable _ -> true | _ -> false)
+                     || (sourceOrderAllowsUpdates && joinsSupported && not select.Joins.IsEmpty))
                     && not select.Distinct
                     && not select.CalculateFoundRows
                     && select.GroupBy.IsEmpty
@@ -1591,11 +1604,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                     false
                 elif not select.Joins.IsEmpty then
                     sourceAllowsUpdates source
-                    || (select.Joins
-                        |> List.exists (fun join ->
-                            match join.Table with
-                            | FromTable table -> sourceAllowsUpdates table
-                            | _ -> false))
+                    || (select.Joins |> List.exists (fun join -> sourceAllowsUpdates join.Table))
                 else
                     sourceAllowsUpdates source
             | _ -> false

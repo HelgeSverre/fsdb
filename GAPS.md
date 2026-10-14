@@ -619,6 +619,11 @@ are authorized using each intermediate view's exposed names.
 An inner join may also use a nonmergeable aggregate or UNION view as a
 read-only row source while updating another mergeable component; INSERT still
 requires every component to be mergeable.
+An explicit-column derived source can likewise supply read-only join rows while
+UPDATE writes a physical component, including derived-first and three-source
+inner joins. Invoker views still require read access to the derived source's
+tables. Derived-star projections and broader join-source reorderings remain
+outside this audited path.
 
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
 refused with MySQL-compatible errors.
