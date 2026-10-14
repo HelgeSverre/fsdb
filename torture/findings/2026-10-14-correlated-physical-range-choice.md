@@ -36,6 +36,16 @@ FSDB calls the residual fewer than
 20 times, whereas the previous projected path called it 402 times. Other
 projected access families still select one candidate family.
 
+An ordinary indexed equality and a functional indexed equality now intersect
+by physical row ID before projecting. The native MySQL 8.4.11 oracle used
+1,000 rows, with `user_id=1` on IDs 1–500 and `ABS(band)=7` on IDs 499–898.
+Both the direct table and `(SELECT id,user_id,band FROM probe_orders)` returned
+two rows for `user_id=u.id AND ABS(band)=u.target`. Before the change, the
+FSDB residual `TOUCH(id)=id` ran 402 times on the first source; the focused
+regression now requires fewer than 20 calls on both sources. Functional
+candidates participate only when the physical read sees the stored rows, so
+projection or read overlays that change row identity keep their existing path.
+
 Two correlated ranges over different indexed columns now share the same
 physical row-ID intersection path through a pass-through projection. Native
 MySQL 8.4.11 returned two rows for `id BETWEEN 1 AND 400` combined with

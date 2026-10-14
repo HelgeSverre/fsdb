@@ -203,8 +203,9 @@ set, including direct physical and pass-through projected sources
 Direct and pass-through projected physical sources also intersect compatible
 equality and range candidates by stored row identity before projection and
 residual evaluation. Both source shapes can likewise intersect multiple
-correlated range candidates. Other projected access families still choose one
-slice. Complete [functional and mixed plain/functional equality and text-range OR branches](torture/findings/2026-10-14-correlated-functional-or-union.md)
+correlated range candidates and [mixed ordinary/functional equality candidates](torture/findings/2026-10-14-correlated-physical-range-choice.md).
+The intersection requires physical reads to preserve stored row identity;
+other projected access families still choose one slice. Complete [functional and mixed plain/functional equality and text-range OR branches](torture/findings/2026-10-14-correlated-functional-or-union.md)
 over direct and pass-through physical sources union stored row identities
 before projection and residual evaluation.
 Correlated forms preserve MySQL NULL and multi-column error semantics.

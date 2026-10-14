@@ -14716,7 +14716,18 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
                     correlatedRangeBounds probeSource whereExpr outer
                     |> List.choose (tryProjectedPhysicalRangeCandidates store projection)
 
-                let candidates = (equality |> Option.toList) @ ranges
+                let functional =
+                    if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
+                        outer
+                        |> Option.map (fun context ->
+                            [ tryCorrelatedFunctionalEqualityCandidates store registry projection qualifier context whereExpr
+                              tryCorrelatedFunctionalRangeCandidates store registry projection qualifier context whereExpr ]
+                            |> List.choose id)
+                        |> Option.defaultValue []
+                    else
+                        []
+
+                let candidates = (equality |> Option.toList) @ ranges @ functional
 
                 match candidates with
                 | _ :: _ :: _ ->
@@ -14978,6 +14989,13 @@ and private tryCorrelatedSourceLookup
             | Between _ -> true
             | _ -> false))
 
+    let hasFunctionalEqualityPredicate =
+        whereExpr
+        |> Option.exists (Expression.exists (function
+            | BinOp(Eq, FuncCall _, _)
+            | BinOp(Eq, _, FuncCall _) -> true
+            | _ -> false))
+
     let hasMultipleConjunctiveRanges =
         whereExpr
         |> optionalConjuncts
@@ -14988,7 +15006,7 @@ and private tryCorrelatedSourceLookup
         |> List.length > 1
 
     let physicalIntersection () =
-        if hasRangePredicate then
+        if hasRangePredicate || hasFunctionalEqualityPredicate then
             tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
         else
             None

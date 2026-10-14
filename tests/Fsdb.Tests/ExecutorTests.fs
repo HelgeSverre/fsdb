@@ -13313,6 +13313,47 @@ let tests =
 
                     Expect.isLessThan calls 20 "the direct lookup intersects two individually broad range candidates"
 
+                testCase "correlated projected source intersects plain and functional equality candidates"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values.Head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE probe_users (id INT PRIMARY KEY, target INT)" |> ignore
+                    runDefault store "CREATE TABLE probe_orders (id INT PRIMARY KEY, user_id INT, band INT, KEY (user_id), KEY ix_abs_band ((ABS(band))))" |> ignore
+                    runDefault store "INSERT INTO probe_users VALUES (1,7)" |> ignore
+
+                    [ 1..1000 ]
+                    |> List.map (fun id ->
+                        sprintf "(%d,%d,%d)" id (if id <= 500 then 1 else 2) (if id >= 499 && id <= 898 then 7 else 8))
+                    |> String.concat ","
+                    |> fun rows -> runDefault store ("INSERT INTO probe_orders VALUES " + rows)
+                    |> ignore
+
+                    for source in
+                        [ "probe_orders o"
+                          "(SELECT id,user_id,band FROM probe_orders) o" ] do
+                        calls <- 0
+
+                        match
+                            run
+                                store
+                                registry
+                                ("SELECT (SELECT COUNT(*) FROM "
+                                 + source
+                                 + " WHERE TOUCH(o.id)=o.id AND o.user_id=u.id "
+                                 + "AND ABS(o.band)=u.target) FROM probe_users u")
+                        with
+                        | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                        | other -> failtestf "expected two plain/functional matches for %s, got %A" source other
+
+                        Expect.isLessThan calls 20 "the residual reads the intersection of both indexed candidates"
+
                 testCase "an indexed pass-through derived source resolves only matching physical rows"
                 <| fun _ ->
                     let mutable calls = 0
