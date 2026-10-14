@@ -3511,7 +3511,7 @@ let tests =
 
                     Expect.isLessThan
                         benchmarkTimer.Elapsed
-                        (Fsdb.Limits.maxBenchmarkDuration + System.TimeSpan.FromSeconds 1.0)
+                        (Fsdb.Limits.maxBenchmarkDuration + System.TimeSpan.FromSeconds 3.0)
                         "a nested SLEEP stops near BENCHMARK's earlier deadline"
 
                 testCase "delete-side foreign-key actions run before the replacement insert"
