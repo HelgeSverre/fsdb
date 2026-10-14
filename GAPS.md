@@ -631,7 +631,10 @@ An explicit-column derived source, or an audited `SELECT *`/qualified-star
 source over one relation, can supply read-only join rows while UPDATE writes a
 physical component, including derived-first and three-source inner joins.
 Invoker views still require read access to the derived source's tables.
-Broader join-source reorderings and grouped derived-star sources remain open.
+Grouped derived-star sources now preserve their logical `USING`/natural
+columns and allow an outer joined view to update its physical component
+([MySQL oracle and regression](torture/findings/2026-10-14-grouped-derived-star-view.md)).
+Broader join-source reorderings remain open.
 
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
 refused with MySQL-compatible errors.

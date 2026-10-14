@@ -980,6 +980,27 @@ let tests =
               expectOk (run store "UPDATE derived_star_qualified SET n=13 WHERE id=1") "update beside qualified star"
               Expect.equal (rows store "SELECT n FROM derived_star_target") [ [ Some "13" ] ] "physical updates persist"
 
+          testCase "join view updates beside a grouped derived star"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE grouped_star_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE grouped_star_left(id INT PRIMARY KEY,flag INT)"
+                    "CREATE TABLE grouped_star_right(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO grouped_star_target VALUES(1,0)"
+                    "INSERT INTO grouped_star_left VALUES(1,7)"
+                    "INSERT INTO grouped_star_right VALUES(1,9)"
+                    "CREATE VIEW grouped_star_view AS SELECT a.id AS aid,a.n,d.flag FROM grouped_star_target a JOIN (SELECT * FROM (grouped_star_left b JOIN grouped_star_right c USING(id))) d ON d.id=a.id"
+                    "CREATE VIEW grouped_qualified_view AS SELECT a.id AS aid,a.n,d.flag FROM grouped_star_target a JOIN (SELECT b.* FROM (grouped_star_left b JOIN grouped_star_right c USING(id))) d ON d.id=a.id"
+                    "CREATE VIEW grouped_natural_view AS SELECT a.id AS aid,a.n,d.flag FROM grouped_star_target a JOIN (SELECT * FROM (grouped_star_left b NATURAL JOIN grouped_star_right c)) d ON d.id=a.id" ] do
+                  expectOk (run store sql) sql
+              for view in [ "grouped_star_view"; "grouped_qualified_view"; "grouped_natural_view" ] do
+                  Expect.equal
+                      (rows store ("SELECT is_updatable FROM information_schema.views WHERE table_name='" + view + "'"))
+                      [ [ Some "YES" ] ] "the grouped source does not hide the physical write target"
+                  expectOk (run store ("UPDATE " + view + " SET n=n+1 WHERE aid=1")) view
+              Expect.equal (rows store "SELECT id,n FROM grouped_star_target") [ [ Some "1"; Some "3" ] ] "base row changed"
+
           testCase "join views update mergeable components beside union views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

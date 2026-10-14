@@ -1640,19 +1640,32 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                         | FromSubquery(_, qualifier) -> Some qualifier
                         | _ -> None
 
+                    let columnsByQualifier =
+                        items
+                        |> List.collect FromItem.leaves
+                        |> List.map (fun item ->
+                            qualifierOf item
+                            |> Option.bind (fun qualifier ->
+                                sourceColumnNames item
+                                |> Option.map (fun columns -> qualifier.ToLowerInvariant(), columns)))
+                        |> tryAllSome
+                        |> Option.map Map.ofList
+
+                    let logicalColumns =
+                        columnsByQualifier
+                        |> Option.bind (fun columns ->
+                            FromItem.logicalSelectColumns
+                                (fun qualifier -> columns |> Map.tryFind (qualifier.ToLowerInvariant()) |> Option.defaultValue [])
+                                definition
+                            |> Result.toOption)
+                        |> Option.map (List.map _.Name)
+
                     let expand (projection: Projection) =
                         match projection.Expression with
-                        | Star None ->
-                            items
-                            |> List.map sourceColumnNames
-                            |> tryAllSome
-                            |> Option.map List.concat
+                        | Star None -> logicalColumns
                         | Star(Some qualifier) ->
-                            items
-                            |> List.tryFind (fun item ->
-                                qualifierOf item
-                                |> Option.exists (fun candidate -> candidate.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)))
-                            |> Option.bind sourceColumnNames
+                            columnsByQualifier
+                            |> Option.bind (Map.tryFind (qualifier.ToLowerInvariant()))
                         | _ -> projectedNames [ projection ] |> tryAllSome
 
                     definition.Projections
