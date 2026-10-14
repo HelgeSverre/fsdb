@@ -96,6 +96,17 @@ column, and verifies the summed row changes outside timing. Set
 in-memory fsdb with durable MySQL, so use it for scaling slopes and hotspot
 diagnosis rather than absolute durable-write parity.
 
+When disk space cannot hold both disposable MySQL variants for
+`just bench-durable`, select only the durability-matched pair:
+
+```sh
+FSDB_BENCH_TARGETS=wal-mysql FSDB_BENCH_CATEGORIES=Durability \
+  FSDB_BENCH_METHODS=SequentialInsertBurst just _bench-run --quick
+```
+
+This starts native durable MySQL and WAL-backed fsdb. It omits the separate
+in-memory/no-fsync pair; report the narrower method and target scope.
+
 `PointSelectByFixedPk`, `PointSelectByRoundPi`, and
 `PointSelectByBitCountBound`, and `PointSelectByCastBound` compare the same
 fixed primary-key hit and result shape when profiling literal and

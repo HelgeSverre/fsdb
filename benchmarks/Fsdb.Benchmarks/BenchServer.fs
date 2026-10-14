@@ -16,16 +16,11 @@ let benchBin () =
     |> Option.ofObj
     |> Option.defaultWith (fun () -> failwith "FSDB_BENCH_BIN not set — run via `just bench`/`just bench-load`")
 
-/// The durability-matched run (`just bench-durable`) adds `fsdb-wal` and
-/// `mysql-nofsync` to the target list via this env flag.
-let isDurableRun () =
-    Environment.GetEnvironmentVariable "FSDB_BENCH_TARGETS" = "durable"
-
 let targets () =
-    if isDurableRun () then
-        [| "fsdb"; "fsdb-wal"; "mysql"; "mysql-nofsync" |]
-    else
-        [| "fsdb"; "mysql" |]
+    match Environment.GetEnvironmentVariable "FSDB_BENCH_TARGETS" with
+    | "durable" -> [| "fsdb"; "fsdb-wal"; "mysql"; "mysql-nofsync" |]
+    | "wal-mysql" -> [| "fsdb-wal"; "mysql" |]
+    | _ -> [| "fsdb"; "mysql" |]
 
 /// A fresh throwaway data dir for the `fsdb-wal` (durable) variant.
 let tempDataDir () =
