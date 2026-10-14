@@ -1396,6 +1396,10 @@ implementation effort:
    A [completion-option check](benchmarks/results/2026-10-14-write-completion-check.md)
    likewise found no eight-writer gain from changing group-commit task
    continuations; the candidate was reverted.
+   A [WAL queue and batch-stage profile](benchmarks/results/2026-10-15-wal-queue-stage-profile.md)
+   found queue admission small relative to completion and measured per-batch
+   file-open and flush costs. A retained-handle prototype removed the open
+   cost but did not establish a stable wire-throughput gain, so it was reverted.
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition

@@ -17,6 +17,12 @@ scores are the reviewer's judgment, not a current measured rating.
 | Recovery and backup maturity | Partly addressed; preview limit remains | `docs/operations.md` specifies stopped-directory backup, restore checks, and a staging upgrade procedure. A regression now loads a legacy snapshot, accepts a current write, checkpoints, and reopens it. This checks one historical format path; online backup and general cross-version migration are not guaranteed. |
 | Mixed-type indexed join discrepancy | Open, narrow compatibility gap | `GAPS.md` records the MySQL 8.4 discrepancy and its connection-history dependence. Keep it bounded to a reproducible application case; do not generalize it to ordinary joins. |
 
+The later [WAL queue and batch-stage profile](../benchmarks/results/2026-10-15-wal-queue-stage-profile.md)
+separated admission and handoff from batch work. It measured per-batch file
+open and flush costs, but a retained-handle prototype did not establish a
+stable wire-throughput gain and was reverted. The write-performance finding
+remains open.
+
 For joined mutations, `QueryHandler` parses and checks the request;
 `Executor.runMutationJoin` resolves sources and produces joined rows;
 `MutationTargets.group` maps aliases to physical tables; the `UPDATE` and
@@ -64,9 +70,10 @@ release-blocking defect that can be closed by adding another SQL feature:
 1. Keep the durable-write gate in use. The embedded control and wire scheduling
    profile narrow the target, but do not identify a particular server function
    or lock. A connection-owned disconnect timer and a group-commit leader yield
-   did not improve repeated load, so both were reverted. Separate queue
-   admission, leader wait, flush, and acknowledgement timing before another
-   scheduling change.
+   did not improve repeated load, so both were reverted. The queue-stage
+   profile has now separated admission, handoff, batch work, and completion;
+   obtain a method-resolved server trace with a repeatable host-load control
+   before another scheduling change.
 2. Continue extracting one cohesive executor responsibility at a time when a
    real edit exposes its boundary. Preserve the existing behavior with tests
    and avoid a file-size-driven rewrite.
