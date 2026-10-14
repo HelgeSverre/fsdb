@@ -14610,22 +14610,24 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
                 |> Option.bind (tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection)
 
             match equality with
-            | Some equalRows when equalRows.Length > 1 ->
+            | Some equalRows when equalRows.Length <= 1 -> None
+            | _ ->
                 let ranges =
                     correlatedRangeBounds probeSource whereExpr outer
                     |> List.choose (tryProjectedPhysicalRangeCandidates store projection)
 
-                match ranges with
-                | [] -> None
-                | _ ->
-                    let candidates = (equalRows :: ranges) |> List.sortBy List.length
+                let candidates = (equality |> Option.toList) @ ranges
+
+                match candidates with
+                | _ :: _ :: _ ->
+                    let candidates = candidates |> List.sortBy List.length
                     let shortest = candidates.Head
                     let rowIds = candidates.Tail |> List.map (List.map fst >> Set.ofList)
 
                     shortest
                     |> List.filter (fun (rowId, _) -> rowIds |> List.forall (Set.contains rowId))
                     |> projectPhysicalLookupRows store registry dbName projection
-            | _ -> None))
+                | _ -> None))
 
 and private tryProjectedPhysicalLiteralLookup
     (store: Store)
@@ -14847,7 +14849,7 @@ and private tryCorrelatedSourceLookup
             |> Option.exists (fun physical -> storedRowsMatchReadRows store physical.Columns)
 
         (if physicalFastPath then
-             direct
+             chooseWithRanges true direct
          else
              (if hasRangePredicate then
                   tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
@@ -14857,20 +14859,20 @@ and private tryCorrelatedSourceLookup
                  [ direct
                    tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
                    tryProjectedPhysicalCorrelatedEqualityUnionLookup store registry dbName source whereExpr outer ]
-                 |> fewestRows))
-        |> chooseWithRanges physicalFastPath
+                 |> fewestRows
+                 |> chooseWithRanges false))
         |> Option.orElseWith materializedLookup
     | FromSubquery _ ->
-        ((if hasRangePredicate then
-              tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
-          else
-              None)
-         |> Option.orElseWith (fun () ->
-             [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
-               tryProjectedPhysicalCorrelatedEqualityUnionLookup store registry dbName source whereExpr outer
-               tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
-             |> fewestRows))
-        |> chooseWithRanges false
+        (if hasRangePredicate then
+             tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
+         else
+             None)
+        |> Option.orElseWith (fun () ->
+            [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
+              tryProjectedPhysicalCorrelatedEqualityUnionLookup store registry dbName source whereExpr outer
+              tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
+            |> fewestRows
+            |> chooseWithRanges false)
         |> Option.orElseWith materializedLookup
     | _ -> materializedLookup ()
 

@@ -13051,11 +13051,11 @@ let tests =
 
                     let store = newStore ()
                     runDefault store "CREATE TABLE probe_users (id INT PRIMARY KEY)" |> ignore
-                    runDefault store "CREATE TABLE probe_orders (id INT PRIMARY KEY, user_id INT, KEY (user_id))" |> ignore
+                    runDefault store "CREATE TABLE probe_orders (id INT PRIMARY KEY, user_id INT, band INT, KEY (user_id), KEY (band))" |> ignore
                     runDefault store "INSERT INTO probe_users VALUES (1)" |> ignore
 
                     [ 1..1000 ]
-                    |> List.map (fun id -> sprintf "(%d,%d)" id (if id <= 500 then 1 else 2))
+                    |> List.map (fun id -> sprintf "(%d,%d,%d)" id (if id <= 500 then 1 else 2) id)
                     |> String.concat ","
                     |> fun rows -> runDefault store ("INSERT INTO probe_orders VALUES " + rows)
                     |> ignore
@@ -13117,6 +13117,21 @@ let tests =
                     | other -> failtestf "expected two projected equality/range matches, got %A" other
 
                     Expect.isLessThan calls 20 "the projected lookup intersects physical candidates before the residual"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT (SELECT COUNT(*) FROM (SELECT id,band FROM probe_orders) o "
+                             + "WHERE TOUCH(o.id)=o.id AND o.id BETWEEN u.id AND u.id+399 "
+                             + "AND o.band BETWEEN u.id+398 AND u.id+797) FROM probe_users u")
+                    with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected two projected range/range matches, got %A" other
+
+                    Expect.isLessThan calls 20 "the projected lookup intersects two individually broad range candidates"
 
                 testCase "an indexed pass-through derived source resolves only matching physical rows"
                 <| fun _ ->

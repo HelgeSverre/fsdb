@@ -200,7 +200,8 @@ physical and pass-through projected sources
 ([oracle and residual probe](torture/findings/2026-10-14-correlated-physical-range-choice.md)).
 Direct and pass-through projected physical sources also intersect compatible
 equality and range candidates by stored row identity before projection and
-residual evaluation. Other projected access families still choose one slice.
+residual evaluation. Pass-through sources can likewise intersect multiple
+correlated range candidates. Other projected access families still choose one slice.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,

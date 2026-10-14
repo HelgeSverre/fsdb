@@ -35,3 +35,10 @@ bucket and 400-row range returns two rows on native MySQL 8.4.11 and FSDB;
 FSDB calls the residual fewer than
 20 times, whereas the previous projected path called it 402 times. Other
 projected access families still select one candidate family.
+
+Two correlated ranges over different indexed columns now share the same
+physical row-ID intersection path through a pass-through projection. Native
+MySQL 8.4.11 returned two rows for `id BETWEEN 1 AND 400` combined with
+`band BETWEEN 399 AND 798` over 1,000 numbered rows. Before the change FSDB
+sent 402 candidates to a residual function; the focused regression now sends
+fewer than 20 while returning the same two rows.
