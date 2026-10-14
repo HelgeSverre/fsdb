@@ -12693,6 +12693,44 @@ let tests =
                     | ResultSet(_, [ [ Some "4" ] ]) -> ()
                     | other -> failtestf "uncovered range OR branch must retain its rows, got %A" other
 
+                testCase "materialized correlated OR branches intersect their usable bounds"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE branch_users(id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE branch_rows(id INT PRIMARY KEY,user_id INT)" |> ignore
+                    runDefault store "INSERT INTO branch_users VALUES(1),(2)" |> ignore
+                    runDefault store
+                        ("INSERT INTO branch_rows VALUES "
+                         + ([ 1..100 ]
+                            |> List.map (fun id -> sprintf "(%d,%d)" id (((id - 1) % 10) + 1))
+                            |> String.concat ","))
+                    |> ignore
+
+                    for prefix, source in
+                        [ "", "(SELECT id+0 AS id,user_id+0 AS user_id FROM branch_rows LIMIT 100) o"
+                          "WITH materialized AS (SELECT id+0 AS id,user_id+0 AS user_id FROM branch_rows LIMIT 100)",
+                          "materialized o" ] do
+                        calls <- 0
+                        match
+                            run store registry
+                                (prefix
+                                 + " SELECT u.id,(SELECT COUNT(*) FROM " + source
+                                 + " WHERE TOUCH(o.id)=o.id AND ((o.user_id=u.id AND o.id BETWEEN u.id AND u.id+2)"
+                                 + " OR (o.user_id=u.id+1 AND o.id BETWEEN u.id+10 AND u.id+12))"
+                                 + ") FROM branch_users u ORDER BY u.id")
+                        with
+                        | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "2" ] ]) -> ()
+                        | other -> failtestf "expected MySQL 8.4 branch counts, got %A" other
+
+                        Expect.isLessThan calls 9 "the residual sees intersected candidates from each OR branch"
+
                 testCase "correlated text range OR probes bounded candidates"
                 <| fun _ ->
                     let mutable calls = 0

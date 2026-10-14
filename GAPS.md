@@ -237,7 +237,9 @@ EXPLAIN warning lifetimes remain open.
 
 Stable materialized correlated sources now [intersect usable equality and range
 candidate lists](torture/findings/2026-10-14-correlated-materialized-intersection.md)
-before residual evaluation. More complex correlated expressions without a
+before residual evaluation, including [compatible bounds within each complete
+OR branch](torture/findings/2026-10-14-correlated-materialized-or-intersection.md)
+before branch union. More complex correlated expressions without a
 compatible statement-local lookup still re-execute or scan.
 
 ## 3. Built-in functions

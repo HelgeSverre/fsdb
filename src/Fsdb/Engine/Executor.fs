@@ -14924,9 +14924,7 @@ and private tryMaterializedCorrelatedLookup
                       membershipCandidates (Some branch)
                       rangeCandidates (Some branch) ]
                     |> List.choose id
-                    |> function
-                        | [] -> None
-                        | candidates -> Some(List.minBy List.length candidates)
+                    |> intersectSharedRows
 
                 let merge candidates =
                     let seen = HashSet<Value[]>(HashIdentity.Reference)
