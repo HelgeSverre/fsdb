@@ -65,3 +65,14 @@ crossing in fsdb while MySQL reports touching. Reversing the line and the hole
 ring preserves the MySQL relation. The expanded 345-case probe records four
 mismatches because it includes both ring orientations of those two lines.
 This is still an open line/ring topology gap.
+
+A further diagnostic checked the existing line sampler and the spherical
+proper-segment intersection test on the near-hole lines. For both the crossing
+line at longitude `1.001` and the touching line at longitude `2.999`, the
+sampler saw one interior endpoint followed by outside samples, and the
+proper-segment test reported an intersection. Adding geodesic samples at
+0.1%, 1%, 99%, and 99.9% of each line did not change any of the four
+mismatches in the 345-case corpus. Neither an endpoint-transition shortcut nor
+the current spherical intersection predicate distinguishes MySQL's two
+relations. That probe was reverted; the remaining work needs a more precise
+line/ring relation near the hole corner.
