@@ -2910,17 +2910,22 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
     | Some transaction ->
         let dbName = session.Database |> Option.defaultValue defaultDatabase
 
-        match Executor.transactionWriteTargets transaction.Snapshot (registryFor session) dbName statement with
-        | None -> session
-        | Some(_, _, targets) when targets.RowIds.IsEmpty && targets.Keys.IsEmpty -> session
-        | Some(database, table, targets) ->
-            Storage.acquireTransactionWriteTargets
-                (lockWaitTimeout session)
-                transaction.Snapshot
-                database
-                table
-                targets.RowIds
-                targets.Keys
+        let targets =
+            Executor.transactionWriteTargets transaction.Snapshot (registryFor session) dbName statement
+            |> List.filter (fun (_, _, target) -> not target.RowIds.IsEmpty || not target.Keys.IsEmpty)
+
+        match targets with
+        | [] -> session
+        | _ ->
+            targets
+            |> List.iter (fun (database, table, target) ->
+                Storage.acquireTransactionWriteTargets
+                    (lockWaitTimeout session)
+                    transaction.Snapshot
+                    database
+                    table
+                    target.RowIds
+                    target.Keys)
             // Functions share the invoking statement's private view and publication boundary.
             if insideFunctionOrTrigger session then session
             else

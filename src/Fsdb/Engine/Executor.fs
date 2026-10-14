@@ -27738,7 +27738,7 @@ let transactionWriteTargets
     (registry: Registry)
     (dbName: string)
     (statement: Statement)
-    : (string * string * WriteLockTargets) option =
+    : (string * string * WriteLockTargets) list =
     let targets (tableRef: TableRef) predicate =
         let database = tableRef.Database |> Option.defaultValue dbName
 
@@ -27769,23 +27769,54 @@ let transactionWriteTargets
         |> Result.toOption
         |> Option.bind (insertTargets tableName columns)
 
+    let joinedTargets (from: TableRef) (joins: Join list) (names: string list) predicate =
+        let joinedTables =
+            joins
+            |> List.choose (fun (join: Join) ->
+                match join.Table with
+                | FromTable table -> Some table
+                | _ -> None)
+        let sources = from :: joinedTables
+
+        names
+        |> List.distinctBy (fun name -> name.ToLowerInvariant())
+        |> traverse (fun name ->
+            sources
+            |> List.tryFind (fun table ->
+                let qualifier = table.Alias |> Option.defaultValue table.Table
+                equalsIgnoreCase qualifier name)
+            |> Option.bind (fun table -> targets table predicate)
+            |> function Some target -> Ok target | None -> Error())
+        |> Result.toOption
+        |> Option.defaultValue []
+        |> List.groupBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+        |> List.map (fun (_, grouped) ->
+            let database, table, _ = List.head grouped
+            database,
+            table,
+            { RowIds = grouped |> List.collect (fun (_, _, target) -> target.RowIds) |> List.distinct
+              Keys = grouped |> List.collect (fun (_, _, target) -> target.Keys) |> List.distinct })
+        // Every writer claims tables in the same order, regardless of join order.
+        |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+
     match statement with
-    | Update update when update.Ctes.IsEmpty && update.Joins.IsEmpty -> targets update.From update.Where
+    | Update update when update.Ctes.IsEmpty && update.Joins.IsEmpty ->
+        targets update.From update.Where |> Option.toList
     | Update update when update.Ctes.IsEmpty && not update.Joins.IsEmpty ->
-        let target = update.From.Alias |> Option.defaultValue update.From.Table
-        if update.Assignments
-           |> List.forall (fun assignment -> assignment.Table |> Option.exists (equalsIgnoreCase target)) then
-            targets update.From update.Where
-        else
-            None
-    | Delete delete when delete.Ctes.IsEmpty && delete.Joins.IsEmpty -> targets delete.From delete.Where
+        update.Assignments
+        |> traverse (fun assignment ->
+            match assignment.Table with
+            | Some name -> Ok name
+            | None -> Error())
+        |> Result.toOption
+        |> Option.map (fun names -> joinedTargets update.From update.Joins names update.Where)
+        |> Option.defaultValue []
+    | Delete delete when delete.Ctes.IsEmpty && delete.Joins.IsEmpty ->
+        targets delete.From delete.Where |> Option.toList
     | Delete delete when delete.Ctes.IsEmpty && not delete.Joins.IsEmpty ->
-        let target = delete.From.Alias |> Option.defaultValue delete.From.Table
-        match delete.Targets with
-        | [ named ] when equalsIgnoreCase named target -> targets delete.From delete.Where
-        | _ -> None
+        joinedTargets delete.From delete.Joins delete.Targets delete.Where
     | Insert(tableName, columns, rows, _, _)
-    | Replace(tableName, columns, rows) -> literalInsertTargets tableName columns rows
+    | Replace(tableName, columns, rows) -> literalInsertTargets tableName columns rows |> Option.toList
     | ReplaceSet(tableName, assignments) ->
         assignments
         |> traverse (fun (column, expression) ->
@@ -27796,7 +27827,8 @@ let transactionWriteTargets
         |> Option.bind (fun values ->
             let columns, row = List.unzip values
             insertTargets tableName columns [ row ])
-    | _ -> None
+        |> Option.toList
+    | _ -> []
 
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) =
     let root = Auth.account "root" "%"

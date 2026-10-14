@@ -1445,6 +1445,111 @@ let tests =
               | ResultSet(_, []) -> ()
               | result -> failtestf "expected the autocommit delete to remove the row, got %A" result
 
+          testCase "multi-target joined update rebases both target tables"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_multi_a (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_multi_b (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "INSERT INTO tx_multi_a VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_multi_b VALUES (1, 0)" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, ownerUpdate = handle owner "UPDATE tx_multi_a SET n=n+1 WHERE id=1"
+              Expect.equal ownerUpdate (Affected 1UL) "the owner changes the first target"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              let sql =
+                  "UPDATE tx_multi_a a JOIN tx_multi_b b ON b.id=a.id SET a.n=a.n+1,b.n=b.n+1 WHERE a.id=1"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter sql)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "multi-target update starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "multi-target update resumes"
+              let waiter, updated = waiting.Result
+              Expect.isTrue blocked "multi-target update waits for the first target"
+              Expect.equal updated (Affected 2UL) "both tables are updated"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "multi-target update commits"
+              match handle setup "SELECT n FROM tx_multi_a" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected first target to include both updates, got %A" result
+              match handle setup "SELECT n FROM tx_multi_b" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected second target to be updated once, got %A" result
+
+              let owner, _ = handle (create 4 store) "BEGIN"
+              let owner, ownerUpdate = handle owner "UPDATE tx_multi_a SET n=n+1 WHERE id=1"
+              Expect.equal ownerUpdate (Affected 1UL) "the owner changes the physical target"
+              let waiter, _ = handle (create 5 store) "BEGIN"
+              let derivedSql =
+                  "UPDATE tx_multi_a a JOIN (SELECT id FROM tx_multi_b) d ON d.id=a.id SET a.n=a.n+1 WHERE a.id=1"
+              use derivedStarted = new Threading.ManualResetEventSlim(false)
+              let derivedWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      derivedStarted.Set()
+                      handle waiter derivedSql)
+              Expect.isTrue (derivedStarted.Wait(TimeSpan.FromSeconds 1.0)) "derived-source update starts"
+              let derivedBlocked = not (derivedWaiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits again"
+              Expect.isTrue (derivedWaiting.Wait(TimeSpan.FromSeconds 5.0)) "derived-source update resumes"
+              let waiter, derivedUpdate = derivedWaiting.Result
+              Expect.isTrue derivedBlocked "the physical target is claimed despite a derived join source"
+              Expect.equal derivedUpdate (Affected 1UL) "derived-source update changes the target"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "derived-source update commits"
+              match handle setup "SELECT n FROM tx_multi_a" |> snd with
+              | ResultSet(_, [ [ Some "4" ] ]) -> ()
+              | result -> failtestf "expected the derived-source update after the owner, got %A" result
+
+          testCase "joined deletes claim every named target table"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_delete_a (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_delete_b (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "INSERT INTO tx_delete_a VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_delete_b VALUES (1, 0)" |> ignore
+
+              let runContendedDelete ownerId waiterId sql expected =
+                  let owner, _ = handle (create ownerId store) "BEGIN"
+                  let owner, changed = handle owner "UPDATE tx_delete_b SET n=n+1 WHERE id=1"
+                  Expect.equal changed (Affected 1UL) "the owner changes the joined target"
+                  let waiter, _ = handle (create waiterId store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter sql)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "joined delete starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "joined delete resumes"
+                  let waiter, deleted = waiting.Result
+                  Expect.isTrue blocked "joined delete waits for the joined target"
+                  Expect.equal deleted (Affected expected) "joined delete removes the named targets"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "joined delete commits"
+
+              runContendedDelete
+                  2
+                  3
+                  "DELETE a,b FROM tx_delete_a a JOIN tx_delete_b b ON b.id=a.id WHERE a.id=1"
+                  2UL
+              match handle setup "SELECT id FROM tx_delete_a" |> snd, handle setup "SELECT id FROM tx_delete_b" |> snd with
+              | ResultSet(_, []), ResultSet(_, []) -> ()
+              | results -> failtestf "expected both target tables empty, got %A" results
+
+              handle setup "INSERT INTO tx_delete_a VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_delete_b VALUES (1, 0)" |> ignore
+              runContendedDelete
+                  4
+                  5
+                  "DELETE b FROM tx_delete_a a JOIN tx_delete_b b ON b.id=a.id WHERE a.id=1"
+                  1UL
+              match handle setup "SELECT id FROM tx_delete_a" |> snd, handle setup "SELECT id FROM tx_delete_b" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]), ResultSet(_, []) -> ()
+              | results -> failtestf "expected only the joined target to be removed, got %A" results
+
           testCase "an autocommit full-scan update waits for a transaction changing the same row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -17,4 +17,5 @@ Write-target discovery now claims first-table rows when a joined DELETE names
 that table as its sole target. The existing row wait and snapshot rebase path
 handles the concurrent update. A regression covers the explicit transaction
 and the autocommit `USING` form. Deletes naming multiple targets or a joined
-table other than the first remain outside this targeted claim path.
+table other than the first are covered
+[separately](2026-10-14-multi-target-write-rebase.md).
