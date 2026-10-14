@@ -585,6 +585,10 @@ revoked grants invalidate the joined write as in MySQL 8.4
 ([oracle and regression](torture/findings/2026-10-14-nested-join-view-security.md)).
 Renamed columns retain the component view's column identity for authorization,
 including column-level grants when two aliases reach the same base column.
+[Explicit-column INSERT and INSERT SELECT](torture/findings/2026-10-14-nested-join-view-insert.md)
+also reach a distinct-definer component in a joined view. The outer definer's
+component INSERT grants are checked by exposed column, and the inner definer's
+base-table INSERT grant remains necessary.
 
 An inner join may also use a nonmergeable aggregate or UNION view as a
 read-only row source while updating another mergeable component; INSERT still
@@ -618,7 +622,7 @@ trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE reaches a mergeable component with a distinct definer and verifies the component grant chain; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, outer view layers, and aggregate/UNION read-only join components compose writable targets; distinct-context nested INSERT, broader layered joins, and remaining expression shapes stay open | medium | subset |
+| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, outer view layers, and aggregate/UNION read-only join components compose writable targets; deeper distinct-context layers, other joined insert forms, broader layered joins, and remaining expression shapes stay open | medium | subset |
 | View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 
 ## 10. Stored routines, events, schedulers

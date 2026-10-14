@@ -25196,6 +25196,13 @@ let rec executeAs
                     (Ok current)
 
             let checkReadPaths current =
+                let writePrivileges =
+                    match statement with
+                    | Insert(_, _, _, updates, _)
+                    | InsertSelect(_, _, _, updates, _) ->
+                        if updates.IsEmpty then [ "INSERT" ] else [ "INSERT"; "UPDATE" ]
+                    | _ -> [ "UPDATE" ]
+
                 view.ReadAccessPaths
                 |> List.fold
                     (fun state path ->
@@ -25211,17 +25218,19 @@ let rec executeAs
                                             | [], _ -> Ok()
                                             | columns, Some account ->
                                                 if
-                                                    columns
-                                                    |> List.exists (fun column ->
-                                                        Auth.checkForAccount
-                                                            store
-                                                            account
-                                                            [ "UPDATE", Auth.OnColumn(nested.View.Schema, nested.View.Name, column) ]
-                                                        |> Result.isOk)
+                                                    writePrivileges
+                                                    |> List.forall (fun privilege ->
+                                                        columns
+                                                        |> List.exists (fun column ->
+                                                            Auth.checkForAccount
+                                                                store
+                                                                account
+                                                                [ privilege, Auth.OnColumn(nested.View.Schema, nested.View.Name, column) ]
+                                                            |> Result.isOk))
                                                 then
                                                     Ok()
                                                 else
-                                                    Error(1142, "UPDATE privilege missing for component view")
+                                                    Error(1142, "Write privilege missing for component view")
                                             | _, None -> Error(1449, "The current invoker account does not exist")
 
                                         writeGrant
@@ -25230,6 +25239,52 @@ let rec executeAs
                             |> Result.map (fun _ -> current)
                             |> Result.mapError (fun _ -> invalidViewError view.ViewDatabase view.ViewName)))
                     (Ok current)
+
+            let checkComponentInsertGrants current =
+                let requiredColumns =
+                    match stmt with
+                    | Insert(_, columns, _, updates, _)
+                    | InsertSelect(_, columns, _, updates, _) ->
+                        (columns |> List.map (fun column -> "INSERT", column))
+                        @ (updates |> List.map (fun (column, _) -> "UPDATE", column))
+                    | _ -> []
+
+                if requiredColumns.IsEmpty then
+                    Ok current
+                else
+                    let sourceRefs =
+                        view.AuthorizationSources
+                        |> Option.map (fun (source, joins) ->
+                            source
+                            :: (joins
+                                |> List.choose (fun join ->
+                                    match join.Table with
+                                    | FromTable table -> Some table
+                                    | _ -> None)))
+                        |> Option.defaultValue []
+
+                    let componentSource =
+                        sourceRefs
+                        |> List.tryFind (fun source ->
+                            (source.Alias |> Option.defaultValue source.Table).Equals(target.Qualifier, System.StringComparison.OrdinalIgnoreCase))
+
+                    match componentSource, registryAccount current with
+                    | Some source, Some account ->
+                        let database = source.Database |> Option.defaultValue view.ViewDatabase
+
+                        requiredColumns
+                        |> traverse (fun (privilege, column) ->
+                            match Map.tryFind (column.ToLowerInvariant()) view.Targets with
+                            | Some mapped ->
+                                let componentColumn = mapped.ComponentColumn |> Option.defaultValue mapped.Column
+                                Auth.checkForAccount
+                                    store
+                                    account
+                                    [ privilege, Auth.OnColumn(database, source.Table, componentColumn) ]
+                            | None -> Error(1054, sprintf "Unknown column '%s' in field list" column))
+                        |> Result.map (fun _ -> current)
+                        |> Result.mapError (fun _ -> invalidViewError view.ViewDatabase view.ViewName)
+                    | _ -> Error(invalidViewError view.ViewDatabase view.ViewName)
 
             match statement, view.AuthorizationSources with
             | Update update, Some(from, joins) ->
@@ -25282,6 +25337,18 @@ let rec executeAs
                     if code = 1142 || code = 1143 then invalidViewError view.ViewDatabase view.ViewName else error)
                 |> Result.bind checkReadPaths
                 |> Result.bind (fun current -> checkPath current componentPath)
+            | (Insert _ | InsertSelect _), Some _ when not componentPath.IsEmpty ->
+                match tryStoredView store view.ViewDatabase view.ViewName with
+                | None -> Error(invalidViewError view.ViewDatabase view.ViewName)
+                | Some stored ->
+                    parseStoredViewStatement stored
+                    |> Result.mapError (fun _ -> invalidViewError view.ViewDatabase view.ViewName)
+                    |> Result.bind (registryForView store registry stored)
+                    |> Result.bind checkReadPaths
+                    |> Result.bind checkComponentInsertGrants
+                    |> Result.bind (fun current -> checkPath current componentPath)
+                    |> Result.mapError (fun ((code, _) as error) ->
+                        if code = 1142 || code = 1143 then invalidViewError view.ViewDatabase view.ViewName else error)
             | _ ->
                 let accessPath = if componentPath.IsEmpty then view.AccessPath else componentPath
                 if accessPath.IsEmpty then

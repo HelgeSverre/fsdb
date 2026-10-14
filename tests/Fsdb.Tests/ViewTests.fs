@@ -583,6 +583,69 @@ let tests =
               expectOk (run store "UPDATE alias_join SET label=right_n+1 WHERE id=1") "read the other component while writing the alias"
               Expect.equal (rows store "SELECT n FROM alias_left") [ [ Some "102" ] ] "the cross-source expression uses the joined row"
 
+          testCase "joined view insert follows a component view's distinct definer"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE insert_left(id INT PRIMARY KEY AUTO_INCREMENT,n INT)"
+                    "CREATE TABLE insert_right(id INT PRIMARY KEY,left_id INT,n INT)"
+                    "INSERT INTO insert_right VALUES(1,1,100)"
+                    "CREATE USER insert_inner_owner"
+                    "CREATE USER insert_outer_owner"
+                    "GRANT SELECT,INSERT,UPDATE ON fsdb.insert_left TO insert_inner_owner"
+                    "GRANT SELECT,INSERT,UPDATE ON fsdb.insert_right TO insert_outer_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO insert_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO insert_outer_owner"
+                    "CREATE DEFINER='insert_inner_owner'@'%' VIEW insert_component AS SELECT id,n FROM insert_left"
+                    "GRANT SELECT,INSERT,UPDATE ON fsdb.insert_component TO insert_outer_owner"
+                    "CREATE DEFINER='insert_outer_owner'@'%' VIEW insert_join AS SELECT i.id,i.n,r.n AS right_n FROM insert_component i JOIN insert_right r ON r.left_id=i.id" ] do
+                  expectOk (run store sql) sql
+
+              expectOk (run store "INSERT INTO insert_join(id,n) VALUES(2,20)") "insert into the inner component"
+              Expect.equal (rows store "SELECT id,n FROM insert_left") [ [ Some "2"; Some "20" ] ] "the component row is stored"
+              expectOk (run store "REVOKE UPDATE ON fsdb.insert_component FROM insert_outer_owner") "revoke outer component update grant"
+              match run store "INSERT INTO insert_join(id,n) VALUES(2,30) ON DUPLICATE KEY UPDATE n=VALUES(n)" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected ODKU to require component UPDATE even on a duplicate, got %A" other
+              match run store "INSERT INTO insert_join(id,n) VALUES(5,50) ON DUPLICATE KEY UPDATE n=VALUES(n)" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected ODKU to require component UPDATE on a fresh key, got %A" other
+              Expect.equal (rows store "SELECT id,n FROM insert_left") [ [ Some "2"; Some "20" ] ] "denied ODKU changes nothing"
+              expectOk (run store "GRANT UPDATE ON fsdb.insert_component TO insert_outer_owner") "restore outer update grant"
+              expectOk (run store "INSERT INTO insert_join(id,n) VALUES(2,21) ON DUPLICATE KEY UPDATE n=VALUES(n)") "ODKU with both component grants"
+              Expect.equal (rows store "SELECT id,n FROM insert_left") [ [ Some "2"; Some "21" ] ] "the authorized duplicate updates"
+              expectOk (run store "REVOKE UPDATE ON fsdb.insert_left FROM insert_inner_owner") "revoke inner update grant"
+              match run store "INSERT INTO insert_join(id,n) VALUES(2,22) ON DUPLICATE KEY UPDATE n=VALUES(n)" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected ODKU to require inner base UPDATE on a duplicate, got %A" other
+              match run store "INSERT INTO insert_join(id,n) VALUES(5,50) ON DUPLICATE KEY UPDATE n=VALUES(n)" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected ODKU to require inner base UPDATE on a fresh key, got %A" other
+              expectOk (run store "GRANT UPDATE ON fsdb.insert_left TO insert_inner_owner") "restore inner update grant"
+              expectOk (run store "REVOKE INSERT ON fsdb.insert_left FROM insert_inner_owner") "revoke inner insert grant"
+              match run store "INSERT INTO insert_join(id,n) VALUES(3,30)" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the inner definer's revoked INSERT to invalidate the joined view, got %A" other
+              expectOk (run store "GRANT INSERT ON fsdb.insert_left TO insert_inner_owner") "restore inner insert grant"
+              expectOk (run store "REVOKE INSERT ON fsdb.insert_component FROM insert_outer_owner") "revoke outer component insert grant"
+              match run store "INSERT INTO insert_join(id,n) VALUES(4,40)" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the outer definer's revoked component INSERT to invalidate the joined view, got %A" other
+              Expect.equal (rows store "SELECT id,n FROM insert_left") [ [ Some "2"; Some "21" ] ] "denied inserts change nothing"
+              expectOk (run store "GRANT INSERT(n) ON fsdb.insert_component TO insert_outer_owner") "grant one insertable component column"
+              expectOk (run store "INSERT INTO insert_join(n) VALUES(50)") "insert the granted column"
+              match run store "INSERT INTO insert_join(id,n) VALUES(4,40)" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the ungranted component id to block the insert, got %A" other
+              expectOk (run store "INSERT INTO insert_join(n) SELECT 60") "insert-select the granted column"
+              match run store "INSERT INTO insert_join(id,n) SELECT 6,70" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the ungranted component id to block insert-select, got %A" other
+              Expect.equal
+                  (rows store "SELECT id,n FROM insert_left ORDER BY id")
+                  [ [ Some "2"; Some "21" ]; [ Some "3"; Some "50" ]; [ Some "4"; Some "60" ] ]
+                  "column grants protect the nested insert"
+
           testCase "join views update mergeable components beside materialized views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
