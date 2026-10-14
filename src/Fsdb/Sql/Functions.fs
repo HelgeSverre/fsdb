@@ -6634,7 +6634,12 @@ let private geometryPredicateFn functionName predicate =
             | _ -> false
         let hasOutside = positions |> List.exists (function GeographicPointPolygonPosition.Outside _ -> true | _ -> false)
         let hasInterior = positions |> List.exists isInterior
-        let hasBoundary = positions |> List.exists ((=) GeographicPointPolygonPosition.ExteriorBoundary)
+        let hasBoundary =
+            positions
+            |> List.exists (function
+                | GeographicPointPolygonPosition.ExteriorBoundary
+                | GeographicPointPolygonPosition.HoleMeridianBoundary -> true
+                | _ -> false)
         let intersects = hasInterior || hasBoundary
         let contained = not hasOutside && hasInterior
         match functionName with

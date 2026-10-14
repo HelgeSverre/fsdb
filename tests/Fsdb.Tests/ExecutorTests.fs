@@ -16267,6 +16267,12 @@ let tests =
                         match runDefault store sql with
                         | ResultSet(_, [ row ]) when row = (expected |> List.map (string >> Some)) -> ()
                         | result -> failtestf "expected MySQL geographic point-polygon topology for %s, got %A" pointText result
+                    let meridianHole = "ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,3 1,3 3,1 3,1 1))',4326)"
+                    let edgePoint = "ST_GeomFromText('POINT(2 1)',4326)"
+                    let sql = sprintf "SELECT ST_Within(%s,%s),ST_Touches(%s,%s)" edgePoint meridianHole edgePoint meridianHole
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
+                    | result -> failtestf "expected meridian hole-edge point to touch, got %A" result
                     let curved = "ST_GeomFromText('POLYGON((50 0,50 10,52 10,52 0,50 0))',4326)"
                     let apparentInside = "ST_GeomFromText('POINT(50.05 5)',4326)"
                     let antimeridian = "ST_GeomFromText('POLYGON((10 170,10 -170,20 -170,20 170,10 170))',4326)"
@@ -16507,9 +16513,15 @@ let tests =
                           "LINESTRING(4 1,5 1)", exterior, [ Some "0"; Some "0"; Some "0"; Some "0" ]
                           "LINESTRING(-1 1,0 1)", exterior, [ Some "0"; Some "1"; Some "0"; Some "0" ]
                           "LINESTRING(0 1,0 2)", exterior, [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(-1 0,5 0)", exterior, [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(-1 3,5 3)", exterior, [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(-1 0,1 0)", exterior, [ Some "0"; Some "1"; Some "0"; Some "0" ]
                           "LINESTRING(1 1,0 1)", exterior, [ Some "0"; Some "0"; Some "1"; Some "1" ]
                           "LINESTRING(0.5 1,0.5 3)", hole, [ Some "0"; Some "0"; Some "1"; Some "1" ]
                           "LINESTRING(1.5 0.5,3.0 0.5)", hole, [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(-1 0,5 0)", hole, [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(-1 1,5 1)", hole, [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(-1 0,8 0)", "MULTIPOLYGON(((0 0,0 3,3 3,3 0,0 0)),((5 -1,5 1,7 1,7 -1,5 -1)))", [ Some "1"; Some "0"; Some "0"; Some "0" ]
                           "LINESTRING(0.25 2,0.75 2)", hole, [ Some "1"; Some "0"; Some "0"; Some "0" ] ]
                     for lineText, polygonText, expected in cases do
                         let line = sprintf "ST_GeomFromText('%s',4326)" lineText

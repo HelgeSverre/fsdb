@@ -364,9 +364,19 @@ type internal GeographicPointPolygonPosition =
     | Interior
     | ExteriorBoundary
     | HoleBoundary
+    | HoleMeridianBoundary
 
 let internal geographicPointPolygonPosition referenceSystem point polygons =
     let pointLineDistance ring = geographicPointLineDistance referenceSystem point [ ring ]
+    let onMeridian ring =
+        let latitude, longitude = point
+        ring
+        |> List.pairwise
+        |> List.exists (fun ((startLatitude, startLongitude), (endLatitude, endLongitude)) ->
+            startLongitude = endLongitude
+            && longitude = startLongitude
+            && latitude >= min startLatitude endLatitude
+            && latitude <= max startLatitude endLatitude)
     let polygonPosition rings =
         match rings with
         | [] -> GeographicPointPolygonPosition.Outside None
@@ -379,7 +389,11 @@ let internal geographicPointPolygonPosition referenceSystem point polygons =
                     | [] -> None
                     | distances -> Some(List.min distances)
             match exteriorDistance with
-            | Some distance when distance < 0.00001 -> GeographicPointPolygonPosition.ExteriorBoundary
+            | Some distance when distance < 0.00001 || onMeridian exterior -> GeographicPointPolygonPosition.ExteriorBoundary
+            // A meridian hole edge is an actual geodesic boundary. Coordinate-
+            // straight samples on other hole edges may instead lie in the fill.
+            | _ when List.exists onMeridian holes ->
+                GeographicPointPolygonPosition.HoleMeridianBoundary
             | _ when holeDistances |> List.exists (fun distance -> distance < 0.00001) ->
                 GeographicPointPolygonPosition.HoleBoundary
             | _ when geographicRingContains referenceSystem point exterior
@@ -391,6 +405,8 @@ let internal geographicPointPolygonPosition referenceSystem point polygons =
         GeographicPointPolygonPosition.Interior
     elif positions |> List.contains GeographicPointPolygonPosition.HoleBoundary then
         GeographicPointPolygonPosition.HoleBoundary
+    elif positions |> List.contains GeographicPointPolygonPosition.HoleMeridianBoundary then
+        GeographicPointPolygonPosition.HoleMeridianBoundary
     elif positions |> List.contains GeographicPointPolygonPosition.ExteriorBoundary then
         GeographicPointPolygonPosition.ExteriorBoundary
     else
@@ -581,7 +597,22 @@ type internal GeographicLinePolygonTopology =
 
 let internal geographicLinePolygonTopology referenceSystem lines polygons =
     let boundarySegments = polygons |> List.collect id |> List.collect List.pairwise
+    let exteriorBoundarySegments = polygons |> List.choose List.tryHead |> List.collect List.pairwise
     let lineSegments = lines |> List.collect List.pairwise
+    let coordinateOverlap (start, endpoint) (boundaryStart, boundaryEnd) =
+        let x, y = start
+        let endX, endY = endpoint
+        let dx, dy = endX - x, endY - y
+        let lengthSquared = dx * dx + dy * dy
+        let cross (px, py) = dx * (py - y) - dy * (px - x)
+        if lengthSquared = 0.0 then None
+        elif abs (cross boundaryStart) > 1e-12 * max 1.0 lengthSquared
+             || abs (cross boundaryEnd) > 1e-12 * max 1.0 lengthSquared then None
+        else
+            let position (px, py) = ((px - x) * dx + (py - y) * dy) / lengthSquared
+            let first, second = position boundaryStart, position boundaryEnd
+            let lower, upper = max 0.0 (min first second), min 1.0 (max first second)
+            if lower < upper then Some(lower, upper) else None
     let liesOnBoundary (start, endpoint) =
         boundarySegments
         |> List.exists (fun segment ->
@@ -594,8 +625,21 @@ let internal geographicLinePolygonTopology referenceSystem lines polygons =
             line
             |> List.pairwise
             |> List.collect (fun (start, endpoint) ->
-                sampleGeographicSegment referenceSystem start endpoint |> Array.toList))
-        |> List.map (fun point -> geographicPointPolygonPosition referenceSystem point polygons)
+                let segment = start, endpoint
+                let sharedIntervals =
+                    exteriorBoundarySegments |> List.choose (coordinateOverlap segment)
+                let samples = sampleGeographicSegment referenceSystem start endpoint
+                samples
+                |> Array.mapi (fun index point ->
+                    let fraction = float index / float (samples.Length - 1)
+                    // The common coordinate interval remains boundary contact even
+                    // when sampling the longer ellipsoidal arc drifts off the edge.
+                    if sharedIntervals
+                       |> List.exists (fun (lower, upper) -> fraction >= lower && fraction <= upper) then
+                        GeographicPointPolygonPosition.ExteriorBoundary
+                    else
+                        geographicPointPolygonPosition referenceSystem point polygons)
+                |> Array.toList))
     let hasInterior =
         positions
         |> List.exists (function
@@ -652,7 +696,8 @@ let internal geographicPolygonPolygonTopology referenceSystem firstPolygons seco
             let position = geographicPointPolygonPosition referenceSystem point target
             match position with
             | GeographicPointPolygonPosition.ExteriorBoundary
-            | GeographicPointPolygonPosition.HoleBoundary -> position
+            | GeographicPointPolygonPosition.HoleBoundary
+            | GeographicPointPolygonPosition.HoleMeridianBoundary -> position
             | _ ->
                 // ponytail: Thomas interpolation can move a shared edge sample by about 0.1 m.
                 // Keep the fallback at 0.2 m until boundary intersection no longer uses samples.
@@ -683,7 +728,8 @@ let internal geographicPolygonPolygonTopology referenceSystem firstPolygons seco
         && (positions
             |> List.forall (function
                 | GeographicPointPolygonPosition.ExteriorBoundary
-                | GeographicPointPolygonPosition.HoleBoundary -> true
+                | GeographicPointPolygonPosition.HoleBoundary
+                | GeographicPointPolygonPosition.HoleMeridianBoundary -> true
                 | _ -> false))
     let sameBoundary = allBoundary firstInSecond && allBoundary secondInFirst
     let firstContainsSecond = not (hasOutside secondInFirst) && (hasInterior secondInFirst || sameBoundary)
