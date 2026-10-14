@@ -59,9 +59,9 @@ let resetDatabase (target: string) =
     exec root "DROP DATABASE IF EXISTS fsdb_bench"
     exec root "CREATE DATABASE fsdb_bench"
 
-let createSchema (conn: MySqlConnection) =
-    exec
-        conn
+/// Apply the common benchmark schema through either the wire or embedded API.
+let createSchemaWith (execute: string -> unit) =
+    execute
         """
         CREATE TABLE users (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -78,8 +78,7 @@ let createSchema (conn: MySqlConnection) =
         )
         """
 
-    exec
-        conn
+    execute
         """
         CREATE TABLE functional_users (
             id INT PRIMARY KEY,
@@ -90,8 +89,7 @@ let createSchema (conn: MySqlConnection) =
         )
         """
 
-    exec
-        conn
+    execute
         """
         CREATE TABLE places (
             id INT PRIMARY KEY,
@@ -100,8 +98,7 @@ let createSchema (conn: MySqlConnection) =
         )
         """
 
-    exec
-        conn
+    execute
         """
         CREATE TABLE articles (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -111,8 +108,7 @@ let createSchema (conn: MySqlConnection) =
         )
         """
 
-    exec
-        conn
+    execute
         """
         CREATE TABLE checked_values (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -122,12 +118,11 @@ let createSchema (conn: MySqlConnection) =
         )
         """
 
-    exec conn "CREATE TABLE trigger_source (id INT PRIMARY KEY AUTO_INCREMENT, value INT NOT NULL)"
-    exec conn "CREATE TABLE trigger_audit (id INT PRIMARY KEY AUTO_INCREMENT, source_id INT NOT NULL, value INT NOT NULL)"
-    exec conn "CREATE TRIGGER audit_trigger_source AFTER INSERT ON trigger_source FOR EACH ROW INSERT INTO trigger_audit (source_id, value) VALUES (NEW.id, NEW.value)"
+    execute "CREATE TABLE trigger_source (id INT PRIMARY KEY AUTO_INCREMENT, value INT NOT NULL)"
+    execute "CREATE TABLE trigger_audit (id INT PRIMARY KEY AUTO_INCREMENT, source_id INT NOT NULL, value INT NOT NULL)"
+    execute "CREATE TRIGGER audit_trigger_source AFTER INSERT ON trigger_source FOR EACH ROW INSERT INTO trigger_audit (source_id, value) VALUES (NEW.id, NEW.value)"
 
-    exec
-        conn
+    execute
         """
         CREATE TABLE orders (
             id INT PRIMARY KEY AUTO_INCREMENT,
@@ -142,19 +137,20 @@ let createSchema (conn: MySqlConnection) =
         )
         """
 
-    exec conn "CREATE VIEW adult_users AS SELECT id, name, email, age FROM users WHERE age >= 40"
-    exec conn "CREATE VIEW order_totals AS SELECT status, COUNT(*) AS order_count, SUM(total) AS total FROM orders GROUP BY status"
+    execute "CREATE VIEW adult_users AS SELECT id, name, email, age FROM users WHERE age >= 40"
+    execute "CREATE VIEW order_totals AS SELECT status, COUNT(*) AS order_count, SUM(total) AS total FROM orders GROUP BY status"
 
-/// Seed `userCount` users and `orderCount` orders via batched multi-row
-/// INSERTs, drawing from a fixed seed so fsdb and MySQL see byte-identical
-/// data.
-let seed (conn: MySqlConnection) =
+let createSchema (conn: MySqlConnection) = createSchemaWith (exec conn)
+
+/// Seed the benchmark tables through an executor. The fixed random seed gives
+/// the wire and embedded paths the same SQL and starting rows.
+let seedWith (execute: string -> unit) =
     let rng = Random(42)
     let batchSize = 500
     let epoch = DateTime(2020, 1, 1)
 
     let runBatch (columns: string) (sql: string) =
-        exec conn $"INSERT INTO %s{columns} VALUES %s{sql}"
+        execute $"INSERT INTO %s{columns} VALUES %s{sql}"
 
     let randomDate () =
         epoch.AddDays(float (rng.Next(365 * 5))).ToString("yyyy-MM-dd HH:mm:ss")
@@ -215,3 +211,5 @@ let seed (conn: MySqlConnection) =
                 $"('Benchmark article {i}','{body}')" ]
 
         runBatch "articles (title, body)" (String.Join(",", rows))
+
+let seed (conn: MySqlConnection) = seedWith (exec conn)

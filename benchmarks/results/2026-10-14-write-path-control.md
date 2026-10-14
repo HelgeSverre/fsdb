@@ -50,6 +50,7 @@ limits throughput. The traced FSDB trial measured 10,975 ops/sec, so its rate
 should not be compared directly with the untraced trial as a before/after.
 
 The next diagnosis should separate active SQL/write processing, publication,
-and durable completion timing under the same load. A wire-versus-embedded
-control could first bound protocol and scheduling overhead. No lock or group-
-commit change follows from this trace alone.
+and durable completion timing under the same load. A later
+[wire-versus-embedded control](2026-10-14-embedded-wire-write-control.md)
+bounded the combined server, protocol, client, and scheduling cost. No lock or
+group-commit change follows from this trace alone.
