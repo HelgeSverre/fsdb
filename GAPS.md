@@ -1406,7 +1406,10 @@ implementation effort:
    A [method-resolved wire trace](benchmarks/results/2026-10-15-wire-method-trace.md)
    sampled statement execution, dependency expansion, and WAL work under
    bracketed eight-writer load. It did not isolate a causal lock or support a
-   production scheduling change.
+   production scheduling change. [Direct timing](benchmarks/results/2026-10-15-write-dependency-timing.md)
+   then measured dependency discovery and expansion at about 9–10 µs per call
+   versus about 474 µs for the whole query handler; the sampled dependency
+   monitor is not the dominant wire-write cost.
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition

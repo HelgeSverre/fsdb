@@ -59,7 +59,7 @@ The trace gives a method-resolved view that the macOS `sample` tool could not:
 that tool reported JIT frames as unknown binaries. It does not yet establish a
 safe scheduling change. The bracketed untraced runs are close to each other,
 while tracing reduced FSDB throughput, so use untraced trials for performance
-claims. A next candidate experiment should measure dependency expansion and
-statement execution wall time directly with a low-overhead, temporary counter
-while retaining the same MySQL host-load control; do not infer a global lock
-fix from this sample alone.
+claims. The [direct timing follow-up](2026-10-15-write-dependency-timing.md)
+puts dependency discovery and expansion at roughly 9–10 µs per call against
+roughly 474 µs in the whole query handler. That rules out this path as the
+dominant source of the wire throughput gap.
