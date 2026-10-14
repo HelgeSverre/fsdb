@@ -1550,6 +1550,60 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]), ResultSet(_, []) -> ()
               | results -> failtestf "expected only the joined target to be removed, got %A" results
 
+          testCase "unqualified joined update claims its unique physical column owner"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_bare_target (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_bare_lookup (id INT PRIMARY KEY, flag INT)" |> ignore
+              handle setup "INSERT INTO tx_bare_target VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_bare_lookup VALUES (1, 1)" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_bare_target SET n=n+1 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "the owner changes the target row"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              let sql =
+                  "UPDATE tx_bare_target t JOIN tx_bare_lookup l ON l.id=t.id SET n=n+1 WHERE t.id=1"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter sql)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "unqualified joined update starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "unqualified joined update resumes"
+              let waiter, updated = waiting.Result
+              Expect.isTrue blocked "the inferred target waits for the owner"
+              Expect.equal updated (Affected 1UL) "the unique column owner is updated"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the joined update commits"
+              match handle setup "SELECT n FROM tx_bare_target" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both unqualified increments, got %A" result
+
+              let owner, _ = handle (create 4 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_bare_lookup SET flag=flag+1 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "the owner changes the joined table"
+              let waiter, _ = handle (create 5 store) "BEGIN"
+              let joinedSql =
+                  "UPDATE tx_bare_target t JOIN tx_bare_lookup l ON l.id=t.id SET flag=flag+1 WHERE t.id=1"
+              use joinedStarted = new Threading.ManualResetEventSlim(false)
+              let joinedWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      joinedStarted.Set()
+                      handle waiter joinedSql)
+              Expect.isTrue (joinedStarted.Wait(TimeSpan.FromSeconds 1.0)) "joined-table update starts"
+              let joinedBlocked = not (joinedWaiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the joined-table owner commits"
+              Expect.isTrue (joinedWaiting.Wait(TimeSpan.FromSeconds 5.0)) "joined-table update resumes"
+              let waiter, joinedUpdate = joinedWaiting.Result
+              Expect.isTrue joinedBlocked "the inferred joined-table target waits"
+              Expect.equal joinedUpdate (Affected 1UL) "the joined table is updated"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "joined-table update commits"
+              match handle setup "SELECT flag FROM tx_bare_lookup" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | result -> failtestf "expected both joined-table increments, got %A" result
+
           testCase "an autocommit full-scan update waits for a transaction changing the same row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -1302,11 +1302,13 @@ implementation effort:
 
 2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements,
    plus audited joined UPDATE and DELETE statements with named physical targets,
-   wait and rebase across all target tables. Other write shapes, including
-   joined UPDATE with unqualified assignments, still rely on optimistic catalog
-   merge ([joined UPDATE](torture/findings/2026-10-14-joined-update-rebase.md),
+   and joined UPDATE assignments whose unqualified column has one physical
+   owner, wait and rebase across all target tables. Other write shapes still
+   rely on optimistic catalog merge
+   ([joined UPDATE](torture/findings/2026-10-14-joined-update-rebase.md),
    [joined DELETE](torture/findings/2026-10-14-joined-delete-rebase.md),
-   [multi-target writes](torture/findings/2026-10-14-multi-target-write-rebase.md)).
+   [multi-target writes](torture/findings/2026-10-14-multi-target-write-rebase.md),
+   [unqualified targets](torture/findings/2026-10-14-unqualified-joined-update-rebase.md)).
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition

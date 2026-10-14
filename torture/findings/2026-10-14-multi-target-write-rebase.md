@@ -21,5 +21,6 @@ name order before the transaction snapshot is rebased once. Expecto regressions
 cover two-target UPDATE, two-target DELETE, and DELETE targeting only the
 joined table. A joined UPDATE whose write target is physical and whose lookup
 source is derived also waits and rebases, matching the MySQL probe. Joined
-UPDATE with unqualified assignments, targets inside nested join groups, and
-other write shapes remain outside this claim path.
+UPDATE with uniquely owned unqualified physical assignments is covered
+[separately](2026-10-14-unqualified-joined-update-rebase.md). Targets inside
+nested join groups and other write shapes remain outside this claim path.

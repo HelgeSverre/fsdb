@@ -27803,11 +27803,39 @@ let transactionWriteTargets
     | Update update when update.Ctes.IsEmpty && update.Joins.IsEmpty ->
         targets update.From update.Where |> Option.toList
     | Update update when update.Ctes.IsEmpty && not update.Joins.IsEmpty ->
+        let sourceSchemas =
+            if update.Assignments |> List.forall (fun assignment -> assignment.Table.IsSome) then
+                None
+            else
+                update.Joins
+                |> traverse (fun (join: Join) ->
+                    match join.Table with
+                    | FromTable table -> Ok table
+                    | _ -> Error())
+                |> Result.toOption
+                |> Option.bind (fun joined ->
+                    update.From :: joined
+                    |> traverse (fun tableRef ->
+                        match physicalFastPathTable store dbName tableRef with
+                        | Some table -> Ok(tableRef, table)
+                        | None -> Error())
+                    |> Result.toOption)
+
         update.Assignments
         |> traverse (fun assignment ->
             match assignment.Table with
             | Some name -> Ok name
-            | None -> Error())
+            | None ->
+                sourceSchemas
+                |> Option.bind (fun schemas ->
+                    schemas
+                    |> List.filter (fun (_, table) ->
+                        table.Columns
+                        |> List.exists (fun column -> equalsIgnoreCase column.Name assignment.Column))
+                    |> function
+                        | [ (owner, _) ] -> Some(owner.Alias |> Option.defaultValue owner.Table)
+                        | _ -> None)
+                |> function Some name -> Ok name | None -> Error())
         |> Result.toOption
         |> Option.map (fun names -> joinedTargets update.From update.Joins names update.Where)
         |> Option.defaultValue []

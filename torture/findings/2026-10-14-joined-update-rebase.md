@@ -21,7 +21,8 @@ existing row wait and snapshot rebase path then lets the waiting statement
 evaluate `n+1` against the committed value. An Expecto regression covers both
 explicit transactions and a waiting autocommit statement.
 
-Updates with unqualified assignments and other transaction write shapes need
-separate MySQL comparisons. Multi-target joined writes are covered
-[separately](2026-10-14-multi-target-write-rebase.md), as is the analogous
+Updates with a uniquely owned unqualified physical assignment are covered
+[separately](2026-10-14-unqualified-joined-update-rebase.md). Other transaction
+write shapes need separate MySQL comparisons. Multi-target joined writes are
+covered [separately](2026-10-14-multi-target-write-rebase.md), as is the analogous
 [joined DELETE case](2026-10-14-joined-delete-rebase.md).
