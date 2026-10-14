@@ -76,3 +76,20 @@ mismatches in the 345-case corpus. Neither an endpoint-transition shortcut nor
 the current spherical intersection predicate distinguishes MySQL's two
 relations. That probe was reverted; the remaining work needs a more precise
 line/ring relation near the hole corner.
+
+A later MySQL-only probe split the disputed line into subsegments and inspected
+`ST_AsText(ST_Intersection(line, polygon))`. For longitude `1.001`, MySQL
+reports a short `LINESTRING` from the starting point plus a separate `POINT`
+near latitude `1.00000031`, and calls the line crossing. At longitude `2.999`,
+it reports only the short `LINESTRING` and calls the line touching. Both lines
+start at a point that `ST_Within` calls interior; their middle subsegments do
+not intersect the polygon. Reversing the hole ring does not change the result.
+This suggests the disagreement lies in the near-corner line/ring intersection
+construction, rather than endpoint classification alone.
+
+The result is not explained merely by whether `ST_Intersection` contains a
+separate point: longitude `2.99999` produces a `GEOMETRYCOLLECTION` containing
+a short line and a point, yet MySQL still calls it touching. Offsets from
+`1.00001` through `2.99` in the same probe were crossings; `2.999` and
+`2.99999` were touches. A threshold or component-count special case would
+encode this sample without establishing a general geographic topology rule.
