@@ -12606,6 +12606,27 @@ let tests =
                     | ResultSet(_, [ [ Some "21" ] ]) -> ()
                     | other -> failtestf "expected an unindexable OR branch to retain its rows, got %A" other
 
+                    for prefix, source in
+                        [ "", "(SELECT id,user_id FROM or_orders) o"
+                          "WITH candidates AS (SELECT id,user_id FROM or_orders)", "candidates o" ] do
+                        calls <- 0
+
+                        match
+                            run store registry
+                                (prefix
+                                 + " SELECT u.id, (SELECT COUNT(*) FROM " + source
+                                 + " WHERE (o.user_id=u.id OR o.user_id=u.id+1) "
+                                 + "AND TOUCH(o.id)=o.id) FROM or_users u ORDER BY u.id")
+                        with
+                        | ResultSet(_, rows) ->
+                            Expect.equal
+                                (rows |> List.map (fun row -> row.[1]))
+                                (([ 1..49 ] |> List.map (fun _ -> Some "40")) @ [ Some "20" ])
+                                "pass-through source retains correlated OR counts"
+                        | other -> failtestf "expected projected correlated OR counts, got %A" other
+
+                        Expect.isLessThan calls 2400 "the pass-through source probes only OR candidates"
+
                 testCase "fully covered correlated counts use index cardinality"
                 <| fun _ ->
                     let mutable calls = 0

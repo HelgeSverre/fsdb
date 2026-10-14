@@ -14431,11 +14431,9 @@ and private projectPhysicalLookupRows
     |> Result.toOption
     |> Option.map (fun projectedRows -> projection.OutputColumns, projectedRows)
 
-and private tryProjectedPhysicalEqualityRows
+and private tryProjectedPhysicalEqualityCandidates
     policy
     store
-    registry
-    dbName
     (projection: PhysicalProjection)
     ((column, value): string * Value)
     =
@@ -14445,13 +14443,11 @@ and private tryProjectedPhysicalEqualityRows
         |> Option.filter (fun (_, rows) ->
             policy = CandidateNarrowing
             || isUsefulEqualityCardinality projection.PhysicalTable.RowsArray.Count rows.Length)
-        |> Option.bind (fun (_, rows) -> projectPhysicalLookupRows store registry dbName projection rows))
+        |> Option.map snd)
 
-and private tryProjectedPhysicalEqualitiesRows
+and private tryProjectedPhysicalEqualitiesCandidates
     policy
     store
-    registry
-    dbName
     (projection: PhysicalProjection)
     (equalities: (string * Value) list)
     =
@@ -14467,15 +14463,16 @@ and private tryProjectedPhysicalEqualitiesRows
             | CandidateNarrowing -> true
             | CostedRead ->
                 isUsefulEqualityCardinality projection.PhysicalTable.RowsArray.Count lookup.CandidateCount)
-        |> Option.bind (fun (_, lookup) ->
-            lookup.CandidateRows
-            |> List.ofSeq
-            |> projectPhysicalLookupRows store registry dbName projection)
+        |> Option.map (fun (_, lookup) -> lookup.CandidateRows |> List.ofSeq)
 
     matched
     |> Option.orElseWith (fun () ->
         equalities
-        |> List.tryPick (tryProjectedPhysicalEqualityRows policy store registry dbName projection))
+        |> List.tryPick (tryProjectedPhysicalEqualityCandidates policy store projection))
+
+and private tryProjectedPhysicalEqualitiesRows policy store registry dbName projection equalities =
+    tryProjectedPhysicalEqualitiesCandidates policy store projection equalities
+    |> Option.bind (projectPhysicalLookupRows store registry dbName projection)
 
 and private tryProjectedPhysicalLiteralInRows store registry dbName (projection: PhysicalProjection) (probe: IndexInProbe) =
     probe.Columns
@@ -14542,6 +14539,42 @@ and private tryProjectedPhysicalCorrelatedEqualityLookup
         |> Option.bind (fun projection ->
             correlatedProbeEqualities (correlatedProbeSource qualifier projection.OutputColumns) whereExpr outer
             |> Option.bind (tryProjectedPhysicalEqualitiesRows CandidateNarrowing store registry dbName projection)))
+
+and private tryProjectedPhysicalCorrelatedEqualityUnionLookup
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (source: FromItem)
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    : (ColumnDef list * Value[] list) option =
+    FromItem.tryQualifier source
+    |> Option.bind (fun qualifier ->
+        tryPhysicalProjection store registry dbName source
+        |> Option.bind (fun projection ->
+            let probeSource = correlatedProbeSource qualifier projection.OutputColumns
+
+            whereExpr
+            |> optionalConjuncts
+            |> List.choose (fun expression ->
+                match disjuncts expression with
+                | [ _ ] -> None
+                | branches ->
+                    branches
+                    |> List.map (fun branch ->
+                        correlatedProbeEqualities probeSource (Some branch) outer
+                        |> Option.bind (tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection))
+                    |> tryAllSome
+                    |> Option.bind (fun candidates ->
+                        candidates
+                        |> List.collect id
+                        |> List.map fst
+                        |> Set.ofList
+                        |> Storage.rowsForRowIds projection.PhysicalTable
+                        |> projectPhysicalLookupRows store registry dbName projection))
+            |> function
+                | [] -> None
+                | candidates -> Some(List.minBy (snd >> List.length) candidates)))
 
 and private tryProjectedPhysicalCorrelatedRangeLookup
     (store: Store)
@@ -14756,18 +14789,31 @@ and private tryCorrelatedSourceLookup
             tryCorrelatedEqualityLookup store dbName table whereExpr outer
             |> Option.map (fun (columns, rows) -> columns, rows |> List.map snd)
 
-        (match equality with
-         | Some(_, rows) when rows.Length <= 1 -> equality
-         | _ ->
-             [ equality
-               tryCorrelatedEqualityUnionLookup store dbName table whereExpr outer
-               tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
+        let direct =
+            match equality with
+            | Some(_, rows) when rows.Length <= 1 -> equality
+            | _ ->
+                [ equality
+                  tryCorrelatedEqualityUnionLookup store dbName table whereExpr outer
+                  tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
+                |> fewestRows
+
+        let physicalFastPath =
+            physicalFastPathTable store dbName table
+            |> Option.exists (fun physical -> storedRowsMatchReadRows store physical.Columns)
+
+        (if physicalFastPath then
+             direct
+         else
+             [ direct
+               tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
+               tryProjectedPhysicalCorrelatedEqualityUnionLookup store registry dbName source whereExpr outer ]
              |> fewestRows)
-        |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer)
         |> chooseWithRanges
         |> Option.orElseWith materializedLookup
     | FromSubquery _ ->
         [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
+          tryProjectedPhysicalCorrelatedEqualityUnionLookup store registry dbName source whereExpr outer
           tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
         |> fewestRows
         |> chooseWithRanges
