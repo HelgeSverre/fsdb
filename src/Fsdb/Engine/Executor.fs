@@ -14679,6 +14679,23 @@ and private tryCorrelatedSourceLookup
 
     let materializedLookup () = tryMaterializedCorrelatedLookup store registry dbName source whereExpr outer
 
+    let hasRangePredicate =
+        whereExpr
+        |> Option.exists (Expression.exists (function
+            | BinOp((Gt | Gte | Lt | Lte), _, _)
+            | Between _ -> true
+            | _ -> false))
+
+    let chooseWithRanges (equality: (ColumnDef list * Value[] list) option) =
+        match equality with
+        | Some(_, rows) when rows.Length <= 1 -> equality
+        | Some _ when not hasRangePredicate -> equality
+        | _ ->
+            [ equality
+              tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer
+              tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer ]
+            |> fewestRows
+
     match source with
     | FromTable table ->
         [ tryCorrelatedEqualityLookup store dbName table whereExpr outer
@@ -14686,15 +14703,13 @@ and private tryCorrelatedSourceLookup
           tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
         |> fewestRows
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer)
-        |> Option.orElseWith (fun () -> tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer)
-        |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
+        |> chooseWithRanges
         |> Option.orElseWith materializedLookup
     | FromSubquery _ ->
         [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
           tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
         |> fewestRows
-        |> Option.orElseWith (fun () -> tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer)
-        |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
+        |> chooseWithRanges
         |> Option.orElseWith materializedLookup
     | _ -> materializedLookup ()
 

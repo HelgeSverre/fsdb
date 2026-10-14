@@ -12924,6 +12924,55 @@ let tests =
 
                     Expect.isLessThan calls 5 "the residual reads only the overlapping range candidates"
 
+                testCase "correlated physical source chooses the narrower range over a broad equality"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values.Head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE probe_users (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE probe_orders (id INT PRIMARY KEY, user_id INT, KEY (user_id))" |> ignore
+                    runDefault store "INSERT INTO probe_users VALUES (1)" |> ignore
+
+                    [ 1..1000 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (if id <= 500 then 1 else 2))
+                    |> String.concat ","
+                    |> fun rows -> runDefault store ("INSERT INTO probe_orders VALUES " + rows)
+                    |> ignore
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT (SELECT COUNT(*) FROM probe_orders o "
+                             + "WHERE TOUCH(o.id)=o.id AND o.user_id=u.id "
+                             + "AND o.id BETWEEN u.id AND u.id+5) FROM probe_users u")
+                    with
+                    | ResultSet(_, [ [ Some "6" ] ]) -> ()
+                    | other -> failtestf "expected six correlated matches, got %A" other
+
+                    Expect.isLessThan calls 20 "the range excludes the broad equality bucket before the residual"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT (SELECT COUNT(*) FROM (SELECT id,user_id FROM probe_orders) o "
+                             + "WHERE TOUCH(o.id)=o.id AND o.user_id=u.id "
+                             + "AND o.id BETWEEN u.id AND u.id+5) FROM probe_users u")
+                    with
+                    | ResultSet(_, [ [ Some "6" ] ]) -> ()
+                    | other -> failtestf "expected six projected correlated matches, got %A" other
+
+                    Expect.isLessThan calls 20 "the pass-through projection also chooses the narrower range"
+
                 testCase "an indexed pass-through derived source resolves only matching physical rows"
                 <| fun _ ->
                     let mutable calls = 0

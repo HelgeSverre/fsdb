@@ -195,8 +195,10 @@ CTEs. Materialized derived tables and stable CTEs build statement-local composit
 equality keys from their usable correlated predicates. Outer values and literals
 may bind different key parts. Numeric and matching-collation text ranges over
 materialized sources use statement-local ordered lookups. Competing equality
-and range probes choose the narrower observed candidate set. Correlated forms
-preserve MySQL NULL and multi-column error semantics.
+and range probes choose the narrower observed candidate set, including direct
+physical and pass-through projected sources
+([oracle and residual probe](torture/findings/2026-10-14-correlated-physical-range-choice.md)).
+Correlated forms preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
 multi-column `COUNT(DISTINCT ...)`, the `GROUP_CONCAT` byte ceiling,
