@@ -88,8 +88,9 @@ just test --filter-test-case <Substring>
 # or: --filter "fsdb/<list>/<case>" / --run "<full test name>"
 ```
 
-There is no CI in this repository. Run `just check` locally before handing off
-a change, plus the relevant torture lane for compatibility work.
+PR and main-branch CI run build, tests, package verification, and branch
+coverage. Run `just check` locally before handing off a change, plus the
+relevant torture lane for compatibility work.
 
 ## Performance comparisons
 

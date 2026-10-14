@@ -667,28 +667,26 @@ let private recordRollbackWork (store: Store) events =
     | None -> ()
 
 let private preparePublishedEvents (store: Store) (durableEvents: CommitEvent list) (observerEvents: CommitEvent list) =
-    let durableAction, observerError =
+    let durableAction =
         lock store.CommitLock (fun () ->
             let action =
                 store.Durability.Sink
                 |> Option.map (fun sink -> sink.Enqueue durableEvents)
                 |> Option.defaultValue ignore
 
-            let error =
-                try
-                    for event in observerEvents do
-                        for observer in store.OnCommit do
-                            observer event
+            for event in observerEvents do
+                for observer in store.OnCommit do
+                    try
+                        observer event
+                    with error ->
+                        try
+                            Log.diagnostic "Commit observer failed: %s" (error.ToString())
+                        with _ ->
+                            ()
 
-                    None
-                with error ->
-                    Some error
+            action)
 
-            action, error)
-
-    fun () ->
-        durableAction ()
-        observerError |> Option.iter raise
+    durableAction
 
 let rec private observerEvent = function
     | WithDdlAllowInvalidDates(_, event)

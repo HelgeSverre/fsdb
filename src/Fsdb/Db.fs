@@ -12,9 +12,9 @@ open Fsdb.Functions
 open Fsdb.Value
 
 /// An embeddable fsdb instance: its storage plus whatever custom functions
-/// have been registered so far. Immutable, like every other piece of fsdb's
-/// state — `registerScalar`/`registerAggregate` return a new `Db` so calls
-/// chain with `|>`. `DataDir` is `None` for the default pure in-memory mode
+/// have been registered so far. Function and transport builders return a new
+/// configuration; store-level builders and subscriptions update the shared store.
+/// `DataDir` is `None` for the default pure in-memory mode
 /// (`withDataDir` sets it) — kept on the record mainly so callers can see
 /// whether durability is on, `listen`/`registerScalar` don't need it.
 type Db =
@@ -163,16 +163,24 @@ let onCommit (handler: Storage.CommitEvent -> unit) (db: Db) : Db =
     lock db.Store.CommitLock (fun () -> db.Store.OnCommit.Add handler)
     db
 
-/// An ordered, non-blocking commit queue. Dispose it to unregister from the store.
-/// The queue is unbounded; consumers should drain it continuously.
-type CommitSubscription internal (store: Storage.Store) =
-    let channel = Channel.CreateUnbounded<Storage.CommitEvent>(UnboundedChannelOptions(SingleReader = false, SingleWriter = false))
-    let enqueue event = channel.Writer.TryWrite event |> ignore
+/// An ordered, non-blocking commit queue. When full, new events are dropped and
+/// counted; a consumer can use the count to detect a gap and resynchronize.
+/// Dispose it to unregister from the store.
+type CommitSubscription internal (store: Storage.Store, capacity: int) =
+    let channel =
+        Channel.CreateBounded<Storage.CommitEvent>(
+            BoundedChannelOptions(capacity, SingleReader = false, SingleWriter = false, FullMode = BoundedChannelFullMode.Wait)
+        )
+    let mutable droppedCount = 0L
+    let enqueue event =
+        if not (channel.Writer.TryWrite event) then
+            Interlocked.Increment(&droppedCount) |> ignore
     let mutable disposed = false
 
     do lock store.CommitLock (fun () -> store.OnCommit.Add enqueue)
 
     member _.Reader : ChannelReader<Storage.CommitEvent> = channel.Reader
+    member _.DroppedCount = Interlocked.Read(&droppedCount)
 
     interface System.IDisposable with
         member _.Dispose() =
@@ -183,7 +191,12 @@ type CommitSubscription internal (store: Storage.Store) =
                     channel.Writer.TryComplete() |> ignore)
 
 /// Subscribes to committed changes without running host code in the commit path.
-let subscribeCommits (db: Db) : CommitSubscription = new CommitSubscription(db.Store)
+let subscribeCommitsWithCapacity (capacity: int) (db: Db) : CommitSubscription =
+    if capacity <= 0 then invalidArg (nameof capacity) "Commit subscription capacity must be positive."
+    new CommitSubscription(db.Store, capacity)
+
+/// Subscribes with a queue of up to 1024 events. Check DroppedCount to detect overflow.
+let subscribeCommits (db: Db) : CommitSubscription = subscribeCommitsWithCapacity 1024 db
 
 /// Distinguishes in-process `connect` sessions from each other (for
 /// `CONNECTION_ID()`); negative so they can never collide with the

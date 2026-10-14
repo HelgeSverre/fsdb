@@ -182,6 +182,35 @@ let tests =
               let mutable later = Unchecked.defaultof<Fsdb.Storage.CommitEvent>
               Expect.isFalse (subscription.Reader.TryRead(&later)) "disposed subscription receives no new event"
 
+          testCase "failing commit observer does not change write acknowledgement or stop later observers"
+          <| fun _ ->
+              let received = ResizeArray<Fsdb.Storage.CommitEvent>()
+              let db =
+                  Fsdb.Db.create ()
+                  |> Fsdb.Db.onCommit (fun _ -> failwith "observer failed")
+                  |> Fsdb.Db.onCommit received.Add
+              use conn = Fsdb.Db.connect db
+              conn.Query "CREATE TABLE observed (n INT)" |> ignore
+              match conn.Query "INSERT INTO observed VALUES (1)" with
+              | Affected 1UL -> ()
+              | other -> failtestf "committed insert should succeed despite observer failure, got %A" other
+              Expect.equal received.Count 2 "later observer receives both committed events"
+              match conn.Query "SELECT n FROM observed" with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "committed row remains readable, got %A" other
+
+          testCase "bounded commit subscription reports dropped events"
+          <| fun _ ->
+              let db = Fsdb.Db.create ()
+              use subscription = Fsdb.Db.subscribeCommitsWithCapacity 1 db
+              use conn = Fsdb.Db.connect db
+              conn.Query "CREATE TABLE bounded_events (n INT)" |> ignore
+              conn.Query "INSERT INTO bounded_events VALUES (1)" |> ignore
+              Expect.equal subscription.DroppedCount 1L "overflow is observable"
+              let mutable first = Unchecked.defaultof<Fsdb.Storage.CommitEvent>
+              Expect.isTrue (subscription.Reader.TryRead(&first)) "the first event is retained"
+              Expect.isFalse (subscription.Reader.TryRead(&first)) "the dropped event is absent"
+
           testCase "owned database host checkpoints and closes its connections"
           <| fun _ ->
               let directory = IO.Path.Combine(IO.Path.GetTempPath(), "fsdb-owned-" + Guid.NewGuid().ToString("N"))

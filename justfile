@@ -351,3 +351,7 @@ bench-load-scale:
 # Full benchmark matrix
 [group('bench')]
 bench-comprehensive: bench bench-durable bench-scale bench-load-scale
+
+# Durable write latency and concurrent worker scaling, with provenance reports
+[group('bench')]
+bench-write-gate: bench-durable bench-load-scale

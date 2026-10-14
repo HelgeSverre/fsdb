@@ -33,6 +33,7 @@ Choose a recipe by the behavior under investigation:
 | Commit durability cost | `just bench-durable` |
 | Data-size slope | `just bench-scale` |
 | Concurrent throughput | `just bench-load` or `just bench-load-scale` |
+| Write regression gate | `just bench-write-gate` |
 | Complete local campaign | `just bench-comprehensive` |
 
 ```sh
@@ -44,6 +45,7 @@ just bench-load-scale    # throughput at 1/2/4/8/16 workers
 just bench-durable       # four-target durability-matched write latency
 just bench-scale         # scale-sensitive cases at 100k/500k rows
 just bench-comprehensive # latency, durability, data scale, and worker scale
+just bench-write-gate    # durable write latency and concurrent worker scale
 ```
 
 Prerequisites and isolation rules:

@@ -628,6 +628,8 @@ replication, lives in [GAPS.md](GAPS.md). The
 
 `--data-dir` stores two files, both binary (no JSON). Durable mode uses POSIX
 `fsync` through libc on Unix and the managed durable file flush on Windows.
+For stopped-directory backups, restore checks, and preview upgrade procedure,
+see [preview operations](docs/operations.md).
 
 The data directory is a trusted input with the same authority as the server
 process. CRC-32 detects torn or accidentally corrupted records; it does not
@@ -703,9 +705,11 @@ The [`Fsdb.Db` facade](src/Fsdb/Db.fs) owns an engine instance, its extension
 registry, and its transport settings. Register extensions before opening
 connections or serving traffic.
 
-Configuration uses pipeline-friendly builders. Most return a new `Db` value;
-`withLogger` changes the process-wide sink, while `registerTable` and
-`onCommit` attach state to the current store:
+Configuration uses pipeline-friendly builders. Function and transport builders
+return a new `Db` value. Store-level settings, `registerTable`, and `onCommit`
+update the shared store before serving; configurations derived from the same
+`Db` therefore share those registrations. `withLogger` changes the process-wide
+sink:
 
 | API | Purpose |
 |---|---|
@@ -772,6 +776,11 @@ its host, and avoid
 using the same connection concurrently for independent transactions. `Db.own`
 takes exclusive ownership of the configured database; stop any separate wire
 listener before disposing its host.
+
+The asynchronous connection and prepared-command methods run synchronous
+engine work on a .NET thread-pool worker via `Task.Run`. Cancellation is passed
+into the engine, but these methods do not provide non-blocking database I/O;
+size the host's concurrency accordingly.
 
 ### Create an embedded host
 
@@ -1008,14 +1017,17 @@ avoid blocking, and never write back to the database from a handler; re-entry
 deadlocks. Queue events and process them after the originating statement
 returns.
 
-A handler exception can make the statement report an error, but it cannot roll
-back data that has already been published. Handlers should therefore capture
-their own failures.
+A handler exception is reported through the diagnostic sink. It does not change
+the statement's acknowledgement or prevent later handlers from receiving the
+same event. Handlers should still capture failures they need to recover from.
 
 For application work, prefer `Db.subscribeCommits db`. Its `Reader` is a
 `ChannelReader<Storage.CommitEvent>` that receives ordered commits without
 running host code in the commit path. Dispose the subscription to unregister
-it. The queue is unbounded, so drain it continuously in a long-running host.
+it. Its queue holds 1024 events by default; use
+`Db.subscribeCommitsWithCapacity capacity db` to choose a size. When full, new
+events are dropped without blocking commits. Check `DroppedCount`; a nonzero
+value means the consumer must resynchronize from database state.
 
 ### Run SQL in-process or over the wire
 

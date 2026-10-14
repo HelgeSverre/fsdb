@@ -50,7 +50,7 @@ let defaultVariables: Map<string, string option> =
     Map.ofList
         [ "version", ServerVersion
           "version_comment", "fsdb"
-          "version_compile_os", "osx"
+          "version_compile_os", (if OperatingSystem.IsWindows() then "Win64" elif OperatingSystem.IsMacOS() then "osx" else "Linux")
           "sql_mode", SqlMode.defaultText
           "binlog_format", "ROW"
           "sql_log_bin", "1"
