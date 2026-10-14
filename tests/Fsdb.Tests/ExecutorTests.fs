@@ -12892,6 +12892,38 @@ let tests =
                     assertCounts "WITH candidates AS (SELECT id, user_id FROM orders)" "candidates c"
                     assertCounts "" "(SELECT id, user_id FROM orders) c"
 
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT users.id, (SELECT COUNT(*) FROM "
+                             + "(SELECT id + 0 AS id, user_id + 0 AS user_id FROM orders LIMIT 1000) c "
+                             + "WHERE TOUCH(c.id) = c.id AND c.user_id = users.id "
+                             + "AND c.id BETWEEN users.id AND users.id + 50) FROM users WHERE users.id = 1")
+                    with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ] ]) -> ()
+                    | other -> failtestf "expected two rows in the correlated equality/range overlap, got %A" other
+
+                    Expect.isLessThan calls 5 "the residual reads only the equality/range intersection"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT users.id, (SELECT COUNT(*) FROM "
+                             + "(SELECT id + 0 AS id, user_id + 0 AS user_id FROM orders LIMIT 1000) c "
+                             + "WHERE TOUCH(c.id) = c.id AND c.user_id BETWEEN users.id AND users.id "
+                             + "AND c.id BETWEEN users.id AND users.id + 50) FROM users WHERE users.id = 1")
+                    with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ] ]) -> ()
+                    | other -> failtestf "expected two rows in the correlated range overlap, got %A" other
+
+                    Expect.isLessThan calls 5 "the residual reads only the overlapping range candidates"
+
                 testCase "an indexed pass-through derived source resolves only matching physical rows"
                 <| fun _ ->
                     let mutable calls = 0

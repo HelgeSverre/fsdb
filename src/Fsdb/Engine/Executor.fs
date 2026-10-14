@@ -14535,6 +14535,16 @@ and private tryMaterializedCorrelatedLookup
             let probeSource = correlatedProbeSource qualifier columns
             let memo = currentStatementMemo ()
 
+            let intersectCandidates candidates =
+                match candidates |> List.sortBy List.length with
+                | [] -> None
+                | [ rows ] -> Some rows
+                | shortest :: rest ->
+                    let memberships = rest |> List.map (fun rows -> HashSet<Value[]>(rows, HashIdentity.Reference))
+                    shortest
+                    |> List.filter (fun row -> memberships |> List.forall (fun rows -> rows.Contains row))
+                    |> Some
+
             let equalityCandidates () =
                 let equalities = correlatedProbeEqualities probeSource whereExpr (Some context) |> Option.defaultValue []
 
@@ -14608,13 +14618,12 @@ and private tryMaterializedCorrelatedLookup
                             |> Option.bind (fun lookup -> lookup values.Lower values.Upper))
                     |> function
                         | [] -> None
-                        | candidates -> Some(List.minBy List.length candidates)
+                        | candidates -> intersectCandidates candidates
 
             [ equalityCandidates (); rangeCandidates () ]
             |> List.choose id
-            |> function
-                | [] -> None
-                | candidates -> Some(columns, List.minBy List.length candidates))
+            |> intersectCandidates
+            |> Option.map (fun rows -> columns, rows))
     | _ -> None
 
 and private tryCorrelatedSourceLookup

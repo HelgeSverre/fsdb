@@ -224,6 +224,11 @@ key. [Warning-producing numeric CAST bounds](torture/findings/2026-10-10-numeric
 match the audited indexed SELECT result and warning count. Unindexed and
 EXPLAIN warning lifetimes remain open.
 
+Stable materialized correlated sources now [intersect usable equality and range
+candidate lists](torture/findings/2026-10-14-correlated-materialized-intersection.md)
+before residual evaluation. More complex correlated expressions without a
+compatible statement-local lookup still re-execute or scan.
+
 ## 3. Built-in functions
 
 `Functions.builtins` covers these broad families:
