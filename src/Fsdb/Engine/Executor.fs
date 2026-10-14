@@ -1971,8 +1971,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             | FromTable original, { Reference = FromTable physical } :: _, _ ->
                                 Some(physical, rewrittenJoins, original, select.Joins)
                             | FromSubquery _, derived :: { Reference = FromTable physical } :: _, join :: trailing
-                                when (join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin)
-                                     && join.Using.IsEmpty ->
+                                when (join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin) ->
                                 let reordered =
                                     { join with
                                         Table = derived.Reference

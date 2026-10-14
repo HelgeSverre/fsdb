@@ -644,7 +644,11 @@ columns and allow an outer joined view to update its physical component
 [Multiple leading read-only derived sources](torture/findings/2026-10-15-multiple-derived-join-view.md)
 now also precede a writable physical target in audited inner-join views;
 the moved target predicate is applied after all its source aliases are bound.
-Broader join-source reorderings and lateral or outer-join writes remain open.
+[Derived-first `USING` chains](torture/findings/2026-10-15-derived-using-view.md)
+also retain writable metadata and update a physical target, including a merged
+key projection; multiple leading derived sources are supported when every
+`USING` join merges the same keys. Broader join-source reorderings and lateral
+or outer-join writes remain open.
 
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
 refused with MySQL-compatible errors.

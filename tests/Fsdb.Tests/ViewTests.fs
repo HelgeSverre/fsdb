@@ -958,6 +958,39 @@ let tests =
               expectOk (update ()) "authorized update through derived join"
               Expect.equal (rows store "SELECT n FROM derived_grant_target") [ [ Some "11" ] ] "authorized update reaches the physical target"
 
+          testCase "derived-first USING join views update their physical component"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE derived_using_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE derived_using_source(id INT PRIMARY KEY,flag INT)"
+                    "CREATE TABLE derived_using_second(id INT PRIMARY KEY,aux INT)"
+                    "CREATE TABLE derived_using_third(id INT PRIMARY KEY,extra INT)"
+                    "INSERT INTO derived_using_target VALUES(1,4),(2,20)"
+                    "INSERT INTO derived_using_source VALUES(1,7),(3,9)"
+                    "INSERT INTO derived_using_second VALUES(1,8),(3,10)"
+                    "INSERT INTO derived_using_third VALUES(1,11),(3,12)"
+                    "CREATE VIEW derived_using_qualified AS SELECT a.id AS aid,a.n,d.id AS did FROM (SELECT id FROM derived_using_source GROUP BY id) d JOIN derived_using_target a USING(id)"
+                    "CREATE VIEW derived_using_merged AS SELECT id,n FROM (SELECT id FROM derived_using_source GROUP BY id) d JOIN derived_using_target a USING(id)"
+                    "CREATE VIEW derived_using_two AS SELECT a.id AS aid,a.n,d1.id AS first_id,d2.id AS second_id FROM (SELECT id FROM derived_using_source GROUP BY id) d1 JOIN (SELECT id FROM derived_using_second GROUP BY id) d2 USING(id) JOIN derived_using_target a USING(id)"
+                    "CREATE VIEW derived_using_three AS SELECT a.id AS aid,a.n FROM (SELECT id FROM derived_using_source GROUP BY id) d1 JOIN (SELECT id FROM derived_using_second GROUP BY id) d2 USING(id) JOIN (SELECT id FROM derived_using_third GROUP BY id) d3 USING(id) JOIN derived_using_target a USING(id)" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT table_name,is_updatable FROM information_schema.views WHERE table_name LIKE 'derived_using_%' ORDER BY table_name")
+                  [ [ Some "derived_using_merged"; Some "YES" ]; [ Some "derived_using_qualified"; Some "YES" ]; [ Some "derived_using_three"; Some "YES" ]; [ Some "derived_using_two"; Some "YES" ] ]
+                  "each view retains the writable physical component"
+              expectOk (run store "UPDATE derived_using_qualified SET n=n+1 WHERE aid=1") "qualified update"
+              expectOk (run store "UPDATE derived_using_merged SET n=n+1 WHERE id=1") "merged-column update"
+              Expect.equal
+                  (run store "UPDATE derived_using_qualified SET n=n+1 WHERE aid=2")
+                  (Affected 0UL) "the USING key excludes unmatched target rows"
+              expectOk (run store "UPDATE derived_using_two SET n=n+1 WHERE aid=1") "two derived sources update"
+              expectOk (run store "UPDATE derived_using_three SET n=n+1 WHERE aid=1") "three derived sources update"
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_using_target ORDER BY id")
+                  [ [ Some "1"; Some "8" ]; [ Some "2"; Some "20" ] ]
+                  "USING still filters by the shared key"
+
           testCase "join views update beside derived star projections"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
