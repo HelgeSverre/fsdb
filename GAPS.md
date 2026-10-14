@@ -513,6 +513,10 @@ measures keyless inserts at one, four, and eight writers with WAL-backed and
 in-memory fsdb on the same host. Durability lowers throughput, but both modes
 retain a weaker worker-scaling slope than durable MySQL; the sampled trace
 does not isolate a lock or group-commit cause.
+A [wire scheduling control](benchmarks/results/2026-10-14-wire-write-scheduling-profile.md)
+finds statement dispatch dominating measured per-connection wire time and no
+throughput recovery from doubling writers beyond eight. The timing includes
+waits and does not yet isolate publication or WAL completion.
 
 ## 8. Persistence and durability
 
