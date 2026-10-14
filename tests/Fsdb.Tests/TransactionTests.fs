@@ -1393,6 +1393,66 @@ let tests =
               | ResultSet(_, [ [ Some "4" ] ]) -> ()
               | result -> failtestf "expected the autocommit increment after the owner, got %A" result
 
+          testCase "CTE-joined update waits for its physical target and rebases"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_cte_target (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "INSERT INTO tx_cte_target VALUES (1, 0)" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_cte_target SET n=n+1 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "the owner changes the target row"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              let sql =
+                  "WITH c AS (SELECT 1 AS id) "
+                  + "UPDATE tx_cte_target t JOIN c ON c.id=t.id SET t.n=t.n+1 WHERE t.id=1"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter sql)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the CTE writer starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the CTE writer resumes"
+              let waiter, updated = waiting.Result
+              Expect.isTrue blocked "the CTE writer waits for its physical target"
+              Expect.equal updated (Affected 1UL) "the CTE writer updates the committed row"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the CTE writer commits"
+              match handle setup "SELECT n FROM tx_cte_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both increments after CTE write contention, got %A" result
+
+          testCase "CTE-joined delete waits for its physical target"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_cte_delete (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "INSERT INTO tx_cte_delete VALUES (1, 0)" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_cte_delete SET n=n+1 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "the owner changes the target row"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              let sql =
+                  "WITH c AS (SELECT 1 AS id) "
+                  + "DELETE t FROM tx_cte_delete t JOIN c ON c.id=t.id WHERE t.id=1"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter sql)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the CTE delete starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the CTE delete resumes"
+              let waiter, deleted = waiting.Result
+              Expect.isTrue blocked "the CTE delete waits for its physical target"
+              Expect.equal deleted (Affected 1UL) "the CTE delete removes the committed row"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the CTE delete commits"
+              match handle setup "SELECT id FROM tx_cte_delete" |> snd with
+              | ResultSet(_, []) -> ()
+              | result -> failtestf "expected no row after CTE delete contention, got %A" result
+
           testCase "joined single-target delete waits for an updated target row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

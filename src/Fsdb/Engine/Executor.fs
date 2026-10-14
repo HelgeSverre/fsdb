@@ -27730,19 +27730,28 @@ let transactionWriteTargets
     (dbName: string)
     (statement: Statement)
     : (string * string * WriteLockTargets) list =
+    let cteNames =
+        match statement with
+        | Update update -> update.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
+        | Delete delete -> delete.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
+        | _ -> Set.empty
+
     let targets (tableRef: TableRef) predicate =
         let database = tableRef.Database |> Option.defaultValue dbName
 
-        tryPhysicalCandidates store registry dbName tableRef predicate
-        |> Option.map (fun (_, rows) -> rows)
-        |> Option.orElseWith (fun () ->
-            physicalFastPathTable store dbName tableRef
-            |> Option.map (fun table -> table.RowsArray.Indexed |> Seq.toList))
-        |> Option.map (fun rows ->
-            database,
-            tableRef.Table,
-            { RowIds = rows |> List.map fst
-              Keys = [] })
+        if tableRef.Database.IsNone && Set.contains (tableRef.Table.ToLowerInvariant()) cteNames then
+            None
+        else
+            tryPhysicalCandidates store registry dbName tableRef predicate
+            |> Option.map (fun (_, rows) -> rows)
+            |> Option.orElseWith (fun () ->
+                physicalFastPathTable store dbName tableRef
+                |> Option.map (fun table -> table.RowsArray.Indexed |> Seq.toList))
+            |> Option.map (fun rows ->
+                database,
+                tableRef.Table,
+                { RowIds = rows |> List.map fst
+                  Keys = [] })
 
     let insertTargets tableName (columns: string list) rows =
         let database, table = splitQualified dbName tableName
@@ -27791,9 +27800,9 @@ let transactionWriteTargets
         |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
 
     match statement with
-    | Update update when update.Ctes.IsEmpty && update.Joins.IsEmpty ->
+    | Update update when update.Joins.IsEmpty ->
         targets update.From update.Where |> Option.toList
-    | Update update when update.Ctes.IsEmpty && not update.Joins.IsEmpty ->
+    | Update update when not update.Joins.IsEmpty ->
         let sourceSchemas =
             if update.Assignments |> List.forall (fun assignment -> assignment.Table.IsSome) then
                 None
@@ -27830,9 +27839,9 @@ let transactionWriteTargets
         |> Result.toOption
         |> Option.map (fun names -> joinedTargets update.From update.Joins names update.Where)
         |> Option.defaultValue []
-    | Delete delete when delete.Ctes.IsEmpty && delete.Joins.IsEmpty ->
+    | Delete delete when delete.Joins.IsEmpty ->
         targets delete.From delete.Where |> Option.toList
-    | Delete delete when delete.Ctes.IsEmpty && not delete.Joins.IsEmpty ->
+    | Delete delete when not delete.Joins.IsEmpty ->
         joinedTargets delete.From delete.Joins delete.Targets delete.Where
     | Insert(tableName, columns, rows, _, _)
     | Replace(tableName, columns, rows) -> literalInsertTargets tableName columns rows |> Option.toList
