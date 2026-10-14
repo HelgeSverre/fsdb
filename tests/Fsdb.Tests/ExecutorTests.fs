@@ -12544,6 +12544,68 @@ let tests =
 
                     Expect.isGreaterThan effects 1000 "an effectful outer expression is not hoisted into an index probe"
 
+                testCase "correlated indexed OR probes only matching inner rows"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE or_users (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE or_orders (id INT PRIMARY KEY, user_id INT, KEY ix_user (user_id))" |> ignore
+
+                    runDefault store ("INSERT INTO or_users VALUES " + ([ 1..50 ] |> List.map (sprintf "(%d)") |> String.concat ","))
+                    |> ignore
+
+                    runDefault store
+                        ("INSERT INTO or_orders VALUES "
+                         + ([ 1..1000 ]
+                            |> List.map (fun id -> sprintf "(%d,%d)" id (((id - 1) % 50) + 1))
+                            |> String.concat ","))
+                    |> ignore
+
+                    match
+                        run store registry
+                            ("SELECT u.id, (SELECT COUNT(*) FROM or_orders o "
+                             + "WHERE (o.user_id=u.id OR o.user_id=u.id+1) "
+                             + "AND TOUCH(o.id)=o.id) FROM or_users u ORDER BY u.id")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows.Length 50 "all outer rows are present"
+                        Expect.equal
+                            (rows |> List.map (fun row -> row.[1]))
+                            (([ 1..49 ] |> List.map (fun _ -> Some "40")) @ [ Some "20" ])
+                            "adjacent keys have their MySQL counts"
+                    | other -> failtestf "expected correlated OR counts, got %A" other
+
+                    Expect.isLessThan calls 2400 "the residual sees the union of indexed candidates"
+
+                    calls <- 0
+
+                    match
+                        run store registry
+                            ("SELECT (SELECT COUNT(*) FROM or_orders o "
+                             + "WHERE (o.user_id=u.id OR o.user_id=u.id) "
+                             + "AND TOUCH(o.id)=o.id) FROM or_users u WHERE u.id=1")
+                    with
+                    | ResultSet(_, [ [ Some "20" ] ]) -> ()
+                    | other -> failtestf "expected duplicate OR branches to count each row once, got %A" other
+
+                    Expect.isLessThan calls 40 "duplicate branches do not repeat residual work"
+
+                    match
+                        run store registry
+                            ("SELECT (SELECT COUNT(*) FROM or_orders o "
+                             + "WHERE (o.user_id=u.id OR MOD(o.id,1000)=1) "
+                             + "AND TOUCH(o.id)=o.id) FROM or_users u WHERE u.id=2")
+                    with
+                    | ResultSet(_, [ [ Some "21" ] ]) -> ()
+                    | other -> failtestf "expected an unindexable OR branch to retain its rows, got %A" other
+
                 testCase "fully covered correlated counts use index cardinality"
                 <| fun _ ->
                     let mutable calls = 0

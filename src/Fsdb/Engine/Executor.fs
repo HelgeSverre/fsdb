@@ -14075,6 +14075,36 @@ and private tryCorrelatedEqualityLookup
                     Storage.tryEqualityLookup store tableDb tref.Table column value
                     |> Option.orElseWith (fun () -> transientLookup tableDb column value)))))
 
+and private tryCorrelatedEqualityUnionLookup
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    : (ColumnDef list * Value[] list) option =
+    whereExpr
+    |> optionalConjuncts
+    |> List.choose (fun expression ->
+        match disjuncts expression with
+        | [ _ ] -> None
+        | branches ->
+            branches
+            |> List.map (fun branch -> tryCorrelatedEqualityLookup store dbName tref (Some branch) outer)
+            |> tryAllSome
+            |> Option.map (fun lookups ->
+                let columns = lookups.Head |> fst
+                let rows =
+                    lookups
+                    |> List.collect snd
+                    |> List.distinctBy fst
+                    |> List.sortBy fst
+                    |> List.map snd
+
+                columns, rows))
+    |> function
+        | [] -> None
+        | candidates -> Some(List.minBy (snd >> List.length) candidates)
+
 and private tryCorrelatedFunctionalEqualityLookup
     (store: Store)
     (registry: Registry)
@@ -14722,10 +14752,17 @@ and private tryCorrelatedSourceLookup
 
     match source with
     | FromTable table ->
-        [ tryCorrelatedEqualityLookup store dbName table whereExpr outer
-          |> Option.map (fun (columns, rows) -> columns, rows |> List.map snd)
-          tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
-        |> fewestRows
+        let equality =
+            tryCorrelatedEqualityLookup store dbName table whereExpr outer
+            |> Option.map (fun (columns, rows) -> columns, rows |> List.map snd)
+
+        (match equality with
+         | Some(_, rows) when rows.Length <= 1 -> equality
+         | _ ->
+             [ equality
+               tryCorrelatedEqualityUnionLookup store dbName table whereExpr outer
+               tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
+             |> fewestRows)
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer)
         |> chooseWithRanges
         |> Option.orElseWith materializedLookup
