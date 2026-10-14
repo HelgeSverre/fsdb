@@ -349,10 +349,20 @@ bench-load-scale:
     @rm -f benchmarks/load-report.md
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-load-scale.md"
 
+# Durability-matched worker scaling
+[group('bench')]
+bench-load-scale-durable:
+    @mkdir -p benchmarks/results
+    @FSDB_LOAD_FSDB_TARGET=fsdb-wal FSDB_LOAD_WORKERS=1,2,4,8,16 FSDB_LOAD_TRIALS=3 FSDB_LOAD_WARMUP=2 FSDB_LOAD_SECONDS=10 just _bench-run --load
+    @just _bench-header "fsdb WAL; MySQL durable" > "benchmarks/results/$(git rev-parse --short HEAD)-load-scale-durable.md"
+    @cat benchmarks/load-report.md >> "benchmarks/results/$(git rev-parse --short HEAD)-load-scale-durable.md"
+    @rm -f benchmarks/load-report.md
+    @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-load-scale-durable.md"
+
 # Full benchmark matrix
 [group('bench')]
 bench-comprehensive: bench bench-durable bench-scale bench-load-scale
 
 # Durable write latency and concurrent worker scaling, with provenance reports
 [group('bench')]
-bench-write-gate: bench-durable bench-load-scale
+bench-write-gate: bench-durable bench-load-scale-durable

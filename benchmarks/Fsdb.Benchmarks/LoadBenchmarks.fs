@@ -106,6 +106,13 @@ let private warmupSeconds = envFloat "FSDB_LOAD_WARMUP" 1.0
 let private measureSeconds = envFloat "FSDB_LOAD_SECONDS" 5.0
 let private trialCount = envInt "FSDB_LOAD_TRIALS" 1
 
+let private fsdbTarget =
+    match Environment.GetEnvironmentVariable "FSDB_LOAD_FSDB_TARGET" with
+    | null
+    | "fsdb" -> "fsdb"
+    | "fsdb-wal" -> "fsdb-wal"
+    | value -> invalidArg "FSDB_LOAD_FSDB_TARGET" $"Unknown load target: {value}"
+
 /// One worker: its own connection, a disjoint id slice, ops until `seconds`.
 /// `insertCounter` is process-wide so warmup and measure phases (and every
 /// worker) mint distinct emails across the whole run — the `email` column is
@@ -275,16 +282,15 @@ let private relativeStandardDeviation (samples: float list) =
         sqrt variance / mean
 
 let run () : int =
-    let bin = BenchServer.benchBin ()
     let workloads = envWorkloads ()
 
     let measureFsdb workload workerCount =
-        let proc = BenchServer.startFsdb bin None
+        let session = BenchServer.startTarget fsdbTarget
 
         try
             measure "fsdb" workload workerCount
         finally
-            BenchServer.stopFsdb proc
+            BenchServer.stopTarget session
 
     let measureMysql workload workerCount =
         BenchServer.resetAndSeed "mysql"
@@ -324,7 +330,7 @@ let run () : int =
     let workersLabel = workerCounts |> List.map string |> String.concat ", "
 
     let table =
-        [ yield $"Workers: {workersLabel}. {trialCount} trial(s), {measureLabel}s measured after {warmupLabel}s warmup."
+        [ yield $"Targets: {fsdbTarget} and durable MySQL. Workers: {workersLabel}. {trialCount} trial(s), {measureLabel}s measured after {warmupLabel}s warmup."
           yield ""
           yield "| Workers | Workload | fsdb ops/sec | fsdb RSD | fsdb retry | MySQL ops/sec | MySQL RSD | MySQL retry | fsdb/MySQL |"
           yield "|---:|---|---:|---:|---:|---:|---:|---:|---:|"

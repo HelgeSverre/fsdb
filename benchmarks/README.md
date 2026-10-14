@@ -33,6 +33,7 @@ Choose a recipe by the behavior under investigation:
 | Commit durability cost | `just bench-durable` |
 | Data-size slope | `just bench-scale` |
 | Concurrent throughput | `just bench-load` or `just bench-load-scale` |
+| Durable concurrent writes | `just bench-load-scale-durable` |
 | Write regression gate | `just bench-write-gate` |
 | Complete local campaign | `just bench-comprehensive` |
 
@@ -42,6 +43,7 @@ just bench-features      # selected SQL features, results -> results/<git-sha>-f
 just bench-quick         # ShortRun validation, results -> results/<git-sha>-quick.md
 just bench-load          # 8-worker throughput, results -> results/<git-sha>-load.md
 just bench-load-scale    # throughput at 1/2/4/8/16 workers
+just bench-load-scale-durable # WAL-backed fsdb versus durable MySQL at 1/2/4/8/16 workers
 just bench-durable       # four-target durability-matched write latency
 just bench-scale         # scale-sensitive cases at 100k/500k rows
 just bench-comprehensive # latency, durability, data scale, and worker scale
@@ -68,6 +70,10 @@ The ordinary recipes start fsdb without `--data-dir`, while MySQL retains its
 normal durability settings. That asymmetry is intentional for broad read and
 planner profiling, but its write results are not durable-performance evidence.
 Use `just bench-durable` for matched storage semantics.
+`just bench-load-scale-durable` starts each fsdb trial with a disposable WAL
+directory and removes it afterward. `just bench-write-gate` uses that matched
+load recipe. A focused `just _bench-run --load` can select the same mode with
+`FSDB_LOAD_FSDB_TARGET=fsdb-wal`.
 
 ### Focused runs
 
