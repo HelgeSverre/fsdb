@@ -5730,19 +5730,29 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE null_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
-    let private yearFunctionalIndex =
-        { Name = "year-functional-index"
+    let private calendarPartFunctionalIndex =
+        { Name = "calendar-part-functional-index"
           Setup =
             [| "CREATE TABLE year_probe(id INT PRIMARY KEY,d DATE,KEY ix_year ((YEAR(d))))"
-               "INSERT INTO year_probe VALUES(1,'2024-02-29'),(2,'2023-01-01'),(3,NULL),(4,'2024-12-31')" |]
+               "INSERT INTO year_probe VALUES(1,'2024-02-29'),(2,'2023-01-01'),(3,NULL),(4,'2024-12-31')"
+               "CREATE TABLE calendar_probe(id INT PRIMARY KEY,d DATE,KEY ix_month ((MONTH(d))),KEY ix_day ((DAY(d))))"
+               "INSERT INTO calendar_probe VALUES(1,'2024-02-29'),(2,'2023-03-01'),(3,NULL),(4,'2024-02-01')" |]
           Steps =
             [| Contract.query "source-years" "SELECT id,YEAR(d) FROM year_probe ORDER BY id"
                Contract.query "year-key" "SELECT id FROM year_probe WHERE YEAR(d)=2024 ORDER BY id"
                Contract.query "null-key" "SELECT id FROM year_probe WHERE YEAR(d) IS NULL ORDER BY id"
                Contract.execute "update" "UPDATE year_probe SET d='2025-01-01' WHERE id=1"
                Contract.query "old-key-removed" "SELECT id FROM year_probe WHERE YEAR(d)=2024 ORDER BY id"
-               Contract.query "new-key-added" "SELECT id FROM year_probe WHERE YEAR(d)=2025 ORDER BY id" |]
-          Cleanup = [| "DROP TABLE year_probe" |]
+               Contract.query "new-key-added" "SELECT id FROM year_probe WHERE YEAR(d)=2025 ORDER BY id"
+               Contract.query "source-calendar-parts" "SELECT id,MONTH(d),DAY(d),DAYOFMONTH(d) FROM calendar_probe ORDER BY id"
+               Contract.query "month-key" "SELECT id FROM calendar_probe WHERE MONTH(d)=2 ORDER BY id"
+               Contract.query "day-key" "SELECT id FROM calendar_probe WHERE DAY(d)=29 ORDER BY id"
+               Contract.query "day-alias-key" "SELECT id FROM calendar_probe WHERE DAYOFMONTH(d)=29 ORDER BY id"
+               Contract.query "calendar-null-key" "SELECT id FROM calendar_probe WHERE MONTH(d) IS NULL ORDER BY id"
+               Contract.execute "calendar-update" "UPDATE calendar_probe SET d='2025-04-30' WHERE id=1"
+               Contract.query "calendar-old-key-removed" "SELECT id FROM calendar_probe WHERE DAY(d)=29 ORDER BY id"
+               Contract.query "calendar-new-key-added" "SELECT id FROM calendar_probe WHERE MONTH(d)=4 ORDER BY id" |]
+          Cleanup = [| "DROP TABLE calendar_probe"; "DROP TABLE year_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private asciiFunctionalIndex =
@@ -11505,7 +11515,7 @@ module ContractCatalog =
            exactIntegerFunctionalBounds
            numericFunctionalBounds
            isNullFunctionalIndex
-           yearFunctionalIndex
+           calendarPartFunctionalIndex
            asciiFunctionalIndex
            ordFunctionalIndex
            unhexFunctionalIndex

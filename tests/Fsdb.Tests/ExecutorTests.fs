@@ -8211,6 +8211,31 @@ let tests =
                     Expect.equal datetimePlan.AccessType (Some "ref") "the DATETIME year key serves equality"
                     Expect.equal datetimePlan.KeyLength (Some "2") "the DATETIME year key uses two bytes"
 
+                testCase "MONTH and DAY date parts use functional equality indexes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE date_parts (id INT PRIMARY KEY, d DATE, INDEX ix_month ((MONTH(d))), INDEX ix_day ((DAY(d))))" |> ignore
+                    let rowsFor special ordinary =
+                        [ for id in 1 .. 300 ->
+                              let date = if id = 17 || id = 219 then special else ordinary
+                              sprintf "(%d, '%s')" id date ]
+                        |> String.concat ", "
+                    runDefault store ("INSERT INTO date_parts VALUES " + rowsFor "2024-02-29" "2023-01-01") |> ignore
+                    for expression in [ "MONTH(d)=2"; "DAY(d)=29"; "DAYOFMONTH(d)=29" ] do
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM date_parts WHERE {expression} ORDER BY id")
+                            (ResultSet([ "id" ], [ [ Some "17" ]; [ Some "219" ] ]))
+                            "the date-part predicate returns matching dates"
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM date_parts WHERE {expression}" |> explainRow
+                        Expect.equal plan.AccessType (Some "ref") "the date-part predicate uses its key"
+                        Expect.equal plan.KeyLength (Some "5") "MONTH and DAY use nullable INT keys"
+                    runDefault store "CREATE TABLE datetime_parts (id INT PRIMARY KEY, d DATETIME, INDEX ix_month ((MONTH(d))), INDEX ix_day ((DAY(d))))" |> ignore
+                    runDefault store ("INSERT INTO datetime_parts VALUES " + rowsFor "2024-02-29 23:59:59" "2023-01-01 00:00:00") |> ignore
+                    for expression in [ "MONTH(d)=2"; "DAYOFMONTH(d)=29" ] do
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM datetime_parts WHERE {expression}" |> explainRow
+                        Expect.equal plan.AccessType (Some "ref") "DATETIME calendar parts use their index"
+                        Expect.equal plan.KeyLength (Some "5") "DATETIME month and day keys use five bytes"
+
                 testCase "functional equality and range probes use expression indexes"
                 <| fun _ ->
                     let mutable calls = 0

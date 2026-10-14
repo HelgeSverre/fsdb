@@ -461,6 +461,8 @@ and IndexTransform =
     | ByteLength
     | BitLength
     | YearPart
+    | MonthPart
+    | DayPart
     | FirstByte
     | FirstCharacterCode
     | DecodedHex
