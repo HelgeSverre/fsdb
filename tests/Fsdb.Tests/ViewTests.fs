@@ -958,6 +958,28 @@ let tests =
               expectOk (update ()) "authorized update through derived join"
               Expect.equal (rows store "SELECT n FROM derived_grant_target") [ [ Some "11" ] ] "authorized update reaches the physical target"
 
+          testCase "join views update beside derived star projections"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE derived_star_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE derived_star_source(id INT,marker INT)"
+                    "INSERT INTO derived_star_target VALUES(1,10)"
+                    "INSERT INTO derived_star_source VALUES(1,100)"
+                    "CREATE VIEW derived_star_forward AS SELECT a.id,a.n,d.marker FROM derived_star_target a JOIN (SELECT * FROM derived_star_source) d ON d.id=a.id"
+                    "CREATE VIEW derived_star_reverse AS SELECT a.id,a.n,d.marker FROM (SELECT * FROM derived_star_source) d JOIN derived_star_target a ON d.id=a.id"
+                    "CREATE VIEW derived_star_qualified AS SELECT a.id,a.n,d.marker FROM derived_star_target a JOIN (SELECT b.* FROM derived_star_source b) d ON d.id=a.id" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT table_name,is_updatable FROM information_schema.views WHERE table_name LIKE 'derived_star_%' ORDER BY table_name")
+                  [ [ Some "derived_star_forward"; Some "YES" ]; [ Some "derived_star_qualified"; Some "YES" ]; [ Some "derived_star_reverse"; Some "YES" ] ]
+                  "star-derived joins are updatable"
+              expectOk (run store "UPDATE derived_star_forward SET n=11 WHERE id=1") "update beside unqualified star"
+              expectOk (run store "UPDATE derived_star_reverse SET n=12 WHERE id=1") "update with derived source first"
+              expectOk (run store "UPDATE derived_star_qualified SET n=13 WHERE id=1") "update beside qualified star"
+              Expect.equal (rows store "SELECT n FROM derived_star_target") [ [ Some "13" ] ] "physical updates persist"
+
           testCase "join views update mergeable components beside union views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

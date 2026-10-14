@@ -1626,6 +1626,49 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             | Star _ -> None
                             | _ -> Some(InformationSchema.exprToSql expression)))
 
+                let rec derivedColumnNames body =
+                    let definition =
+                        match body with
+                        | PlainSelect select -> select
+                        | UnionSelect(first, _, _, _, _) -> first
+
+                    let items =
+                        (definition.From |> Option.toList) @ (definition.Joins |> List.map _.Table)
+
+                    let qualifierOf = function
+                        | FromTable table -> Some(table.Alias |> Option.defaultValue table.Table)
+                        | FromSubquery(_, qualifier) -> Some qualifier
+                        | _ -> None
+
+                    let expand (projection: Projection) =
+                        match projection.Expression with
+                        | Star None ->
+                            items
+                            |> List.map sourceColumnNames
+                            |> tryAllSome
+                            |> Option.map List.concat
+                        | Star(Some qualifier) ->
+                            items
+                            |> List.tryFind (fun item ->
+                                qualifierOf item
+                                |> Option.exists (fun candidate -> candidate.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)))
+                            |> Option.bind sourceColumnNames
+                        | _ -> projectedNames [ projection ] |> tryAllSome
+
+                    definition.Projections
+                    |> List.map expand
+                    |> tryAllSome
+                    |> Option.map List.concat
+
+                and sourceColumnNames = function
+                    | FromTable table ->
+                        InformationSchema.relationColumns
+                            store.Catalog
+                            (table.Database |> Option.defaultValue view.Schema)
+                            table.Table
+                    | FromSubquery(body, _) -> derivedColumnNames body
+                    | _ -> None
+
                 let resolveSource (tableRef: TableRef) : WritableViewSource option =
                     let database = tableRef.Database |> Option.defaultValue view.Schema
                     let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
@@ -1761,13 +1804,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                 let resolveSourceItem = function
                     | FromTable tableRef -> resolveSource tableRef
                     | FromSubquery(body, qualifier) as reference ->
-                        let projections =
-                            match body with
-                            | PlainSelect definition -> definition.Projections
-                            | UnionSelect(first, _, _, _, _) -> first.Projections
-
-                        projectedNames projections
-                        |> tryAllSome
+                        derivedColumnNames body
                         |> Option.filter (fun columns -> tryDuplicateIgnoreCase id columns |> Option.isNone)
                         |> Option.map (fun columns ->
                             { Reference = reference

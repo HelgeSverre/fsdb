@@ -71,7 +71,7 @@ let private tryCatalogDatabase name (catalog: Catalog) =
     |> Map.toSeq
     |> Seq.tryPick (fun (candidate, database) -> if eqI candidate name then Some database else None)
 
-let private relationColumns (catalog: Catalog) schema name =
+let internal relationColumns (catalog: Catalog) schema name =
     let tableColumns =
         catalog
         |> tryCatalogDatabase schema
