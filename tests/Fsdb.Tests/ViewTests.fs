@@ -554,6 +554,35 @@ let tests =
               | other -> failtestf "expected the outer view to become invalid after base grant revocation, got %A" other
               Expect.equal (rows store "SELECT n FROM security_right") [ [ Some "103" ] ] "the revoked base grant prevents writes"
 
+          testCase "joined view update authorizes a renamed component column"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE alias_left(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE alias_right(id INT PRIMARY KEY,left_id INT,n INT)"
+                    "INSERT INTO alias_left VALUES(1,10)"
+                    "INSERT INTO alias_right VALUES(1,1,100)"
+                    "CREATE USER alias_inner_owner"
+                    "CREATE USER alias_outer_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.alias_left TO alias_inner_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.alias_right TO alias_outer_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO alias_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO alias_outer_owner"
+                    "CREATE DEFINER='alias_inner_owner'@'%' VIEW alias_component AS SELECT id,n AS metric,n AS other FROM alias_left"
+                    "GRANT SELECT,UPDATE(metric) ON fsdb.alias_component TO alias_outer_owner"
+                    "CREATE DEFINER='alias_outer_owner'@'%' VIEW alias_join AS SELECT i.id,i.metric AS label,i.other AS other_label,r.n AS right_n FROM alias_component i JOIN alias_right r ON r.left_id=i.id" ] do
+                  expectOk (run store sql) sql
+
+              expectOk (run store "UPDATE alias_join SET label=label+1 WHERE id=1") "write the twice-renamed component column"
+              Expect.equal (rows store "SELECT n FROM alias_left") [ [ Some "11" ] ] "the physical column changes"
+              match run store "UPDATE alias_join SET other_label=other_label+1 WHERE id=1" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the ungranted alias of the same physical column to be denied, got %A" other
+              expectOk (run store "UPDATE alias_join SET right_n=right_n+1 WHERE id=1") "write the physical component"
+              Expect.equal (rows store "SELECT n FROM alias_right") [ [ Some "101" ] ] "the other component changes"
+              expectOk (run store "UPDATE alias_join SET label=right_n+1 WHERE id=1") "read the other component while writing the alias"
+              Expect.equal (rows store "SELECT n FROM alias_left") [ [ Some "102" ] ] "the cross-source expression uses the joined row"
+
           testCase "join views update mergeable components beside materialized views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

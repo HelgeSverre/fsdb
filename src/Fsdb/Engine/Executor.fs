@@ -958,7 +958,8 @@ type private ViewColumnTarget =
     { Database: string
       Table: string
       Qualifier: string
-      Column: string }
+      Column: string
+      ComponentColumn: string option }
 
 let private sameViewTarget (left: ViewColumnTarget) (right: ViewColumnTarget) =
     left.Database.Equals(right.Database, System.StringComparison.OrdinalIgnoreCase)
@@ -1404,7 +1405,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                     { Database = sourceDb
                                       Table = source.Table
                                       Qualifier = physicalQualifier
-                                      Column = column }
+                                      Column = column
+                                      ComponentColumn = None }
                             | Some nested -> nested.Targets |> Map.tryFind (column.ToLowerInvariant())
                         | QualifiedCol(qualifier, column)
                             when sourceNames
@@ -1415,7 +1417,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                     { Database = sourceDb
                                       Table = source.Table
                                       Qualifier = physicalQualifier
-                                      Column = column }
+                                      Column = column
+                                      ComponentColumn = None }
                             | Some nested -> nested.Targets |> Map.tryFind (column.ToLowerInvariant())
                         | _ -> None
 
@@ -1682,7 +1685,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                                     let targets =
                                         nested.Targets
-                                        |> Map.map (fun _ target -> { target with Qualifier = qualifier })
+                                        |> Map.map (fun column target ->
+                                            { target with Qualifier = qualifier; ComponentColumn = Some column })
 
                                     let checkPredicates =
                                         nested.CheckPredicates
@@ -1738,7 +1742,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                     { Database = database
                                       Table = tableRef.Table
                                       Qualifier = qualifier
-                                      Column = column.Name })
+                                      Column = column.Name
+                                      ComponentColumn = None })
                                 |> Map.ofList
 
                             { Reference = { tableRef with Database = Some database }
@@ -25143,7 +25148,7 @@ let rec executeAs
             (fun targetStore tableColumns _ candidate ->
                 finishInsertRow targetStore db table tableColumns candidate)
 
-    let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement =
+    let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement (originalUpdate: UpdateStmt option) =
         let targetKey = target.Database, target.Table, target.Qualifier
         let retarget (access: ViewAccess) =
             if access.Mode = OriginalWrite then
@@ -25228,13 +25233,51 @@ let rec executeAs
 
             match statement, view.AuthorizationSources with
             | Update update, Some(from, joins) ->
+                let authorizationUpdate =
+                    match originalUpdate with
+                    | Some original ->
+                        let outerNames =
+                            [ original.From.Table
+                              yield! Option.toList original.From.Alias ]
+
+                        let sourceColumn (name: string) =
+                            view.Targets
+                            |> Map.tryFind (name.ToLowerInvariant())
+                            |> Option.map (fun target ->
+                                QualifiedCol(target.Qualifier, target.ComponentColumn |> Option.defaultValue target.Column))
+
+                        let sourceExpression =
+                            Expression.rewrite (function
+                                | Col name -> sourceColumn name
+                                | QualifiedCol(qualifier, name)
+                                    when outerNames
+                                         |> List.exists (fun outer -> outer.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)) ->
+                                    sourceColumn name
+                                | _ -> None)
+
+                        let assignments =
+                            original.Assignments
+                            |> List.map (fun (assignment: Assignment) ->
+                                match view.Targets |> Map.tryFind (assignment.Column.ToLowerInvariant()) with
+                                | Some target ->
+                                    { assignment with
+                                        Table = Some target.Qualifier
+                                        Column = target.ComponentColumn |> Option.defaultValue target.Column
+                                        Value = sourceExpression assignment.Value }
+                                | None -> assignment)
+
+                        { update with
+                            Assignments = assignments
+                            Where = original.Where |> Option.map sourceExpression }
+                    | None -> update
+
                 registryForViewSecurity
                     store
                     registry
                     view.SecurityType
                     view.Definer
                     view.ViewDatabase
-                    (Update { update with From = from; Joins = joins })
+                    (Update { authorizationUpdate with From = from; Joins = joins })
                 |> Result.mapError (fun ((code, _) as error) ->
                     if code = 1142 || code = 1143 then invalidViewError view.ViewDatabase view.ViewName else error)
                 |> Result.bind checkReadPaths
@@ -26488,7 +26531,7 @@ let rec executeAs
                                 Fields = baseFields
                                 Assignments = assignments }
 
-                    executeViewWrite view target rewritten
+                    executeViewWrite view target rewritten None
 
     | LoadData load ->
         let db, table = splitQualified dbName load.Table
@@ -26634,7 +26677,7 @@ let rec executeAs
                 | Ok(), Ok assignments ->
                     let rewritten = Insert(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
 
-                    executeViewWrite view target rewritten
+                    executeViewWrite view target rewritten None
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -26688,7 +26731,7 @@ let rec executeAs
                 | Ok(), Ok assignments ->
                     let rewritten = InsertSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select, assignments, ignoreDuplicates)
 
-                    executeViewWrite view target rewritten
+                    executeViewWrite view target rewritten None
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -26762,7 +26805,7 @@ let rec executeAs
             | Ok(target, baseColumns) ->
                 let rewritten = Replace(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs)
 
-                executeViewWrite view target rewritten
+                executeViewWrite view target rewritten None
 
     | Replace(table, columns, rowsExprs) ->
         let db, table = splitQualified dbName table
@@ -26790,7 +26833,7 @@ let rec executeAs
             | Ok(target, baseColumns) ->
                 let rewritten = ReplaceSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select)
 
-                executeViewWrite view target rewritten
+                executeViewWrite view target rewritten None
 
     | ReplaceSelect(table, columns, select) ->
         let db, table = splitQualified dbName table
@@ -26820,7 +26863,7 @@ let rec executeAs
             | Ok(target, _), Ok rewrittenAssignments ->
                 let rewritten = ReplaceSet(SqlText.objectName (Some target.Database) target.Table, rewrittenAssignments)
 
-                executeViewWrite view target rewritten
+                executeViewWrite view target rewritten None
 
     | ReplaceSet(table, assignments) ->
         let db, table = splitQualified dbName table
@@ -26919,7 +26962,7 @@ let rec executeAs
                             Limit = updateStmt.Limit |> Option.map rewrite }
 
                     let target = assignments |> List.head |> snd
-                    executeViewWrite view target (Update rewritten)
+                    executeViewWrite view target (Update rewritten) (Some updateStmt)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -27346,7 +27389,7 @@ let rec executeAs
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
             let target = view.Targets |> Map.values |> Seq.head
-            executeViewWrite view target (Delete rewritten)
+            executeViewWrite view target (Delete rewritten) None
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table

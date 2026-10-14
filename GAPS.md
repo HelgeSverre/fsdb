@@ -583,6 +583,8 @@ The outer definer must retain access to the component view, while that view's
 definer must retain SELECT on its base tables and UPDATE on the written target;
 revoked grants invalidate the joined write as in MySQL 8.4
 ([oracle and regression](torture/findings/2026-10-14-nested-join-view-security.md)).
+Renamed columns retain the component view's column identity for authorization,
+including column-level grants when two aliases reach the same base column.
 
 An inner join may also use a nonmergeable aggregate or UNION view as a
 read-only row source while updating another mergeable component; INSERT still

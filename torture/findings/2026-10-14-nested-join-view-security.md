@@ -16,6 +16,15 @@ other owner's base table.
 | Grant `UPDATE(n)` on the inner view to `outer_owner`, then update `b.n` | One row updated | One row updated |
 | Revoke `UPDATE` on `b` from `outer_owner`, then update `b.n` | 1356 | 1356 |
 
+A second fixture exposes the same base `n` twice in the inner view, as
+`metric` and `other`, and exposes `metric` again as `label` in the outer view.
+With only `UPDATE(metric)` granted to the outer owner, updating `label` changes
+the base row in both engines. Updating `other_label` returns 1356 in both,
+although it names the same physical column. An assignment to `label` using
+the joined physical component's value also succeeds in both engines. The
+executor therefore retains each component view's exposed column name for
+authorization while using the physical column for the actual write.
+
 The first FSDB implementation classified a distinct-definer component as
 read-only. Merely making it writable exposed an authorization bypass: the
 flattened update could modify `b` after the inner definer lost SELECT on `a`.
