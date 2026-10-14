@@ -646,6 +646,42 @@ let tests =
                   [ [ Some "2"; Some "21" ]; [ Some "3"; Some "50" ]; [ Some "4"; Some "60" ] ]
                   "column grants protect the nested insert"
 
+          testCase "joined view insert follows two distinct definer layers"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE deep_a(id INT PRIMARY KEY AUTO_INCREMENT,n INT)"
+                    "CREATE TABLE deep_b(id INT PRIMARY KEY,left_id INT)"
+                    "INSERT INTO deep_b VALUES(1,1)"
+                    "CREATE USER deep_inner_owner"
+                    "CREATE USER deep_middle_owner"
+                    "CREATE USER deep_outer_owner"
+                    "GRANT SELECT,INSERT,UPDATE ON fsdb.deep_a TO deep_inner_owner"
+                    "GRANT SELECT,INSERT,UPDATE ON fsdb.deep_b TO deep_outer_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO deep_inner_owner,deep_middle_owner,deep_outer_owner"
+                    "CREATE DEFINER='deep_inner_owner'@'%' VIEW deep_inner AS SELECT id,n FROM deep_a"
+                    "GRANT SELECT,INSERT,UPDATE ON fsdb.deep_inner TO deep_middle_owner"
+                    "CREATE DEFINER='deep_middle_owner'@'%' VIEW deep_middle AS SELECT id,n AS metric FROM deep_inner"
+                    "GRANT SELECT,INSERT,UPDATE ON fsdb.deep_middle TO deep_outer_owner"
+                    "CREATE DEFINER='deep_outer_owner'@'%' VIEW deep_outer AS SELECT m.id,m.metric,b.id AS b_id FROM deep_middle m JOIN deep_b b ON b.left_id=m.id" ] do
+                  expectOk (run store sql) sql
+
+              expectOk (run store "INSERT INTO deep_outer(metric) VALUES(10)") "insert through two view layers"
+              expectOk (run store "INSERT INTO deep_outer(id,metric) VALUES(2,20)") "insert both exposed columns"
+              expectOk (run store "REVOKE INSERT ON fsdb.deep_inner FROM deep_middle_owner") "revoke middle-layer INSERT"
+              match run store "INSERT INTO deep_outer(metric) VALUES(30)" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the revoked middle grant to invalidate the outer view, got %A" other
+              expectOk (run store "GRANT INSERT(n) ON fsdb.deep_inner TO deep_middle_owner") "grant the middle layer's written column"
+              expectOk (run store "INSERT INTO deep_outer(metric) VALUES(40)") "insert with middle-layer column grant"
+              match run store "INSERT INTO deep_outer(id,metric) VALUES(5,50)" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the ungranted id through the middle layer to be denied, got %A" other
+              Expect.equal
+                  (rows store "SELECT id,n FROM deep_a ORDER BY id")
+                  [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "40" ] ]
+                  "the authorized inserts reach the base table"
+
           testCase "join views update mergeable components beside materialized views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

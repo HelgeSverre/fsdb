@@ -589,6 +589,9 @@ including column-level grants when two aliases reach the same base column.
 also reach a distinct-definer component in a joined view. The outer definer's
 component INSERT grants are checked by exposed column, and the inner definer's
 base-table INSERT grant remains necessary.
+An [audited third definer layer](torture/findings/2026-10-14-deep-joined-view-insert.md)
+also preserves the intermediate view's column grant: `INSERT(metric)` reaches
+the base table, while writing an ungranted `id` fails with 1356.
 
 An inner join may also use a nonmergeable aggregate or UNION view as a
 read-only row source while updating another mergeable component; INSERT still
