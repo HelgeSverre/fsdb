@@ -1971,7 +1971,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             | FromTable original, { Reference = FromTable physical } :: _, _ ->
                                 Some(physical, rewrittenJoins, original, select.Joins)
                             | FromSubquery _, derived :: { Reference = FromTable physical } :: _, join :: trailing
-                                when (join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin) ->
+                                when (join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin || join.Kind = NaturalJoin) ->
                                 let reordered =
                                     { join with
                                         Table = derived.Reference
@@ -2003,7 +2003,18 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                             ||> List.map2 (fun join left ->
                                                 match FromItem.tryQualifier join.Table, left with
                                                 | Some qualifier, Ok columns ->
-                                                    join.Using
+                                                    let keys =
+                                                        if join.Kind = NaturalJoin then
+                                                            let right = columnsOf qualifier
+                                                            columns
+                                                            |> List.map _.Name
+                                                            |> List.filter (fun name ->
+                                                                right
+                                                                |> List.exists (fun column ->
+                                                                    column.Equals(name, System.StringComparison.OrdinalIgnoreCase)))
+                                                        else
+                                                            join.Using
+                                                    keys
                                                     |> List.fold
                                                         (fun state key ->
                                                             let left =
@@ -2034,7 +2045,11 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                                         conditions.[index]
                                                         |> List.map rewrite
                                                         |> List.fold (fun on condition -> BinOp(And, on, condition)) join.On
-                                                    let join = { join with On = on; Using = [] }
+                                                    let join =
+                                                        { join with
+                                                            Kind = if join.Kind = NaturalJoin then InnerJoin else join.Kind
+                                                            On = on
+                                                            Using = [] }
                                                     // The target join can refer to every leading source.
                                                     // Evaluate it once the last of those sources is bound.
                                                     if index = leadingCount - 2 then

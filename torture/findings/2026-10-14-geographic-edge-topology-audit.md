@@ -93,3 +93,13 @@ a short line and a point, yet MySQL still calls it touching. Offsets from
 `1.00001` through `2.99` in the same probe were crossings; `2.999` and
 `2.99999` were touches. A threshold or component-count special case would
 encode this sample without establishing a general geographic topology rule.
+
+A later native 8.4.11 comparison ran the same line and hole coordinates in
+SRID 0 and 4326. The planar line at offsets `1.001`, `2.5`, `2.99`, `2.999`,
+and `2.99999` only touches the two hole edges, and `ST_Intersection` contains
+the two endpoints. Geographic lines cross through `2.99`; at `2.999` and
+`2.99999` MySQL instead reports touching even though `ST_Intersection`
+contains a short line beginning at the endpoint. At `2.99999` it also
+contains a separate point. This confines the discrepancy to geographic
+intersection construction near the corner; a planar rule, a component-count
+test, or a simple point label would contradict the native result.

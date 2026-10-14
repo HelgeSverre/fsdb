@@ -1015,6 +1015,40 @@ let tests =
                   [ [ Some "1"; Some "999"; Some "102" ]; [ Some "2"; Some "20"; Some "200" ] ]
                   "the x match belongs to the derived sources, not the target"
 
+          testCase "derived-first NATURAL joins update their physical component"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE natural_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE natural_extra_target(id INT PRIMARY KEY,x INT,n INT)"
+                    "CREATE TABLE natural_source(id INT PRIMARY KEY,x INT)"
+                    "CREATE TABLE natural_key(x INT PRIMARY KEY)"
+                    "INSERT INTO natural_target VALUES(1,10),(2,20)"
+                    "INSERT INTO natural_extra_target VALUES(1,999,10),(2,888,20)"
+                    "INSERT INTO natural_source VALUES(1,7),(2,8)"
+                    "INSERT INTO natural_key VALUES(7),(8)"
+                    "CREATE VIEW natural_one AS SELECT a.id AS aid,a.n FROM (SELECT id,x FROM natural_source) d NATURAL JOIN natural_target a"
+                    "CREATE VIEW natural_first AS SELECT a.id AS aid,a.n FROM (SELECT id,x FROM natural_source) d1 NATURAL JOIN (SELECT x FROM natural_key) d2 JOIN natural_target a USING(id)"
+                    "CREATE VIEW natural_extra AS SELECT a.id AS aid,a.n FROM (SELECT id,x FROM natural_source) d1 NATURAL JOIN (SELECT x FROM natural_key) d2 JOIN natural_extra_target a USING(id)"
+                    "CREATE VIEW natural_last AS SELECT a.id AS aid,a.n FROM (SELECT id,x FROM natural_source) d1 JOIN (SELECT x FROM natural_key) d2 USING(x) NATURAL JOIN natural_target a" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT table_name,is_updatable FROM information_schema.views WHERE table_name IN ('natural_extra','natural_first','natural_last','natural_one') ORDER BY table_name")
+                  [ [ Some "natural_extra"; Some "YES" ]; [ Some "natural_first"; Some "YES" ]; [ Some "natural_last"; Some "YES" ]; [ Some "natural_one"; Some "YES" ] ]
+                  "MySQL 8.4 reports all derived-first NATURAL join views as updatable"
+              expectOk (run store "UPDATE natural_first SET n=11 WHERE aid=1") "update with leading NATURAL join"
+              expectOk (run store "UPDATE natural_last SET n=12 WHERE aid=1") "update with target NATURAL join"
+              expectOk (run store "UPDATE natural_one SET n=13 WHERE aid=1") "update with one derived NATURAL join"
+              expectOk (run store "UPDATE natural_extra SET n=11 WHERE aid=1") "the moved target does not add a NATURAL x key"
+              Expect.equal
+                  (rows store "SELECT id,n FROM natural_target ORDER BY id")
+                  [ [ Some "1"; Some "13" ]; [ Some "2"; Some "20" ] ]
+                  "only the matched physical row is updated"
+              Expect.equal
+                  (rows store "SELECT id,x,n FROM natural_extra_target ORDER BY id")
+                  [ [ Some "1"; Some "999"; Some "11" ]; [ Some "2"; Some "888"; Some "20" ] ]
+                  "NATURAL key ownership stays with the original derived pair"
+
           testCase "join views update beside derived star projections"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

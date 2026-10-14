@@ -1550,12 +1550,13 @@ let internal tryLeadingDerivedWritableTarget (source: FromItem) (joins: Join lis
                 if count = 0 then
                     (targetJoin.Kind = InnerJoin
                      || targetJoin.Kind = StraightJoin
-                     || targetJoin.Kind = CrossJoin)
+                     || targetJoin.Kind = CrossJoin
+                     || targetJoin.Kind = NaturalJoin)
                 else
                     joins
                     |> List.take (count + 1)
                     |> List.forall (fun join ->
-                        join.Kind = InnerJoin || join.Kind = CrossJoin)
+                        join.Kind = InnerJoin || join.Kind = CrossJoin || join.Kind = NaturalJoin)
 
             if canMove then Some(count + 1) else None
         | _ -> None

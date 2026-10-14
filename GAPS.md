@@ -652,6 +652,9 @@ the moved target predicate is applied after all its source aliases are bound.
 also retain writable metadata and update a physical target, including a merged
 key projection; multiple leading derived sources now preserve the original
 left operand of each `USING` key even when the chain merges different keys.
+[Derived-first `NATURAL JOIN` views](torture/findings/2026-10-15-derived-natural-view.md)
+also update a physical target; moved joins retain the original shared-column
+ownership even when the target has another same-named column.
 Broader join-source reorderings and lateral or outer-join writes remain open.
 
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
