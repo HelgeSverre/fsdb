@@ -40,6 +40,13 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Branch coverage
         run: |
+          (while sleep 10; do
+            echo "Coverage runner resources at $(date -u +%H:%M:%S):"
+            free -m
+            ps -eo pid,rss,pcpu,comm --sort=-rss | head -8
+          done) &
+          resource_monitor=$!
+          trap 'kill "$resource_monitor" 2>/dev/null || true' EXIT
           dotnet tool restore
           dotnet build tests/Fsdb.Tests -c Debug --nologo
           dotnet tool run coverlet tests/Fsdb.Tests/bin/Debug/net10.0/Fsdb.Tests.dll \
