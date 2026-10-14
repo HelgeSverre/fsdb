@@ -20804,6 +20804,17 @@ let private rewriteViewAssignments (view: UpdatableView) (assignments: (string *
         resolveViewColumn view column
         |> Result.map (fun baseColumn -> baseColumn, rewrite value))
 
+let private rewriteViewInsertAssignments (view: UpdatableView) (target: ViewColumnTarget) assignments =
+    let physicalTarget =
+        Expression.rewrite (function
+            | QualifiedCol(qualifier, column)
+                when qualifier.Equals(target.Qualifier, System.StringComparison.OrdinalIgnoreCase) ->
+                Some(Col column)
+            | _ -> None)
+
+    rewriteViewAssignments view assignments
+    |> Result.map (List.map (fun (column, value) -> column, physicalTarget value))
+
 let private combineViewPredicate predicate whereClause =
     match predicate, whereClause with
     | Some predicate, Some whereClause -> Some(BinOp(And, predicate, whereClause))
@@ -25184,6 +25195,31 @@ let rec executeAs
                 | Delete delete -> Delete { delete with From = { delete.From with Database = Some access.Database; Table = access.Table } }
                 | other -> other
 
+        let checkAnyViewColumnGrant account database table privilege =
+            match tryStoredView store database table with
+            | Some stored ->
+                match parseStoredViewStatement stored with
+                | Ok(Select definition) ->
+                    let columns =
+                        updatableViewOfSelect store stored definition
+                        |> Option.map _.OrderedColumns
+                        |> Option.defaultValue stored.Columns
+
+                    if
+                        columns
+                        |> List.exists (fun column ->
+                            Auth.checkForAccount
+                                store
+                                account
+                                [ privilege, Auth.OnColumn(database, table, column) ]
+                            |> Result.isOk)
+                    then
+                        Ok()
+                    else
+                        Error(1142, "Write privilege missing for component view")
+                | _ -> Error(invalidViewError view.ViewDatabase view.ViewName)
+            | None -> Error(invalidViewError view.ViewDatabase view.ViewName)
+
         let authorizedRegistry =
             let componentPath = view.ComponentAccessPaths |> Map.tryFind targetKey |> Option.defaultValue []
             let checkPath current (path: ViewAccess list) =
@@ -25192,7 +25228,35 @@ let rec executeAs
                     (fun state access ->
                         state
                         |> Result.bind (fun current ->
-                            registryForViewSecurity store current access.SecurityType access.Definer access.Database (retarget access)))
+                            match access.Mode, statement with
+                            | TargetGrantOnly, (Insert(_, _, _, updates, _) | InsertSelect(_, _, _, updates, _))
+                                when not updates.IsEmpty ->
+                                let insertOnly =
+                                    match retarget access with
+                                    | Insert(table, columns, rows, _, ignore) -> Insert(table, columns, rows, [], ignore)
+                                    | InsertSelect(table, columns, select, _, ignore) -> InsertSelect(table, columns, select, [], ignore)
+                                    | other -> other
+
+                                let effectiveAccount =
+                                    if access.SecurityType.Equals("INVOKER", System.StringComparison.OrdinalIgnoreCase) then
+                                        registryAccount current
+                                    else
+                                        Auth.tryParseAccount access.Definer
+
+                                match tryStoredView store access.Database access.Table with
+                                | None ->
+                                    registryForViewSecurity store current access.SecurityType access.Definer access.Database (retarget access)
+                                | Some _ ->
+                                    let updateGrant =
+                                        match effectiveAccount with
+                                        | Some account -> checkAnyViewColumnGrant account access.Database access.Table "UPDATE"
+                                        | None -> Error(1449, "The current invoker account does not exist")
+
+                                    updateGrant
+                                    |> Result.bind (fun () ->
+                                        registryForViewSecurity store current access.SecurityType access.Definer access.Database insertOnly)
+                            | _ ->
+                                registryForViewSecurity store current access.SecurityType access.Definer access.Database (retarget access)))
                     (Ok current)
 
             let checkReadPaths current =
@@ -25241,15 +25305,14 @@ let rec executeAs
                     (Ok current)
 
             let checkComponentInsertGrants current =
-                let requiredColumns =
+                let insertColumns, updates =
                     match stmt with
                     | Insert(_, columns, _, updates, _)
                     | InsertSelect(_, columns, _, updates, _) ->
-                        (columns |> List.map (fun column -> "INSERT", column))
-                        @ (updates |> List.map (fun (column, _) -> "UPDATE", column))
-                    | _ -> []
+                        columns, updates
+                    | _ -> [], []
 
-                if requiredColumns.IsEmpty then
+                if insertColumns.IsEmpty then
                     Ok current
                 else
                     let sourceRefs =
@@ -25272,17 +25335,20 @@ let rec executeAs
                     | Some source, Some account ->
                         let database = source.Database |> Option.defaultValue view.ViewDatabase
 
-                        requiredColumns
-                        |> traverse (fun (privilege, column) ->
+                        insertColumns
+                        |> traverse (fun column ->
                             match Map.tryFind (column.ToLowerInvariant()) view.Targets with
                             | Some mapped ->
                                 let componentColumn = mapped.ComponentColumn |> Option.defaultValue mapped.Column
                                 Auth.checkForAccount
                                     store
                                     account
-                                    [ privilege, Auth.OnColumn(database, source.Table, componentColumn) ]
+                                    [ "INSERT", Auth.OnColumn(database, source.Table, componentColumn) ]
                             | None -> Error(1054, sprintf "Unknown column '%s' in field list" column))
-                        |> Result.map (fun _ -> current)
+                        |> Result.bind (fun _ ->
+                            if updates.IsEmpty then Ok()
+                            else checkAnyViewColumnGrant account database source.Table "UPDATE")
+                        |> Result.map (fun () -> current)
                         |> Result.mapError (fun _ -> invalidViewError view.ViewDatabase view.ViewName)
                     | _ -> Error(invalidViewError view.ViewDatabase view.ViewName)
 
@@ -26738,7 +26804,7 @@ let rec executeAs
             match resolveViewInsertTarget view viewColumns with
             | Error error -> ids, error
             | Ok(target, baseColumns) ->
-                match validateViewAssignmentTarget view target onDuplicateUpdate, rewriteViewAssignments view onDuplicateUpdate with
+                match validateViewAssignmentTarget view target onDuplicateUpdate, rewriteViewInsertAssignments view target onDuplicateUpdate with
                 | Error error, _
                 | _, Error error -> ids, error
                 | Ok(), Ok assignments ->
@@ -26792,7 +26858,7 @@ let rec executeAs
             match resolveViewInsertTarget view viewColumns with
             | Error error -> ids, error
             | Ok(target, baseColumns) ->
-                match validateViewAssignmentTarget view target onDuplicateUpdate, rewriteViewAssignments view onDuplicateUpdate with
+                match validateViewAssignmentTarget view target onDuplicateUpdate, rewriteViewInsertAssignments view target onDuplicateUpdate with
                 | Error error, _
                 | _, Error error -> ids, error
                 | Ok(), Ok assignments ->

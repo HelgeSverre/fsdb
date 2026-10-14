@@ -73,6 +73,16 @@ def main():
                     "GRANT INSERT(n) ON probe.inner_v TO middle_owner",
                     "INSERT INTO outer_v(metric) VALUES(40)",
                     "INSERT INTO outer_v(id,metric) VALUES(5,50)",
+                    "GRANT INSERT ON probe.inner_v TO middle_owner",
+                    "REVOKE UPDATE ON probe.inner_v FROM middle_owner",
+                    "INSERT INTO outer_v(id,metric) VALUES(2,25) ON DUPLICATE KEY UPDATE id=id+10",
+                    "GRANT UPDATE(n) ON probe.inner_v TO middle_owner",
+                    "INSERT INTO outer_v(id,metric) VALUES(2,25) ON DUPLICATE KEY UPDATE metric=VALUES(metric)",
+                    "INSERT INTO outer_v(id,metric) VALUES(2,30) ON DUPLICATE KEY UPDATE id=id+10",
+                    "INSERT INTO outer_v(id,metric) VALUES(5,50) ON DUPLICATE KEY UPDATE id=id+10",
+                    "REVOKE UPDATE ON probe.middle_v FROM outer_owner",
+                    "GRANT UPDATE(metric) ON probe.middle_v TO outer_owner",
+                    "INSERT INTO outer_v(id,metric) VALUES(5,55) ON DUPLICATE KEY UPDATE id=id+10",
                     "SELECT id,n FROM a ORDER BY id",
                 ]
                 for sql in cases:

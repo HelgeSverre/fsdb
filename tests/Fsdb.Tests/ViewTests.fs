@@ -682,6 +682,31 @@ let tests =
                   [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "40" ] ]
                   "the authorized inserts reach the base table"
 
+              expectOk (run store "GRANT INSERT ON fsdb.deep_inner TO deep_middle_owner") "restore the middle insert grant"
+              expectOk (run store "REVOKE UPDATE ON fsdb.deep_inner FROM deep_middle_owner") "revoke the middle update grant"
+              match run store "INSERT INTO deep_outer(id,metric) VALUES(2,25) ON DUPLICATE KEY UPDATE id=id+10" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected missing middle-layer UPDATE to invalidate ODKU, got %A" other
+              expectOk (run store "GRANT UPDATE(n) ON fsdb.deep_inner TO deep_middle_owner") "grant one middle update column"
+              expectOk
+                  (run store "INSERT INTO deep_outer(id,metric) VALUES(2,25) ON DUPLICATE KEY UPDATE metric=VALUES(metric)")
+                  "update the granted column through two view layers"
+              expectOk
+                  (run store "INSERT INTO deep_outer(id,metric) VALUES(2,30) ON DUPLICATE KEY UPDATE id=id+10")
+                  "MySQL validates the middle view with any update grant"
+              expectOk
+                  (run store "INSERT INTO deep_outer(id,metric) VALUES(5,50) ON DUPLICATE KEY UPDATE id=id+10")
+                  "fresh ODKU insert through two view layers"
+              expectOk (run store "REVOKE UPDATE ON fsdb.deep_middle FROM deep_outer_owner") "revoke the outer component update grant"
+              expectOk (run store "GRANT UPDATE(metric) ON fsdb.deep_middle TO deep_outer_owner") "grant one outer component update column"
+              expectOk
+                  (run store "INSERT INTO deep_outer(id,metric) VALUES(5,55) ON DUPLICATE KEY UPDATE id=id+10")
+                  "MySQL validates the outer component with any update grant"
+              Expect.equal
+                  (rows store "SELECT id,n FROM deep_a ORDER BY id")
+                  [ [ Some "1"; Some "10" ]; [ Some "3"; Some "40" ]; [ Some "12"; Some "25" ]; [ Some "15"; Some "50" ] ]
+                  "the ODKU rows follow MySQL's definer-view authorization"
+
           testCase "join views update mergeable components beside materialized views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

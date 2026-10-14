@@ -12,6 +12,21 @@ outer `INSERT(metric)` but rejects `INSERT(id,metric)` with error 1356. The
 accepted values and final auto-increment identities match fsdb's focused
 Expecto regression in `ViewTests.fs`.
 
+`ON DUPLICATE KEY UPDATE` exposes a distinct rule. With only `UPDATE(n)` on
+the inner view for the middle definer, MySQL accepts both an update to
+`metric` and an update to `id`, as well as a fresh-key insert carrying the
+ODKU clause. Fsdb initially returned 1356 for the `id` assignment because it
+checked the intermediate view grant against that specific column. After
+grant validation was corrected, the rewritten upsert still referred to the
+joined alias `m.id` outside its scope and returned 1054. The executor now
+checks exact INSERT columns and the existence of an UPDATE grant at the
+intermediate view, then resolves target-column references against the physical
+upsert row. The base-table definer's privileges remain checked separately.
+The same any-column UPDATE validity rule applies to the outer definer's grant
+on the middle component view: `UPDATE(metric)` permits an ODKU assignment to
+`id`, while the INSERT column grants are still checked for each supplied
+column.
+
 The disposable native oracle is
 `torture/scripts/deep-joined-view-insert-oracle.py`. This case confirms an
 additional supported distinct-definer layer; it does not establish parity for
