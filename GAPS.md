@@ -196,7 +196,9 @@ equality keys from their usable correlated predicates. Outer values and literals
 may bind different key parts. Numeric and matching-collation text ranges over
 materialized sources use statement-local ordered lookups. Numeric and
 matching-collation text `IN` lists bound to direct outer columns or literals
-reuse statement-local equality keys.
+reuse statement-local equality keys. [Multiple compatible materialized `IN`
+predicates](torture/findings/2026-10-15-correlated-materialized-in-intersection.md)
+intersect their candidate rows before residual evaluation.
 Competing equality and range probes choose the narrower observed candidate
 set, including direct physical and pass-through projected sources
 ([oracle and residual probe](torture/findings/2026-10-14-correlated-physical-range-choice.md)).
@@ -242,7 +244,9 @@ Stable materialized correlated sources now [intersect usable equality and range
 candidate lists](torture/findings/2026-10-14-correlated-materialized-intersection.md)
 before residual evaluation, including [compatible bounds within each complete
 OR branch](torture/findings/2026-10-14-correlated-materialized-or-intersection.md)
-before branch union. More complex correlated expressions without a
+before branch union. They also intersect [multiple outer-bound `IN` candidate
+groups](torture/findings/2026-10-15-correlated-materialized-in-intersection.md).
+More complex correlated expressions without a
 compatible statement-local lookup still re-execute or scan.
 
 ## 3. Built-in functions

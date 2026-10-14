@@ -14946,7 +14946,7 @@ and private tryMaterializedCorrelatedLookup
 
                 predicate
                 |> optionalConjuncts
-                |> List.tryPick (function
+                |> List.choose (function
                     | In(inner, bounds) when not bounds.IsEmpty && bounds |> List.forall directBound ->
                         tryCorrelatedInnerColumn probeSource inner
                         |> Option.bind (fun name ->
@@ -14974,6 +14974,7 @@ and private tryMaterializedCorrelatedLookup
                                                 let seen = HashSet<Value[]>(HashIdentity.Reference)
                                                 rowGroups |> List.collect id |> List.filter seen.Add))))))
                     | _ -> None)
+                |> intersectSharedRows
 
             let rangeCandidates predicate =
                 let bounds =

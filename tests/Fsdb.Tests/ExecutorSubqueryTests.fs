@@ -741,6 +741,40 @@ let tests =
                           "mixed numeric/string IN comparison retains MySQL membership"
                   | other -> failtestf "expected mixed IN counts, got %A" other
 
+          testCase "materialized correlated IN predicates intersect candidate rows"
+          <| fun _ ->
+              let mutable touches = 0
+              let touch values =
+                  touches <- touches + 1
+                  List.head values
+              let registry = registerScalar "TOUCH" touch builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE in_bounds(a1 INT,a2 INT,b1 INT,b2 INT)" |> ignore
+              runDefault store "CREATE TABLE in_pairs(id INT PRIMARY KEY,a INT,b INT)" |> ignore
+              runDefault store "INSERT INTO in_bounds VALUES(1,999,1,999)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id ->
+                  let a = if id <= 500 then 1 else 1000 + id
+                  let b = if id >= 499 && id <= 898 then 1 else 2000 + id
+                  sprintf "(%d,%d,%d)" id a b)
+              |> String.concat ","
+              |> sprintf "INSERT INTO in_pairs VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for prefix, source in
+                  [ "", "(SELECT id+0 AS id,a+0 AS a,b+0 AS b FROM in_pairs LIMIT 1000) d"
+                    "WITH materialized AS (SELECT id+0 AS id,a+0 AS a,b+0 AS b FROM in_pairs LIMIT 1000) ", "materialized d" ] do
+                  touches <- 0
+                  let sql =
+                      prefix + "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.a IN(o.a1,o.a2) AND d.b IN(o.b1,o.b2))"
+                      + " FROM in_bounds o"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                  | other -> failtestf "expected the two MySQL 8.4 matches, got %A" other
+                  Expect.isLessThan touches 20 "both IN groups narrow before residual evaluation"
+
           testCase "materialized correlated decimal IN probes preserve exact keys"
           <| fun _ ->
               let mutable touches = 0
