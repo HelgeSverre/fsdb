@@ -161,6 +161,11 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.PointSelectByCastBound() =
+        this.Query "SELECT id, name, email, age, meta, created_at FROM users WHERE id = CAST('3' AS UNSIGNED)"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.PointSelectByConstantExpression() =
         this.Query $"SELECT id, name, email, age, meta, created_at FROM users WHERE id = {randomUserId ()} + 0"
 

@@ -218,6 +218,12 @@ or locking retain the general SELECT pipeline.
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/index_merge/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings, index unions and intersections, and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once; common correlated equality/range shapes and compatible functional probes over physical or pass-through projected sources use maintained indexes; stable materialized sources use statement-local composite equality, numeric range, and matching-collation text range lookups; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
 
+Warning-free numeric `CAST` constants now participate in indexed equality and
+range bounds, including an exact positive unsigned probe against a signed
+integer key. [Warning-producing numeric CAST bounds](torture/findings/2026-10-10-numeric-constant-bounds.md#numeric-cast-bounds)
+still retain row evaluation and differ from MySQL's indexed plan and warning
+count.
+
 ## 3. Built-in functions
 
 `Functions.builtins` covers these broad families:

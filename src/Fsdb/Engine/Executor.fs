@@ -13183,6 +13183,7 @@ and private plannerConstantEvaluator (store: Store) (registry: Registry) =
         | Between _ | In _ | Case _ | Expression.CollationOverride _ -> safeChildren ()
         | BinOp((Add | Sub | SignedSub | Mul | Div | IntDiv | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq | And | Or | Xor), _, _) ->
             safeChildren ()
+        | Cast(_, target) when isNumericIndexType target -> safeChildren ()
         | FuncCall(name, _)
             when ((FunctionalIndex.tryBuiltin name |> Option.isSome)
                   || Set.contains (name.ToUpperInvariant()) plannerFoldableBuiltins)
@@ -13194,7 +13195,11 @@ and private plannerConstantEvaluator (store: Store) (registry: Registry) =
 
     function
     | expression when isSafe expression ->
-        evalExpr context.Value expression |> Result.toOption
+        if Expression.exists (function Cast(_, target) -> isNumericIndexType target | _ -> false) expression then
+            let result, conditions = Diagnostics.capture (fun () -> evalExpr context.Value expression)
+            if conditions.IsEmpty then result |> Result.toOption else None
+        else
+            evalExpr context.Value expression |> Result.toOption
     | _ -> None
 
 and private numericPlannerConstantEvaluator store registry =

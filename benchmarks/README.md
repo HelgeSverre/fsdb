@@ -88,8 +88,9 @@ The data-size variables `FSDB_BENCH_USERS`, `FSDB_BENCH_ORDERS`, and
 `FSDB_BENCH_ARTICLES` override the seeded cardinalities.
 
 `PointSelectByFixedPk`, `PointSelectByRoundPi`, and
-`PointSelectByBitCountBound` compare the same fixed primary-key hit and result
-shape when profiling literal and expression-derived index bounds.
+`PointSelectByBitCountBound`, and `PointSelectByCastBound` compare the same
+fixed primary-key hit and result shape when profiling literal and
+expression-derived index bounds.
 
 A focused result is evidence for that shape, not a replacement for the broader
 suite. Keep the generated provenance header with any tracked artifact.

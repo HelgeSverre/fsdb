@@ -34,6 +34,22 @@ conversion warning. Numeric bit/hex literals retain their numeric origin;
 ones wider than 64 bits yield zero with a truncated-BINARY warning. Fsdb now
 keeps these two paths distinct.
 
+## Numeric CAST bounds
+
+On MySQL 8.4.11, `id=CAST('20' AS UNSIGNED)` and
+`id=CAST('2' AS SIGNED)` use `PRIMARY`/`const` for a signed `INT` primary key.
+`id BETWEEN CAST('2' AS SIGNED) AND CAST('4' AS SIGNED)` uses
+`PRIMARY`/`range`. Fsdb now folds warning-free numeric casts into these
+physical probes. A positive unsigned result is converted to a signed stored
+key only when the value fits and the conversion is exact.
+
+MySQL also uses `PRIMARY`/`const` for `CAST('2x' AS SIGNED)` and reports two
+1292 truncation warnings on the audited six-row table. Fsdb retains row
+evaluation for warning-producing casts, preserving the matching row but
+scanning all six rows and reporting six warnings. Plan and warning-count parity
+remain open; this prevents planning from suppressing conversion diagnostics
+while that behavior is investigated.
+
 The expanded `numeric-constant-index-bounds` contract in run
 `20261010T161131310-7062` matched MySQL 8.4.11 on all 51 steps.
 The complete run retained the same nine documented identifier-case

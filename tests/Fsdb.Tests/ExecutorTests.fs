@@ -6629,6 +6629,30 @@ let tests =
                         let plan = runDefault store ("EXPLAIN " + sql) |> explainRow
                         Expect.equal plan.Key (Some "PRIMARY") (sprintf "constant %s uses the primary key" expression)
 
+                    let castRange =
+                        "SELECT label FROM numeric_bounds WHERE id BETWEEN CAST('2' AS SIGNED) AND CAST('4' AS SIGNED) ORDER BY id"
+                    Expect.equal
+                        (runDefault store castRange)
+                        (ResultSet([ "label" ], [ [ Some "two" ]; [ Some "three" ]; [ Some "four" ] ]))
+                        "cast bounds keep the range results"
+                    Expect.equal
+                        ((runDefault store ("EXPLAIN " + castRange) |> explainRow).AccessType)
+                        (Some "range")
+                        "cast bounds use the primary range"
+
+                    for expression, expected in
+                        [ "CAST('20' AS UNSIGNED)", "twenty"
+                          "CAST('2' AS SIGNED)", "two" ] do
+                        let sql = sprintf "SELECT label FROM numeric_bounds WHERE id=%s" expression
+                        Expect.equal (runDefault store sql) (ResultSet([ "label" ], [ [ Some expected ] ])) sql
+                        let plan = runDefault store ("EXPLAIN " + sql) |> explainRow
+                        Expect.equal plan.Key (Some "PRIMARY") (sprintf "constant %s uses the primary key" expression)
+
+                    Expect.equal
+                        (runDefault store "SELECT label FROM numeric_bounds WHERE id=CAST('2x' AS SIGNED)")
+                        (ResultSet([ "label" ], [ [ Some "two" ] ]))
+                        "warning-producing cast retains the matching row"
+
                     let bitCountTextResult, bitCountTextWarnings =
                         Fsdb.Diagnostics.capture (fun () ->
                             runDefault store "SELECT label FROM numeric_bounds WHERE id=BIT_COUNT('12x')")

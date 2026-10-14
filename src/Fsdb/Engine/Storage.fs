@@ -5249,6 +5249,11 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
         | VDecimal number -> integerColumn && System.Decimal.Truncate number = number
         | _ -> false
 
+    let exactPositiveUnsigned =
+        match value with
+        | VUInt number -> integerColumn && number <= uint64 Int64.MaxValue
+        | _ -> false
+
     let coerced =
         match column.Type, value with
         // In-range signed integers already have the exact stored representation.
@@ -5269,6 +5274,10 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
         match coerced, value with
         | VInt integer, VDecimal bound when decimal integer = bound -> Some coerced
         | VUInt integer, VDecimal bound when decimal integer = bound -> Some coerced
+        | _ -> None
+    | Ok coerced when exactPositiveUnsigned ->
+        match coerced, value with
+        | VInt integer, VUInt bound when integer >= 0L && uint64 integer = bound -> Some coerced
         | _ -> None
     | _ -> None
 
