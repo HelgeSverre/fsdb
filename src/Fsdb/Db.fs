@@ -151,7 +151,8 @@ let registerFunction (fn: ScalarFunction) (db: Db) : Db =
 /// the real `fsdb` database (also the default one): a registered name wins
 /// over a same-named real table, other real tables resolve unchanged, and
 /// re-registering a name replaces it (names are case-insensitive). Register
-/// before serving traffic. Tables configured before `withDataDir` are retained.
+/// before opening connections or serving traffic: a session captures the
+/// registry at creation. Tables configured before `withDataDir` are retained.
 let registerTable (table: VirtualTable) (db: Db) : Db =
     db.Store.VirtualTables <- Map.add (table.Name.ToLowerInvariant()) table db.Store.VirtualTables
     db

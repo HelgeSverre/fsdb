@@ -308,6 +308,27 @@ let tests =
               | ResultSet(_, [ [ Some "384" ] ]) -> ()
               | other -> failtestf "expected the virtual table to join a real one, got %A" other
 
+          testCase "virtual table registration is captured when a connection opens"
+          <| fun _ ->
+              let db = Fsdb.Db.create ()
+              use existing = Fsdb.Db.connect db
+              let table =
+                  Fsdb.Functions.VirtualTable.create "shared_models" [ Fsdb.Functions.VirtualTable.text "name" ] (fun () ->
+                      [ [| VString "small" |] ])
+
+              let configured = db |> Fsdb.Db.registerTable table
+              use later = Fsdb.Db.connect configured
+              use shared = Fsdb.Db.connect db
+
+              (match existing.Query "SELECT name FROM fsdb.shared_models" with
+               | Err(1146, _) -> ()
+               | other -> failtestf "registration after connection opening should not change its table view, got %A" other)
+
+              for connection in [ later; shared ] do
+                  match connection.Query "SELECT name FROM fsdb.shared_models" with
+                  | ResultSet(_, [ [ Some "small" ] ]) -> ()
+                  | other -> failtestf "new connection should see the shared registration, got %A" other
+
           testCase "empty virtual-table registry adds nothing to the fsdb schema"
           <| fun _ ->
               let conn = Fsdb.Db.connect (Fsdb.Db.create ())

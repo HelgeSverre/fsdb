@@ -709,7 +709,8 @@ Configuration uses pipeline-friendly builders. Function and transport builders
 return a new `Db` value. Store-level settings, `registerTable`, and `onCommit`
 update the shared store before serving; configurations derived from the same
 `Db` therefore share those registrations. `withLogger` changes the process-wide
-sink:
+sink. A connection captures the virtual-table registry when it opens, so
+register tables before opening connections or starting a listener:
 
 | API | Purpose |
 |---|---|
