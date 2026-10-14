@@ -31,3 +31,14 @@ smallest one. Physical row IDs are unioned before projection and residual
 evaluation. The focused regression requires fewer than 30 residual evaluations
 for the functional and mixed predicates on both source shapes. An uncovered
 branch keeps the general path, preserving its rows.
+
+A further MySQL 8.4.11 probe uses 1,000 inner rows. `user_id=1` matches IDs
+1–500, `ABS(band)=7` matches IDs 499–898, and a second OR branch matches IDs
+950–951. MySQL returns four rows for both the physical source and a
+pass-through derived source. Before branch intersection, FSDB returned four
+but evaluated the residual 404 times: the first branch selected the smaller
+400-row functional slice. Complete OR branches now intersect all compatible
+ordinary and functional candidates by physical row ID before unioning their
+results. The focused regression requires fewer than 20 residual calls for
+both source shapes. As with other physical candidate intersections, functional
+lookups participate only when read rows retain stored-row identity.

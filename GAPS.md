@@ -206,8 +206,9 @@ residual evaluation. Both source shapes can likewise intersect multiple
 correlated range candidates and [mixed ordinary/functional equality candidates](torture/findings/2026-10-14-correlated-physical-range-choice.md).
 The intersection requires physical reads to preserve stored row identity;
 other projected access families still choose one slice. Complete [functional and mixed plain/functional equality and text-range OR branches](torture/findings/2026-10-14-correlated-functional-or-union.md)
-over direct and pass-through physical sources union stored row identities
-before projection and residual evaluation.
+over direct and pass-through physical sources intersect compatible candidates
+within each branch, then union stored row identities before projection and
+residual evaluation.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,

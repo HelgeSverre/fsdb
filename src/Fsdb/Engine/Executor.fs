@@ -82,6 +82,15 @@ let private intersectSharedRows (candidates: Value[] list list) =
         |> List.filter (fun row -> memberships |> List.forall (fun rows -> rows.Contains row))
         |> Some
 
+let private intersectPhysicalRows (candidates: (RowId * Value[]) list list) =
+    match candidates |> List.sortBy List.length with
+    | [] -> None
+    | shortest :: rest ->
+        let memberships = rest |> List.map (List.map fst >> Set.ofList)
+        shortest
+        |> List.filter (fun (rowId, _) -> memberships |> List.forall (Set.contains rowId))
+        |> Some
+
 let private (|NamedFunction|_|) expected =
     function
     | FuncCall(name, arguments) when equalsIgnoreCase name expected -> Some arguments
@@ -14660,11 +14669,8 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     else
                         []
 
-                equality :: ((ranges @ functional) |> List.map Some)
-                |> List.choose id
-                |> function
-                    | [] -> None
-                    | candidates -> Some(List.minBy List.length candidates)
+                (equality |> Option.toList) @ ranges @ functional
+                |> intersectPhysicalRows
 
             let merge candidates =
                 candidates
@@ -14731,13 +14737,9 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
 
                 match candidates with
                 | _ :: _ :: _ ->
-                    let candidates = candidates |> List.sortBy List.length
-                    let shortest = candidates.Head
-                    let rowIds = candidates.Tail |> List.map (List.map fst >> Set.ofList)
-
-                    shortest
-                    |> List.filter (fun (rowId, _) -> rowIds |> List.forall (Set.contains rowId))
-                    |> projectPhysicalLookupRows store registry dbName projection
+                    candidates
+                    |> intersectPhysicalRows
+                    |> Option.bind (projectPhysicalLookupRows store registry dbName projection)
                 | _ -> None))
 
 and private tryProjectedPhysicalLiteralLookup

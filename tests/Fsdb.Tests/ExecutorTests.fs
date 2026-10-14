@@ -13313,7 +13313,7 @@ let tests =
 
                     Expect.isLessThan calls 20 "the direct lookup intersects two individually broad range candidates"
 
-                testCase "correlated projected source intersects plain and functional equality candidates"
+                testCase "correlated plain and functional candidates intersect in conjuncts and OR branches"
                 <| fun _ ->
                     let mutable calls = 0
 
@@ -13338,21 +13338,25 @@ let tests =
                     for source in
                         [ "probe_orders o"
                           "(SELECT id,user_id,band FROM probe_orders) o" ] do
-                        calls <- 0
+                        for predicate, expected in
+                            [ "o.user_id=u.id AND ABS(o.band)=u.target", "2"
+                              "((o.user_id=u.id AND ABS(o.band)=u.target) OR o.id BETWEEN u.id+949 AND u.id+950)", "4" ] do
+                            calls <- 0
 
-                        match
-                            run
-                                store
-                                registry
-                                ("SELECT (SELECT COUNT(*) FROM "
-                                 + source
-                                 + " WHERE TOUCH(o.id)=o.id AND o.user_id=u.id "
-                                 + "AND ABS(o.band)=u.target) FROM probe_users u")
-                        with
-                        | ResultSet(_, [ [ Some "2" ] ]) -> ()
-                        | other -> failtestf "expected two plain/functional matches for %s, got %A" source other
+                            match
+                                run
+                                    store
+                                    registry
+                                    ("SELECT (SELECT COUNT(*) FROM "
+                                     + source
+                                     + " WHERE TOUCH(o.id)=o.id AND "
+                                     + predicate
+                                     + ") FROM probe_users u")
+                            with
+                            | ResultSet(_, [ [ Some count ] ]) when count = expected -> ()
+                            | other -> failtestf "expected %s matches for %s, got %A" expected source other
 
-                        Expect.isLessThan calls 20 "the residual reads the intersection of both indexed candidates"
+                            Expect.isLessThan calls 20 "the residual reads intersected physical candidates"
 
                 testCase "an indexed pass-through derived source resolves only matching physical rows"
                 <| fun _ ->
