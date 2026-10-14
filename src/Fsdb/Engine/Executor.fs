@@ -20869,7 +20869,7 @@ let private explainIndexKeyLen
             transforms
             |> Option.bind (List.tryItem position)
             |> Option.flatten
-        let functionalLength = transform |> Option.bind (FunctionalIndex.tryIntegerExpressionKeyLength column.Type)
+        let functionalLength = transform |> Option.bind (FunctionalIndex.tryExplainFunctionalKeyLength column.Type)
         let resultColumn =
             if transform |> Option.exists FunctionalIndex.hasNonNullableTextFallback then
                 { column with Nullable = false }

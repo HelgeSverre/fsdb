@@ -61,6 +61,9 @@ let private definitions =
       { CanonicalName = "WEEKDAY"
         Aliases = []
         Transform = WeekdayPart }
+      { CanonicalName = "DATE"
+        Aliases = []
+        Transform = DateOnlyPart }
       { CanonicalName = "ASCII"
         Aliases = []
         Transform = FirstByte }
@@ -297,6 +300,7 @@ let tryPhysicalExpression expression =
         | FuncCall(name, [ argument ]) ->
             tryBuiltin name
             |> Option.bind (fun transform -> collect ((name, transform) :: calls) argument)
+        | Cast(source, TDate) -> collect (("DATE", DateOnlyPart) :: calls) source
         | _ -> None
 
     collect [] expression
@@ -361,12 +365,20 @@ let sameLookupTransform (column: ColumnDef) requested stored =
                         requestedFallback.Literal storedFallback.Literal
                 | _ -> false
             | _ -> false
+        | Some(Expression requested), Some stored ->
+            tryPhysicalExpression requested
+            |> Option.exists (fun physical ->
+                physical.Column.Equals(column.Name, StringComparison.OrdinalIgnoreCase)
+                && physical.NullFallback.IsNone
+                && physical.NullComparison.IsNone
+                && (physical.Calls |> List.map snd) = [ stored ])
         | _ -> false
 
 type private TransformFamily =
     | TextOperation
     | IntegerFromText
     | IntegerFromDate
+    | DateFromDateTime
     | EncodedTextResult
     | DecodedBinaryResult
     | NumericGeneral
@@ -391,6 +403,7 @@ let private transformFamily = function
     | DayOfYearPart
     | DayOfWeekPart
     | WeekdayPart -> IntegerFromDate
+    | DateOnlyPart -> DateFromDateTime
     | EncodedHex
     | Md5Digest
     | Sha1Digest -> EncodedTextResult
@@ -515,7 +528,8 @@ let private supportsSingleTransform transform columnType =
         | TGeometry _
         | TVector _ -> false
         | _ -> true
-    | IntegerFromDate ->
+    | IntegerFromDate
+    | DateFromDateTime ->
         match columnType with
         | TDate | TDateTime _ -> true
         | _ -> false
@@ -665,12 +679,12 @@ let supportsColumn transform (column: ColumnDef) =
                 | _ -> false)
     | transform -> supportsSingleTransform transform column.Type
 
-/// These transforms return exact integer values; their encoded key width also
-/// supplies metadata for the hidden functional column.
+/// Fixed result widths also supply metadata for hidden functional columns.
 let private yearKeyLength = 2
 let private calendarIntegerKeyLength = 5
+let private dateKeyLength = 4
 
-let rec private integerKeyLength = function
+let rec private fixedResultKeyLength = function
     | CharacterLength
     | ByteLength
     | BitLength
@@ -680,6 +694,7 @@ let rec private integerKeyLength = function
     | FirstByte
     | Checksum32
     | IsNullResult -> Some 4
+    | DateOnlyPart -> Some dateKeyLength
     | YearPart -> Some yearKeyLength
     | MonthPart
     | DayPart
@@ -689,11 +704,12 @@ let rec private integerKeyLength = function
     | WeekdayPart -> Some calendarIntegerKeyLength
     | Expression expression ->
         tryPhysicalExpression expression
-        |> Option.bind (fun physical -> physical.Calls |> List.tryLast |> Option.bind (snd >> integerKeyLength))
+        |> Option.bind (fun physical -> physical.Calls |> List.tryLast |> Option.bind (snd >> fixedResultKeyLength))
     | _ -> None
 
 /// The hidden result type depends on both source signedness and literal width.
-let tryIntegerExpressionKeyLength columnType = function
+let tryExplainFunctionalKeyLength columnType = function
+    | DateOnlyPart -> Some dateKeyLength
     | YearPart -> Some yearKeyLength
     | MonthPart
     | DayPart
@@ -716,8 +732,8 @@ let tryIntegerExpressionKeyLength columnType = function
     | _ -> None
 
 let fixedKeyLength columnType transform =
-    tryIntegerExpressionKeyLength columnType transform
-    |> Option.orElseWith (fun () -> integerKeyLength transform)
+    tryExplainFunctionalKeyLength columnType transform
+    |> Option.orElseWith (fun () -> fixedResultKeyLength transform)
 
 let rec hasNumericResult = function
     | Expression expression ->
@@ -898,6 +914,20 @@ let private tryTextResultProbe = function
     | VString text -> Some(VString text)
     | _ -> None
 
+let private tryDateResultProbe value =
+    match value with
+    | VDate _ | VZeroDate _ -> Some value
+    | VDateTime date -> Some(VDate(DateOnly.FromDateTime date))
+    | VZeroDateTime date -> Some(VZeroDate(zeroDateOfDateTime date))
+    | VString _ | VEncodedString _ ->
+        value
+        |> toText
+        |> Option.bind (fun text ->
+            match DateOnly.TryParseExact(text, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None) with
+            | true, date -> Some(VDate date)
+            | _ -> tryParseDateComponents text |> Option.map VZeroDate)
+    | _ -> None
+
 let rec tryNormalizeProbe columnType transform normalizeStored value =
     match transform, value with
     | Some _, VNull -> Some VNull
@@ -922,6 +952,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
         tryRoundedProbe columnType value |> Option.orElseWith (fun () -> normalizeStored value)
     | Some transform, VDouble number when producesDoubleResult transform && Double.IsFinite number -> Some(VDouble number)
     | Some transform, _ when producesDoubleResult transform -> None
+    | Some DateOnlyPart, _ -> tryDateResultProbe value
     | Some CharacterLength, _
     | Some ByteLength, _
     | Some BitLength, _
@@ -1191,6 +1222,11 @@ let rec projectValueWithStatusUsing textEquals encodeText transform value =
     | Some DayOfYearPart, value -> normalizedCalendarPartValue _.DayOfYear value, None
     | Some DayOfWeekPart, value -> normalizedCalendarPartValue (fun date -> int date.DayOfWeek + 1) value, None
     | Some WeekdayPart, value -> normalizedCalendarPartValue (fun date -> (int date.DayOfWeek + 6) % 7) value, None
+    | Some DateOnlyPart, (VDate _ as source) -> source, None
+    | Some DateOnlyPart, VDateTime date -> VDate(DateOnly.FromDateTime date), None
+    | Some DateOnlyPart, (VZeroDate _ as source) -> source, None
+    | Some DateOnlyPart, VZeroDateTime date -> VZeroDate(zeroDateOfDateTime date), None
+    | Some DateOnlyPart, _ -> VNull, None
     | Some FirstByte, value ->
         let bytes =
             match tryRawBytes value with

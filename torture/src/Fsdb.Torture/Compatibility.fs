@@ -5738,7 +5738,9 @@ module ContractCatalog =
                "CREATE TABLE calendar_probe(id INT PRIMARY KEY,d DATE,KEY ix_month ((MONTH(d))),KEY ix_day ((DAY(d))))"
                "INSERT INTO calendar_probe VALUES(1,'2024-02-29'),(2,'2023-03-01'),(3,NULL),(4,'2024-02-01')"
                "CREATE TABLE derived_calendar_probe(id INT PRIMARY KEY,d DATE,KEY ix_quarter ((QUARTER(d))),KEY ix_doy ((DAYOFYEAR(d))),KEY ix_dow ((DAYOFWEEK(d))),KEY ix_weekday ((WEEKDAY(d))))"
-               "INSERT INTO derived_calendar_probe VALUES(1,'2024-02-29'),(2,'2023-10-01'),(3,NULL),(4,'2024-12-31')" |]
+               "INSERT INTO derived_calendar_probe VALUES(1,'2024-02-29'),(2,'2023-10-01'),(3,NULL),(4,'2024-12-31')"
+               "CREATE TABLE date_result_probe(id INT PRIMARY KEY,dt DATETIME,KEY ix_date ((DATE(dt))))"
+               "INSERT INTO date_result_probe VALUES(1,'2024-02-29 12:00:00'),(2,'2023-10-01 08:00:00'),(3,NULL),(4,'2024-02-29 23:59:59')" |]
           Steps =
             [| Contract.query "source-years" "SELECT id,YEAR(d) FROM year_probe ORDER BY id"
                Contract.query "year-key" "SELECT id FROM year_probe WHERE YEAR(d)=2024 ORDER BY id"
@@ -5763,6 +5765,12 @@ module ContractCatalog =
                Contract.execute "derived-update" "UPDATE derived_calendar_probe SET d='2025-04-01' WHERE id=1"
                Contract.query "derived-old-key-removed" "SELECT id FROM derived_calendar_probe WHERE DAYOFWEEK(d)=5 ORDER BY id"
                Contract.query "derived-new-key-added" "SELECT id FROM derived_calendar_probe WHERE QUARTER(d)=2 ORDER BY id"
+               Contract.query "date-result-source" "SELECT id,DATE(dt),CAST(dt AS DATE) FROM date_result_probe ORDER BY id"
+               Contract.query "date-result-key" "SELECT id FROM date_result_probe WHERE DATE(dt)='2024-02-29' ORDER BY id"
+               Contract.query "date-result-cast-alias" "SELECT id FROM date_result_probe WHERE CAST(dt AS DATE)='2024-02-29' ORDER BY id"
+               Contract.execute "date-result-update" "UPDATE date_result_probe SET dt='2025-03-01 08:30:00' WHERE id=1"
+               Contract.query "date-result-old-key-removed" "SELECT id FROM date_result_probe WHERE DATE(dt)='2024-02-29' ORDER BY id"
+               Contract.query "date-result-new-key-added" "SELECT id FROM date_result_probe WHERE CAST(dt AS DATE)='2025-03-01' ORDER BY id"
                Contract.execute "allow-invalid-calendar" "SET SESSION sql_mode='ALLOW_INVALID_DATES'"
                Contract.execute "insert-invalid-calendar" "INSERT INTO derived_calendar_probe VALUES(5,'0000-00-00'),(6,'2024-00-15'),(7,'2024-02-00'),(8,'2024-02-31')"
                Contract.query "invalid-calendar-parts" "SELECT id,QUARTER(d),DAYOFYEAR(d),DAYOFWEEK(d),WEEKDAY(d) FROM derived_calendar_probe WHERE id>=5 ORDER BY id"
@@ -5771,7 +5779,7 @@ module ContractCatalog =
                Contract.query "invalid-weekday-null-key" "SELECT id FROM derived_calendar_probe WHERE id>=5 AND WEEKDAY(d) IS NULL ORDER BY id"
                Contract.query "normalized-weekday-key" "SELECT id FROM derived_calendar_probe WHERE WEEKDAY(d)=5 ORDER BY id"
                Contract.execute "restore-calendar-mode" "SET SESSION sql_mode=DEFAULT" |]
-          Cleanup = [| "SET SESSION sql_mode=DEFAULT"; "DROP TABLE derived_calendar_probe"; "DROP TABLE calendar_probe"; "DROP TABLE year_probe" |]
+          Cleanup = [| "SET SESSION sql_mode=DEFAULT"; "DROP TABLE date_result_probe"; "DROP TABLE derived_calendar_probe"; "DROP TABLE calendar_probe"; "DROP TABLE year_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
     let private asciiFunctionalIndex =

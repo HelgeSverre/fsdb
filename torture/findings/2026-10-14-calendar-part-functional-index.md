@@ -52,3 +52,12 @@ no row. A separate January 31 UTC fixture projected February 1 after the
 same time-zone change, while indexed `MONTH(ts)=2` and `DAY(ts)=1` both
 returned no row. Fsdb should not claim a compatible physical lookup until the
 time-zone-dependent behavior is characterized more fully.
+
+Native MySQL 8.4.11 also accepts `KEY ix_date ((DATE(dt)))` on a `DATETIME`
+column and normalizes it to a `CAST(... AS DATE)` expression. Both spellings
+use `ref` access with a four-byte key for a selective date equality. Fsdb now
+projects the date result into the stored key and treats those spellings as the
+same lookup. The focused regression checks key access and UPDATE maintenance;
+the expanded calendar contract matched all 37 steps against the pinned MySQL
+8.4.11 image in `20261014T033512725-91120/contracts`. The full 151-case,
+19,169-step run retained the same ten unrelated differences.

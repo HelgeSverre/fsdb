@@ -8255,6 +8255,38 @@ let tests =
                         Expect.equal plan.AccessType (Some "ref") "the derived calendar part uses its physical key"
                         Expect.equal plan.KeyLength (Some "5") "the derived calendar part uses a five-byte key"
 
+                testCase "DATE and CAST AS DATE share a functional key on DATETIME"
+                <| fun _ ->
+                    let store = newStore ()
+                    let created = runDefault store "CREATE TABLE indexed_dates (id INT PRIMARY KEY, dt DATETIME, INDEX ix_date ((DATE(dt))))"
+                    Expect.equal created (Affected 0UL) "the DATE key is accepted"
+                    let rows =
+                        [ for id in 1 .. 300 ->
+                              let date =
+                                  if id = 17 || id = 219 then "2024-02-29"
+                                  else System.DateOnly(2023, 1, 1).AddDays(id).ToString("yyyy-MM-dd")
+                              sprintf "(%d, '%s 23:59:59')" id date ]
+                        |> String.concat ", "
+                    runDefault store ("INSERT INTO indexed_dates VALUES " + rows) |> ignore
+                    runDefault store "INSERT INTO indexed_dates VALUES (301,NULL)" |> ignore
+                    for expression in [ "DATE(dt)"; "CAST(dt AS DATE)" ] do
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM indexed_dates WHERE {expression}='2024-02-29' ORDER BY id")
+                            (ResultSet([ "id" ], [ [ Some "17" ]; [ Some "219" ] ]))
+                            "both date expressions return the same rows"
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM indexed_dates WHERE {expression}='2024-02-29'" |> explainRow
+                        Expect.equal plan.AccessType (Some "ref") (sprintf "the date expression uses the functional key: %A" plan)
+                        Expect.equal plan.KeyLength (Some "4") "MySQL uses a four-byte DATE key"
+                    runDefault store "UPDATE indexed_dates SET dt='2025-03-01 08:30:00' WHERE id=17" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM indexed_dates WHERE DATE(dt)='2024-02-29' ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "219" ] ]))
+                        "updating the source removes the old date key"
+                    Expect.equal
+                        (runDefault store "SELECT id FROM indexed_dates WHERE CAST(dt AS DATE)='2025-03-01'")
+                        (ResultSet([ "id" ], [ [ Some "17" ] ]))
+                        "the cast finds the updated date key"
+
                 testCase "functional equality and range probes use expression indexes"
                 <| fun _ ->
                     let mutable calls = 0

@@ -444,8 +444,8 @@ different access pattern:
 - **Functional keys.** Composite indexes may contain `LOWER`/`LCASE`,
   `UPPER`/`UCASE`, `TRIM`, `REVERSE`, `CHAR_LENGTH`/`CHARACTER_LENGTH`,
   `LENGTH`/`OCTET_LENGTH`, `BIT_LENGTH`, `YEAR`, `MONTH`, and
-  `DAY`/`DAYOFMONTH`, `QUARTER`, `DAYOFYEAR`, `DAYOFWEEK`, and `WEEKDAY`
-  on `DATE`/`DATETIME`,
+  `DAY`/`DAYOFMONTH`, `QUARTER`, `DAYOFYEAR`, `DAYOFWEEK`, `WEEKDAY`,
+  and `DATE`/`CAST(... AS DATE)` on `DATE`/`DATETIME`,
   `ASCII`, `ORD`, `HEX`, `UNHEX`,
   `MD5`, `SHA1`/`SHA`, `ISNULL`, `CRC32`,
   or numeric/text/binary `ABS`, `SIGN`, `BIT_COUNT`, `FLOOR`, `CEIL`/`CEILING`, `ROUND`, `SQRT`,

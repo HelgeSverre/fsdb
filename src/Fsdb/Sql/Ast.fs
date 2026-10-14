@@ -467,6 +467,7 @@ and IndexTransform =
     | DayOfYearPart
     | DayOfWeekPart
     | WeekdayPart
+    | DateOnlyPart
     | FirstByte
     | FirstCharacterCode
     | DecodedHex
