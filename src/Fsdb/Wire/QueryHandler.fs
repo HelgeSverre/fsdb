@@ -4058,18 +4058,16 @@ let private cacheableSqlLength = 512
 let private parsedStatements =
     BoundedConcurrentCache<struct (Parser.ParserOptions * string), Statement>(parsedStatementCapacity)
 
-let private parsedStatementCandidates =
-    BoundedConcurrentCache<int, byte>(parsedStatementCandidateCapacity)
+let private parsedStatementCandidateSlots =
+    Array.zeroCreate<int64> parsedStatementCandidateCapacity
 
 let private isRepeatedStatement (options: Parser.ParserOptions) (sql: string) =
     // The fingerprint only decides admission. Cache lookups still use the
-    // complete SQL and mode, so collisions cannot select the wrong AST.
+    // complete SQL and mode, so slot collisions cannot select the wrong AST.
     let fingerprint = HashCode.Combine(options, StringComparer.Ordinal.GetHashCode sql)
-
-    if parsedStatementCandidates.TryAdd(fingerprint, 0uy) then
-        false
-    else
-        true
+    let slot = fingerprint &&& (parsedStatementCandidateCapacity - 1)
+    let marker = int64 (uint32 fingerprint) + 1L
+    System.Threading.Interlocked.Exchange(&parsedStatementCandidateSlots.[slot], marker) = marker
 
 let private parseStatement (options: Parser.ParserOptions) (sql: string) =
     let key = struct (options, sql)

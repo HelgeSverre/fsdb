@@ -1310,6 +1310,12 @@ The engine already avoids several earlier cliffs:
 - REGEXP expressions reuse a compiled pattern within a statement while the
   pattern, match type, and collation stay the same ([scan measurement](benchmarks/results/2026-10-09-regexp-wire-latency.md)).
 
+A [durable concurrent-insert profile](benchmarks/results/2026-10-14-statement-admission-contention.md)
+found process-wide contention in parsed-statement admission for unique literal
+SQL texts. Fixed-size atomic admission slots removed that hot spot in the
+audited load; full SQL and parser options still key the parsed statements.
+Durable write throughput and worker scaling remain below MySQL.
+
 Shared statement setup, computed scan predicates, phrase/proximity matching,
 and broader join-shaped full-text plans remain input-sensitive. Immutable
 [benchmark artifacts](benchmarks/results/) hold the measurements; this ledger
