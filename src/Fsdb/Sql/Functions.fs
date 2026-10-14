@@ -6898,6 +6898,13 @@ let private registerFunctionalScalar transform registry =
     |> List.fold (fun registry name -> registerScalar name (exactArity name 1 (functionalIndexScalar transform)) registry) registry
 
 let private registerTemporalBuiltins registry =
+    let quarter =
+        zeroAwareDatePart
+            (fun date ->
+                let _, month, _ = zeroDateParts date
+                quarterOfMonth month)
+            (fun date -> quarterOfMonth date.Month)
+
     registry
     |> registerScalar "DATE_ADD" (dateAddCore 1.0)
     |> registerScalar "TIMESTAMPADD" timestampAddFn
@@ -6929,7 +6936,7 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "WEEKDAY" (exactArity "WEEKDAY" 1 weekdayFn)
     |> registerScalar "WEEKOFYEAR" (exactArity "WEEKOFYEAR" 1 weekOfYearFn)
     |> registerScalar "YEARWEEK" (arityRange "YEARWEEK" 1 2 yearWeekFn)
-    |> registerScalar "QUARTER" (datePartFn (fun d -> (d.Month - 1) / 3 + 1))
+    |> registerScalar "QUARTER" quarter
     |> registerScalar "CURDATE" curDateFn
     |> registerScalar "CURRENT_DATE" curDateFn
     |> registerScalar "CURTIME" curTimeFn

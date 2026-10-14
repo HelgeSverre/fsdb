@@ -7507,6 +7507,23 @@ let tests =
               | Affected 1UL -> ()
               | other -> failtestf "expected strict mode without zero modes to preserve the value, got %A" other
 
+          testCase "quarter functional keys retain zero and invalid date months"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "SET SESSION sql_mode='ALLOW_INVALID_DATES'"
+                        "CREATE TABLE t (id INT PRIMARY KEY, d DATE, KEY ix_quarter ((QUARTER(d))))"
+                        "INSERT INTO t VALUES (1,'0000-00-00'),(2,'2024-00-15'),(3,'2024-02-00'),(4,'2024-02-31')" ]
+
+              Expect.equal
+                  (run "SELECT id,QUARTER(d) FROM t ORDER BY id")
+                  (ResultSet([ "id"; "QUARTER(d)" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "1" ]; [ Some "4"; Some "1" ] ]))
+                  "the scalar quarter follows the stored month"
+              Expect.equal
+                  (run "SELECT id FROM t WHERE QUARTER(d)=0 ORDER BY id")
+                  (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                  "the zero-month functional key returns both matching rows"
+
           testCase "ALLOW_INVALID_DATES preserves invalid DATE and DATETIME calendar combinations"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

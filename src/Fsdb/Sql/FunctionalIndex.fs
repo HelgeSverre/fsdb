@@ -49,6 +49,18 @@ let private definitions =
       { CanonicalName = "DAY"
         Aliases = [ "DAYOFMONTH" ]
         Transform = DayPart }
+      { CanonicalName = "QUARTER"
+        Aliases = []
+        Transform = QuarterPart }
+      { CanonicalName = "DAYOFYEAR"
+        Aliases = []
+        Transform = DayOfYearPart }
+      { CanonicalName = "DAYOFWEEK"
+        Aliases = []
+        Transform = DayOfWeekPart }
+      { CanonicalName = "WEEKDAY"
+        Aliases = []
+        Transform = WeekdayPart }
       { CanonicalName = "ASCII"
         Aliases = []
         Transform = FirstByte }
@@ -374,7 +386,11 @@ let private transformFamily = function
     | FirstCharacterCode -> IntegerFromText
     | YearPart
     | MonthPart
-    | DayPart -> IntegerFromDate
+    | DayPart
+    | QuarterPart
+    | DayOfYearPart
+    | DayOfWeekPart
+    | WeekdayPart -> IntegerFromDate
     | EncodedHex
     | Md5Digest
     | Sha1Digest -> EncodedTextResult
@@ -652,7 +668,7 @@ let supportsColumn transform (column: ColumnDef) =
 /// These transforms return exact integer values; their encoded key width also
 /// supplies metadata for the hidden functional column.
 let private yearKeyLength = 2
-let private monthDayKeyLength = 5
+let private calendarIntegerKeyLength = 5
 
 let rec private integerKeyLength = function
     | CharacterLength
@@ -666,7 +682,11 @@ let rec private integerKeyLength = function
     | IsNullResult -> Some 4
     | YearPart -> Some yearKeyLength
     | MonthPart
-    | DayPart -> Some monthDayKeyLength
+    | DayPart
+    | QuarterPart
+    | DayOfYearPart
+    | DayOfWeekPart
+    | WeekdayPart -> Some calendarIntegerKeyLength
     | Expression expression ->
         tryPhysicalExpression expression
         |> Option.bind (fun physical -> physical.Calls |> List.tryLast |> Option.bind (snd >> integerKeyLength))
@@ -676,7 +696,11 @@ let rec private integerKeyLength = function
 let tryIntegerExpressionKeyLength columnType = function
     | YearPart -> Some yearKeyLength
     | MonthPart
-    | DayPart -> Some monthDayKeyLength
+    | DayPart
+    | QuarterPart
+    | DayOfYearPart
+    | DayOfWeekPart
+    | WeekdayPart -> Some calendarIntegerKeyLength
     | Expression expression ->
         match tryPhysicalExpression expression with
         | Some { NullComparison = Some _; Calls = [] } -> nullIfIntegerWidth columnType |> Option.map ((+) 1)
@@ -904,6 +928,10 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
     | Some YearPart, _
     | Some MonthPart, _
     | Some DayPart, _
+    | Some QuarterPart, _
+    | Some DayOfYearPart, _
+    | Some DayOfWeekPart, _
+    | Some WeekdayPart, _
     | Some FirstByte, _
     | Some FirstCharacterCode, _
     | Some IsNullResult, _
@@ -1110,6 +1138,17 @@ let private calendarPartValue select value =
 
     parts |> Option.map (select >> int64 >> VInt) |> Option.defaultValue VNull
 
+let private normalizedCalendarPartValue select value =
+    let date =
+        match value with
+        | VDate date -> Some date
+        | VDateTime date -> Some(DateOnly.FromDateTime date)
+        | VZeroDate date -> tryNormalizeInvalidDate date
+        | VZeroDateTime date -> zeroDateOfDateTime date |> tryNormalizeInvalidDate
+        | _ -> None
+
+    date |> Option.map (select >> int64 >> VInt) |> Option.defaultValue VNull
+
 let rec projectValueWithStatusUsing textEquals encodeText transform value =
     match transform, value with
     | Some IsNullResult, VNull -> VInt 1L, None
@@ -1147,6 +1186,11 @@ let rec projectValueWithStatusUsing textEquals encodeText transform value =
     | Some YearPart, value -> calendarPartValue (fun (year, _, _) -> year) value, None
     | Some MonthPart, value -> calendarPartValue (fun (_, month, _) -> month) value, None
     | Some DayPart, value -> calendarPartValue (fun (_, _, day) -> day) value, None
+    | Some QuarterPart, value ->
+        calendarPartValue (fun (_, month, _) -> quarterOfMonth month) value, None
+    | Some DayOfYearPart, value -> normalizedCalendarPartValue _.DayOfYear value, None
+    | Some DayOfWeekPart, value -> normalizedCalendarPartValue (fun date -> int date.DayOfWeek + 1) value, None
+    | Some WeekdayPart, value -> normalizedCalendarPartValue (fun date -> (int date.DayOfWeek + 6) % 7) value, None
     | Some FirstByte, value ->
         let bytes =
             match tryRawBytes value with

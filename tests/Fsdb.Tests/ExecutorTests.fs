@@ -8236,6 +8236,25 @@ let tests =
                         Expect.equal plan.AccessType (Some "ref") "DATETIME calendar parts use their index"
                         Expect.equal plan.KeyLength (Some "5") "DATETIME month and day keys use five bytes"
 
+                testCase "derived calendar parts use selective functional indexes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE calendar_derived (id INT PRIMARY KEY, d DATE, INDEX ix_quarter ((QUARTER(d))), INDEX ix_doy ((DAYOFYEAR(d))), INDEX ix_dow ((DAYOFWEEK(d))), INDEX ix_weekday ((WEEKDAY(d))))" |> ignore
+                    let rows =
+                        [ for id in 1 .. 300 ->
+                              let date = if id = 17 || id = 219 then "2024-02-29" else "2023-10-01"
+                              sprintf "(%d, '%s')" id date ]
+                        |> String.concat ", "
+                    runDefault store ("INSERT INTO calendar_derived VALUES " + rows) |> ignore
+                    for expression in [ "QUARTER(d)=1"; "DAYOFYEAR(d)=60"; "DAYOFWEEK(d)=5"; "WEEKDAY(d)=3" ] do
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM calendar_derived WHERE {expression} ORDER BY id")
+                            (ResultSet([ "id" ], [ [ Some "17" ]; [ Some "219" ] ]))
+                            "the derived calendar part returns its matching dates"
+                        let plan = runDefault store $"EXPLAIN SELECT id FROM calendar_derived WHERE {expression}" |> explainRow
+                        Expect.equal plan.AccessType (Some "ref") "the derived calendar part uses its physical key"
+                        Expect.equal plan.KeyLength (Some "5") "the derived calendar part uses a five-byte key"
+
                 testCase "functional equality and range probes use expression indexes"
                 <| fun _ ->
                     let mutable calls = 0

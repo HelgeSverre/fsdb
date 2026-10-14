@@ -2239,6 +2239,8 @@ let tests =
                           Expect.equal (call "MONTH" [ partial ]) (VInt 1L) "month survives"
                           Expect.equal (call "DAYOFMONTH" [ partial ]) (VInt 0L) "zero day survives"
                           Expect.equal (call "DAY" [ partial ]) (VInt 0L) "DAY matches DAYOFMONTH"
+                          Expect.equal (call "QUARTER" [ partial ]) (VInt 1L) "quarter keeps a nonzero month"
+                          Expect.equal (call "QUARTER" [ allZero ]) (VInt 0L) "quarter retains a zero month"
                           Expect.equal (call "DATE_FORMAT" [ partial; VString "%Y-%m-%d" ]) (VString "2020-01-00") "format preserves components"
                           Expect.equal (call "LAST_DAY" [ partial ]) (VDate(DateOnly(2020, 1, 31))) "calendar month remains known"
                           let zeroDateTime = VZeroDateTime(tryZeroDateTime (tryZeroDate 2020 0 1 |> Option.get) 12 34 56 0 |> Option.get)

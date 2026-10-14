@@ -354,6 +354,9 @@ let tryInvalidDate (year: int) (month: int) (day: int) : ZeroDate option =
 
 let zeroDateParts (ZeroDate(year, month, day)) = year, month, day
 
+let quarterOfMonth month =
+    if month = 0 then 0 else (month - 1) / 3 + 1
+
 let hasZeroDatePart date =
     let year, month, day = zeroDateParts date
     year = 0 || month = 0 || day = 0

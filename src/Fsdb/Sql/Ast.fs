@@ -463,6 +463,10 @@ and IndexTransform =
     | YearPart
     | MonthPart
     | DayPart
+    | QuarterPart
+    | DayOfYearPart
+    | DayOfWeekPart
+    | WeekdayPart
     | FirstByte
     | FirstCharacterCode
     | DecodedHex
