@@ -1601,7 +1601,12 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               SecurityType = view.SecurityType }
             | Some(FromTable source)
                 when not select.Joins.IsEmpty
-                     && (select.Joins |> List.forall (fun join -> join.Kind = InnerJoin || join.Kind = StraightJoin))
+                     && (select.Joins
+                         |> List.forall (fun join ->
+                             join.Kind = InnerJoin
+                             || join.Kind = StraightJoin
+                             || join.Kind = CrossJoin
+                             || join.Kind = NaturalJoin))
                      && (select.Joins |> List.forall (fun join -> match join.Table with FromTable _ -> true | _ -> false))
                      && hasWritableShape select
                      && select.OrderBy.IsEmpty ->
@@ -1745,6 +1750,19 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                 if sources.Length <> tableRefs.Length then
                     None
                 else
+                    let coalescedNames =
+                        (sources |> List.tail, select.Joins)
+                        ||> List.zip
+                        |> List.fold
+                            (fun (seen, merged) (source, join) ->
+                                let sourceNames = source.Columns |> List.map _.ToLowerInvariant() |> Set.ofList
+                                let shared =
+                                    if join.Kind = NaturalJoin then Set.intersect seen sourceNames
+                                    else join.Using |> List.map _.ToLowerInvariant() |> Set.ofList
+                                Set.union seen sourceNames, Set.union merged shared)
+                            (sources.Head.Columns |> List.map _.ToLowerInvariant() |> Set.ofList, Set.empty)
+                        |> snd
+
                     let directTarget =
                         function
                         | QualifiedCol(qualifier, column) ->
@@ -1752,11 +1770,14 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             |> List.tryFind (fun source -> source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
                             |> Option.bind (fun source -> source.Targets |> Map.tryFind (column.ToLowerInvariant()))
                         | Col column ->
-                            sources
-                            |> List.choose (fun source -> source.Targets |> Map.tryFind (column.ToLowerInvariant()))
-                            |> function
-                                | [ target ] -> Some target
-                                | _ -> None
+                            let targets =
+                                sources
+                                |> List.choose (fun source -> source.Targets |> Map.tryFind (column.ToLowerInvariant()))
+
+                            match targets with
+                            | [ target ] -> Some target
+                            | target :: _ when Set.contains (column.ToLowerInvariant()) coalescedNames -> Some target
+                            | _ -> None
                         | _ -> None
 
                     let expandedProjections =
@@ -1782,11 +1803,14 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 |> List.tryFind (fun source -> source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
                                 |> Option.bind (fun source -> source.Expressions |> Map.tryFind (column.ToLowerInvariant()))
                             | Col column ->
-                                sources
-                                |> List.choose (fun source -> source.Expressions |> Map.tryFind (column.ToLowerInvariant()))
-                                |> function
-                                    | [ expression ] -> Some expression
-                                    | _ -> None
+                                let expressions =
+                                    sources
+                                    |> List.choose (fun source -> source.Expressions |> Map.tryFind (column.ToLowerInvariant()))
+
+                                match expressions with
+                                | [ expression ] -> Some expression
+                                | expression :: _ when Set.contains (column.ToLowerInvariant()) coalescedNames -> Some expression
+                                | _ -> None
                             | _ -> None)
 
                     let projected =

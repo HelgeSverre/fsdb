@@ -563,6 +563,9 @@ inside view predicates lower with the base-table write.
 
 Direct physical inner-join views can update one component table per statement
 and insert through an explicit column list into one insertable component.
+Writable join views also cover `CROSS JOIN`, `JOIN ... USING`, and `NATURAL JOIN`;
+merged `USING` and natural columns bind to the left input when a view write
+references them.
 Direct inner-join views with `WITH CHECK OPTION` validate inserted and updated
 rows against the join and view predicate. Updates retain their originally
 matched join partners; finding a different partner after a key change does not

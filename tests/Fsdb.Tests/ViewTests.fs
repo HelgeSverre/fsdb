@@ -313,6 +313,32 @@ let tests =
                   [ [ Some "1"; Some "11" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]
                   "rejected writes do not change the base table"
 
+          testCase "cross using and natural join views retain writable columns"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE join_form_left (id INT PRIMARY KEY, n INT)") "create left"
+              expectOk (run store "CREATE TABLE join_form_right (id INT PRIMARY KEY, v INT)") "create right"
+              expectOk (run store "INSERT INTO join_form_left VALUES (1, 10), (2, 20)") "seed left"
+              expectOk (run store "INSERT INTO join_form_right VALUES (1, 100), (2, 200)") "seed right"
+
+              for name, definition, value in
+                  [ "cross_form", "SELECT l.id,l.n,r.v FROM join_form_left l CROSS JOIN join_form_right r WHERE l.id=r.id", 11
+                    "using_form", "SELECT l.id,l.n,r.v FROM join_form_left l JOIN join_form_right r USING(id)", 12
+                    "natural_form", "SELECT id,n,v FROM join_form_left NATURAL JOIN join_form_right", 13 ] do
+                  expectOk (run store (sprintf "CREATE VIEW %s AS %s" name definition)) (sprintf "create %s" name)
+                  Expect.equal
+                      (rows store (sprintf "SELECT is_updatable FROM information_schema.views WHERE table_name = '%s'" name))
+                      [ [ Some "YES" ] ]
+                      (sprintf "%s is updatable" name)
+                  expectOk
+                      (run store (sprintf "UPDATE %s SET n = %d WHERE id = 1" name value))
+                      (sprintf "update %s" name)
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM join_form_left ORDER BY id")
+                  [ [ Some "1"; Some "13" ]; [ Some "2"; Some "20" ] ]
+                  "each join form writes the left table"
+
           testCase "subquery views follow MySQL updateability boundaries"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -1565,7 +1565,10 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                     (select.Joins.IsEmpty
                      || (select.Joins
                          |> List.forall (fun join ->
-                             (join.Kind = InnerJoin || join.Kind = StraightJoin)
+                             (join.Kind = InnerJoin
+                              || join.Kind = StraightJoin
+                              || join.Kind = CrossJoin
+                              || join.Kind = NaturalJoin)
                              && match join.Table with FromTable _ -> true | _ -> false)))
                     && not select.Distinct
                     && not select.CalculateFoundRows
