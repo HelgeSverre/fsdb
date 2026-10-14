@@ -569,7 +569,10 @@ insertability, dependent projection subqueries refuse writes, and subqueries
 inside view predicates lower with the base-table write.
 
 Direct physical inner-join views can update one component table per statement
-and insert through an explicit column list into one insertable component.
+and insert through explicit target columns into one insertable component.
+This includes [audited `INSERT ... SET`, `INSERT IGNORE ... SET`, and ODKU
+forms](torture/findings/2026-10-14-joined-view-insert-set-check-option.md);
+an implicit-column `VALUES` insert still returns MySQL error 1394.
 Writable join views also cover `CROSS JOIN`, `JOIN ... USING`, and `NATURAL JOIN`;
 merged `USING` and natural columns bind to the left input when a view write
 references them. An [ordered join view](torture/findings/2026-10-14-ordered-join-view.md)
@@ -595,6 +598,9 @@ revoked grants invalidate the joined write as in MySQL 8.4
 ([oracle and regression](torture/findings/2026-10-14-nested-join-view-security.md)).
 Renamed columns retain the component view's column identity for authorization,
 including column-level grants when two aliases reach the same base column.
+An [audited distinct-definer component CHECK OPTION](torture/findings/2026-10-14-joined-view-insert-set-check-option.md)
+also rejects invalid joined UPDATE and `INSERT ... SET` rows with error 1369,
+while allowing a valid insert.
 [Explicit-column INSERT and INSERT SELECT](torture/findings/2026-10-14-nested-join-view-insert.md)
 also reach a distinct-definer component in a joined view. The outer definer's
 component INSERT grants are checked by exposed column, and the inner definer's
@@ -641,7 +647,7 @@ trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; audited three-layer outer joins and renamed column grants work; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, outer view layers, and aggregate/UNION read-only join components compose writable targets; other joined insert forms, broader layered joins, and remaining expression shapes stay open | medium | subset |
+| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; `INSERT ... SET`, `IGNORE`, ODKU, and audited component CHECK OPTION cases work; audited three-layer outer joins and renamed column grants work; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, outer view layers, and aggregate/UNION read-only join components compose writable targets; broader layered joins and remaining expression shapes stay open | medium | subset |
 | View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 
 ## 10. Stored routines, events, schedulers

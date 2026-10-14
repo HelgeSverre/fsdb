@@ -271,6 +271,60 @@ let tests =
                   [ [ Some "1"; Some "changed" ]; [ Some "2"; Some "layered" ]; [ Some "4"; Some "four" ] ]
                   "right-table update persists"
 
+          testCase "joined view INSERT SET targets one physical component"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE set_left (id INT PRIMARY KEY, n INT)") "create left"
+              expectOk (run store "CREATE TABLE set_right (id INT PRIMARY KEY, left_id INT)") "create right"
+              expectOk (run store "INSERT INTO set_right VALUES (1, 1)") "seed right"
+              expectOk
+                  (run store "CREATE VIEW set_joined AS SELECT l.id AS aid, l.n, r.id AS bid FROM set_left l JOIN set_right r ON r.left_id=l.id")
+                  "create join view"
+
+              Expect.equal (run store "INSERT INTO set_joined SET aid=1,n=10") (Affected 1UL) "SET inserts the left component"
+              Expect.equal
+                  (run store "INSERT IGNORE INTO set_joined SET aid=1,n=30")
+                  (Affected 0UL)
+                  "IGNORE skips a duplicate"
+              Expect.equal
+                  (run store "INSERT INTO set_joined SET aid=1,n=22 ON DUPLICATE KEY UPDATE n=VALUES(n)")
+                  (Affected 2UL)
+                  "ODKU updates the same component"
+              Expect.equal (rows store "SELECT id,n FROM set_left") [ [ Some "1"; Some "22" ] ] "the physical row matches MySQL"
+
+          testCase "distinct-definer component CHECK OPTION survives a joined write"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE DATABASE probe"
+                    "CREATE TABLE probe.check_left (id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE probe.check_right (id INT PRIMARY KEY,left_id INT)"
+                    "INSERT INTO probe.check_left VALUES(1,10)"
+                    "INSERT INTO probe.check_right VALUES(1,1)"
+                    "CREATE USER filter_owner"
+                    "CREATE USER join_owner"
+                    "GRANT SELECT,INSERT,UPDATE ON probe.check_left TO filter_owner"
+                    "GRANT SELECT,INSERT,UPDATE ON probe.check_right TO join_owner"
+                    "GRANT CREATE VIEW ON probe.* TO filter_owner,join_owner"
+                    "CREATE DEFINER='filter_owner'@'%' VIEW probe.filtered AS SELECT id,n FROM probe.check_left WHERE n>0 WITH CASCADED CHECK OPTION"
+                    "GRANT SELECT,INSERT,UPDATE ON probe.filtered TO join_owner"
+                    "CREATE DEFINER='join_owner'@'%' VIEW probe.joined AS SELECT f.id AS aid,f.n,b.id AS bid FROM probe.filtered f JOIN probe.check_right b ON b.left_id=f.id" ] do
+                  expectOk (run store sql) sql
+
+              match run store "UPDATE probe.joined SET n=-1 WHERE aid=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection for UPDATE, got %A" other
+
+              match run store "INSERT INTO probe.joined SET aid=2,n=-1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection for INSERT SET, got %A" other
+
+              Expect.equal (run store "INSERT INTO probe.joined SET aid=2,n=20") (Affected 1UL) "legal insert succeeds"
+              Expect.equal
+                  (rows store "SELECT id,n FROM probe.check_left ORDER BY id")
+                  [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ] ]
+                  "the physical rows match MySQL"
+
           testCase "ordered join view remains insertable but refuses updates"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
