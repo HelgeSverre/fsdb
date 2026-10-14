@@ -28310,17 +28310,33 @@ let transactionWriteTargets
     | Update update when update.Joins.IsEmpty ->
         targets update.From update.Where |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
+        let projectedNames body =
+            let projections =
+                match body with
+                | PlainSelect select -> select.Projections
+                | UnionSelect(first, _, _, _, _) -> first.Projections
+
+            let names = projections |> List.map (fun projection -> projection.Alias |> Option.orElse projection.SourceName)
+            if names |> List.forall Option.isSome then names |> List.choose id else []
+
         let sourceSchemas =
             if update.Assignments |> List.forall (fun assignment -> assignment.Table.IsSome) then
                 None
             else
                 update.Joins
                 |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
-                |> traverse (function FromTable table -> Ok table | _ -> Error())
-                |> Result.toOption
-                |> Option.bind (fun joined ->
-                    update.From :: joined
-                    |> traverse (fun tableRef ->
+                |> fun joined -> FromTable update.From :: joined
+                |> traverse (fun source ->
+                    match source with
+                    | FromSubquery(body, _) ->
+                        let columns = selectSourceColumns store dbName source
+                        let names =
+                            if columns.IsEmpty || (columns |> List.exists Option.isNone) then
+                                projectedNames body
+                            else
+                                columns |> List.choose id |> List.map _.Name
+                        if names.IsEmpty then Error() else Ok(None, names)
+                    | FromTable tableRef ->
                         let cte =
                             if tableRef.Database.IsSome then None
                             else
@@ -28329,18 +28345,6 @@ let transactionWriteTargets
 
                         match cte with
                         | Some cte ->
-                            let projectedNames =
-                                let projections =
-                                    match cte.Body with
-                                    | PlainSelect select -> select.Projections
-                                    | UnionSelect(first, _, _, _, _) -> first.Projections
-
-                                let names =
-                                    projections
-                                    |> List.map (fun projection -> projection.Alias |> Option.orElse projection.SourceName)
-
-                                if names |> List.forall Option.isSome then names |> List.choose id else []
-
                             let columns =
                                 if cte.CteColumns.IsEmpty then
                                     let inferred =
@@ -28349,7 +28353,7 @@ let transactionWriteTargets
                                             dbName
                                             (FromSubquery(cte.Body, tableRef.Alias |> Option.defaultValue tableRef.Table))
                                     if inferred.IsEmpty || (inferred |> List.exists Option.isNone) then
-                                        projectedNames
+                                        projectedNames cte.Body
                                     else
                                         inferred |> List.choose id |> List.map _.Name
 
@@ -28360,8 +28364,9 @@ let transactionWriteTargets
                         | None ->
                             match physicalFastPathTable store dbName tableRef with
                             | Some table -> Ok(Some tableRef, table.Columns |> List.map _.Name)
-                            | None -> Error())
-                    |> Result.toOption)
+                            | None -> Error()
+                    | _ -> Error())
+                |> Result.toOption
 
         update.Assignments
         |> traverse (fun assignment ->

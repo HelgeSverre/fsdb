@@ -497,7 +497,7 @@ resolved.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
-| Write parallelism within a database | row-lock concurrency | indexed and single-table full-scan UPDATE/DELETE paths coordinate row stripes; full scans conservatively claim current rows but not gaps or later inserts; insert, upsert, and replacement candidates are prepared once, then claim supplied, generated, or defaulted unique keys and refresh existing duplicate rows before publication, including SELECT sources; AUTO_INCREMENT identities are reserved across transaction snapshots; joined writes now also claim [physical targets inside nested join groups](torture/findings/2026-10-14-grouped-joined-write-rebase.md); [keyless inserts](benchmarks/results/2026-10-12-keyless-insert-load.md), CTE writes without inferable physical targets, and other multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
+| Write parallelism within a database | row-lock concurrency | indexed and single-table full-scan UPDATE/DELETE paths coordinate row stripes; full scans conservatively claim current rows but not gaps or later inserts; insert, upsert, and replacement candidates are prepared once, then claim supplied, generated, or defaulted unique keys and refresh existing duplicate rows before publication, including SELECT sources; AUTO_INCREMENT identities are reserved across transaction snapshots; joined writes claim [physical targets inside nested join groups](torture/findings/2026-10-14-grouped-joined-write-rebase.md) and [bare assignments beside derived sources](torture/findings/2026-10-14-derived-joined-write-rebase.md); [keyless inserts](benchmarks/results/2026-10-12-keyless-insert-load.md), CTE writes without inferable physical targets, and other multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize catalog-wide referential actions, and recorded campaigns show CPU saturation limiting higher worker counts | medium | partial |
 
 ## 8. Persistence and durability
@@ -1338,7 +1338,8 @@ implementation effort:
    plus audited joined UPDATE and DELETE statements with named physical targets,
    and joined UPDATE assignments whose unqualified column has one physical
    owner, including [CTE-joined physical targets and uniquely owned bare assignments](torture/findings/2026-10-14-cte-joined-write-rebase.md)
-   and [targets inside join groups](torture/findings/2026-10-14-grouped-joined-write-rebase.md),
+   [targets inside join groups](torture/findings/2026-10-14-grouped-joined-write-rebase.md),
+   and [bare assignments beside derived sources](torture/findings/2026-10-14-derived-joined-write-rebase.md),
    wait and rebase across all target tables. Other write shapes still
    rely on optimistic catalog merge
    ([joined UPDATE](torture/findings/2026-10-14-joined-update-rebase.md),

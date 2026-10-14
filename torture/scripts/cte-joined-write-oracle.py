@@ -32,10 +32,10 @@ def verify_wait(owner, waiter, owner_sql, waiter_sql, expected_rows):
     waiting = threading.Thread(target=lambda: result.append(execute(waiter, waiter_sql)))
     waiting.start()
     time.sleep(0.2)
-    assert waiting.is_alive(), "CTE writer did not wait for the target row"
+    assert waiting.is_alive(), "joined writer did not wait for the target row"
     execute(owner, "COMMIT")
     waiting.join(timeout=5)
-    assert not waiting.is_alive(), "CTE writer did not resume"
+    assert not waiting.is_alive(), "joined writer did not resume"
     assert result == [1], result
     execute(waiter, "COMMIT")
     assert execute(owner, "SELECT id,n FROM probe.a ORDER BY id") == expected_rows
@@ -90,13 +90,25 @@ def main():
                     "WITH c AS (SELECT 2 AS id) DELETE a FROM a JOIN c ON c.id=a.id WHERE a.id=2",
                     ((1, 4),),
                 )
+                verify_wait(
+                    owner, waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "UPDATE a JOIN (SELECT 1 AS id) d ON d.id=a.id SET n=n+1 WHERE a.id=1",
+                    ((1, 6),),
+                )
                 try:
                     execute(owner, "WITH c AS (SELECT 1 AS id,9 AS n) UPDATE a JOIN c ON c.id=a.id SET n=n+1 WHERE a.id=1")
                 except pymysql.MySQLError as error:
                     assert error.args[0] == 1052, error
                 else:
                     raise AssertionError("ambiguous CTE assignment was accepted")
-                print("MySQL 8.4.11: CTE-joined UPDATE and DELETE waited and committed")
+                try:
+                    execute(owner, "UPDATE a JOIN (SELECT 1 AS id,9 AS n) d ON d.id=a.id SET n=n+1 WHERE a.id=1")
+                except pymysql.MySQLError as error:
+                    assert error.args[0] == 1052, error
+                else:
+                    raise AssertionError("ambiguous derived assignment was accepted")
+                print("MySQL 8.4.11: CTE and derived joined writes waited and committed")
             except Exception:
                 print((root / "mysql.log").read_text())
                 raise
