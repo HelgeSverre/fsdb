@@ -1486,6 +1486,47 @@ let tests =
               | ResultSet(_, []) -> ()
               | result -> failtestf "expected no row after CTE delete contention, got %A" result
 
+          testCase "write targets inside a join group wait and rebase"
+          <| fun _ ->
+              for statement, expectedRows in
+                  [ "UPDATE tx_group_a a JOIN (tx_group_b b JOIN tx_group_c c ON b.id=c.id) ON a.id=b.id SET b.n=b.n+1 WHERE a.id=1",
+                    [ [ Some "1"; Some "2" ] ]
+                    "UPDATE tx_group_a a JOIN (tx_group_b b JOIN tx_group_c c ON b.id=c.id) ON a.id=b.id SET n=n+1 WHERE a.id=1",
+                    [ [ Some "1"; Some "2" ] ]
+                    "DELETE b FROM tx_group_a a JOIN (tx_group_b b JOIN tx_group_c c ON b.id=c.id) ON a.id=b.id WHERE a.id=1",
+                    [] ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_group_a (id INT PRIMARY KEY, flag INT)" |> ignore
+                  handle setup "CREATE TABLE tx_group_b (id INT PRIMARY KEY, n INT)" |> ignore
+                  handle setup "CREATE TABLE tx_group_c (id INT PRIMARY KEY)" |> ignore
+                  handle setup "INSERT INTO tx_group_a VALUES (1,0)" |> ignore
+                  handle setup "INSERT INTO tx_group_b VALUES (1,0)" |> ignore
+                  handle setup "INSERT INTO tx_group_c VALUES (1)" |> ignore
+
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, changed = handle owner "UPDATE tx_group_b SET n=n+1 WHERE id=1"
+                  Expect.equal changed (Affected 1UL) "the owner changes the grouped target"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter statement)
+
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the grouped writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the grouped writer resumes"
+                  let waiter, affected = waiting.Result
+                  Expect.isTrue blocked "the grouped writer waits for its physical target"
+                  Expect.equal affected (Affected 1UL) "the grouped writer changes one row"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the grouped writer commits"
+
+                  match handle setup "SELECT id,n FROM tx_group_b" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expectedRows "the committed grouped target agrees with MySQL"
+                  | result -> failtestf "expected grouped target rows, got %A" result
+
           testCase "joined single-target delete waits for an updated target row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

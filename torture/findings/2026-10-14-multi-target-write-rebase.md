@@ -23,4 +23,6 @@ joined table. A joined UPDATE whose write target is physical and whose lookup
 source is derived also waits and rebases, matching the MySQL probe. Joined
 UPDATE with uniquely owned unqualified physical assignments is covered
 [separately](2026-10-14-unqualified-joined-update-rebase.md). Targets inside
-nested join groups and other write shapes remain outside this claim path.
+nested join groups are covered
+[separately](2026-10-14-grouped-joined-write-rebase.md). Other write shapes
+remain outside this claim path.

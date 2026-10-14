@@ -28168,10 +28168,8 @@ let transactionWriteTargets
     let joinedTargets (from: TableRef) (joins: Join list) (names: string list) predicate =
         let joinedTables =
             joins
-            |> List.choose (fun (join: Join) ->
-                match join.Table with
-                | FromTable table -> Some table
-                | _ -> None)
+            |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
+            |> List.choose (function FromTable table -> Some table | _ -> None)
         let sources = from :: joinedTables
 
         names
@@ -28204,10 +28202,8 @@ let transactionWriteTargets
                 None
             else
                 update.Joins
-                |> traverse (fun (join: Join) ->
-                    match join.Table with
-                    | FromTable table -> Ok table
-                    | _ -> Error())
+                |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
+                |> traverse (function FromTable table -> Ok table | _ -> Error())
                 |> Result.toOption
                 |> Option.bind (fun joined ->
                     update.From :: joined
