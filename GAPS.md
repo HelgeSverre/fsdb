@@ -246,6 +246,9 @@ before residual evaluation, including [compatible bounds within each complete
 OR branch](torture/findings/2026-10-14-correlated-materialized-or-intersection.md)
 before branch union. They also intersect [multiple outer-bound `IN` candidate
 groups](torture/findings/2026-10-15-correlated-materialized-in-intersection.md).
+Stable arithmetic expressions over outer columns can also bind materialized
+`IN` probes for derived tables and CTEs
+([oracle and residual probe](torture/findings/2026-10-15-correlated-materialized-expression-in.md)).
 More complex correlated expressions without a
 compatible statement-local lookup still re-execute or scan.
 

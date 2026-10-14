@@ -14934,11 +14934,6 @@ and private tryMaterializedCorrelatedLookup
                     |> Option.bind (fun lookup -> lookup values)
 
             let membershipCandidates predicate =
-                let directBound = function
-                    | Col _
-                    | QualifiedCol _
-                    | Lit _ -> true
-                    | _ -> false
                 let boundValue = function
                     | Lit value -> Some value
                     | expression -> tryCorrelatedOuterValue probeSource context expression
@@ -14962,7 +14957,7 @@ and private tryMaterializedCorrelatedLookup
                 predicate
                 |> optionalConjuncts
                 |> List.choose (function
-                    | In(inner, bounds) when not bounds.IsEmpty && bounds |> List.forall directBound ->
+                    | In(inner, bounds) when not bounds.IsEmpty ->
                         tryCorrelatedInnerColumn probeSource inner
                         |> Option.bind (fun name ->
                             resolveColumn columns name

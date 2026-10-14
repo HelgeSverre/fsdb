@@ -775,6 +775,41 @@ let tests =
                   | other -> failtestf "expected the two MySQL 8.4 matches, got %A" other
                   Expect.isLessThan touches 20 "both IN groups narrow before residual evaluation"
 
+          testCase "materialized correlated IN probes accept stable outer arithmetic bounds"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE arithmetic_outer(id INT PRIMARY KEY,a INT,b INT)" |> ignore
+              runDefault store "CREATE TABLE arithmetic_inner(id INT PRIMARY KEY,k INT)" |> ignore
+              runDefault store "INSERT INTO arithmetic_outer VALUES(1,1,3),(2,2,NULL),(3,NULL,1)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,%d)" id id)
+              |> String.concat ","
+              |> sprintf "INSERT INTO arithmetic_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for prefix, source in
+                  [ "", "(SELECT id+0 AS id,k+0 AS k FROM arithmetic_inner LIMIT 1000) d"
+                    "WITH materialized AS (SELECT id+0 AS id,k+0 AS k FROM arithmetic_inner LIMIT 1000) ",
+                    "materialized d" ] do
+                  touches <- 0
+                  let sql =
+                      prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.k IN(o.a+0,o.b+0)) "
+                      + "FROM arithmetic_outer o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows
+                          [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ] ]
+                          "MySQL 8.4 returns the matching rows for stable outer expressions"
+                  | other -> failtestf "expected correlated counts, got %A" other
+                  Expect.isLessThan touches 20 "the materialized lookup narrows before residual evaluation"
+
           testCase "materialized correlated decimal IN probes preserve exact keys"
           <| fun _ ->
               let mutable touches = 0
