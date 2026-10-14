@@ -13358,6 +13358,52 @@ let tests =
 
                             Expect.isLessThan calls 20 "the residual reads intersected physical candidates"
 
+                testCase "correlated functional candidates intersect within conjuncts and OR branches"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values.Head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE probe_users (id INT PRIMARY KEY, target_a INT, target_b INT)" |> ignore
+                    runDefault store "CREATE TABLE probe_orders (id INT PRIMARY KEY, a INT, b INT, KEY ix_abs_a ((ABS(a))), KEY ix_abs_b ((ABS(b))))" |> ignore
+                    runDefault store "INSERT INTO probe_users VALUES (1,7,9)" |> ignore
+
+                    [ 1..1000 ]
+                    |> List.map (fun id ->
+                        sprintf "(%d,%d,%d)" id (if id <= 450 then 7 else 8) (if id >= 449 && id <= 848 then 9 else 10))
+                    |> String.concat ","
+                    |> fun rows -> runDefault store ("INSERT INTO probe_orders VALUES " + rows)
+                    |> ignore
+
+                    for source in
+                        [ "probe_orders o"
+                          "(SELECT id,a,b FROM probe_orders) o" ] do
+                        for predicate, expected in
+                            [ "ABS(o.a)=u.target_a AND ABS(o.b)=u.target_b", "2"
+                              "((ABS(o.a)=u.target_a AND ABS(o.b)=u.target_b) OR o.id BETWEEN u.id+949 AND u.id+950)", "4"
+                              "ABS(o.a) BETWEEN u.target_a AND u.target_a AND ABS(o.b) BETWEEN u.target_b AND u.target_b", "2" ] do
+                            calls <- 0
+
+                            match
+                                run
+                                    store
+                                    registry
+                                    ("SELECT (SELECT COUNT(*) FROM "
+                                     + source
+                                     + " WHERE TOUCH(o.id)=o.id AND "
+                                     + predicate
+                                     + ") FROM probe_users u")
+                            with
+                            | ResultSet(_, [ [ Some count ] ]) when count = expected -> ()
+                            | other -> failtestf "expected %s matches for %s, got %A" expected source other
+
+                            Expect.isLessThan calls 20 "the residual reads the functional index intersection"
+
                 testCase "an indexed pass-through derived source resolves only matching physical rows"
                 <| fun _ ->
                     let mutable calls = 0

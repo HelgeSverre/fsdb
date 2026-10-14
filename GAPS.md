@@ -203,7 +203,8 @@ set, including direct physical and pass-through projected sources
 Direct and pass-through projected physical sources also intersect compatible
 equality and range candidates by stored row identity before projection and
 residual evaluation. Both source shapes can likewise intersect multiple
-correlated range candidates and [mixed ordinary/functional equality candidates](torture/findings/2026-10-14-correlated-physical-range-choice.md).
+correlated range candidates, [mixed ordinary/functional equality candidates](torture/findings/2026-10-14-correlated-physical-range-choice.md),
+and [multiple functional equality or range candidates](torture/findings/2026-10-14-correlated-functional-or-union.md).
 The intersection requires physical reads to preserve stored row identity;
 other projected access families still choose one slice. Complete [functional and mixed plain/functional equality and text-range OR branches](torture/findings/2026-10-14-correlated-functional-or-union.md)
 over direct and pass-through physical sources intersect compatible candidates

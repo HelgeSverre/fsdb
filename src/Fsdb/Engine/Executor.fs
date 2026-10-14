@@ -14251,9 +14251,7 @@ and private tryCorrelatedFunctionalEqualityCandidates
         |> Option.bind (fun index ->
             Storage.tryProjectedEqualityRowIdsForIndex store projection.PhysicalTable index [ value ])
         |> Option.map (Storage.rowsForRowIds projection.PhysicalTable))
-    |> function
-        | [] -> None
-        | candidates -> Some(List.minBy List.length candidates)
+    |> intersectPhysicalRows
 
 and private tryCorrelatedFunctionalRangeCandidates
     (store: Store)
@@ -14294,9 +14292,7 @@ and private tryCorrelatedFunctionalRangeCandidates
             |> Option.filter (fun lookup ->
                 QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange)
             |> Option.map (fun lookup -> lookup.RangeRows.Value))
-    |> function
-        | [] -> None
-        | candidates -> Some(List.minBy List.length candidates)
+    |> intersectPhysicalRows
 
 and private tryCorrelatedFunctionalLookup
     store

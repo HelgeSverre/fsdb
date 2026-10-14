@@ -42,3 +42,15 @@ ordinary and functional candidates by physical row ID before unioning their
 results. The focused regression requires fewer than 20 residual calls for
 both source shapes. As with other physical candidate intersections, functional
 lookups participate only when read rows retain stored-row identity.
+
+Two functional predicates can also narrow each other before a branch is
+unioned. A separate native MySQL 8.4.11 case has 1,000 rows with `ABS(a)=7`
+on IDs 1–450 and `ABS(b)=9` on IDs 449–848. Their intersection has two rows;
+an OR branch for IDs 950–951 makes four. MySQL returned 2, 4, and 2 for the
+conjunctive equality, OR, and two-functional-range forms, respectively, on
+both direct and pass-through projected sources. FSDB previously passed 402
+candidates to a residual function for the first and range forms. Its
+functional equality and range helpers now intersect every compatible indexed
+candidate list by physical row ID, leaving fewer than 20 residual calls in
+the focused regression. This does not cover functional bounds that cannot be
+mapped to stored columns or comparisons with incompatible collations.
