@@ -991,6 +991,30 @@ let tests =
                   [ [ Some "1"; Some "8" ]; [ Some "2"; Some "20" ] ]
                   "USING still filters by the shared key"
 
+          testCase "derived-first mixed USING keys retain their original left operand"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE mixed_using_target(id INT PRIMARY KEY,x INT,n INT)"
+                    "CREATE TABLE mixed_using_source(id INT PRIMARY KEY,x INT)"
+                    "CREATE TABLE mixed_using_key(x INT PRIMARY KEY)"
+                    "INSERT INTO mixed_using_target VALUES(1,999,100),(2,20,200)"
+                    "INSERT INTO mixed_using_source VALUES(1,10),(2,20)"
+                    "INSERT INTO mixed_using_key VALUES(10),(20)"
+                    "CREATE VIEW mixed_using_view AS SELECT a.id AS aid,a.n,d1.x AS bx FROM (SELECT id,x FROM mixed_using_source) d1 JOIN (SELECT x FROM mixed_using_key) d2 USING(x) JOIN mixed_using_target a USING(id)"
+                    "CREATE VIEW mixed_using_second AS SELECT a.id AS aid,a.n,d2.x AS bx FROM (SELECT x FROM mixed_using_key) d1 JOIN (SELECT id,x FROM mixed_using_source) d2 USING(x) JOIN mixed_using_target a USING(id)" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT table_name,is_updatable FROM information_schema.views WHERE table_name LIKE 'mixed_using_%' ORDER BY table_name")
+                  [ [ Some "mixed_using_second"; Some "YES" ]; [ Some "mixed_using_view"; Some "YES" ] ]
+                  "MySQL 8.4 reports both mixed-key views as updatable"
+              expectOk (run store "UPDATE mixed_using_view SET n=101 WHERE aid=1") "update through mixed-key view"
+              expectOk (run store "UPDATE mixed_using_second SET n=102 WHERE aid=1") "update when only the later derived source has the target key"
+              Expect.equal
+                  (rows store "SELECT id,x,n FROM mixed_using_target ORDER BY id")
+                  [ [ Some "1"; Some "999"; Some "102" ]; [ Some "2"; Some "20"; Some "200" ] ]
+                  "the x match belongs to the derived sources, not the target"
+
           testCase "join views update beside derived star projections"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

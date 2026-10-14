@@ -1984,7 +1984,40 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                     match sources.[leadingCount].Reference with
                                     | FromTable physical ->
                                         let leadingDerived = sources |> List.take leadingCount
-                                        let reorder (joins: Join list) =
+                                        let columnsOf qualifier =
+                                            sources
+                                            |> List.tryFind (fun source -> source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
+                                            |> Option.map _.Columns
+                                            |> Option.defaultValue []
+                                        let movedJoins = select.Joins |> List.take leadingCount
+                                        let leftColumns =
+                                            movedJoins
+                                            |> List.scan
+                                                (fun state join ->
+                                                    state
+                                                    |> Result.bind (fun left -> FromItem.logicalJoinColumns columnsOf left join))
+                                                (FromItem.logicalColumns columnsOf source)
+                                            |> List.take movedJoins.Length
+                                        let usingConditions =
+                                            (movedJoins, leftColumns)
+                                            ||> List.map2 (fun join left ->
+                                                match FromItem.tryQualifier join.Table, left with
+                                                | Some qualifier, Ok columns ->
+                                                    join.Using
+                                                    |> List.fold
+                                                        (fun state key ->
+                                                            let left =
+                                                                columns
+                                                                |> List.filter (fun column -> column.Name.Equals(key, System.StringComparison.OrdinalIgnoreCase))
+                                                                |> List.tryExactlyOne
+                                                            match state, left with
+                                                            | Some predicates, Some column ->
+                                                                Some(BinOp(Eq, column.Expression, QualifiedCol(qualifier, key)) :: predicates)
+                                                            | _ -> None)
+                                                        (Some [])
+                                                | _ -> None)
+
+                                        let reorder (rewrite: Expr -> Expr) (conditions: Expr list list) (joins: Join list) =
                                             let targetJoin = joins.[leadingCount - 1]
                                             let before = joins |> List.take (leadingCount - 1)
                                             let after = joins |> List.skip leadingCount
@@ -1992,14 +2025,25 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                                 { targetJoin with
                                                     Kind = CrossJoin
                                                     Table = leadingDerived.Head.Reference
-                                                    On = Lit(VInt 1L) }
+                                                    On = Lit(VInt 1L)
+                                                    Using = [] }
                                             let before =
                                                 before
                                                 |> List.mapi (fun index join ->
+                                                    let on =
+                                                        conditions.[index]
+                                                        |> List.map rewrite
+                                                        |> List.fold (fun on condition -> BinOp(And, on, condition)) join.On
+                                                    let join = { join with On = on; Using = [] }
                                                     // The target join can refer to every leading source.
                                                     // Evaluate it once the last of those sources is bound.
                                                     if index = leadingCount - 2 then
-                                                        { join with On = BinOp(And, join.On, targetJoin.On) }
+                                                        let targetConditions =
+                                                            targetJoin.On :: (conditions.[leadingCount - 1] |> List.map rewrite)
+                                                        { join with
+                                                            On =
+                                                                targetConditions
+                                                                |> List.fold (fun on condition -> BinOp(And, on, condition)) join.On }
                                                     else
                                                         join)
                                             first :: (before @ after)
@@ -2011,7 +2055,16 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                                 select.Joins
                                                 (List.tail sources)
 
-                                        Some(physical, reorder rewrittenJoins, physical, reorder authorizationJoins)
+                                        if usingConditions |> List.exists Option.isNone then
+                                            None
+                                        else
+                                            let conditions = usingConditions |> List.choose id
+                                            Some(
+                                                physical,
+                                                reorder rewriteSources conditions rewrittenJoins,
+                                                physical,
+                                                reorder id conditions authorizationJoins
+                                            )
                                     | _ -> None
                                 | _ -> None
                             | _ -> None

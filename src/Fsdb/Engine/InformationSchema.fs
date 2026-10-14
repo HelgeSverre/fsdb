@@ -1552,22 +1552,10 @@ let internal tryLeadingDerivedWritableTarget (source: FromItem) (joins: Join lis
                      || targetJoin.Kind = StraightJoin
                      || targetJoin.Kind = CrossJoin)
                 else
-                    let targetKeys = targetJoin.Using |> List.map _.ToLowerInvariant() |> Set.ofList
-                    let compatibleUsing =
-                        if targetKeys.IsEmpty then
-                            leadingJoins |> List.forall (fun join -> join.Using.IsEmpty)
-                        else
-                            leadingJoins
-                            |> List.forall (fun join ->
-                                join.Using
-                                |> List.map _.ToLowerInvariant()
-                                |> Set.ofList
-                                |> (=) targetKeys)
                     joins
                     |> List.take (count + 1)
                     |> List.forall (fun join ->
                         join.Kind = InnerJoin || join.Kind = CrossJoin)
-                    && compatibleUsing
 
             if canMove then Some(count + 1) else None
         | _ -> None

@@ -646,9 +646,9 @@ now also precede a writable physical target in audited inner-join views;
 the moved target predicate is applied after all its source aliases are bound.
 [Derived-first `USING` chains](torture/findings/2026-10-15-derived-using-view.md)
 also retain writable metadata and update a physical target, including a merged
-key projection; multiple leading derived sources are supported when every
-`USING` join merges the same keys. Broader join-source reorderings and lateral
-or outer-join writes remain open.
+key projection; multiple leading derived sources now preserve the original
+left operand of each `USING` key even when the chain merges different keys.
+Broader join-source reorderings and lateral or outer-join writes remain open.
 
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
 refused with MySQL-compatible errors.

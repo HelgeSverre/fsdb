@@ -26,12 +26,36 @@ For one leading derived source, the inner-join reorder now retains the
 `USING` key when it moves the writable table to the front. Equality is
 symmetric, while the view's original source expressions continue to own its
 projected and merged columns. For multiple leading derived sources, the
-reorder is admitted only when every leading `USING` join merges exactly the
-same key names as the target join. This keeps one logical merged key at each
-step after the move; a chain with additional or different merged keys could
-make an originally unambiguous left operand ambiguous and remains unsupported.
+reorder now resolves each `USING` key against the original join's logical left
+columns and converts it to a qualified equality before moving the target.
+This also covers different keys in one chain, where retaining `USING` after
+the move would give a key to the wrong left operand.
+
+MySQL 8.4.11 reports `IS_UPDATABLE=YES` and updates `a` in both of these
+mixed-key views:
+
+```sql
+CREATE TABLE a(id INT PRIMARY KEY,x INT,n INT);
+CREATE TABLE b(id INT PRIMARY KEY,x INT);
+CREATE TABLE c(x INT PRIMARY KEY);
+INSERT INTO a VALUES(1,999,100);
+INSERT INTO b VALUES(1,10);
+INSERT INTO c VALUES(10);
+CREATE VIEW v1 AS SELECT a.id AS aid,a.n,d1.x AS bx
+  FROM (SELECT id,x FROM b) d1 JOIN (SELECT x FROM c) d2 USING(x)
+  JOIN a USING(id);
+CREATE VIEW v2 AS SELECT a.id AS aid,a.n,d2.x AS bx
+  FROM (SELECT x FROM c) d1 JOIN (SELECT id,x FROM b) d2 USING(x)
+  JOIN a USING(id);
+UPDATE v1 SET n=101 WHERE aid=1;
+UPDATE v2 SET n=102 WHERE aid=1;
+```
+
+`a.x` deliberately differs from the derived `x`: the `USING(x)` match
+belongs to the two derived sources. In `v2`, the target's `id` key belongs
+only to the second derived source. Both writes reach `a` on MySQL and FSDB.
 
 The focused regression checks metadata, qualified and merged projections,
-one, two, and three leading derived sources, the physical update result, and
-an unmatched target row. Broader mixed-key, `NATURAL`, lateral, and outer-join
-write shapes are not established by this case.
+one, two, and three leading derived sources, mixed-key ownership, the physical
+update result, and an unmatched target row. Broader `NATURAL`, lateral, and
+outer-join write shapes are not established by this case.
