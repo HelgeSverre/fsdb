@@ -4232,13 +4232,14 @@ let tests =
 
                   use ins = conn.CreateCommand()
                   ins.CommandText <- sprintf "INSERT INTO big_blobs VALUES (1, x'%s')" (Convert.ToHexString blob)
-                  ins.CommandTimeout <- 120
+                  // Branch instrumentation makes parsing this large literal much slower on CI.
+                  ins.CommandTimeout <- 300
                   let! affected = ins.ExecuteNonQueryAsync() |> Async.AwaitTask
                   Expect.equal affected 1 "the >16MiB INSERT was accepted"
 
                   use sel = conn.CreateCommand()
                   sel.CommandText <- "SELECT data FROM big_blobs WHERE id = 1"
-                  sel.CommandTimeout <- 120
+                  sel.CommandTimeout <- 300
                   let! back = sel.ExecuteScalarAsync() |> Async.AwaitTask
                   let backBytes = back :?> byte[]
                   Expect.equal backBytes.Length blob.Length "the blob's length survived the round-trip"
