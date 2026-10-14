@@ -8414,7 +8414,10 @@ let tryPrepareLoad (session: Session) (sql: string) : Result<Parser.LoadRequest 
                                 @ if load.Local then [] else [ "FILE", Auth.Global ]
 
                             match checkSessionAccess session store required with
-                            | Ok() -> Result.Ok(Some load)
+                            | Ok() ->
+                                match Executor.tryJoinedViewLoadError store database load.Table with
+                                | Some error -> Result.Error error
+                                | None -> Result.Ok(Some load)
                             | Error(code, message) -> Result.Error(Err(code, message))
 
         let isUpdate =

@@ -20895,6 +20895,19 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
         | Ok(Select select) -> updatableViewOfSelect store view select
         | _ -> None
 
+let private joinedViewLoadError viewName =
+    Err(1288, sprintf "The target table %s of the LOAD is not updatable" viewName)
+
+let tryJoinedViewLoadError (store: Store) (defaultDatabase: string) (qualifiedName: string) : QueryResult option =
+    let database, viewName = splitQualified defaultDatabase qualifiedName
+
+    tryUpdatableView store database viewName
+    |> Option.bind (fun view ->
+        if view.UpdateJoins.IsEmpty then
+            None
+        else
+            Some(joinedViewLoadError viewName))
+
 let private rewriteViewExpression (view: UpdatableView) (expression: Expr) =
     rewriteExprWith (function
         | FuncCall(name, [ Col column ]) when name.Equals("VALUES", System.StringComparison.OrdinalIgnoreCase) ->
@@ -26835,11 +26848,9 @@ let rec executeAs
 
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the INSERT is not insertable-into" viewName)
-        | Some view when load.Replace && not view.UpdateJoins.IsEmpty ->
-            ids, Err(1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName)
+        | Some view when not view.UpdateJoins.IsEmpty ->
+            ids, joinedViewLoadError viewName
         | Some view when not view.Insertable -> ids, Err(1471, sprintf "The target table %s of the INSERT is not insertable-into" viewName)
-        | Some view when not view.UpdateJoins.IsEmpty && load.Fields.IsEmpty ->
-            ids, Err(1394, sprintf "Can not insert into join view '%s.%s' without fields list" view.ViewDatabase view.ViewName)
         | Some view ->
             let fields =
                 if load.Fields.IsEmpty then

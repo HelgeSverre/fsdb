@@ -612,6 +612,9 @@ requires every component to be mergeable.
 
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
 refused with MySQL-compatible errors.
+`LOAD DATA` into an inner-join view is also refused with MySQL error 1288
+before a local upload or server-side file read; ordinary inserts remain
+available through their supported forms.
 
 View projections appear in I_S.COLUMNS, DESCRIBE, SHOW COLUMNS, and SHOW TABLE
 STATUS. SHOW CREATE VIEW reports the algorithm, host-qualified definer,

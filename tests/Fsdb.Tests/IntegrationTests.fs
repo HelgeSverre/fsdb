@@ -901,6 +901,44 @@ let tests =
                   }
                   |> Async.RunSynchronously)
 
+          TestSupport.processGlobalCase "LOAD DATA LOCAL INFILE rejects a joined view before requesting bytes"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->
+                  async {
+                      let store = Fsdb.Storage.create ()
+                      use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                      let! client, stream = connectRawAsWithCapabilities server.Port "root" (ClientProtocol41 ||| ClientLocalFiles)
+                      use client = client
+
+                      let query (sql: string) =
+                          writePacketAsync
+                              stream
+                              { SeqId = 0uy
+                                Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                      for sql in
+                          [ "CREATE TABLE load_view_a (id INT PRIMARY KEY, n INT)"
+                            "CREATE TABLE load_view_b (id INT PRIMARY KEY, a_id INT)"
+                            "CREATE VIEW joined_load_view AS SELECT a.id,a.n,b.id AS b_id FROM load_view_a a JOIN load_view_b b ON b.a_id=a.id" ] do
+                          do! query sql |> Async.Ignore
+                          let! response = readPacketAsync stream
+                          Expect.equal response.Value.Payload.[0] 0uy "setup succeeds"
+
+                      for sql in
+                          [ "LOAD DATA LOCAL INFILE 'joined.tsv' INTO TABLE joined_load_view (id,n)"
+                            "LOAD DATA LOCAL INFILE 'joined.tsv' INTO TABLE joined_load_view"
+                            "LOAD DATA LOCAL INFILE 'joined.tsv' REPLACE INTO TABLE joined_load_view (id,n)" ] do
+                          do! query sql |> Async.Ignore
+                          let! rejected = readPacketAsync stream
+                          Expect.equal rejected.Value.Payload.[0] 0xffuy "joined view is rejected before a file request"
+                          Expect.equal (Reader(rejected.Value.Payload.[1..]).ReadInt16LE()) 1288 "MySQL LOAD error"
+
+                      match Fsdb.Storage.scanList store "fsdb" "load_view_a" with
+                      | Ok(_, rows) -> Expect.isEmpty rows "rejected LOAD leaves the base table untouched"
+                      | Error error -> failtestf "table scan failed: %A" error
+                  }
+                  |> Async.RunSynchronously)
+
           testCase "LOAD DATA INFILE rejects disabled and out-of-directory paths"
           <| fun _ ->
               TestSupport.withDirectory "server-load-boundary" (fun directory ->
