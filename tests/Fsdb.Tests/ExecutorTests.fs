@@ -12693,6 +12693,69 @@ let tests =
                     | ResultSet(_, [ [ Some "4" ] ]) -> ()
                     | other -> failtestf "uncovered range OR branch must retain its rows, got %A" other
 
+                testCase "correlated text range OR probes bounded candidates"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+
+                    let store = newStore ()
+                    runDefault store
+                        "CREATE TABLE text_or_bounds(id INT PRIMARY KEY,lo VARCHAR(8) COLLATE utf8mb4_bin,hi VARCHAR(8) COLLATE utf8mb4_bin,lo2 VARCHAR(8) COLLATE utf8mb4_bin,hi2 VARCHAR(8) COLLATE utf8mb4_bin,exact_code VARCHAR(8) COLLATE utf8mb4_bin)"
+                    |> ignore
+                    runDefault store
+                        "CREATE TABLE text_or_rows(id INT PRIMARY KEY,code VARCHAR(8) COLLATE utf8mb4_bin,KEY ix_code(code),KEY ix_lower ((LOWER(code))))"
+                    |> ignore
+                    runDefault store
+                        "INSERT INTO text_or_bounds VALUES(1,'a010','a012','a011','a013','a015'),(2,'a020','a022','a021','a023','a025')"
+                    |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,'a%03d')" id id)
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO text_or_rows VALUES" + values)
+                    |> ignore
+
+                    for source in
+                        [ "text_or_rows o"
+                          "(SELECT id,code FROM text_or_rows) o"
+                          "(SELECT id,CONCAT(code,'') AS code FROM text_or_rows LIMIT 1000) o" ] do
+                        for predicate in
+                            [ "o.code BETWEEN u.lo AND u.hi OR o.code=u.exact_code"
+                              "o.code BETWEEN u.lo AND u.hi OR o.code BETWEEN u.lo2 AND u.hi2" ] do
+                            calls <- 0
+                            match run store registry
+                                ("SELECT u.id,(SELECT COUNT(*) FROM " + source
+                                 + " WHERE (" + predicate + ") AND TOUCH(o.id)=o.id) "
+                                 + "FROM text_or_bounds u ORDER BY u.id") with
+                            | ResultSet(_, [ [ Some "1"; Some "4" ]; [ Some "2"; Some "4" ] ]) -> ()
+                            | other -> failtestf "expected MySQL 8.4 text OR counts, got %A" other
+                            Expect.isLessThan calls 30 "the residual sees only text OR candidates"
+
+                    for source in
+                        [ "text_or_rows o"
+                          "(SELECT id,code FROM text_or_rows) o" ] do
+                        for predicate in
+                            [ "LOWER(o.code) BETWEEN LOWER(u.lo) AND LOWER(u.hi) OR LOWER(o.code)=LOWER(u.exact_code)"
+                              "LOWER(o.code) BETWEEN LOWER(u.lo) AND LOWER(u.hi) OR LOWER(o.code) BETWEEN LOWER(u.lo2) AND LOWER(u.hi2)" ] do
+                            calls <- 0
+                            match run store registry
+                                ("SELECT u.id,(SELECT COUNT(*) FROM " + source
+                                 + " WHERE (" + predicate + ") AND TOUCH(o.id)=o.id) "
+                                 + "FROM text_or_bounds u ORDER BY u.id") with
+                            | ResultSet(_, [ [ Some "1"; Some "4" ]; [ Some "2"; Some "4" ] ]) -> ()
+                            | other -> failtestf "expected MySQL 8.4 functional text OR counts, got %A" other
+                            Expect.isLessThan calls 30 "the residual sees only functional text OR candidates"
+
+                    match runDefault store
+                        ("SELECT u.id,(SELECT COUNT(*) FROM text_or_rows o "
+                         + "WHERE LOWER(o.code) BETWEEN LOWER(u.lo) AND LOWER(u.hi) OR MOD(o.id,1000)=1) "
+                         + "FROM text_or_bounds u ORDER BY u.id") with
+                    | ResultSet(_, [ [ Some "1"; Some "4" ]; [ Some "2"; Some "4" ] ]) -> ()
+                    | other -> failtestf "an uncovered OR branch must retain its rows, got %A" other
+
                 testCase "fully covered correlated counts use index cardinality"
                 <| fun _ ->
                     let mutable calls = 0

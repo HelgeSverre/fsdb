@@ -14111,131 +14111,137 @@ and private tryCorrelatedEqualityUnionLookup
         merge
         (snd >> List.length)
 
-and private tryCorrelatedFunctionalEqualityLookup
+and private tryCorrelatedFunctionalEqualityCandidates
     (store: Store)
     (registry: Registry)
-    (dbName: string)
-    (sourceItem: FromItem)
-    (whereExpr: Expr option)
-    (outer: EvalContext option)
-    : (ColumnDef list * Value[] list) option =
+    (projection: PhysicalProjection)
+    qualifier
+    (context: EvalContext)
+    whereExpr
+    =
+    let sourceRef = correlatedSourceRef qualifier
+    let source = correlatedProbeSource qualifier projection.OutputColumns
+
+    let bind inner bound =
+        Option.map2
+            (fun (column, transform) value -> column, transform, inner, bound, value)
+            (storedFunctionalColumnFor registry sourceRef inner)
+            (tryCorrelatedOuterValue source context bound)
+
+    let predicate = function
+        | BinOp(Eq, left, right) -> bind left right |> Option.orElseWith (fun () -> bind right left)
+        | _ -> None
+
+    whereExpr
+    |> optionalConjuncts
+    |> List.choose predicate
+    |> List.choose (fun (columnName, transform, inner, bound, value) ->
+        resolveColumn projection.OutputColumns columnName
+        |> Result.toOption
+        |> Option.map (fun outputIndex -> projection.OutputColumns.[outputIndex])
+        |> Option.filter (fun outputColumn ->
+            functionalComparisonUsesStoredCollation context outputColumn transform "=" inner bound)
+        |> Option.bind (fun _ -> tryPhysicalFunctionalColumn projection columnName transform)
+        |> Option.bind (fun (physicalColumn, physicalTransform) ->
+            Storage.tryEqualityIndexForTransform
+                projection.PhysicalTable
+                physicalColumn.Name
+                (Some physicalTransform))
+        |> Option.bind (fun index ->
+            Storage.tryProjectedEqualityRowIdsForIndex store projection.PhysicalTable index [ value ])
+        |> Option.map (Storage.rowsForRowIds projection.PhysicalTable))
+    |> function
+        | [] -> None
+        | candidates -> Some(List.minBy List.length candidates)
+
+and private tryCorrelatedFunctionalRangeCandidates
+    (store: Store)
+    (registry: Registry)
+    (projection: PhysicalProjection)
+    qualifier
+    (context: EvalContext)
+    whereExpr
+    =
+    let sourceRef = correlatedSourceRef qualifier
+    let source = correlatedProbeSource qualifier projection.OutputColumns
+    let nullBound = function
+        | Some((_, VNull), _) -> true
+        | _ -> false
+
+    correlatedFunctionalRangeBounds registry sourceRef source whereExpr context
+    |> List.choose (fun bounds ->
+        if nullBound bounds.Lower || nullBound bounds.Upper then
+            Some []
+        else
+            let columnName, transform = bounds.Column
+
+            resolveColumn projection.OutputColumns columnName
+            |> Result.toOption
+            |> Option.map (fun outputIndex -> projection.OutputColumns.[outputIndex])
+            |> Option.filter (fun outputColumn ->
+                functionalRangeUsesStoredCollation context outputColumn transform bounds)
+            |> Option.bind (fun _ -> tryPhysicalFunctionalColumn projection columnName transform)
+            |> Option.bind (fun (physicalColumn, physicalTransform) ->
+                let values = functionalRangeValues bounds
+                Storage.tryProjectedSecondaryRangeLookupInTable
+                    store
+                    projection.PhysicalTable
+                    physicalColumn.Name
+                    physicalTransform
+                    values.Lower
+                    values.Upper)
+            |> Option.filter (fun lookup ->
+                QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange)
+            |> Option.map (fun lookup -> lookup.RangeRows.Value))
+    |> function
+        | [] -> None
+        | candidates -> Some(List.minBy List.length candidates)
+
+and private tryCorrelatedFunctionalLookup
+    store
+    registry
+    dbName
+    sourceItem
+    outer
+    candidates
+    =
     FromItem.tryQualifier sourceItem
     |> Option.bind (fun qualifier ->
-        let sourceRef = correlatedSourceRef qualifier
-
-        let bind source context inner bound =
-            Option.map2
-                (fun (column, transform) value -> column, transform, inner, bound, value)
-                (storedFunctionalColumnFor registry sourceRef inner)
-                (tryCorrelatedOuterValue source context bound)
-
-        let predicate source context =
-            function
-            | BinOp(Eq, left, right) ->
-                bind source context left right
-                |> Option.orElseWith (fun () -> bind source context right left)
-            | _ -> None
-
         tryPhysicalProjection store registry dbName sourceItem
         |> Option.filter (fun projection -> storedRowsMatchReadRows store projection.PhysicalTable.Columns)
         |> Option.bind (fun projection ->
             outer
             |> Option.bind (fun context ->
-                let source = correlatedProbeSource qualifier projection.OutputColumns
+                candidates projection qualifier context
+                |> Option.bind (projectPhysicalLookupRows store registry dbName projection))))
 
-                whereExpr
-                |> optionalConjuncts
-                |> List.choose (predicate source context)
-                |> List.tryPick (fun (columnName, transform, inner, bound, value) ->
-                    match resolveColumn projection.OutputColumns columnName with
-                    | Error _ -> None
-                    | Ok outputIndex ->
-                        let outputColumn = projection.OutputColumns.[outputIndex]
+and private tryCorrelatedFunctionalEqualityLookup store registry dbName sourceItem whereExpr outer =
+    tryCorrelatedFunctionalLookup store registry dbName sourceItem outer (fun projection qualifier context ->
+        tryCorrelatedFunctionalEqualityCandidates store registry projection qualifier context whereExpr)
 
-                        let compatibleCollation =
-                            functionalComparisonUsesStoredCollation
-                                context
-                                outputColumn
-                                transform
-                                "="
-                                inner
-                                bound
+and private tryCorrelatedFunctionalRangeLookup store registry dbName sourceItem whereExpr outer =
+    tryCorrelatedFunctionalLookup store registry dbName sourceItem outer (fun projection qualifier context ->
+        tryCorrelatedFunctionalRangeCandidates store registry projection qualifier context whereExpr)
 
-                        if not compatibleCollation then
-                            None
-                        else
-                            tryPhysicalFunctionalColumn projection columnName transform
-                            |> Option.bind (fun (physicalColumn, physicalTransform) ->
-                                Storage.tryEqualityIndexForTransform
-                                    projection.PhysicalTable
-                                    physicalColumn.Name
-                                    (Some physicalTransform))
-                            |> Option.bind (fun index ->
-                                Storage.tryProjectedEqualityRowIdsForIndex
-                                    store
-                                    projection.PhysicalTable
-                                    index
-                                    [ value ])
-                            |> Option.bind (fun rowIds ->
-                                Storage.rowsForRowIds projection.PhysicalTable rowIds
-                                |> List.map snd
-                                |> projectPhysicalRows store registry dbName projection
-                                |> Result.toOption
-                                |> Option.map (fun rows -> projection.OutputColumns, rows))))))
+and private tryCorrelatedFunctionalUnionLookup store registry dbName sourceItem whereExpr outer =
+    tryCorrelatedFunctionalLookup store registry dbName sourceItem outer (fun projection qualifier context ->
+        let branchCandidates branch =
+            [ tryCorrelatedFunctionalEqualityCandidates store registry projection qualifier context (Some branch)
+              tryCorrelatedFunctionalRangeCandidates store registry projection qualifier context (Some branch) ]
+            |> List.choose id
+            |> function
+                | [] -> None
+                | candidates -> Some(List.minBy List.length candidates)
 
-and private tryCorrelatedFunctionalRangeLookup
-    (store: Store)
-    (registry: Registry)
-    (dbName: string)
-    (sourceItem: FromItem)
-    (whereExpr: Expr option)
-    (outer: EvalContext option)
-    : (ColumnDef list * Value[] list) option =
-    FromItem.tryQualifier sourceItem
-    |> Option.bind (fun qualifier ->
-        let sourceRef = correlatedSourceRef qualifier
+        let merge candidates =
+            candidates
+            |> List.collect id
+            |> List.map fst
+            |> Set.ofList
+            |> Storage.rowsForRowIds projection.PhysicalTable
+            |> Some
 
-        let nullBound = function
-            | Some((_, VNull), _) -> true
-            | _ -> false
-
-        tryPhysicalProjection store registry dbName sourceItem
-        |> Option.filter (fun projection -> storedRowsMatchReadRows store projection.PhysicalTable.Columns)
-        |> Option.bind (fun projection ->
-            outer
-            |> Option.bind (fun context ->
-                correlatedFunctionalRangeBounds
-                    registry
-                    sourceRef
-                    (correlatedProbeSource qualifier projection.OutputColumns)
-                    whereExpr
-                    context
-                |> List.tryPick (fun bounds ->
-                    if nullBound bounds.Lower || nullBound bounds.Upper then
-                        Some(projection.OutputColumns, [])
-                    else
-                        let columnName, transform = bounds.Column
-
-                        resolveColumn projection.OutputColumns columnName
-                        |> Result.toOption
-                        |> Option.map (fun outputIndex -> projection.OutputColumns.[outputIndex])
-                        |> Option.filter (fun outputColumn ->
-                            functionalRangeUsesStoredCollation context outputColumn transform bounds)
-                        |> Option.bind (fun _ -> tryPhysicalFunctionalColumn projection columnName transform)
-                        |> Option.bind (fun (physicalColumn, physicalTransform) ->
-                            let values = functionalRangeValues bounds
-
-                            Storage.tryProjectedSecondaryRangeLookupInTable
-                                store
-                                projection.PhysicalTable
-                                physicalColumn.Name
-                                physicalTransform
-                                values.Lower
-                                values.Upper)
-                        |> Option.filter (fun lookup ->
-                            QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange)
-                        |> Option.bind (fun lookup ->
-                            projectPhysicalLookupRows store registry dbName projection lookup.RangeRows.Value)))))
+        tryCompleteOrCandidates whereExpr branchCandidates merge List.length)
 
 and private tryPhysicalProjection
     (store: Store)
@@ -14878,7 +14884,8 @@ and private tryCorrelatedSourceLookup
                        tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
                    else
                        None)
-                  tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
+                  tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer
+                  tryCorrelatedFunctionalUnionLookup store registry dbName source whereExpr outer ]
                 |> fewestRows
 
         let physicalFastPath =
@@ -14906,7 +14913,8 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith (fun () ->
             [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
               tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
-              tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
+              tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer
+              tryCorrelatedFunctionalUnionLookup store registry dbName source whereExpr outer ]
             |> fewestRows
             |> chooseWithRanges false)
         |> Option.orElseWith materializedLookup
