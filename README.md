@@ -1013,10 +1013,12 @@ let drain () =
             printfn "committed doc row: %A" row
 ```
 
-Handlers run synchronously under the commit-ordering lock. Keep them fast,
-avoid blocking, and never write back to the database from a handler; re-entry
-deadlocks. Queue events and process them after the originating statement
-returns.
+Handlers run synchronously under the commit-ordering lock after catalog
+publication, before the WAL fsync that acknowledges a durable write. Keep them
+fast, avoid blocking, and never write back to the database from a handler;
+re-entry can deadlock. Queue events and process them after the originating
+statement returns. A callback is an in-process notification, not proof that a
+write has reached durable storage.
 
 A handler exception is reported through the diagnostic sink. It does not change
 the statement's acknowledgement or prevent later handlers from receiving the
@@ -1028,7 +1030,8 @@ running host code in the commit path. Dispose the subscription to unregister
 it. Its queue holds 1024 events by default; use
 `Db.subscribeCommitsWithCapacity capacity db` to choose a size. When full, new
 events are dropped without blocking commits. Check `DroppedCount`; a nonzero
-value means the consumer must resynchronize from database state.
+value means the consumer must resynchronize from database state. The queue is
+not a durable change stream and does not survive process restart.
 
 ### Run SQL in-process or over the wire
 

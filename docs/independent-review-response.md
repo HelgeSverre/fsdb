@@ -6,8 +6,8 @@ scores are the reviewer's judgment, not a current measured rating.
 
 | Review finding | Current state | Evidence and next action |
 |---|---|---|
-| No PR or main CI | Resolved for the current workflow | `.github/workflows/ci.yml` runs a Release build, a separate ordinary regression suite, package verification, and a Coverlet job enforcing 65% branch coverage on pushes to main and pull requests. [The current `64ca9352` run](https://github.com/HelgeSverre/fsdb/actions/runs/38619625254) passed all three jobs. Earlier parallel coverage runs exhausted a 16 GB runner; a resource trace showed the instrumented process exceeding 15 GB RSS. The CI test jobs now use a 4 GiB .NET GC heap limit and run sequentially. The MySQL differential suite remains a separate gate. |
-| Observer exceptions can turn committed writes into reported failures | Resolved after the reviewed revision | `Storage.preparePublishedEvents` catches and logs each observer exception and continues to later observers. `EmbeddingIntegrationTests` checks successful write acknowledgement and continued delivery. A synchronous observer can still delay a commit or deadlock by writing back to the store; use the queued subscription for application work. |
+| No PR or main CI | Resolved for the current workflow | `.github/workflows/ci.yml` runs a Release build, a separate ordinary regression suite, package verification, and a Coverlet job enforcing 65% branch coverage on pushes to main and pull requests. [The `11e5a19d` run](https://github.com/HelgeSverre/fsdb/actions/runs/38631642312) passed all three jobs. Earlier parallel coverage runs exhausted a 16 GB runner; a resource trace showed the instrumented process exceeding 15 GB RSS. The CI test jobs now use a 4 GiB .NET GC heap limit and run sequentially. The MySQL differential suite remains a separate gate. |
+| Observer exceptions can turn committed writes into reported failures | Exception handling resolved; synchronous callback limitations remain | `Storage.preparePublishedEvents` catches and logs each observer exception and continues to later observers. `EmbeddingIntegrationTests` checks successful write acknowledgement and continued delivery. Observers run after catalog publication but before WAL fsync; they can delay acknowledgement or deadlock by writing back to the store. Use the queued subscription for application work, and do not treat either callback delivery or queued delivery as durable acknowledgement. |
 | Unbounded commit subscriptions | Resolved after the reviewed revision | `Db.subscribeCommits` defaults to 1024 events; `subscribeCommitsWithCapacity` accepts a positive limit. Overflow drops new events and increments `DroppedCount`, which requires the consumer to resynchronize. The queue is in-process and is not a durable change stream. |
 | Hardcoded `version_compile_os` | Resolved after the reviewed revision | `Session.fs` selects Windows, macOS, or Linux at runtime. |
 | Async API looks like nonblocking database I/O | Documented limitation | `Db.fs` uses `Task.Run` for embedded async calls; the README now says so and describes cancellation and host concurrency implications. A truly asynchronous executor would need separate design and workload evidence. |
@@ -54,3 +54,23 @@ The deployment contract remains preview-grade: use disposable or restorable
 data, bind safely, retain stopped-directory backups, and verify restores before
 upgrades. The review's production-readiness concern is therefore still valid
 even though several cited code-level hazards have since been addressed.
+
+## Disposition before further gap work
+
+The review's immediate regression and embedded-notification hazards have
+concrete fixes and regression coverage. The remaining work is not a single
+release-blocking defect that can be closed by adding another SQL feature:
+
+1. Keep the durable-write gate in use and isolate active CPU work from WAL and
+   thread-pool waits before changing write scheduling. The current eight-writer
+   result establishes a scaling gap, not its precise cause.
+2. Continue extracting one cohesive executor responsibility at a time when a
+   real edit exposes its boundary. Preserve the existing behavior with tests
+   and avoid a file-size-driven rewrite.
+3. Decide whether virtual-table registration is store-wide or configuration-
+   local before changing `registerTable`. The present shared-store behavior is
+   documented and pinned by a test; silently making it pure would change what
+   existing and new sessions observe.
+4. Treat online backup, general cross-version migration, and durable change
+   delivery as unsupported preview capabilities until they have explicit
+   contracts and end-to-end validation.
