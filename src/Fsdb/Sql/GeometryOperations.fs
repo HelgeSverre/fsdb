@@ -382,9 +382,9 @@ let internal geographicPointPolygonPosition referenceSystem point polygons =
         | [] -> GeographicPointPolygonPosition.Outside None
         | exterior :: holes ->
             let exteriorDistance = pointLineDistance exterior
-            let holeDistances = holes |> List.choose pointLineDistance
+            let holeDistances = holes |> List.map (fun hole -> hole, pointLineDistance hole)
             let boundaryDistance =
-                (Option.toList exteriorDistance) @ holeDistances
+                (Option.toList exteriorDistance) @ (holeDistances |> List.choose snd)
                 |> function
                     | [] -> None
                     | distances -> Some(List.min distances)
@@ -394,7 +394,13 @@ let internal geographicPointPolygonPosition referenceSystem point polygons =
             // straight samples on other hole edges may instead lie in the fill.
             | _ when List.exists onMeridian holes ->
                 GeographicPointPolygonPosition.HoleMeridianBoundary
-            | _ when holeDistances |> List.exists (fun distance -> distance < 0.00001) ->
+            // Andoyer distance can round to zero beside a hole corner. Use
+            // geodesic segment membership before treating it as boundary.
+            | _ when holeDistances
+                     |> List.exists (fun (hole, distance) ->
+                         (distance |> Option.exists (fun value -> value < 0.00001))
+                         && geographicPointLinePosition referenceSystem point [ hole ]
+                            <> GeographicPointLinePosition.Outside) ->
                 GeographicPointPolygonPosition.HoleBoundary
             | _ when geographicRingContains referenceSystem point exterior
                      && not (holes |> List.exists (geographicRingContains referenceSystem point)) ->

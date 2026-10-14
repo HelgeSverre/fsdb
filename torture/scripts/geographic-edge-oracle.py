@@ -56,6 +56,12 @@ def cases():
         "LINESTRING(-1 0,8 0)",
         "MULTIPOLYGON(((0 0,0 3,3 3,3 0,0 0)),((5 -1,5 1,7 1,7 -1,5 -1)))",
     )
+    hole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,3 1,3 3,1 3,1 1))"
+    for longitude in (1.00001, 1.001, 2.999, 2.99999):
+        yield f"LINESTRING(3 {longitude},1 {longitude})", hole
+    reverse_hole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,1 3,3 3,3 1,1 1))"
+    for longitude in (1.00001, 1.001, 2.999, 2.99999):
+        yield f"LINESTRING(1 {longitude},3 {longitude})", reverse_hole
 
 
 def main():

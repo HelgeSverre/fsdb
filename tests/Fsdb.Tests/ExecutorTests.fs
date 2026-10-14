@@ -16388,6 +16388,14 @@ let tests =
                     match runDefault store sql with
                     | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
                     | result -> failtestf "expected meridian hole-edge point to touch, got %A" result
+                    let nearCorner = "ST_GeomFromText('POINT(3 1.00001)',4326)"
+                    let sql =
+                        sprintf
+                            "SELECT ST_Within(%s,%s),ST_Touches(%s,%s),ST_Intersects(%s,%s)"
+                            nearCorner meridianHole nearCorner meridianHole nearCorner meridianHole
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "0"; Some "0"; Some "0" ] ]) -> ()
+                    | result -> failtestf "expected the near-corner point to remain outside the hole polygon, got %A" result
                     let curved = "ST_GeomFromText('POLYGON((50 0,50 10,52 10,52 0,50 0))',4326)"
                     let apparentInside = "ST_GeomFromText('POINT(50.05 5)',4326)"
                     let antimeridian = "ST_GeomFromText('POLYGON((10 170,10 -170,20 -170,20 170,10 170))',4326)"

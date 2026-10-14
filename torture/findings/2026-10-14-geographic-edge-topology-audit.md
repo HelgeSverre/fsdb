@@ -15,9 +15,9 @@ the later interior crossing still counts. MySQL also reports a point exactly
 on a hole's meridian edge as touching; the point classifier now records that
 case separately from other near-hole samples that MySQL treats as filled area.
 
-The current corpus agrees on 335 of 337 line/polygon pairs. The remaining
-disagreements are these near-hole lines, for which MySQL reports crossing and
-FSDB reports touching:
+The original corpus agreed on 335 of 337 line/polygon pairs. Its remaining
+disagreements were these near-hole lines, for which MySQL reports crossing and
+FSDB reported touching:
 
 ```sql
 SET @area = ST_GeomFromText(
@@ -56,3 +56,12 @@ a false crossing. Reducing geodesic sampling from 25 km to 5 km left the
 classification unchanged and made the focused test substantially slower, so
 the sampling change was discarded. The remaining fix needs an oriented
 line/ring intersection rule rather than a point-label or sampling shortcut.
+
+The point classifier now checks exact geodesic segment membership before
+calling a point a hole-boundary point. This fixes the near-corner point and
+agrees with MySQL on all 39 sampled points. It leaves two line mismatches in
+the 337-case corpus: lines at longitude `2.999` and `2.99999` now report
+crossing in fsdb while MySQL reports touching. Reversing the line and the hole
+ring preserves the MySQL relation. The expanded 345-case probe records four
+mismatches because it includes both ring orientations of those two lines.
+This is still an open line/ring topology gap.
