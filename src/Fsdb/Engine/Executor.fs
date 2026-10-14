@@ -14668,8 +14668,8 @@ and private tryMaterializedCorrelatedLookup
                     |> List.filter (fun row -> memberships |> List.forall (fun rows -> rows.Contains row))
                     |> Some
 
-            let equalityCandidates () =
-                let equalities = correlatedProbeEqualities probeSource whereExpr (Some context) |> Option.defaultValue []
+            let equalityCandidates predicate =
+                let equalities = correlatedProbeEqualities probeSource predicate (Some context) |> Option.defaultValue []
 
                 // One statement-local key covers every usable equality.
                 let probes =
@@ -14689,6 +14689,23 @@ and private tryMaterializedCorrelatedLookup
 
                     getMemoized lookups names (fun () -> materializedEqualityLookup store columns rows names)
                     |> Option.bind (fun lookup -> lookup values)
+
+            let unionCandidates () =
+                whereExpr
+                |> optionalConjuncts
+                |> List.choose (fun expression ->
+                    match disjuncts expression with
+                    | [ _ ] -> None
+                    | branches ->
+                        branches
+                        |> List.map (Some >> equalityCandidates)
+                        |> tryAllSome
+                        |> Option.map (fun candidates ->
+                            let seen = HashSet<Value[]>(HashIdentity.Reference)
+                            candidates |> List.collect id |> List.filter seen.Add))
+                |> function
+                    | [] -> None
+                    | candidates -> Some(List.minBy List.length candidates)
 
             let rangeCandidates () =
                 let bounds =
@@ -14743,7 +14760,7 @@ and private tryMaterializedCorrelatedLookup
                         | [] -> None
                         | candidates -> intersectCandidates candidates
 
-            [ equalityCandidates (); rangeCandidates () ]
+            [ equalityCandidates whereExpr; unionCandidates (); rangeCandidates () ]
             |> List.choose id
             |> intersectCandidates
             |> Option.map (fun rows -> columns, rows))

@@ -26,5 +26,10 @@ The follow-up regression found the same 3,031 residual evaluations with a
 pass-through derived table. The physical-row union now runs below projection,
 and the derived-table and stable pass-through CTE cases both stay below 2,400
 evaluations. The candidate union is deduplicated before its projection pass.
-Materialized derived sources and branches needing ranges or functional lookups
-still use the general path.
+MySQL 8.4.11 also returned those rows for materialized `LIMIT` derived tables
+and CTEs with `id + 0` and `user_id + 0` projections. The materialized
+regression initially had 3,031 residual evaluations; its statement-local
+equality keys now union each complete OR branch and stay below 2,400. Array
+identity deduplicates overlapping branches without collapsing distinct rows
+that happen to contain equal values. Branches needing ranges or functional
+lookups still use the general path.

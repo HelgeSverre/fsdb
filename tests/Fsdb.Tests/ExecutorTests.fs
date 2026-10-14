@@ -12627,6 +12627,38 @@ let tests =
 
                         Expect.isLessThan calls 2400 "the pass-through source probes only OR candidates"
 
+                    for prefix, source in
+                        [ "", "(SELECT id+0 AS id,user_id+0 AS user_id FROM or_orders LIMIT 1000) o"
+                          "WITH candidates AS (SELECT id+0 AS id,user_id+0 AS user_id FROM or_orders LIMIT 1000)",
+                          "candidates o" ] do
+                        calls <- 0
+
+                        match
+                            run store registry
+                                (prefix
+                                 + " SELECT u.id, (SELECT COUNT(*) FROM " + source
+                                 + " WHERE (o.user_id=u.id OR o.user_id=u.id+1) "
+                                 + "AND TOUCH(o.id)=o.id) FROM or_users u ORDER BY u.id")
+                        with
+                        | ResultSet(_, rows) ->
+                            Expect.equal
+                                (rows |> List.map (fun row -> row.[1]))
+                                (([ 1..49 ] |> List.map (fun _ -> Some "40")) @ [ Some "20" ])
+                                "materialized source retains correlated OR counts"
+                        | other -> failtestf "expected materialized correlated OR counts, got %A" other
+
+                        Expect.isLessThan calls 2400 "the materialized source probes only OR candidates"
+
+                    match
+                        runDefault store
+                            ("SELECT (SELECT COUNT(*) FROM "
+                             + "(SELECT user_id+0 AS user_id FROM or_orders LIMIT 1000) o "
+                             + "WHERE o.user_id=u.id OR o.user_id=u.id) "
+                             + "FROM or_users u WHERE u.id=1")
+                    with
+                    | ResultSet(_, [ [ Some "20" ] ]) -> ()
+                    | other -> failtestf "expected duplicate-valued materialized rows to stay distinct, got %A" other
+
                 testCase "fully covered correlated counts use index cardinality"
                 <| fun _ ->
                     let mutable calls = 0
