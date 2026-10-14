@@ -13,6 +13,13 @@ remaining concerns are architectural and operational limits, so the review's
 4/10 production-readiness score should not be read as having been fixed by
 those narrower changes.
 
+A further check at `4bbf3ed2` found the same disposition. `just check` passed
+with 3,559 tests, no warnings, and no failures; `just package-check` built the
+package and passed the example consumer. The corresponding [GitHub CI
+build/package job](https://github.com/HelgeSverre/fsdb/actions/runs/38652246865/job/116153572702)
+also passed. The review's scores remain historical judgments,
+and the outstanding preview limits below remain open.
+
 | Review finding | Current state | Evidence and next action |
 |---|---|---|
 | No PR or main CI | Resolved for the current workflow | `.github/workflows/ci.yml` runs a Release build, a separate ordinary regression suite, package verification, and a Coverlet job enforcing 65% branch coverage on pushes to main and pull requests. [The `f11a278c` run](https://github.com/HelgeSverre/fsdb/actions/runs/38636418469) passed all three jobs. Earlier parallel coverage runs exhausted a 16 GB runner; a resource trace showed the instrumented process exceeding 15 GB RSS. The CI test jobs now use a 4 GiB .NET GC heap limit and run sequentially. The MySQL differential suite remains a separate gate. |
