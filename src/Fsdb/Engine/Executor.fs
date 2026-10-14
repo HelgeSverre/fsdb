@@ -1472,15 +1472,6 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             not nested.UpdateJoins.IsEmpty
                             && not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase)))
 
-                    let changesNestedSecurityContext =
-                        underlying
-                        |> Option.exists (fun nested ->
-                            not nested.UpdateJoins.IsEmpty
-                            && (underlyingStored
-                                |> Option.exists (fun stored ->
-                                    not (stored.Definer.Equals(view.Definer, System.StringComparison.OrdinalIgnoreCase))
-                                    || not (stored.SecurityType.Equals(view.SecurityType, System.StringComparison.OrdinalIgnoreCase)))))
-
                     if
                         unresolvedStar
                         || dependentProjection
@@ -1488,7 +1479,6 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                         || not (namesMatchProjections outputNames projected)
                         || not (hasWritableProjection projected)
                         || rejectsNestedCheckOption
-                        || changesNestedSecurityContext
                     then
                         None
                     else
@@ -25325,6 +25315,13 @@ let rec executeAs
 
         let authorizedRegistry =
             let componentPath = view.ComponentAccessPaths |> Map.tryFind targetKey |> Option.defaultValue []
+            let layeredSecurity =
+                view.AccessPath
+                |> List.pairwise
+                |> List.exists (fun (outer, inner) ->
+                    not (outer.Definer.Equals(inner.Definer, System.StringComparison.OrdinalIgnoreCase))
+                    || not (outer.SecurityType.Equals(inner.SecurityType, System.StringComparison.OrdinalIgnoreCase)))
+
             let checkPath current (path: ViewAccess list) =
                 path
                 |> List.fold
@@ -25456,7 +25453,7 @@ let rec executeAs
                     | _ -> Error(invalidViewError view.ViewDatabase view.ViewName)
 
             match statement, view.AuthorizationSources with
-            | Update update, Some(from, joins) ->
+            | Update update, Some(from, joins) when not view.UpdateJoins.IsEmpty ->
                 let authorizationUpdate =
                     match originalUpdate with
                     | Some original ->
@@ -25495,13 +25492,65 @@ let rec executeAs
                             Where = original.Where |> Option.map sourceExpression }
                     | None -> update
 
-                registryForViewSecurity
-                    store
-                    registry
-                    view.SecurityType
-                    view.Definer
-                    view.ViewDatabase
-                    (Update { authorizationUpdate with From = from; Joins = joins })
+                let physicalUpdate = Update { authorizationUpdate with From = from; Joins = joins }
+
+                let authorizeLayered () =
+                    let invalid () = Error(invalidViewError view.ViewDatabase view.ViewName)
+
+                    let rec check current currentDatabase currentView = function
+                        | [] -> invalid ()
+                        | access :: rest when access.Mode = RetargetedWrite ->
+                            match tryStoredView store currentDatabase currentView,
+                                  writableAccessView access.Database access.Table with
+                            | Some stored, Some inner ->
+                                parseStoredViewStatement stored
+                                |> Result.mapError (fun _ -> invalidViewError view.ViewDatabase view.ViewName)
+                                |> Result.bind (registryForViewSecurity store current access.SecurityType access.Definer currentDatabase)
+                                |> Result.bind (fun effective ->
+                                    (match originalUpdate with
+                                     | Some original when original.Assignments.Length = authorizationUpdate.Assignments.Length ->
+                                         Ok(List.zip original.Assignments authorizationUpdate.Assignments)
+                                     | _ -> invalid ())
+                                    |> Result.bind (traverse (fun (exposed, assignment) ->
+                                        match Map.tryFind (exposed.Column.ToLowerInvariant()) view.Targets with
+                                        | None -> invalid ()
+                                        | Some outerTarget ->
+                                            inner.Targets
+                                            |> Map.toList
+                                            |> List.choose (fun (name, innerTarget) ->
+                                                if
+                                                    sameViewTarget outerTarget innerTarget
+                                                    && equalsIgnoreCase outerTarget.Column innerTarget.Column
+                                                then Some name else None)
+                                            |> List.tryExactlyOne
+                                            |> function
+                                                | Some name -> Ok { assignment with Table = None; Column = name; Value = Lit VNull }
+                                                | None -> invalid ()))
+                                    |> Result.bind (fun assignments ->
+                                        let innerUpdate =
+                                            { authorizationUpdate with
+                                                Ctes = []
+                                                From = { authorizationUpdate.From with Database = Some access.Database; Table = access.Table; Alias = None }
+                                                Joins = []
+                                                Assignments = assignments
+                                                Where = None
+                                                OrderBy = []
+                                                Limit = None }
+                                        registryForViewSecurity
+                                            store effective access.SecurityType access.Definer currentDatabase (Update innerUpdate)))
+                                |> Result.bind (fun next -> check next access.Database access.Table rest)
+                            | _ -> invalid ()
+                        | [ access ] when access.Mode = OriginalWrite ->
+                            registryForViewSecurity
+                                store current access.SecurityType access.Definer access.Database physicalUpdate
+                        | _ -> invalid ()
+
+                    check registry view.ViewDatabase view.ViewName view.AccessPath
+
+                (if layeredSecurity then authorizeLayered ()
+                 else
+                     registryForViewSecurity
+                         store registry view.SecurityType view.Definer view.ViewDatabase physicalUpdate)
                 |> Result.mapError (fun ((code, _) as error) ->
                     if code = 1142 || code = 1143 then invalidViewError view.ViewDatabase view.ViewName else error)
                 |> Result.bind checkReadPaths
@@ -25525,6 +25574,11 @@ let rec executeAs
                     |> Result.bind checkReadPaths
                 else
                     checkPath registry accessPath
+                    |> Result.mapError (fun ((code, _) as error) ->
+                        if layeredSecurity && (code = 1142 || code = 1143)
+                           && (match statement with Insert _ | InsertSelect _ -> true | _ -> false) then
+                            invalidViewError view.ViewDatabase view.ViewName
+                        else error)
                     |> Result.bind checkReadPaths
 
         match authorizedRegistry with

@@ -502,6 +502,89 @@ let tests =
                   [ [ Some "1"; Some "14" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]
                   "nested join writes persist"
 
+          testCase "joined view outer layers preserve invoker and definer grants"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE security_mode_left(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE security_mode_right(id INT PRIMARY KEY,v INT)"
+                    "INSERT INTO security_mode_left VALUES(1,10)"
+                    "INSERT INTO security_mode_right VALUES(1,100)"
+                    "CREATE ALGORITHM=MERGE SQL SECURITY DEFINER VIEW security_mode_join AS SELECT a.id,a.n,b.v FROM security_mode_left a JOIN security_mode_right b ON a.id=b.id"
+                    "CREATE ALGORITHM=MERGE SQL SECURITY INVOKER VIEW security_mode_outer AS SELECT id,n,v FROM security_mode_join" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='security_mode_outer'")
+                  [ [ Some "YES" ] ]
+                  "MySQL marks the invoker layer updatable"
+              expectOk (run store "UPDATE security_mode_outer SET n=n+1 WHERE id=1") "update the left component"
+              expectOk (run store "UPDATE security_mode_outer SET v=v+1 WHERE id=1") "update the right component"
+              Expect.equal (rows store "SELECT n FROM security_mode_left") [ [ Some "11" ] ] "left row changes"
+              Expect.equal (rows store "SELECT v FROM security_mode_right") [ [ Some "101" ] ] "right row changes"
+
+              for sql in
+                  [ "CREATE USER mode_inner_owner"
+                    "CREATE USER mode_outer_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.security_mode_left TO mode_inner_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.security_mode_right TO mode_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO mode_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO mode_outer_owner"
+                    "CREATE ALGORITHM=MERGE DEFINER='mode_inner_owner'@'%' SQL SECURITY DEFINER VIEW mode_owned_join AS SELECT a.id,a.n AS metric,b.v FROM security_mode_left a JOIN security_mode_right b ON a.id=b.id"
+                    "GRANT SELECT,UPDATE ON fsdb.mode_owned_join TO mode_outer_owner"
+                    "CREATE ALGORITHM=MERGE DEFINER='mode_outer_owner'@'%' SQL SECURITY DEFINER VIEW mode_owned_outer AS SELECT id,metric AS n,v FROM mode_owned_join" ] do
+                  expectOk (run store sql) sql
+
+              expectOk (run store "UPDATE mode_owned_outer SET n=n+1 WHERE id=1") "write through both definers"
+              expectOk (run store "UPDATE mode_owned_outer SET v=v+1 WHERE id=1") "write the second joined component"
+              Expect.equal (rows store "SELECT n FROM security_mode_left") [ [ Some "12" ] ] "owned left write persists"
+              Expect.equal (rows store "SELECT v FROM security_mode_right") [ [ Some "102" ] ] "owned right write persists"
+              expectOk (run store "REVOKE UPDATE ON fsdb.mode_owned_join FROM mode_outer_owner") "revoke intermediate write grant"
+              for sql in
+                  [ "UPDATE mode_owned_outer SET n=n+1 WHERE id=1"
+                    "UPDATE mode_owned_outer SET v=v+1 WHERE id=1" ] do
+                  match run store sql with
+                  | Err(1356, _) -> ()
+                  | result -> failtestf "expected revoked intermediate grant to invalidate %s, got %A" sql result
+
+              expectOk (run store "GRANT UPDATE(metric) ON fsdb.mode_owned_join TO mode_outer_owner") "grant the intermediate exposed column"
+              expectOk (run store "UPDATE mode_owned_outer SET n=n+1 WHERE id=1") "the metric grant permits its renamed outer column"
+              match run store "UPDATE mode_owned_outer SET v=v+1 WHERE id=1" with
+              | Err(1356, _) -> ()
+              | result -> failtestf "expected the ungranted intermediate v column to remain protected, got %A" result
+              Expect.equal (rows store "SELECT n FROM security_mode_left") [ [ Some "13" ] ] "the authorized metric write persists"
+              Expect.equal (rows store "SELECT v FROM security_mode_right") [ [ Some "102" ] ] "the denied right write changes nothing"
+
+              for sql in
+                  [ "CREATE USER mode_third_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO mode_third_owner"
+                    "GRANT SELECT,UPDATE(n) ON fsdb.mode_owned_outer TO mode_third_owner"
+                    "CREATE ALGORITHM=MERGE DEFINER='mode_third_owner'@'%' SQL SECURITY DEFINER VIEW mode_owned_third AS SELECT id,n,v FROM mode_owned_outer" ] do
+                  expectOk (run store sql) sql
+
+              expectOk (run store "UPDATE mode_owned_third SET n=n+1 WHERE id=1") "three definer layers preserve the exposed n grant"
+              match run store "UPDATE mode_owned_third SET v=v+1 WHERE id=1" with
+              | Err(1356, _) -> ()
+              | result -> failtestf "expected the ungranted third-layer v column to remain protected, got %A" result
+              Expect.equal (rows store "SELECT n FROM security_mode_left") [ [ Some "14" ] ] "the third-layer write persists"
+
+              expectOk (run store "INSERT INTO security_mode_right VALUES(2,200),(3,300)") "seed joined insert partners"
+              expectOk (run store "GRANT INSERT ON fsdb.mode_owned_join TO mode_outer_owner") "grant the outer insert path"
+              match run store "INSERT INTO mode_owned_outer(id,n) VALUES(2,20)" with
+              | Err(1356, _) -> ()
+              | result -> failtestf "expected the inner definer's missing base INSERT to deny the write, got %A" result
+              expectOk (run store "GRANT INSERT ON fsdb.security_mode_left TO mode_inner_owner") "grant inner left insert"
+              expectOk (run store "GRANT INSERT ON fsdb.security_mode_right TO mode_inner_owner") "grant inner right insert"
+              expectOk (run store "INSERT INTO mode_owned_outer(id,n) VALUES(2,20)") "insert through distinct definers"
+              expectOk (run store "REVOKE INSERT ON fsdb.mode_owned_join FROM mode_outer_owner") "revoke outer insert grant"
+              match run store "INSERT INTO mode_owned_outer(id,n) VALUES(3,30)" with
+              | Err(1356, _) -> ()
+              | result -> failtestf "expected the revoked intermediate INSERT grant to deny the write, got %A" result
+              Expect.equal
+                  (rows store "SELECT id,n FROM security_mode_left ORDER BY id")
+                  [ [ Some "1"; Some "14" ]; [ Some "2"; Some "20" ] ]
+                  "the denied inserts leave the base table unchanged"
+
           testCase "join view writes honor a component view's distinct definer"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -578,6 +578,11 @@ satisfy the check. Outer view layers inherit the restriction.
 Mergeable component views and simple outer layers preserve the same behavior,
 including inherited CHECK OPTION predicates, when the nested security identity
 is unchanged.
+Mergeable [outer layers over an inner-join view](torture/findings/2026-10-14-layered-join-view-security.md) now also retain writable metadata
+and authorize UPDATE at each definer or invoker boundary, including renamed
+columns and column-level grants through three layers. Explicit-column INSERT
+checks the corresponding layered grants; a missing grant invalidates the outer
+view with MySQL's 1356 error in the audited cases.
 Joined UPDATE also reaches a mergeable component view with a distinct definer.
 The outer definer must retain access to the component view, while that view's
 definer must retain SELECT on its base tables and UPDATE on the written target;
@@ -628,7 +633,7 @@ trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, outer view layers, and aggregate/UNION read-only join components compose writable targets; deeper distinct-context layers, other joined insert forms, broader layered joins, and remaining expression shapes stay open | medium | subset |
+| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; audited three-layer outer joins and renamed column grants work; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, outer view layers, and aggregate/UNION read-only join components compose writable targets; other joined insert forms, broader layered joins, and remaining expression shapes stay open | medium | subset |
 | View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 
 ## 10. Stored routines, events, schedulers
