@@ -1164,6 +1164,10 @@ The [correlated planner baseline](benchmarks/results/b9a6895-quick.md) covers
 nested derived tables, chained CTEs, source filters, and range predicates.
 Equality probes retain a small fixed setup cost; the filtered and range shapes
 already avoid the scan cliff on the recorded corpus.
+The [October 14 repeat check](benchmarks/results/2026-10-14-correlated-quick-check.md)
+finds the bounded derived and CTE equality queries around four times MySQL's
+whole-query latency in its stable quick-run pair; a point-lookup control also
+lags, so that ratio is not an isolated correlated-planner cost.
 
 The [correlated functional-key profile](benchmarks/results/2bb13632-quick.md)
 extends that coverage to compatible unary and composed expression indexes.
