@@ -768,6 +768,67 @@ let tests =
               | other -> failtestf "expected decimal IN counts, got %A" other
               Expect.isLessThan touches 10 "the decimal lookup avoids unrelated materialized rows"
 
+          testCase "materialized correlated text IN probes retain their source collation"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              for suffix, collation, outerRows, innerRows, expected, literal, literalExpected in
+                  [ "ci", "utf8mb4_0900_ai_ci",
+                    "(1,'ALPHA','beta'),(2,'ALPHA',NULL),(3,NULL,NULL)",
+                    "(1,'alpha'),(2,'ALPHA'),(3,'BETA'),(4,'gamma'),(5,NULL)",
+                    [ "3"; "2"; "0" ], "BETA", [ "3"; "3"; "1" ]
+                    "bin", "utf8mb4_bin",
+                    "(1,'ALPHA','beta'),(2,'alpha',NULL),(3,NULL,NULL)",
+                    "(1,'alpha'),(2,'ALPHA'),(3,'BETA'),(4,'beta'),(5,NULL)",
+                    [ "2"; "1"; "0" ], "beta", [ "2"; "2"; "1" ] ] do
+                  let outerTable, innerTable = suffix + "_text_outer", suffix + "_text_inner"
+                  runDefault store (sprintf "CREATE TABLE %s(id INT PRIMARY KEY,lo VARCHAR(20) COLLATE %s,hi VARCHAR(20) COLLATE %s)" outerTable collation collation) |> ignore
+                  runDefault store (sprintf "CREATE TABLE %s(id INT PRIMARY KEY,k VARCHAR(20) COLLATE %s)" innerTable collation) |> ignore
+                  runDefault store (sprintf "INSERT INTO %s VALUES %s" outerTable outerRows) |> ignore
+                  runDefault store (sprintf "INSERT INTO %s VALUES %s" innerTable innerRows) |> ignore
+                  [ 6..105 ]
+                  |> List.map (fun id -> sprintf "(%d,'filler%03d')" id id)
+                  |> String.concat ","
+                  |> sprintf "INSERT INTO %s VALUES %s" innerTable
+                  |> runDefault store
+                  |> ignore
+                  touches <- 0
+                  let sql =
+                      sprintf
+                          "SELECT o.id,(SELECT COUNT(*) FROM (SELECT id,k FROM %s LIMIT 200) d WHERE d.k IN(o.lo,o.hi) AND TOUCH(d.id)=d.id) FROM %s o ORDER BY o.id"
+                          innerTable outerTable
+                  match run store registry sql with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows
+                          (expected |> List.mapi (fun index count -> [ Some(string (index + 1)); Some count ])) sql
+                  | other -> failtestf "expected text IN counts, got %A" other
+                  Expect.isLessThan touches 20 "matching-collation text lookup avoids unrelated rows"
+
+                  touches <- 0
+                  let literalSql =
+                      sprintf
+                          "SELECT o.id,(SELECT COUNT(*) FROM (SELECT id,k FROM %s LIMIT 200) d WHERE d.k IN(o.lo,'%s') AND TOUCH(d.id)=d.id) FROM %s o ORDER BY o.id"
+                          innerTable literal outerTable
+                  match run store registry literalSql with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows
+                          (literalExpected |> List.mapi (fun index count -> [ Some(string (index + 1)); Some count ])) literalSql
+                  | other -> failtestf "expected text literal IN counts, got %A" other
+                  Expect.isLessThan touches 20 "text literal uses the stored collation lookup"
+
+              touches <- 0
+              match run store registry
+                  "SELECT o.id,(SELECT COUNT(*) FROM (SELECT id,k FROM ci_text_inner LIMIT 200) d WHERE d.k IN(o.lo,o.hi) AND TOUCH(d.id)=d.id) FROM bin_text_outer o ORDER BY o.id" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows
+                      [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]
+                      "a binary comparison cannot narrow through an accent-insensitive key"
+              | other -> failtestf "expected mixed-collation IN counts, got %A" other
+
           testCase "materialized correlated ranges preserve strict bounds and NULLs"
           <| fun _ ->
               let store = newStore ()

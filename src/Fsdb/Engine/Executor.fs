@@ -14739,6 +14739,22 @@ and private tryMaterializedCorrelatedLookup
                     | Lit value -> Some value
                     | expression -> tryCorrelatedOuterValue probeSource context expression
 
+                let compatibleBound (column: ColumnDef) domain expression value =
+                    match value, domain with
+                    | VNull, _ -> true
+                    | VString _, TextMembership stored ->
+                        comparisonCollation
+                            context
+                            "="
+                            (Col column.Name)
+                            (Some column)
+                            expression
+                            (tryColumnDefForExpr context expression)
+                        |> Result.toOption
+                        |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)
+                    | _, TextMembership _ -> false
+                    | _ -> equalityMembershipKey domain value |> Option.isSome
+
                 predicate
                 |> optionalConjuncts
                 |> List.tryPick (function
@@ -14747,26 +14763,27 @@ and private tryMaterializedCorrelatedLookup
                         |> Option.bind (fun name ->
                             resolveColumn columns name
                             |> Result.toOption
-                            |> Option.filter (fun index ->
-                                match equalityMembershipDomain store columns.[index] with
-                                | Some SignedIntegerMembership
-                                | Some DecimalMembership -> true
-                                | _ -> false)
-                            |> Option.bind (fun _ ->
-                                bounds
-                                |> List.map boundValue
-                                |> tryAllSome
-                                |> Option.filter (List.forall (function VNull -> true | value -> isNumericIndexValue value))
-                                |> Option.bind (fun values ->
-                                    equalityLookup [ name.ToLowerInvariant() ]
-                                    |> Option.bind (fun lookup ->
-                                        values
-                                        |> List.filter ((<>) VNull)
-                                        |> List.map (fun value -> lookup [ value ])
-                                        |> tryAllSome
-                                        |> Option.map (fun rowGroups ->
-                                            let seen = HashSet<Value[]>(HashIdentity.Reference)
-                                            rowGroups |> List.collect id |> List.filter seen.Add)))))
+                            |> Option.bind (fun index ->
+                                let column = columns.[index]
+                                equalityMembershipDomain store column
+                                |> Option.bind (fun domain ->
+                                    bounds
+                                    |> List.map boundValue
+                                    |> tryAllSome
+                                    |> Option.filter (fun values ->
+                                        List.zip bounds values
+                                        |> List.forall (fun (expression, value) ->
+                                            compatibleBound column domain expression value))
+                                    |> Option.bind (fun values ->
+                                        equalityLookup [ name.ToLowerInvariant() ]
+                                        |> Option.bind (fun lookup ->
+                                            values
+                                            |> List.filter ((<>) VNull)
+                                            |> List.map (fun value -> lookup [ value ])
+                                            |> tryAllSome
+                                            |> Option.map (fun rowGroups ->
+                                                let seen = HashSet<Value[]>(HashIdentity.Reference)
+                                                rowGroups |> List.collect id |> List.filter seen.Add))))))
                     | _ -> None)
 
             let rangeCandidates predicate =
