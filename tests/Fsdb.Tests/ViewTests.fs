@@ -502,6 +502,58 @@ let tests =
                   [ [ Some "1"; Some "14" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]
                   "nested join writes persist"
 
+          testCase "join view writes honor a component view's distinct definer"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE security_left(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE security_right(id INT PRIMARY KEY,left_id INT,n INT)"
+                    "INSERT INTO security_left VALUES(1,10)"
+                    "INSERT INTO security_right VALUES(1,1,100)"
+                    "CREATE USER inner_join_owner"
+                    "CREATE USER outer_join_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.security_left TO inner_join_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.security_right TO outer_join_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO inner_join_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO outer_join_owner"
+                    "CREATE DEFINER='inner_join_owner'@'%' VIEW secured_component AS SELECT id,n FROM security_left"
+                    "GRANT SELECT,UPDATE ON fsdb.secured_component TO outer_join_owner"
+                    "CREATE DEFINER='outer_join_owner'@'%' VIEW secured_join AS SELECT i.id,i.n,r.n AS right_n FROM secured_component i JOIN security_right r ON r.left_id=i.id" ] do
+                  expectOk (run store sql) sql
+
+              expectOk (run store "UPDATE secured_join SET n=n+1 WHERE id=1") "update through both definers"
+              Expect.equal (rows store "SELECT n FROM security_left") [ [ Some "11" ] ] "the base row changes"
+              expectOk (run store "UPDATE secured_join SET right_n=right_n+1 WHERE id=1") "update outer owner's table"
+              Expect.equal (rows store "SELECT n FROM security_right") [ [ Some "101" ] ] "the other base row changes"
+              expectOk (run store "REVOKE UPDATE ON fsdb.security_left FROM inner_join_owner") "revoke inner write grant"
+              match run store "UPDATE secured_join SET n=n+1 WHERE id=1" with
+              | Err(1142, message) -> Expect.stringContains message "security_left" "the inner definer needs base-table UPDATE"
+              | other -> failtestf "expected the inner definer's revoked grant to block the write, got %A" other
+              expectOk (run store "UPDATE secured_join SET right_n=right_n+1 WHERE id=1") "inner write revocation does not block the other table"
+              Expect.equal (rows store "SELECT n FROM security_right") [ [ Some "102" ] ] "the other row changes again"
+              expectOk (run store "REVOKE SELECT ON fsdb.security_left FROM inner_join_owner") "revoke inner read grant"
+              match run store "UPDATE secured_join SET right_n=right_n+1 WHERE id=1" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the invalid inner view to block the outer table's write, got %A" other
+              Expect.equal (rows store "SELECT n FROM security_right") [ [ Some "102" ] ] "the denied write changes nothing"
+              expectOk (run store "GRANT SELECT ON fsdb.security_left TO inner_join_owner") "restore inner read grant"
+              expectOk (run store "REVOKE UPDATE ON fsdb.secured_component FROM outer_join_owner") "revoke outer view write grant"
+              match run store "UPDATE secured_join SET right_n=right_n+1 WHERE id=1" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the invalid component grant to block the other table's write, got %A" other
+              match run store "UPDATE secured_join SET n=n+1 WHERE id=1" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the invalid component grant to block its own table's write, got %A" other
+              Expect.equal (rows store "SELECT n FROM security_right") [ [ Some "102" ] ] "the denied outer write changes nothing"
+              expectOk (run store "GRANT UPDATE(n) ON fsdb.secured_component TO outer_join_owner") "grant one writable view column"
+              expectOk (run store "UPDATE secured_join SET right_n=right_n+1 WHERE id=1") "a column-level component grant restores validity"
+              Expect.equal (rows store "SELECT n FROM security_right") [ [ Some "103" ] ] "the column grant allows the outer write"
+              expectOk (run store "REVOKE UPDATE ON fsdb.security_right FROM outer_join_owner") "revoke outer base write grant"
+              match run store "UPDATE secured_join SET right_n=right_n+1 WHERE id=1" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the outer view to become invalid after base grant revocation, got %A" other
+              Expect.equal (rows store "SELECT n FROM security_right") [ [ Some "103" ] ] "the revoked base grant prevents writes"
+
           testCase "join views update mergeable components beside materialized views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

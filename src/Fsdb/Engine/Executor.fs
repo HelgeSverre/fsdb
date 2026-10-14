@@ -937,12 +937,22 @@ type private StoredView =
       Algorithm: string
       CollationConnection: string }
 
+type private ViewAccessMode =
+    | OriginalWrite
+    | RetargetedWrite
+    | TargetGrantOnly
+
 type private ViewAccess =
     { SecurityType: string
       Definer: string
       Database: string
       Table: string
-      Retarget: bool }
+      Mode: ViewAccessMode }
+
+type private ViewReadAccess =
+    { View: StoredView
+      Definition: Statement
+      WritableColumns: string list }
 
 type private ViewColumnTarget =
     { Database: string
@@ -969,6 +979,8 @@ type private WritableViewSource =
       Predicate: Expr option
       CheckPredicates: Map<ViewTargetKey, Expr>
       InsertableTargets: Set<ViewTargetKey>
+      AccessPath: ViewAccess list
+      ReadAccessPaths: ViewReadAccess list list
       Mergeable: bool }
 
 type private JoinViewCheck = { Predicate: Expr option }
@@ -990,7 +1002,10 @@ type private UpdatableView =
       InsertableTargets: Set<string * string * string>
       UpdateFrom: TableRef
       UpdateJoins: Join list
+      AuthorizationSources: (TableRef * Join list) option
       AccessPath: ViewAccess list
+      ComponentAccessPaths: Map<ViewTargetKey, ViewAccess list>
+      ReadAccessPaths: ViewReadAccess list list
       Definer: string
       SecurityType: string }
 
@@ -1567,13 +1582,18 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               InsertableTargets = insertableTargets
                               UpdateFrom = updateFrom
                               UpdateJoins = underlying |> Option.map _.UpdateJoins |> Option.defaultValue []
+                              AuthorizationSources = underlying |> Option.bind _.AuthorizationSources
                               AccessPath =
                                 { SecurityType = view.SecurityType
                                   Definer = view.Definer
                                   Database = sourceDb
                                   Table = source.Table
-                                  Retarget = true }
+                                  Mode = RetargetedWrite }
                                 :: (underlying |> Option.map _.AccessPath |> Option.defaultValue [])
+                              ComponentAccessPaths =
+                                underlying |> Option.map _.ComponentAccessPaths |> Option.defaultValue Map.empty
+                              ReadAccessPaths =
+                                underlying |> Option.map _.ReadAccessPaths |> Option.defaultValue []
                               Definer = view.Definer
                               SecurityType = view.SecurityType }
             | Some(FromTable source)
@@ -1598,7 +1618,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     let database = tableRef.Database |> Option.defaultValue view.Schema
                     let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
 
-                    let readOnlySource (stored: StoredView) projections =
+                    let readOnlySource (stored: StoredView) statement projections =
                         let projectedNames =
                             projections
                             |> List.map (fun ({ Expression = expression; Alias = alias } as projection) ->
@@ -1634,20 +1654,20 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                       Predicate = None
                                       CheckPredicates = Map.empty
                                       InsertableTargets = Set.empty
+                                      AccessPath = []
+                                      ReadAccessPaths =
+                                        [ [ { View = stored; Definition = statement; WritableColumns = [] } ] ]
                                       Mergeable = false }
 
                     match tryStoredView store database tableRef.Table with
                     | Some stored ->
                         match parseStoredViewStatement stored with
                         | Ok(Select definition) ->
-                            let nested =
-                                if
-                                    stored.Definer.Equals(view.Definer, System.StringComparison.OrdinalIgnoreCase)
-                                    && stored.SecurityType.Equals(view.SecurityType, System.StringComparison.OrdinalIgnoreCase)
-                                then
-                                    classify (Set.add key seen) stored definition
-                                else
-                                    None
+                            let sameSecurityContext =
+                                stored.Definer.Equals(view.Definer, System.StringComparison.OrdinalIgnoreCase)
+                                && stored.SecurityType.Equals(view.SecurityType, System.StringComparison.OrdinalIgnoreCase)
+
+                            let nested = classify (Set.add key seen) stored definition
 
                             nested
                             |> Option.bind (fun nested ->
@@ -1686,9 +1706,21 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                           Predicate = nested.Predicate |> Option.map qualify
                                           CheckPredicates = checkPredicates
                                           InsertableTargets = insertableTargets
+                                          AccessPath =
+                                            if sameSecurityContext then
+                                                []
+                                            else
+                                                nested.AccessPath |> List.map (fun access -> { access with Mode = TargetGrantOnly })
+                                          ReadAccessPaths =
+                                            let own =
+                                                { View = stored
+                                                  Definition = Select definition
+                                                  WritableColumns = nested.Targets |> Map.toList |> List.map fst }
+                                            [ [ own ] ]
+                                            @ (nested.ReadAccessPaths |> List.map (fun path -> own :: path))
                                           Mergeable = true })
-                            |> Option.orElseWith (fun () -> readOnlySource stored definition.Projections)
-                        | Ok(Union(first, _, _, _, _)) -> readOnlySource stored first.Projections
+                            |> Option.orElseWith (fun () -> readOnlySource stored (Select definition) definition.Projections)
+                        | Ok(Union(first, _, _, _, _) as statement) -> readOnlySource stored statement first.Projections
                         | _ -> None
                     | None ->
                         InformationSchema.findTable store.Catalog database tableRef.Table
@@ -1717,6 +1749,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               Predicate = None
                               CheckPredicates = Map.empty
                               InsertableTargets = Set.singleton (database, tableRef.Table, qualifier)
+                              AccessPath = []
+                              ReadAccessPaths = []
                               Mergeable = true })
 
                 let sources =
@@ -1873,12 +1907,21 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               InsertableTargets = insertableTargets
                               UpdateFrom = (List.head sources).Reference
                               UpdateJoins = rewrittenJoins
+                              AuthorizationSources = Some(source, select.Joins)
                               AccessPath =
                                 [ { SecurityType = view.SecurityType
                                     Definer = view.Definer
                                     Database = view.Schema
                                     Table = view.Name
-                                    Retarget = false } ]
+                                    Mode = OriginalWrite } ]
+                              ComponentAccessPaths =
+                                sources
+                                |> List.collect (fun source ->
+                                    source.Targets
+                                    |> Map.toList
+                                    |> List.map (fun (_, target) -> viewTargetKey target, source.AccessPath))
+                                |> Map.ofList
+                              ReadAccessPaths = sources |> List.collect _.ReadAccessPaths
                               Definer = view.Definer
                               SecurityType = view.SecurityType }
             | _ -> None
@@ -25101,8 +25144,9 @@ let rec executeAs
                 finishInsertRow targetStore db table tableColumns candidate)
 
     let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement =
+        let targetKey = target.Database, target.Table, target.Qualifier
         let retarget (access: ViewAccess) =
-            if not access.Retarget then
+            if access.Mode = OriginalWrite then
                 statement
             else
                 let qualified = SqlText.objectName (Some access.Database) access.Table
@@ -25114,27 +25158,100 @@ let rec executeAs
                 | ReplaceSelect(_, columns, select) -> ReplaceSelect(qualified, columns, select)
                 | ReplaceSet(_, assignments) -> ReplaceSet(qualified, assignments)
                 | LoadData load -> LoadData { load with Table = qualified }
-                | Update update -> Update { update with From = { update.From with Database = Some access.Database; Table = access.Table } }
+                | Update update ->
+                    let update = { update with From = { update.From with Database = Some access.Database; Table = access.Table } }
+                    if access.Mode = TargetGrantOnly then
+                        Update
+                            { update with
+                                Ctes = []
+                                Joins = []
+                                Assignments =
+                                    update.Assignments
+                                    |> List.map (fun assignment ->
+                                        { assignment with
+                                            Table = None
+                                            Value = Col assignment.Column })
+                                Where = None
+                                OrderBy = []
+                                Limit = None }
+                    else
+                        Update update
                 | Delete delete -> Delete { delete with From = { delete.From with Database = Some access.Database; Table = access.Table } }
                 | other -> other
 
         let authorizedRegistry =
-            if view.AccessPath.IsEmpty then
-                registryForViewSecurity store registry view.SecurityType view.Definer view.ViewDatabase statement
-            else
-                view.AccessPath
+            let componentPath = view.ComponentAccessPaths |> Map.tryFind targetKey |> Option.defaultValue []
+            let checkPath current (path: ViewAccess list) =
+                path
                 |> List.fold
                     (fun state access ->
                         state
                         |> Result.bind (fun current ->
                             registryForViewSecurity store current access.SecurityType access.Definer access.Database (retarget access)))
-                    (Ok registry)
+                    (Ok current)
+
+            let checkReadPaths current =
+                view.ReadAccessPaths
+                |> List.fold
+                    (fun state path ->
+                        state
+                        |> Result.bind (fun current ->
+                            path
+                            |> List.fold
+                                (fun state nested ->
+                                    state
+                                    |> Result.bind (fun nestedRegistry ->
+                                        let writeGrant =
+                                            match nested.WritableColumns, registryAccount nestedRegistry with
+                                            | [], _ -> Ok()
+                                            | columns, Some account ->
+                                                if
+                                                    columns
+                                                    |> List.exists (fun column ->
+                                                        Auth.checkForAccount
+                                                            store
+                                                            account
+                                                            [ "UPDATE", Auth.OnColumn(nested.View.Schema, nested.View.Name, column) ]
+                                                        |> Result.isOk)
+                                                then
+                                                    Ok()
+                                                else
+                                                    Error(1142, "UPDATE privilege missing for component view")
+                                            | _, None -> Error(1449, "The current invoker account does not exist")
+
+                                        writeGrant
+                                        |> Result.bind (fun () -> registryForView store nestedRegistry nested.View nested.Definition)))
+                                (Ok current)
+                            |> Result.map (fun _ -> current)
+                            |> Result.mapError (fun _ -> invalidViewError view.ViewDatabase view.ViewName)))
+                    (Ok current)
+
+            match statement, view.AuthorizationSources with
+            | Update update, Some(from, joins) ->
+                registryForViewSecurity
+                    store
+                    registry
+                    view.SecurityType
+                    view.Definer
+                    view.ViewDatabase
+                    (Update { update with From = from; Joins = joins })
+                |> Result.mapError (fun ((code, _) as error) ->
+                    if code = 1142 || code = 1143 then invalidViewError view.ViewDatabase view.ViewName else error)
+                |> Result.bind checkReadPaths
+                |> Result.bind (fun current -> checkPath current componentPath)
+            | _ ->
+                let accessPath = if componentPath.IsEmpty then view.AccessPath else componentPath
+                if accessPath.IsEmpty then
+                    registryForViewSecurity store registry view.SecurityType view.Definer view.ViewDatabase statement
+                    |> Result.bind checkReadPaths
+                else
+                    checkPath registry accessPath
+                    |> Result.bind checkReadPaths
 
         match authorizedRegistry with
         | Error(code, message) -> ids, Err(code, message)
         | Ok authorized ->
             let execute () = executeAs store authorized dbName ids foundRows currentAccount statement
-            let targetKey = target.Database, target.Table, target.Qualifier
 
             let checkPredicate = Map.tryFind targetKey view.CheckPredicates
 
