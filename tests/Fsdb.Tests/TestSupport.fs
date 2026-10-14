@@ -179,7 +179,11 @@ let configureForArguments (arguments: string array) =
     stressRun <- arguments |> Array.contains "--stress"
 
 let skipTimingAssertions () =
-    stressRun || Environment.GetEnvironmentVariable "FSDB_COVERAGE" = "1"
+    // Hosted CI shares CPUs with other jobs; keep wall-clock canaries for
+    // controlled local runs and exercise their functional work everywhere.
+    stressRun
+    || Environment.GetEnvironmentVariable "FSDB_COVERAGE" = "1"
+    || Environment.GetEnvironmentVariable "CI" = "true"
 
 let cleanup () =
     if Directory.Exists root then
