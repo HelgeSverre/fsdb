@@ -47,6 +47,13 @@ wire-write cost. [Stage timing](../benchmarks/results/2026-10-15-wire-write-stag
 then found that both WAL completion and the handler's remaining work grow
 substantially from one to eight writers; neither the cancellation wrapper nor
 response sending dominates.
+The [same-workload server-stage profile](../benchmarks/results/2026-10-15-keyless-server-stage-profile.md)
+measured about 95 to 458 µs per keyless wire write in the handler as writers
+rose from one to eight. Nested executor time rose from about 67 to 345 µs and
+WAL completion from about 49 to 274 µs. Parsing and stored-function lookup
+were much smaller. These are concurrent wall times, not CPU costs or proof of
+a specific lock. The temporary probes were removed and the normal Release
+binary was rebuilt.
 
 For joined mutations, `QueryHandler` parses and checks the request;
 `Executor.runMutationJoin` resolves sources and produces joined rows;
