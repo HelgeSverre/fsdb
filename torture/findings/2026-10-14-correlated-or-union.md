@@ -31,5 +31,25 @@ and CTEs with `id + 0` and `user_id + 0` projections. The materialized
 regression initially had 3,031 residual evaluations; its statement-local
 equality keys now union each complete OR branch and stay below 2,400. Array
 identity deduplicates overlapping branches without collapsing distinct rows
-that happen to contain equal values. Branches needing ranges or functional
-lookups still use the general path.
+that happen to contain equal values. Functional branches still use the general
+path.
+
+## Numeric range branches
+
+The [native MySQL 8.4.11 oracle](../scripts/correlated-range-or-oracle.py)
+also fixes results for mixed equality/range and overlapping range/range
+disjunctions. For outer IDs 1 and 2, each with 20 matching `user_id` rows
+among 1,000 orders, `user_id = u.id OR id BETWEEN u.id*20 AND u.id*20+2`
+returns 23 rows per outer ID. Overlapping ranges `id BETWEEN u.id*20 AND
+u.id*20+2 OR id BETWEEN u.id*20+1 AND u.id*20+3` return four rows each.
+The oracle confirms both results for direct tables, pass-through derived tables
+and CTEs, and stable materialized derived tables and CTEs.
+
+Before range-aware union planning, the first mixed case evaluated a residual
+`TOUCH` function 1,049 times for two outer rows. The regression now requires
+fewer than 100 evaluations for mixed branches and fewer than 30 for the
+overlapping range branches, across all five source shapes. The physical path
+deduplicates stored row IDs before projection; the materialized path
+deduplicates source row references. Every branch must provide a safe equality
+or range candidate set. An unindexable branch falls back to the general path
+and retains its rows; range costs can likewise reject an unhelpful index.

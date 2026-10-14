@@ -14548,7 +14548,7 @@ and private tryProjectedPhysicalCorrelatedEqualityLookup
             correlatedProbeEqualities (correlatedProbeSource qualifier projection.OutputColumns) whereExpr outer
             |> Option.bind (tryProjectedPhysicalEqualitiesRows CandidateNarrowing store registry dbName projection)))
 
-and private tryProjectedPhysicalCorrelatedEqualityUnionLookup
+and private tryProjectedPhysicalCorrelatedUnionLookup
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -14563,8 +14563,19 @@ and private tryProjectedPhysicalCorrelatedEqualityUnionLookup
             let probeSource = correlatedProbeSource qualifier projection.OutputColumns
 
             let branchCandidates branch =
-                correlatedProbeEqualities probeSource (Some branch) outer
-                |> Option.bind (tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection)
+                let equality =
+                    correlatedProbeEqualities probeSource (Some branch) outer
+                    |> Option.bind (tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection)
+
+                let ranges =
+                    correlatedRangeBounds probeSource (Some branch) outer
+                    |> List.choose (tryProjectedPhysicalRangeCandidates store projection)
+
+                equality :: (ranges |> List.map Some)
+                |> List.choose id
+                |> function
+                    | [] -> None
+                    | candidates -> Some(List.minBy List.length candidates)
 
             let merge candidates =
                 candidates
@@ -14718,19 +14729,12 @@ and private tryMaterializedCorrelatedLookup
                     getMemoized lookups names (fun () -> materializedEqualityLookup store columns rows names)
                     |> Option.bind (fun lookup -> lookup values)
 
-            let unionCandidates () =
-                let merge candidates =
-                    let seen = HashSet<Value[]>(HashIdentity.Reference)
-                    candidates |> List.collect id |> List.filter seen.Add |> Some
-
-                tryCompleteOrCandidates whereExpr (Some >> equalityCandidates) merge List.length
-
-            let rangeCandidates () =
+            let rangeCandidates predicate =
                 let bounds =
                     functionalRangeLookupBounds
                         (tryCorrelatedInnerColumn probeSource)
                         (tryCorrelatedOuterValue probeSource context)
-                        whereExpr
+                        predicate
 
                 let usesStoredCollation (bound: RangeLookupBounds<string, Expr * Value>) =
                     match resolveColumn columns bound.Column with
@@ -14778,7 +14782,21 @@ and private tryMaterializedCorrelatedLookup
                         | [] -> None
                         | candidates -> intersectSharedRows candidates
 
-            [ equalityCandidates whereExpr; unionCandidates (); rangeCandidates () ]
+            let unionCandidates () =
+                let branchCandidates branch =
+                    [ equalityCandidates (Some branch); rangeCandidates (Some branch) ]
+                    |> List.choose id
+                    |> function
+                        | [] -> None
+                        | candidates -> Some(List.minBy List.length candidates)
+
+                let merge candidates =
+                    let seen = HashSet<Value[]>(HashIdentity.Reference)
+                    candidates |> List.collect id |> List.filter seen.Add |> Some
+
+                tryCompleteOrCandidates whereExpr branchCandidates merge List.length
+
+            [ equalityCandidates whereExpr; unionCandidates (); rangeCandidates whereExpr ]
             |> List.choose id
             |> intersectSharedRows
             |> Option.map (fun rows -> columns, rows))
@@ -14856,6 +14874,10 @@ and private tryCorrelatedSourceLookup
             | _ ->
                 [ equality
                   tryCorrelatedEqualityUnionLookup store dbName table whereExpr outer
+                  (if hasRangePredicate then
+                       tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
+                   else
+                       None)
                   tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
                 |> fewestRows
 
@@ -14875,7 +14897,7 @@ and private tryCorrelatedSourceLookup
              |> Option.orElseWith (fun () ->
                  [ direct
                    tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
-                   tryProjectedPhysicalCorrelatedEqualityUnionLookup store registry dbName source whereExpr outer ]
+                   tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer ]
                  |> fewestRows
                  |> chooseWithRanges false))
         |> Option.orElseWith materializedLookup
@@ -14883,7 +14905,7 @@ and private tryCorrelatedSourceLookup
         physicalIntersection ()
         |> Option.orElseWith (fun () ->
             [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
-              tryProjectedPhysicalCorrelatedEqualityUnionLookup store registry dbName source whereExpr outer
+              tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
               tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
             |> fewestRows
             |> chooseWithRanges false)
