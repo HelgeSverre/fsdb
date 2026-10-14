@@ -1403,6 +1403,10 @@ implementation effort:
    found queue admission small relative to completion and measured per-batch
    file-open and flush costs. A retained-handle prototype removed the open
    cost but did not establish a stable wire-throughput gain, so it was reverted.
+   A [method-resolved wire trace](benchmarks/results/2026-10-15-wire-method-trace.md)
+   sampled statement execution, dependency expansion, and WAL work under
+   bracketed eight-writer load. It did not isolate a causal lock or support a
+   production scheduling change.
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition

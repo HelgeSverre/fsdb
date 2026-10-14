@@ -30,7 +30,9 @@ The later [WAL queue and batch-stage profile](../benchmarks/results/2026-10-15-w
 separated admission and handoff from batch work. It measured per-batch file
 open and flush costs, but a retained-handle prototype did not establish a
 stable wire-throughput gain and was reverted. The write-performance finding
-remains open.
+remains open. A subsequent [method-resolved wire trace](../benchmarks/results/2026-10-15-wire-method-trace.md)
+found sampled blocked stacks under dependency expansion and insert preparation,
+but did not identify the contended lock or a safe scheduling fix.
 
 For joined mutations, `QueryHandler` parses and checks the request;
 `Executor.runMutationJoin` resolves sources and produces joined rows;
@@ -80,9 +82,10 @@ release-blocking defect that can be closed by adding another SQL feature:
    profile narrow the target, but do not identify a particular server function
    or lock. A connection-owned disconnect timer and a group-commit leader yield
    did not improve repeated load, so both were reverted. The queue-stage
-   profile has now separated admission, handoff, batch work, and completion;
-   obtain a method-resolved server trace with a repeatable host-load control
-   before another scheduling change.
+   profile separated admission, handoff, batch work, and completion. The
+   method-resolved trace narrowed blocked stacks but did not establish cause;
+   time dependency expansion and statement execution directly under a
+   repeatable host-load control before another scheduling change.
 2. Continue extracting one cohesive executor responsibility at a time when a
    real edit exposes its boundary. Preserve the existing behavior with tests
    and avoid a file-size-driven rewrite.
