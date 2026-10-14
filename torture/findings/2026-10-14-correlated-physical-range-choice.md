@@ -42,3 +42,9 @@ MySQL 8.4.11 returned two rows for `id BETWEEN 1 AND 400` combined with
 `band BETWEEN 399 AND 798` over 1,000 numbered rows. Before the change FSDB
 sent 402 candidates to a residual function; the focused regression now sends
 fewer than 20 while returning the same two rows.
+
+Direct physical sources now use the same row-ID intersection for multiple
+correlated ranges. Native MySQL 8.4.11 also returns two rows for the direct
+version of that query. FSDB previously evaluated the residual over 402 rows;
+the direct regression now stays below 20 calls. A zero- or one-row equality
+candidate still skips the extra range probes.

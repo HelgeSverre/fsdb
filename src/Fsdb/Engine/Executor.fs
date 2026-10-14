@@ -14808,6 +14808,21 @@ and private tryCorrelatedSourceLookup
             | Between _ -> true
             | _ -> false))
 
+    let hasMultipleConjunctiveRanges =
+        whereExpr
+        |> optionalConjuncts
+        |> List.filter (function
+            | BinOp((Gt | Gte | Lt | Lte), _, _)
+            | Between _ -> true
+            | _ -> false)
+        |> List.length > 1
+
+    let physicalIntersection () =
+        if hasRangePredicate then
+            tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
+        else
+            None
+
     let chooseWithRanges sharedPhysicalRows (equality: (ColumnDef list * Value[] list) option) =
         match equality with
         | Some(_, rows) when rows.Length <= 1 -> equality
@@ -14849,12 +14864,14 @@ and private tryCorrelatedSourceLookup
             |> Option.exists (fun physical -> storedRowsMatchReadRows store physical.Columns)
 
         (if physicalFastPath then
-             chooseWithRanges true direct
+             (match direct with
+              | Some(_, rows) when rows.Length <= 1 -> None
+              | Some _ -> physicalIntersection ()
+              | None when hasMultipleConjunctiveRanges -> physicalIntersection ()
+              | None -> None)
+             |> Option.orElseWith (fun () -> chooseWithRanges true direct)
          else
-             (if hasRangePredicate then
-                  tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
-              else
-                  None)
+             physicalIntersection ()
              |> Option.orElseWith (fun () ->
                  [ direct
                    tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
@@ -14863,10 +14880,7 @@ and private tryCorrelatedSourceLookup
                  |> chooseWithRanges false))
         |> Option.orElseWith materializedLookup
     | FromSubquery _ ->
-        (if hasRangePredicate then
-             tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
-         else
-             None)
+        physicalIntersection ()
         |> Option.orElseWith (fun () ->
             [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
               tryProjectedPhysicalCorrelatedEqualityUnionLookup store registry dbName source whereExpr outer

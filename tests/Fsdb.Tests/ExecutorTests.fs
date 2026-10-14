@@ -13133,6 +13133,21 @@ let tests =
 
                     Expect.isLessThan calls 20 "the projected lookup intersects two individually broad range candidates"
 
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT (SELECT COUNT(*) FROM probe_orders o "
+                             + "WHERE TOUCH(o.id)=o.id AND o.id BETWEEN u.id AND u.id+399 "
+                             + "AND o.band BETWEEN u.id+398 AND u.id+797) FROM probe_users u")
+                    with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected two direct range/range matches, got %A" other
+
+                    Expect.isLessThan calls 20 "the direct lookup intersects two individually broad range candidates"
+
                 testCase "an indexed pass-through derived source resolves only matching physical rows"
                 <| fun _ ->
                     let mutable calls = 0
