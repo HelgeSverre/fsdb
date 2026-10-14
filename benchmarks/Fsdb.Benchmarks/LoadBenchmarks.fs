@@ -22,6 +22,7 @@ open Fsdb.Benchmarks.BenchServer
 type private Workload =
     | PointRead
     | UpdateDistinct
+    | UpdateScanDistinct
     | UpdateHot
     | UpsertDistinct
     | Insert
@@ -34,6 +35,7 @@ type private Workload =
         match this with
         | PointRead -> "point-read"
         | UpdateDistinct -> "update-distinct"
+        | UpdateScanDistinct -> "update-scan-distinct"
         | UpdateHot -> "update-hot"
         | UpsertDistinct -> "upsert-distinct"
         | Insert -> "insert"
@@ -45,7 +47,7 @@ type private Workload =
     static member All = [ PointRead; UpdateDistinct; UpdateHot; UpsertDistinct; Insert; InsertKeyless; ReplaceDistinct; TransactionDistinct; Mixed ]
 
     static member TryParse(value: string) =
-        Workload.All
+        (Workload.All @ [ UpdateScanDistinct ])
         |> List.tryFind (fun workload -> String.Equals(workload.Name, value, StringComparison.OrdinalIgnoreCase))
 
 let private envFloat (name: string) (fallback: float) : float =
@@ -131,6 +133,9 @@ let private runOneWorker (conn: MySqlConnection) (workload: Workload) (workerCou
             query $"SELECT id, name, age FROM users WHERE id = {1 + rng.Next(Schema.userCount)}"
         | UpdateDistinct ->
             exec $"UPDATE users SET age = age + 1 WHERE id = {sliceStart + rng.Next(sliceSize)}"
+        | UpdateScanDistinct ->
+            let id = sliceStart + rng.Next(sliceSize)
+            exec $"UPDATE users SET scan_age = scan_age + 1 WHERE name = 'user_{id - 1}'"
         | UpdateHot ->
             exec $"UPDATE users SET age = age + 1 WHERE id = {1 + rng.Next(min 16 Schema.userCount)}"
         | UpsertDistinct ->
@@ -216,6 +221,13 @@ let private runWorkers (target: string) (workload: Workload) (workerCount: int) 
 
 /// Warmup then measure completed operations and contention retries.
 let private measure (target: string) (workload: Workload) (workerCount: int) : Measurement =
+    let scanAgeSum () =
+        use conn = new MySqlConnection(Schema.connectionString target)
+        conn.Open()
+        use command = conn.CreateCommand()
+        command.CommandText <- "SELECT SUM(scan_age) FROM users"
+        Convert.ToInt64(command.ExecuteScalar())
+
     if workload = InsertKeyless then
         use conn = new MySqlConnection(Schema.connectionString target)
         conn.Open()
@@ -223,6 +235,7 @@ let private measure (target: string) (workload: Workload) (workerCount: int) : M
         command.CommandText <- "CREATE TABLE keyless_events (worker_id INT NOT NULL, event_id BIGINT NOT NULL)"
         command.ExecuteNonQuery() |> ignore
 
+    let initialScanAge = if workload = UpdateScanDistinct then Some(scanAgeSum ()) else None
     let insertCounter = ref 0L
     let warmupCounts, _ = runWorkers target workload workerCount warmupSeconds insertCounter
     let counts, elapsed = runWorkers target workload workerCount measureSeconds insertCounter
@@ -236,6 +249,13 @@ let private measure (target: string) (workload: Workload) (workerCount: int) : M
         let expected = warmupCounts.Completed + counts.Completed
         if stored <> expected then
             failwithf "%s retained %d of %d completed keyless inserts" target stored expected
+
+    initialScanAge
+    |> Option.iter (fun before ->
+        let expected = before + warmupCounts.Completed + counts.Completed
+        let actual = scanAgeSum ()
+        if actual <> expected then
+            failwithf "%s applied %d of %d completed full-scan updates" target (actual - before) (expected - before))
 
     let attempts = counts.Completed + counts.Retried
 

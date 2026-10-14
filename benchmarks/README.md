@@ -87,6 +87,15 @@ FSDB_BENCH_CATEGORIES=Numeric just bench-quick
 The data-size variables `FSDB_BENCH_USERS`, `FSDB_BENCH_ORDERS`, and
 `FSDB_BENCH_ARTICLES` override the seeded cardinalities.
 
+For the unindexed single-table write path, run the opt-in
+`FSDB_LOAD_WORKLOADS=update-scan-distinct` workload with `just _bench-run --load`.
+It updates `scan_age` using an equality predicate on the unindexed `name`
+column, and verifies the summed row changes outside timing. Set
+`FSDB_LOAD_WORKERS`, `FSDB_LOAD_TRIALS`, `FSDB_LOAD_WARMUP`, and
+`FSDB_LOAD_SECONDS` to bound the campaign. This load harness compares
+in-memory fsdb with durable MySQL, so use it for scaling slopes and hotspot
+diagnosis rather than absolute durable-write parity.
+
 `PointSelectByFixedPk`, `PointSelectByRoundPi`, and
 `PointSelectByBitCountBound`, and `PointSelectByCastBound` compare the same
 fixed primary-key hit and result shape when profiling literal and
