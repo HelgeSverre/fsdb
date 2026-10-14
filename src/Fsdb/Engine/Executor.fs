@@ -25161,6 +25161,29 @@ let rec executeAs
 
     let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement (originalUpdate: UpdateStmt option) =
         let targetKey = target.Database, target.Table, target.Qualifier
+        let writableAccessView database table =
+            tryStoredView store database table
+            |> Option.bind (fun stored ->
+                match parseStoredViewStatement stored with
+                | Ok(Select definition) -> updatableViewOfSelect store stored definition
+                | _ -> None)
+
+        let exposedInsertColumns (access: ViewAccess) (columns: string list) =
+            match writableAccessView access.Database access.Table with
+            | None -> columns
+            | Some componentView ->
+                let exposedByPhysical =
+                    componentView.Targets
+                    |> Map.toList
+                    |> List.map (fun (exposedName, mapped) -> mapped.Column.ToLowerInvariant(), exposedName)
+                    |> Map.ofList
+
+                columns
+                |> List.map (fun column ->
+                    exposedByPhysical
+                    |> Map.tryFind (column.ToLowerInvariant())
+                    |> Option.defaultValue column)
+
         let retarget (access: ViewAccess) =
             if access.Mode = OriginalWrite then
                 statement
@@ -25168,8 +25191,8 @@ let rec executeAs
                 let qualified = SqlText.objectName (Some access.Database) access.Table
 
                 match statement with
-                | Insert(_, columns, rows, updates, ignore) -> Insert(qualified, columns, rows, updates, ignore)
-                | InsertSelect(_, columns, select, updates, ignore) -> InsertSelect(qualified, columns, select, updates, ignore)
+                | Insert(_, columns, rows, updates, ignore) -> Insert(qualified, exposedInsertColumns access columns, rows, updates, ignore)
+                | InsertSelect(_, columns, select, updates, ignore) -> InsertSelect(qualified, exposedInsertColumns access columns, select, updates, ignore)
                 | Replace(_, columns, rows) -> Replace(qualified, columns, rows)
                 | ReplaceSelect(_, columns, select) -> ReplaceSelect(qualified, columns, select)
                 | ReplaceSet(_, assignments) -> ReplaceSet(qualified, assignments)
@@ -25196,28 +25219,20 @@ let rec executeAs
                 | other -> other
 
         let checkAnyViewColumnGrant account database table privilege =
-            match tryStoredView store database table with
-            | Some stored ->
-                match parseStoredViewStatement stored with
-                | Ok(Select definition) ->
-                    let columns =
-                        updatableViewOfSelect store stored definition
-                        |> Option.map _.OrderedColumns
-                        |> Option.defaultValue stored.Columns
-
-                    if
-                        columns
-                        |> List.exists (fun column ->
-                            Auth.checkForAccount
-                                store
-                                account
-                                [ privilege, Auth.OnColumn(database, table, column) ]
-                            |> Result.isOk)
-                    then
-                        Ok()
-                    else
-                        Error(1142, "Write privilege missing for component view")
-                | _ -> Error(invalidViewError view.ViewDatabase view.ViewName)
+            match writableAccessView database table with
+            | Some accessView ->
+                if
+                    accessView.OrderedColumns
+                    |> List.exists (fun column ->
+                        Auth.checkForAccount
+                            store
+                            account
+                            [ privilege, Auth.OnColumn(database, table, column) ]
+                        |> Result.isOk)
+                then
+                    Ok()
+                else
+                    Error(1142, "Write privilege missing for component view")
             | None -> Error(invalidViewError view.ViewDatabase view.ViewName)
 
         let authorizedRegistry =

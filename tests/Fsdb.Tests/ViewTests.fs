@@ -659,9 +659,9 @@ let tests =
                     "GRANT SELECT,INSERT,UPDATE ON fsdb.deep_a TO deep_inner_owner"
                     "GRANT SELECT,INSERT,UPDATE ON fsdb.deep_b TO deep_outer_owner"
                     "GRANT CREATE VIEW ON fsdb.* TO deep_inner_owner,deep_middle_owner,deep_outer_owner"
-                    "CREATE DEFINER='deep_inner_owner'@'%' VIEW deep_inner AS SELECT id,n FROM deep_a"
+                    "CREATE DEFINER='deep_inner_owner'@'%' VIEW deep_inner AS SELECT id,n AS value FROM deep_a"
                     "GRANT SELECT,INSERT,UPDATE ON fsdb.deep_inner TO deep_middle_owner"
-                    "CREATE DEFINER='deep_middle_owner'@'%' VIEW deep_middle AS SELECT id,n AS metric FROM deep_inner"
+                    "CREATE DEFINER='deep_middle_owner'@'%' VIEW deep_middle AS SELECT id,value AS metric FROM deep_inner"
                     "GRANT SELECT,INSERT,UPDATE ON fsdb.deep_middle TO deep_outer_owner"
                     "CREATE DEFINER='deep_outer_owner'@'%' VIEW deep_outer AS SELECT m.id,m.metric,b.id AS b_id FROM deep_middle m JOIN deep_b b ON b.left_id=m.id" ] do
                   expectOk (run store sql) sql
@@ -672,14 +672,15 @@ let tests =
               match run store "INSERT INTO deep_outer(metric) VALUES(30)" with
               | Err(1356, _) -> ()
               | other -> failtestf "expected the revoked middle grant to invalidate the outer view, got %A" other
-              expectOk (run store "GRANT INSERT(n) ON fsdb.deep_inner TO deep_middle_owner") "grant the middle layer's written column"
+              expectOk (run store "GRANT INSERT(value) ON fsdb.deep_inner TO deep_middle_owner") "grant the middle layer's written column"
               expectOk (run store "INSERT INTO deep_outer(metric) VALUES(40)") "insert with middle-layer column grant"
+              expectOk (run store "INSERT INTO deep_outer(metric) SELECT 45") "insert-select with middle-layer column grant"
               match run store "INSERT INTO deep_outer(id,metric) VALUES(5,50)" with
               | Err(1356, _) -> ()
               | other -> failtestf "expected the ungranted id through the middle layer to be denied, got %A" other
               Expect.equal
                   (rows store "SELECT id,n FROM deep_a ORDER BY id")
-                  [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "40" ] ]
+                  [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "40" ]; [ Some "4"; Some "45" ] ]
                   "the authorized inserts reach the base table"
 
               expectOk (run store "GRANT INSERT ON fsdb.deep_inner TO deep_middle_owner") "restore the middle insert grant"
@@ -687,7 +688,7 @@ let tests =
               match run store "INSERT INTO deep_outer(id,metric) VALUES(2,25) ON DUPLICATE KEY UPDATE id=id+10" with
               | Err(1356, _) -> ()
               | other -> failtestf "expected missing middle-layer UPDATE to invalidate ODKU, got %A" other
-              expectOk (run store "GRANT UPDATE(n) ON fsdb.deep_inner TO deep_middle_owner") "grant one middle update column"
+              expectOk (run store "GRANT UPDATE(value) ON fsdb.deep_inner TO deep_middle_owner") "grant one middle update column"
               expectOk
                   (run store "INSERT INTO deep_outer(id,metric) VALUES(2,25) ON DUPLICATE KEY UPDATE metric=VALUES(metric)")
                   "update the granted column through two view layers"
@@ -704,7 +705,7 @@ let tests =
                   "MySQL validates the outer component with any update grant"
               Expect.equal
                   (rows store "SELECT id,n FROM deep_a ORDER BY id")
-                  [ [ Some "1"; Some "10" ]; [ Some "3"; Some "40" ]; [ Some "12"; Some "25" ]; [ Some "15"; Some "50" ] ]
+                  [ [ Some "1"; Some "10" ]; [ Some "3"; Some "40" ]; [ Some "4"; Some "45" ]; [ Some "12"; Some "25" ]; [ Some "15"; Some "50" ] ]
                   "the ODKU rows follow MySQL's definer-view authorization"
 
           testCase "join views update mergeable components beside materialized views"

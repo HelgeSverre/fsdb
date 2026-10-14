@@ -593,7 +593,8 @@ An [audited third definer layer](torture/findings/2026-10-14-deep-joined-view-in
 also preserves the intermediate view's column grant: `INSERT(metric)` reaches
 the base table, while writing an ungranted `id` fails with 1356. ODKU through
 that layer follows MySQL's distinct intermediate UPDATE-grant validity rule
-and resolves assignment references against the physical row.
+and resolves assignment references against the physical row. Renamed columns
+are authorized using each intermediate view's exposed names.
 
 An inner join may also use a nonmergeable aggregate or UNION view as a
 read-only row source while updating another mergeable component; INSERT still
