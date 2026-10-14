@@ -4427,6 +4427,18 @@ let private disjuncts (expr: Expr) : Expr list =
 
 let private optionalConjuncts = Option.map conjuncts >> Option.defaultValue []
 
+/// An OR narrows candidates only when every branch has a safe lookup.
+let private tryCompleteOrCandidates whereExpr branchCandidates merge candidateCount =
+    whereExpr
+    |> optionalConjuncts
+    |> List.choose (fun expression ->
+        match disjuncts expression with
+        | [ _ ] -> None
+        | branches -> branches |> List.map branchCandidates |> tryAllSome |> Option.bind merge)
+    |> function
+        | [] -> None
+        | candidates -> Some(List.minBy candidateCount candidates)
+
 let private diagnosticFreeLiteralTruth = function
     | LiteralValue(VInt value) -> Some(value <> 0L)
     | LiteralValue(VUInt value) -> Some(value <> 0UL)
@@ -14082,28 +14094,22 @@ and private tryCorrelatedEqualityUnionLookup
     (whereExpr: Expr option)
     (outer: EvalContext option)
     : (ColumnDef list * Value[] list) option =
-    whereExpr
-    |> optionalConjuncts
-    |> List.choose (fun expression ->
-        match disjuncts expression with
-        | [ _ ] -> None
-        | branches ->
-            branches
-            |> List.map (fun branch -> tryCorrelatedEqualityLookup store dbName tref (Some branch) outer)
-            |> tryAllSome
-            |> Option.map (fun lookups ->
-                let columns = lookups.Head |> fst
-                let rows =
-                    lookups
-                    |> List.collect snd
-                    |> List.distinctBy fst
-                    |> List.sortBy fst
-                    |> List.map snd
+    let merge (lookups: (ColumnDef list * (RowId * Value[]) list) list) =
+        let columns = lookups.Head |> fst
+        let rows =
+            lookups
+            |> List.collect snd
+            |> List.distinctBy fst
+            |> List.sortBy fst
+            |> List.map snd
 
-                columns, rows))
-    |> function
-        | [] -> None
-        | candidates -> Some(List.minBy (snd >> List.length) candidates)
+        Some(columns, rows)
+
+    tryCompleteOrCandidates
+        whereExpr
+        (fun branch -> tryCorrelatedEqualityLookup store dbName tref (Some branch) outer)
+        merge
+        (snd >> List.length)
 
 and private tryCorrelatedFunctionalEqualityLookup
     (store: Store)
@@ -14554,27 +14560,19 @@ and private tryProjectedPhysicalCorrelatedEqualityUnionLookup
         |> Option.bind (fun projection ->
             let probeSource = correlatedProbeSource qualifier projection.OutputColumns
 
-            whereExpr
-            |> optionalConjuncts
-            |> List.choose (fun expression ->
-                match disjuncts expression with
-                | [ _ ] -> None
-                | branches ->
-                    branches
-                    |> List.map (fun branch ->
-                        correlatedProbeEqualities probeSource (Some branch) outer
-                        |> Option.bind (tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection))
-                    |> tryAllSome
-                    |> Option.bind (fun candidates ->
-                        candidates
-                        |> List.collect id
-                        |> List.map fst
-                        |> Set.ofList
-                        |> Storage.rowsForRowIds projection.PhysicalTable
-                        |> projectPhysicalLookupRows store registry dbName projection))
-            |> function
-                | [] -> None
-                | candidates -> Some(List.minBy (snd >> List.length) candidates)))
+            let branchCandidates branch =
+                correlatedProbeEqualities probeSource (Some branch) outer
+                |> Option.bind (tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection)
+
+            let merge candidates =
+                candidates
+                |> List.collect id
+                |> List.map fst
+                |> Set.ofList
+                |> Storage.rowsForRowIds projection.PhysicalTable
+                |> projectPhysicalLookupRows store registry dbName projection
+
+            tryCompleteOrCandidates whereExpr branchCandidates merge (snd >> List.length)))
 
 and private tryProjectedPhysicalCorrelatedRangeLookup
     (store: Store)
@@ -14691,21 +14689,11 @@ and private tryMaterializedCorrelatedLookup
                     |> Option.bind (fun lookup -> lookup values)
 
             let unionCandidates () =
-                whereExpr
-                |> optionalConjuncts
-                |> List.choose (fun expression ->
-                    match disjuncts expression with
-                    | [ _ ] -> None
-                    | branches ->
-                        branches
-                        |> List.map (Some >> equalityCandidates)
-                        |> tryAllSome
-                        |> Option.map (fun candidates ->
-                            let seen = HashSet<Value[]>(HashIdentity.Reference)
-                            candidates |> List.collect id |> List.filter seen.Add))
-                |> function
-                    | [] -> None
-                    | candidates -> Some(List.minBy List.length candidates)
+                let merge candidates =
+                    let seen = HashSet<Value[]>(HashIdentity.Reference)
+                    candidates |> List.collect id |> List.filter seen.Add |> Some
+
+                tryCompleteOrCandidates whereExpr (Some >> equalityCandidates) merge List.length
 
             let rangeCandidates () =
                 let bounds =
