@@ -42,3 +42,5 @@ throughput at 1, 2, 4, 8, and 16 workers. Keep the generated benchmark reports
 with their revision, engine versions, modes, and dataset sizes. Investigate a
 regression against the previous same-host run before accepting it; the in-memory
 FSDB write numbers from other recipes are not durable-write evidence.
+The disposable MySQL server keeps InnoDB's commit-time flush enabled but disables
+binary logging; replication logging is outside this single-node durability comparison.

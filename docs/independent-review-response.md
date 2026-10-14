@@ -1,7 +1,7 @@
 # Response to the October 14 independent review
 
 The review inspected `ffb9e71d`. This response checks its actionable findings
-against `a37c1c6a` and distinguishes completed work from remaining limits. Its
+against the October 14 main branch through `92fe4a11` and distinguishes completed work from remaining limits. Its
 scores are the reviewer's judgment, not a current measured rating.
 
 | Review finding | Current state | Evidence and next action |
@@ -13,7 +13,7 @@ scores are the reviewer's judgment, not a current measured rating.
 | Async API looks like nonblocking database I/O | Documented limitation | `Db.fs` uses `Task.Run` for embedded async calls; the README now says so and describes cancellation and host concurrency implications. A truly asynchronous executor would need separate design and workload evidence. |
 | `registerTable` mutates shared configuration | Open API design issue | `registerScalar` returns a new function registry, while `registerTable` updates `Store.VirtualTables`. `Db.fs` and the README explicitly describe store-level mutation and startup registration. Derived `Db` values sharing a store therefore share virtual tables. If independent derived configurations become a supported use case, move the registry into a per-configuration/session overlay and test both embedded and wire sessions before changing this contract. |
 | Large execution modules | Open maintainability issue | `Executor.fs` is about 27,700 lines and `Storage.fs` about 11,700. Extract one cohesive query or mutation responsibility at a time, with behavior-preserving tests and a separate commit from semantic changes. Avoid a wholesale split based only on file size. |
-| Durable writes and worker scaling trail MySQL | Open performance issue | The review quotes historical benchmark artifacts. `just bench-write-gate` now combines durability-matched latency and worker-scaling runs; `docs/operations.md` gives the comparison procedure. Re-run on the same quiet host after write-path changes before treating those historical ratios as current. |
+| Durable writes and worker scaling trail MySQL | Open performance issue | The review quotes historical benchmark artifacts. A newer, focused native-host WAL-versus-durable-MySQL insert burst measures FSDB at 5.022–5.038 ms and MySQL at 2.203–2.224 ms for sixteen sequential autocommit inserts ([evidence](../benchmarks/results/c399e5d0-durable-write-pair.md)). This is one workload, not a full replacement for `just bench-write-gate`. The broad gate previously exhausted disk with disposable MySQL binary logs; the benchmark server now disables binary logging while retaining InnoDB commit-time flush. Re-run on a quiet host with enough free disk after write-path changes. |
 | Recovery and backup maturity | Partly addressed; preview limit remains | `docs/operations.md` specifies stopped-directory backup, restore checks, and a staging upgrade procedure. Online backup and cross-version migration are not guaranteed. Recovery tests exercise WAL replay and snapshot rotation, but do not establish production field history. |
 | Mixed-type indexed join discrepancy | Open, narrow compatibility gap | `GAPS.md` records the MySQL 8.4 discrepancy and its connection-history dependence. Keep it bounded to a reproducible application case; do not generalize it to ordinary joins. |
 
@@ -24,6 +24,12 @@ surface for that responsibility, unchanged MySQL-visible behavior, the normal
 gate passing, and no regression in a focused benchmark. The shared virtual
 table registry deserves a separate API design decision because changing it
 silently would change what existing connections and listeners can see.
+
+This is not a claim that the remaining architectural or performance concerns
+are solved. The large-module refactor needs a narrow seam with independent
+behavioral tests; changing `registerTable` to a pure builder needs an explicit
+policy for already-open sessions and listeners. Those should be reviewed as API
+and architecture changes, not folded into unrelated MySQL compatibility patches.
 
 The deployment contract remains preview-grade: use disposable or restorable
 data, bind safely, retain stopped-directory backups, and verify restores before

@@ -180,6 +180,7 @@ bench-mysql-start:
     fi
     {{ MYSQLD }} --no-defaults --datadir={{ BENCH_MYSQL_DATADIR }} --port="$mysql_port" --bind-address=127.0.0.1 \
         --socket={{ BENCH_MYSQL_DATADIR }}/mysql.sock --pid-file={{ BENCH_MYSQL_DATADIR }}/mysql.pid \
+        --skip-log-bin \
         > {{ BENCH_MYSQL_DATADIR }}/mysqld.log 2>&1 &
     disown
     for _ in $(seq 1 30); do
