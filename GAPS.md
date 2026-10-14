@@ -508,6 +508,12 @@ resolved.
 | Write parallelism within a database | row-lock concurrency | indexed and single-table full-scan UPDATE/DELETE paths coordinate row stripes; full scans conservatively claim current rows but not gaps or later inserts; insert, upsert, and replacement candidates are prepared once, then claim supplied, generated, or defaulted unique keys and refresh existing duplicate rows before publication, including SELECT sources; AUTO_INCREMENT identities are reserved across transaction snapshots; joined writes claim [physical targets inside nested join groups](torture/findings/2026-10-14-grouped-joined-write-rebase.md) and [bare assignments beside derived sources](torture/findings/2026-10-14-derived-joined-write-rebase.md); [keyless inserts](benchmarks/results/2026-10-12-keyless-insert-load.md), CTE writes without inferable physical targets, and other multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced; a [durability-matched keyless-insert run](benchmarks/results/2026-10-14-durable-keyless-scale.md) confirms the worker-scaling gap but does not isolate its cause | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize catalog-wide referential actions, and recorded campaigns show CPU saturation limiting higher worker counts | medium | partial |
 
+A [current write-path control](benchmarks/results/2026-10-14-write-path-control.md)
+measures keyless inserts at one, four, and eight writers with WAL-backed and
+in-memory fsdb on the same host. Durability lowers throughput, but both modes
+retain a weaker worker-scaling slope than durable MySQL; the sampled trace
+does not isolate a lock or group-commit cause.
+
 ## 8. Persistence and durability
 
 Persistence is opt-in through `--data-dir`. The WAL uses length- and CRC-framed
