@@ -80,10 +80,22 @@ def main():
                 )
                 verify_wait(
                     owner, waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT 1 AS id) UPDATE a JOIN c ON c.id=a.id SET n=n+1 WHERE a.id=1",
+                    ((1, 4), (2, 0)),
+                )
+                verify_wait(
+                    owner, waiter,
                     "UPDATE a SET n=n+1 WHERE id=2",
                     "WITH c AS (SELECT 2 AS id) DELETE a FROM a JOIN c ON c.id=a.id WHERE a.id=2",
-                    ((1, 2),),
+                    ((1, 4),),
                 )
+                try:
+                    execute(owner, "WITH c AS (SELECT 1 AS id,9 AS n) UPDATE a JOIN c ON c.id=a.id SET n=n+1 WHERE a.id=1")
+                except pymysql.MySQLError as error:
+                    assert error.args[0] == 1052, error
+                else:
+                    raise AssertionError("ambiguous CTE assignment was accepted")
                 print("MySQL 8.4.11: CTE-joined UPDATE and DELETE waited and committed")
             except Exception:
                 print((root / "mysql.log").read_text())

@@ -12,7 +12,16 @@ FSDB already claimed physical targets for ordinary joined writes, but
 when the statement has a CTE. The focused `UPDATE` and `DELETE` regressions
 both wait, rebase, and commit successfully.
 
-This change covers physical target references discoverable through the
-existing joined-write path. It does not infer an unqualified assignment owner
-through a nonphysical CTE source or claim a CTE reference as a physical target,
-even when its name shadows a real table.
+The follow-up MySQL 8.4.11 probe uses `SET n=n+1` with a CTE source exposing
+only `id`. MySQL waits and commits. Fsdb previously ran that statement without
+a row claim, then failed its later `COMMIT` with 1205. Target discovery now
+uses the CTE's declared or inferable output names while resolving bare
+assignments; it claims the physical table only when exactly one source owns
+the assigned column. A CTE that also exposes `n` leaves the assignment
+ambiguous and returns MySQL error 1052. The focused regression covers the
+wait, rebase, final value, and ambiguity guard.
+
+The claim still requires a physical target discoverable through the joined
+write path. CTE sources themselves are not claimed as physical tables, even
+when a CTE name shadows a real table. Complex CTE output metadata that cannot
+be inferred conservatively remains on the optimistic path.

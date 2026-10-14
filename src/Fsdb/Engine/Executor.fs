@@ -28124,9 +28124,46 @@ let transactionWriteTargets
                 |> Option.bind (fun joined ->
                     update.From :: joined
                     |> traverse (fun tableRef ->
-                        match physicalFastPathTable store dbName tableRef with
-                        | Some table -> Ok(tableRef, table)
-                        | None -> Error())
+                        let cte =
+                            if tableRef.Database.IsSome then None
+                            else
+                                update.Ctes
+                                |> List.tryFind (fun cte -> equalsIgnoreCase cte.CteName tableRef.Table)
+
+                        match cte with
+                        | Some cte ->
+                            let projectedNames =
+                                let projections =
+                                    match cte.Body with
+                                    | PlainSelect select -> select.Projections
+                                    | UnionSelect(first, _, _, _, _) -> first.Projections
+
+                                let names =
+                                    projections
+                                    |> List.map (fun projection -> projection.Alias |> Option.orElse projection.SourceName)
+
+                                if names |> List.forall Option.isSome then names |> List.choose id else []
+
+                            let columns =
+                                if cte.CteColumns.IsEmpty then
+                                    let inferred =
+                                        selectSourceColumns
+                                            store
+                                            dbName
+                                            (FromSubquery(cte.Body, tableRef.Alias |> Option.defaultValue tableRef.Table))
+                                    if inferred.IsEmpty || (inferred |> List.exists Option.isNone) then
+                                        projectedNames
+                                    else
+                                        inferred |> List.choose id |> List.map _.Name
+
+                                else
+                                    cte.CteColumns
+
+                            if columns.IsEmpty then Error() else Ok(None, columns)
+                        | None ->
+                            match physicalFastPathTable store dbName tableRef with
+                            | Some table -> Ok(Some tableRef, table.Columns |> List.map _.Name)
+                            | None -> Error())
                     |> Result.toOption)
 
         update.Assignments
@@ -28137,11 +28174,10 @@ let transactionWriteTargets
                 sourceSchemas
                 |> Option.bind (fun schemas ->
                     schemas
-                    |> List.filter (fun (_, table) ->
-                        table.Columns
-                        |> List.exists (fun column -> equalsIgnoreCase column.Name assignment.Column))
+                    |> List.filter (fun (_, columns) ->
+                        columns |> List.exists (fun column -> equalsIgnoreCase column assignment.Column))
                     |> function
-                        | [ (owner, _) ] -> Some(owner.Alias |> Option.defaultValue owner.Table)
+                        | [ (Some owner, _) ] -> Some(owner.Alias |> Option.defaultValue owner.Table)
                         | _ -> None)
                 |> function Some name -> Ok name | None -> Error())
         |> Result.toOption
