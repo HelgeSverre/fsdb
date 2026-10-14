@@ -27779,6 +27779,11 @@ let transactionWriteTargets
         else
             None
     | Delete delete when delete.Ctes.IsEmpty && delete.Joins.IsEmpty -> targets delete.From delete.Where
+    | Delete delete when delete.Ctes.IsEmpty && not delete.Joins.IsEmpty ->
+        let target = delete.From.Alias |> Option.defaultValue delete.From.Table
+        match delete.Targets with
+        | [ named ] when equalsIgnoreCase named target -> targets delete.From delete.Where
+        | _ -> None
     | Insert(tableName, columns, rows, _, _)
     | Replace(tableName, columns, rows) -> literalInsertTargets tableName columns rows
     | ReplaceSet(tableName, assignments) ->

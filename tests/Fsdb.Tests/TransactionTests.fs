@@ -1393,6 +1393,58 @@ let tests =
               | ResultSet(_, [ [ Some "4" ] ]) -> ()
               | result -> failtestf "expected the autocommit increment after the owner, got %A" result
 
+          testCase "joined single-target delete waits for an updated target row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_join_delete (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_join_delete_lookup (id INT PRIMARY KEY)" |> ignore
+              handle setup "INSERT INTO tx_join_delete VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_join_delete_lookup VALUES (1)" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, ownerUpdate = handle owner "UPDATE tx_join_delete SET n=n+1 WHERE id=1"
+              Expect.equal ownerUpdate (Affected 1UL) "the owner changes the target row"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              let sql = "DELETE t FROM tx_join_delete t JOIN tx_join_delete_lookup l ON l.id=t.id WHERE t.id=1"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter sql)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the delete starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the delete resumes"
+              let waiter, deleted = waiting.Result
+              Expect.isTrue blocked "the delete waits for the target row"
+              Expect.equal deleted (Affected 1UL) "the joined delete removes the updated row"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the joined delete commits"
+              match handle setup "SELECT id FROM tx_join_delete" |> snd with
+              | ResultSet(_, []) -> ()
+              | result -> failtestf "expected the target row to be deleted, got %A" result
+
+              handle setup "INSERT INTO tx_join_delete VALUES (1, 0)" |> ignore
+              let owner, _ = handle (create 4 store) "BEGIN"
+              let owner, ownerUpdate = handle owner "UPDATE tx_join_delete SET n=n+1 WHERE id=1"
+              Expect.equal ownerUpdate (Affected 1UL) "the owner changes the reinserted row"
+              let autocommitWriter = create 5 store
+              let usingSql =
+                  "DELETE FROM tx_join_delete USING tx_join_delete JOIN tx_join_delete_lookup l ON l.id=tx_join_delete.id WHERE tx_join_delete.id=1"
+              use autocommitStarted = new Threading.ManualResetEventSlim(false)
+              let autocommitDelete =
+                  Threading.Tasks.Task.Run(fun () ->
+                      autocommitStarted.Set()
+                      handle autocommitWriter usingSql |> snd)
+              Expect.isTrue (autocommitStarted.Wait(TimeSpan.FromSeconds 1.0)) "autocommit delete starts"
+              let autocommitBlocked = not (autocommitDelete.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the second owner commits"
+              Expect.isTrue (autocommitDelete.Wait(TimeSpan.FromSeconds 5.0)) "autocommit delete resumes"
+              Expect.isTrue autocommitBlocked "autocommit USING delete waits for the owner"
+              Expect.equal autocommitDelete.Result (Affected 1UL) "autocommit USING delete removes the row"
+              match handle setup "SELECT id FROM tx_join_delete" |> snd with
+              | ResultSet(_, []) -> ()
+              | result -> failtestf "expected the autocommit delete to remove the row, got %A" result
+
           testCase "an autocommit full-scan update waits for a transaction changing the same row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
