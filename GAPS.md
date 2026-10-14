@@ -198,6 +198,9 @@ materialized sources use statement-local ordered lookups. Competing equality
 and range probes choose the narrower observed candidate set, including direct
 physical and pass-through projected sources
 ([oracle and residual probe](torture/findings/2026-10-14-correlated-physical-range-choice.md)).
+Direct physical sources also intersect compatible equality and range candidate
+rows when each individual slice is broad, leaving only their overlap for
+residual predicates. Projected physical sources still choose one slice.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,

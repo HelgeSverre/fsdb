@@ -13039,7 +13039,7 @@ let tests =
 
                     Expect.isLessThan calls 5 "the residual reads only the overlapping range candidates"
 
-                testCase "correlated physical source chooses the narrower range over a broad equality"
+                testCase "correlated physical source intersects equality and range candidates"
                 <| fun _ ->
                     let mutable calls = 0
 
@@ -13087,6 +13087,21 @@ let tests =
                     | other -> failtestf "expected six projected correlated matches, got %A" other
 
                     Expect.isLessThan calls 20 "the pass-through projection also chooses the narrower range"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT (SELECT COUNT(*) FROM probe_orders o "
+                             + "WHERE TOUCH(o.id)=o.id AND o.user_id=u.id "
+                             + "AND o.id BETWEEN u.id+498 AND u.id+897) FROM probe_users u")
+                    with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected two correlated equality/range matches, got %A" other
+
+                    Expect.isLessThan calls 20 "the physical lookup intersects two individually broad candidate sets"
 
                 testCase "an indexed pass-through derived source resolves only matching physical rows"
                 <| fun _ ->

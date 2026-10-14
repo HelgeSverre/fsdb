@@ -72,6 +72,16 @@ let private nestedSubqueryResultsError = 1105, "Multiple resultsets are not vali
 let private equalsIgnoreCase (left: string) (right: string) =
     System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
 
+let private intersectSharedRows (candidates: Value[] list list) =
+    match candidates |> List.sortBy List.length with
+    | [] -> None
+    | [ rows ] -> Some rows
+    | shortest :: rest ->
+        let memberships = rest |> List.map (fun rows -> HashSet<Value[]>(rows, HashIdentity.Reference))
+        shortest
+        |> List.filter (fun row -> memberships |> List.forall (fun rows -> rows.Contains row))
+        |> Some
+
 let private (|NamedFunction|_|) expected =
     function
     | FuncCall(name, arguments) when equalsIgnoreCase name expected -> Some arguments
@@ -14646,16 +14656,6 @@ and private tryMaterializedCorrelatedLookup
             let probeSource = correlatedProbeSource qualifier columns
             let memo = currentStatementMemo ()
 
-            let intersectCandidates candidates =
-                match candidates |> List.sortBy List.length with
-                | [] -> None
-                | [ rows ] -> Some rows
-                | shortest :: rest ->
-                    let memberships = rest |> List.map (fun rows -> HashSet<Value[]>(rows, HashIdentity.Reference))
-                    shortest
-                    |> List.filter (fun row -> memberships |> List.forall (fun rows -> rows.Contains row))
-                    |> Some
-
             let equalityCandidates predicate =
                 let equalities = correlatedProbeEqualities probeSource predicate (Some context) |> Option.defaultValue []
 
@@ -14736,11 +14736,11 @@ and private tryMaterializedCorrelatedLookup
                             |> Option.bind (fun lookup -> lookup values.Lower values.Upper))
                     |> function
                         | [] -> None
-                        | candidates -> intersectCandidates candidates
+                        | candidates -> intersectSharedRows candidates
 
             [ equalityCandidates whereExpr; unionCandidates (); rangeCandidates () ]
             |> List.choose id
-            |> intersectCandidates
+            |> intersectSharedRows
             |> Option.map (fun rows -> columns, rows))
     | _ -> None
 
@@ -14768,15 +14768,26 @@ and private tryCorrelatedSourceLookup
             | Between _ -> true
             | _ -> false))
 
-    let chooseWithRanges (equality: (ColumnDef list * Value[] list) option) =
+    let chooseWithRanges sharedPhysicalRows (equality: (ColumnDef list * Value[] list) option) =
         match equality with
         | Some(_, rows) when rows.Length <= 1 -> equality
         | Some _ when not hasRangePredicate -> equality
         | _ ->
-            [ equality
-              tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer
-              tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer ]
-            |> fewestRows
+            let candidates =
+                [ equality
+                  tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer
+                  tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer ]
+                |> List.choose id
+
+            match candidates |> List.sortBy (snd >> List.length) with
+            | [] -> None
+            | shortest :: _ when sharedPhysicalRows ->
+                // Direct physical probes return the same stored row arrays.
+                candidates
+                |> List.map snd
+                |> intersectSharedRows
+                |> Option.map (fun rows -> fst shortest, rows)
+            | shortest :: _ -> Some shortest
 
     match source with
     | FromTable table ->
@@ -14804,14 +14815,14 @@ and private tryCorrelatedSourceLookup
                tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
                tryProjectedPhysicalCorrelatedEqualityUnionLookup store registry dbName source whereExpr outer ]
              |> fewestRows)
-        |> chooseWithRanges
+        |> chooseWithRanges physicalFastPath
         |> Option.orElseWith materializedLookup
     | FromSubquery _ ->
         [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
           tryProjectedPhysicalCorrelatedEqualityUnionLookup store registry dbName source whereExpr outer
           tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
         |> fewestRows
-        |> chooseWithRanges
+        |> chooseWithRanges false
         |> Option.orElseWith materializedLookup
     | _ -> materializedLookup ()
 

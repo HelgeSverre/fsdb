@@ -16,6 +16,16 @@ both the direct source and pass-through projection keep residual calls below
 20 while returning six. Equality candidates of zero or one row skip the extra
 range probes, as do statements without a syntactic range predicate.
 
-This does not add a general cost model or combine physical equality and range
-candidates by row identity. Correlated predicates without a compatible lookup
-still use the existing execution path.
+That first change did not add a general cost model or combine physical equality
+and range candidates by row identity. Correlated predicates without a
+compatible lookup still use the existing execution path.
+
+Follow-up: MySQL 8.4.11 returned two rows when a 1,000-row table had a
+500-row equality bucket (`user_id=1`) and a 400-row primary-key range
+(`id BETWEEN 499 AND 898`). Only IDs 499 and 500 satisfied both. The former
+FSDB choice of the narrower slice still sent hundreds of rows to a residual
+function. Direct physical probes now intersect their candidate row arrays by
+identity before residual evaluation, reducing the focused regression to fewer
+than 20 residual calls while retaining the MySQL result. This path is limited
+to direct physical tables whose read rows are the stored rows; projected
+sources still choose one candidate family.
