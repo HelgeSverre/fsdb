@@ -49,12 +49,25 @@ a disposable database, default token size 2, and enabled default stopwords.
 It asserts ordered results, parser DDL errors, variable scope and labels,
 mutation behavior, and field boundaries for both parsers.
 
-The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 102
+The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 120
 natural-language, boolean, and query-expansion searches at each startup size
-from 1 through 10. All 1,020 query results agreed with native MySQL 8.4.11
+from 1 through 10. All 1,200 query results agree with native MySQL 8.4.11
 on the audited mixed Chinese, Japanese, Korean, ASCII, punctuation, emoji,
-supplementary-character, and NULL corpus. This checks matching row IDs and
-query errors, not exact relevance scores or arbitrary CJK text.
+supplementary-character, and NULL corpus. It checks matching row IDs, query
+errors, the order of meaningfully different scores, and relevance within `1e-5` absolute and relative
+tolerance. It does not establish exact floating-point equality or arbitrary
+CJK text behavior.
+
+Extending this oracle from row membership to relevance exposed six score
+differences at token size 1. The query `生日 日本語` contains `日` twice: MySQL
+uses both query occurrences in that token's document-frequency weight, even
+when one occurrence is in an excluded Boolean phrase. FSDB had deduplicated
+the query token before weighting and could also count the same token twice
+across matching Boolean phrases. Natural, Boolean, and query-expansion scores
+now use the query occurrence count while contributing each distinct matched
+query token once per row, with its row-wide term frequency. A focused four-row
+SQL regression pins the MySQL scores; the
+expanded oracle agrees at all ten startup sizes.
 
 The `ngram-fulltext` differential contract covers natural, boolean, and
 query-expansion searches through text and prepared protocols, Unicode and

@@ -4,6 +4,7 @@ Build Fsdb.Cli in Release first. Requires native mysqld/mysqladmin and PyMySQL.
 Each token size uses disposable servers and data directories.
 """
 
+import math
 import pathlib
 import socket
 import subprocess
@@ -32,7 +33,8 @@ TERMS = [
     "中，文", "生日，快乐", "生日!快乐", '"生日 快乐"', '"生日，快乐"',
     "+生日 +快乐", "生日 -快乐", "生日* +快乐", "ab生日", "abc", "ことば",
     "東京", "祝福", "火曜日", "生日 日本語", "+生日 -日本語", '"生日快乐"',
-    "生 日", "生　日",
+    "生 日", "生　日", "生日生日", "日本語日本語", "生日生日 日本語",
+    "生日快乐生日快乐", "生日日生", "한국어한국어",
 ]
 
 MODES = ["IN NATURAL LANGUAGE MODE", "IN BOOLEAN MODE", "WITH QUERY EXPANSION"]
@@ -72,6 +74,39 @@ def result(connection, term, mode):
         return tuple(row[0] for row in query(connection, sql, (term,)))
     except pymysql.MySQLError as error:
         return "error", error.args[0]
+
+
+def scored_result(connection, term, mode):
+    score = f"MATCH(body,title) AGAINST(%s {mode})"
+    sql = f"SELECT id,{score} AS relevance FROM docs WHERE {score} ORDER BY relevance DESC,id"
+    try:
+        return tuple((row[0], float(row[1])) for row in query(connection, sql, (term, term)))
+    except pymysql.MySQLError as error:
+        return "error", error.args[0]
+
+
+def scores_agree(expected, actual):
+    expected_error = bool(expected) and expected[0] == "error"
+    actual_error = bool(actual) and actual[0] == "error"
+    if expected_error or actual_error:
+        return expected == actual
+    if len(expected) != len(actual):
+        return False
+    actual_scores = dict(actual)
+    if len(actual_scores) != len(expected):
+        return False
+    if not all(
+        id in actual_scores and math.isclose(score, actual_scores[id], rel_tol=1e-5, abs_tol=1e-5)
+        for id, score in expected
+    ):
+        return False
+    positions = {id: position for position, (id, _) in enumerate(actual)}
+    return all(
+        positions[first_id] < positions[second_id]
+        for position, (first_id, first_score) in enumerate(expected)
+        for second_id, second_score in expected[position + 1:]
+        if first_score > second_score and not math.isclose(first_score, second_score, rel_tol=1e-5, abs_tol=1e-5)
+    )
 
 
 def verify(size):
@@ -117,6 +152,10 @@ def verify(size):
                         actual = result(fsdb_connection, term, mode)
                         if actual != expected:
                             mismatches.append((mode, term, expected, actual))
+                        expected_scores = scored_result(mysql_connection, term, mode)
+                        actual_scores = scored_result(fsdb_connection, term, mode)
+                        if not scores_agree(expected_scores, actual_scores):
+                            mismatches.append((mode, term, "relevance", expected_scores, actual_scores))
                 print(f"size {size}: {len(MODES) * len(TERMS)} queries; {len(mismatches)} mismatches")
                 for mismatch in mismatches:
                     print(mismatch)

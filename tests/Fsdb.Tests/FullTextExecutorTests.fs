@@ -204,6 +204,27 @@ let tests =
                   Expect.isTrue (abs (float score - 2.1516475677490234) < 0.000001) "ngram relevance"
               | other -> failtestf "expected ngram relevance, got %A" other
 
+          testCase "single-character ngram scores count repeated query tokens"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE ngram_scores(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO ngram_scores VALUES(1,'生日快乐'),(2,'日本語'),(3,'生日 日本語'),(4,'中文')" |> ignore
+
+              let check term mode expected =
+                  match run store ($"SELECT id,MATCH(body) AGAINST('{term}' {mode}) FROM ngram_scores ORDER BY id") with
+                  | ResultSet(_, rows) ->
+                      for id, score in expected do
+                          let actual = rows |> List.find (fun row -> row.[0] = Some(string id))
+                          let actualScore = actual.[1] |> Option.defaultWith (fun () -> failtestf "missing score for row %d" id)
+                          Expect.isLessThan (abs (float actualScore - score)) 0.00001 $"MySQL 8.4 ngram score for row {id}"
+                  | other -> failtestf "expected ngram scores, got %A" other
+
+              check "生日 日本語" "IN NATURAL LANGUAGE MODE" [ 1, 0.1216271892; 2, 0.2122462392; 3, 0.3338734508 ]
+              check "生日 日本語" "IN BOOLEAN MODE" [ 1, 0.1216271892; 2, 0.2122462392; 3, 0.3338734508 ]
+              check "+生日 -日本語" "IN BOOLEAN MODE" [ 1, 0.1216271892 ]
+              check "生日 日本語" "WITH QUERY EXPANSION" [ 1, 0.8465796709; 2, 0.2122462392; 3, 0.3338734508 ]
+
           testCase "ngram phrases retain stopped positions and split quoted words"
           <| fun _ ->
               let store = create ()

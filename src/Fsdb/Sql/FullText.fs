@@ -573,37 +573,38 @@ type private NaturalClause =
     | NaturalPhrase of Token[]
 
 let private naturalWordClauses (view: ReadView<'id>) (query: string) =
-    let words text = tokensWith view.Rules.Tokenizer view.Collation text
-    let plain text = words text |> Array.filter (isExactLookup view.Rules) |> Array.map (fun word -> NaturalWord word.Key)
-    let clauses = ResizeArray<NaturalClause>()
-    let mutable start = 0
-    while start < query.Length do
-        let opening = query.IndexOf('"', start)
-        let closing = if opening < 0 then -1 else query.IndexOf('"', opening + 1)
-        if closing < 0 then
-            clauses.AddRange(plain (query.Substring start))
-            start <- query.Length
-        else
-            clauses.AddRange(plain (query.Substring(start, opening - start)))
-            words (query.Substring(opening + 1, closing - opening - 1))
-            |> Array.skipWhile (isSearchable view.Rules >> not)
-            |> NaturalPhrase
-            |> clauses.Add
-            start <- closing + 1
-    clauses.ToArray()
+    match view.Rules.Tokenizer with
+    | Ngrams _ -> queryTokens view query |> Array.map (fun word -> NaturalWord word.Key)
+    | Words _ ->
+        let words text = tokensWith view.Rules.Tokenizer view.Collation text
+        let plain text = words text |> Array.filter (isExactLookup view.Rules) |> Array.map (fun word -> NaturalWord word.Key)
+        let clauses = ResizeArray<NaturalClause>()
+        let mutable start = 0
+        while start < query.Length do
+            let opening = query.IndexOf('"', start)
+            let closing = if opening < 0 then -1 else query.IndexOf('"', opening + 1)
+            if closing < 0 then
+                clauses.AddRange(plain (query.Substring start))
+                start <- query.Length
+            else
+                clauses.AddRange(plain (query.Substring(start, opening - start)))
+                words (query.Substring(opening + 1, closing - opening - 1))
+                |> Array.skipWhile (isSearchable view.Rules >> not)
+                |> NaturalPhrase
+                |> clauses.Add
+                start <- closing + 1
+        clauses.ToArray()
 
 let private naturalClauseKeys rules = function
     | NaturalWord key -> [| key |]
     | NaturalPhrase words -> words |> Array.filter (isSearchable rules) |> Array.map _.Key
 
 let private needsNaturalWordEvaluation (view: ReadView<'id>) (query: string) =
+    let terms = queryTokens view query |> Array.filter (isExactLookup view.Rules)
+    let repeated = terms.Length <> (terms |> Array.distinctBy _.Key).Length
     match view.Rules.Tokenizer with
-    | Ngrams _ -> false
-    | Words _ ->
-        if query.Contains '"' then true
-        else
-            let terms = queryTokens view query |> Array.filter (isExactLookup view.Rules)
-            terms.Length <> (terms |> Array.distinctBy _.Key).Length
+    | Ngrams _ -> repeated
+    | Words _ -> query.Contains '"' || repeated
 
 type private NaturalMatches<'id when 'id: comparison> =
     { Occurrences: Map<string, int>
@@ -636,12 +637,15 @@ let private naturalWordMatches candidateIds (view: ReadView<'id>) clauses =
     { Occurrences = clauses |> Array.collect (naturalClauseKeys view.Rules) |> Array.countBy id |> Map.ofArray
       Documents = clauses |> Array.fold addClause Map.empty }
 
+let private queryOccurrenceWeight (view: ReadView<'id>) documentFrequency occurrences =
+    let frequency = float documentFrequency * float occurrences
+    max (abs (log10 (float view.DocumentCount / frequency))) idfFloor
+
 let private scoreNaturalWordMatches (view: ReadView<'id>) matches =
     matches.Documents
     |> Map.fold (fun scores key ids ->
         let rows = view.Postings.[key]
-        let frequency = float rows.Count * float matches.Occurrences.[key]
-        let weight = max (abs (log10 (float view.DocumentCount / frequency))) idfFloor
+        let weight = queryOccurrenceWeight view rows.Count matches.Occurrences.[key]
         ids |> Set.fold (fun scores id ->
             let contribution = float rows.[id] * weight * weight
             Map.change id (fun current -> Some(contribution + Option.defaultValue 0.0 current)) scores) scores) Map.empty
@@ -1090,10 +1094,57 @@ let private tryRepeatedWordScores candidateIds (view: ReadView<'id>) nodes =
         |> scoreNaturalWordMatches view
         |> Some
 
+let private tryRepeatedNgramScores candidateIds (view: ReadView<'id>) nodes =
+    match view.Rules.Tokenizer with
+    | Ngrams 1 ->
+        let keys = function
+            | BWord(word, false) when isExactLookup view.Rules word -> [| word.Key |]
+            | BPhrase(words, None) ->
+                words |> Array.filter (isBooleanSearchable view.Rules) |> Array.map _.Key
+            | _ -> [||]
+
+        if nodes
+           |> List.exists (function
+               | (Optional | Must | MustNot), (BWord(_, false) | BPhrase(_, None)) -> false
+               | _ -> true) then
+            None
+        else
+            let occurrences =
+                nodes
+                |> List.collect (snd >> keys >> Array.toList)
+                |> List.countBy id
+                |> Map.ofList
+
+            if occurrences |> Map.forall (fun _ count -> count = 1) then
+                None
+            else
+                let results = nodes |> List.map (fun (operator, term) -> operator, keys term, evalTerm candidateIds view term)
+
+                results
+                |> List.map (fun (operator, _, matches) -> operator, matches)
+                |> booleanCandidates
+                |> Seq.choose (fun id ->
+                    if results |> List.exists (fun (operator, _, matches) -> operator = MustNot && Map.containsKey id matches) then
+                        None
+                    else
+                        results
+                        |> List.filter (fun (operator, _, matches) -> operator <> MustNot && Map.containsKey id matches)
+                        |> List.collect (fun (_, keys, _) -> Array.toList keys)
+                        |> Set.ofList
+                        |> Seq.sumBy (fun key ->
+                            let rows = view.Postings.[key]
+                            let weight = queryOccurrenceWeight view rows.Count occurrences.[key]
+                            float rows.[id] * weight * weight)
+                        |> fun score -> Some(id, score))
+                |> Map.ofSeq
+                |> Some
+    | _ -> None
+
 let internal booleanScoresInView candidateIds (view: ReadView<'id>) (query: string) =
     let candidateIds = candidatesInView candidateIds view
     let nodes = parseBooleanQuery view.Rules view.Collation query
-    tryRepeatedWordScores candidateIds view nodes
+    tryRepeatedNgramScores candidateIds view nodes
+    |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes)
     |> Option.defaultWith (fun () -> evalNodes candidateIds view nodes)
     |> Map.map (fun _ score -> visibleBooleanScore score)
 
@@ -1233,7 +1284,8 @@ let internal tryFlatBooleanScoresDictionaryInView
             | _ -> accumulatePositivePostings ()
 
     let nodes = parseBooleanQuery view.Rules view.Collation query
-    match tryRepeatedWordScores candidateIds view nodes with
+    match tryRepeatedNgramScores candidateIds view nodes
+          |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes) with
     | Some scores ->
         let result = Collections.Generic.Dictionary<'id, float>()
         scores |> Map.iter (fun id score -> result.Add(id, visibleBooleanScore score))
