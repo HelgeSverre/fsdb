@@ -692,6 +692,82 @@ let tests =
 
                   Expect.isLessThan touches 10 "the residual predicate avoids lower materialized keys"
 
+          testCase "materialized correlated IN probes avoid unrelated rows"
+          <| fun _ ->
+              let mutable touches = 0
+              let touch values =
+                  touches <- touches + 1
+                  List.head values
+              let registry = registerScalar "TOUCH" touch builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE in_outer(id INT PRIMARY KEY, lo INT, hi INT)" |> ignore
+              runDefault store "CREATE TABLE in_inner(id INT PRIMARY KEY, k INT)" |> ignore
+              runDefault store "INSERT INTO in_outer VALUES(1,1,999),(2,2,NULL),(3,NULL,NULL),(4,1,1)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,%d)" id id)
+              |> String.concat ","
+              |> sprintf "INSERT INTO in_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+              runDefault store "INSERT INTO in_inner VALUES(1001,NULL)" |> ignore
+
+              for prefix, source in
+                  [ "", "(SELECT id+0 AS id,k+0 AS k FROM in_inner LIMIT 1001) d"
+                    "WITH materialized AS (SELECT id+0 AS id,k+0 AS k FROM in_inner LIMIT 1001) ", "materialized d" ] do
+                  for predicate, expected in
+                      [ "d.k IN(o.lo,o.hi)", [ "2"; "1"; "0"; "1" ]
+                        "d.k IN(o.lo,999)", [ "2"; "2"; "1"; "2" ]
+                        "(d.k IN(o.lo,o.hi) OR d.k=o.hi+1)", [ "3"; "1"; "0"; "2" ] ] do
+                      touches <- 0
+                      let sql =
+                          prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                          + " WHERE " + predicate + " AND TOUCH(d.id)=d.id)"
+                          + " FROM in_outer o ORDER BY o.id"
+                      match run store registry sql with
+                      | ResultSet(_, rows) ->
+                          Expect.equal rows
+                              (expected |> List.mapi (fun index count -> [ Some(string (index + 1)); Some count ])) sql
+                      | other -> failtestf "expected correlated IN counts, got %A" other
+                      Expect.isLessThan touches 25 "the residual sees only indexed IN candidates"
+
+                  let mixed =
+                      prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                      + " WHERE d.k IN(o.lo,'999')) FROM in_outer o ORDER BY o.id"
+                  match runDefault store mixed with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows
+                          [ [ Some "1"; Some "2" ]; [ Some "2"; Some "2" ]
+                            [ Some "3"; Some "1" ]; [ Some "4"; Some "2" ] ]
+                          "mixed numeric/string IN comparison retains MySQL membership"
+                  | other -> failtestf "expected mixed IN counts, got %A" other
+
+          testCase "materialized correlated decimal IN probes preserve exact keys"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE decimal_outer(id INT PRIMARY KEY,lo DECIMAL(10,2),hi DECIMAL(10,2))" |> ignore
+              runDefault store "CREATE TABLE decimal_inner(id INT PRIMARY KEY,k DECIMAL(10,2))" |> ignore
+              runDefault store "INSERT INTO decimal_outer VALUES(1,1.10,3.30),(2,2.20,NULL),(3,NULL,NULL)" |> ignore
+              runDefault store "INSERT INTO decimal_inner VALUES(1,1.10),(2,2.20),(3,3.30),(4,NULL)" |> ignore
+              [ 5..24 ]
+              |> List.map (fun id -> sprintf "(%d,%d.50)" id id)
+              |> String.concat ","
+              |> sprintf "INSERT INTO decimal_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+              match run store registry
+                  "SELECT o.id,(SELECT COUNT(*) FROM (SELECT id,k FROM decimal_inner LIMIT 100) d WHERE d.k IN(o.lo,o.hi) AND TOUCH(d.id)=d.id) FROM decimal_outer o ORDER BY o.id" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows
+                      [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]
+                      "decimal membership follows MySQL 8.4"
+              | other -> failtestf "expected decimal IN counts, got %A" other
+              Expect.isLessThan touches 10 "the decimal lookup avoids unrelated materialized rows"
+
           testCase "materialized correlated ranges preserve strict bounds and NULLs"
           <| fun _ ->
               let store = newStore ()

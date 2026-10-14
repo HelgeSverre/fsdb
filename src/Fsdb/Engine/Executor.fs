@@ -14704,6 +14704,13 @@ and private tryMaterializedCorrelatedLookup
             let probeSource = correlatedProbeSource qualifier columns
             let memo = currentStatementMemo ()
 
+            let equalityLookup names =
+                let lookups =
+                    getMemoized memo.MaterializedCorrelatedEqualities source (fun () ->
+                        Dictionary<string list, MaterializedEqualityLookup option>())
+
+                getMemoized lookups names (fun () -> materializedEqualityLookup store columns rows names)
+
             let equalityCandidates predicate =
                 let equalities = correlatedProbeEqualities probeSource predicate (Some context) |> Option.defaultValue []
 
@@ -14719,12 +14726,48 @@ and private tryMaterializedCorrelatedLookup
                 if names.IsEmpty then
                     None
                 else
-                    let lookups =
-                        getMemoized memo.MaterializedCorrelatedEqualities source (fun () ->
-                            Dictionary<string list, MaterializedEqualityLookup option>())
-
-                    getMemoized lookups names (fun () -> materializedEqualityLookup store columns rows names)
+                    equalityLookup names
                     |> Option.bind (fun lookup -> lookup values)
+
+            let membershipCandidates predicate =
+                let directBound = function
+                    | Col _
+                    | QualifiedCol _
+                    | Lit _ -> true
+                    | _ -> false
+                let boundValue = function
+                    | Lit value -> Some value
+                    | expression -> tryCorrelatedOuterValue probeSource context expression
+
+                predicate
+                |> optionalConjuncts
+                |> List.tryPick (function
+                    | In(inner, bounds) when not bounds.IsEmpty && bounds |> List.forall directBound ->
+                        tryCorrelatedInnerColumn probeSource inner
+                        |> Option.bind (fun name ->
+                            resolveColumn columns name
+                            |> Result.toOption
+                            |> Option.filter (fun index ->
+                                match equalityMembershipDomain store columns.[index] with
+                                | Some SignedIntegerMembership
+                                | Some DecimalMembership -> true
+                                | _ -> false)
+                            |> Option.bind (fun _ ->
+                                bounds
+                                |> List.map boundValue
+                                |> tryAllSome
+                                |> Option.filter (List.forall (function VNull -> true | value -> isNumericIndexValue value))
+                                |> Option.bind (fun values ->
+                                    equalityLookup [ name.ToLowerInvariant() ]
+                                    |> Option.bind (fun lookup ->
+                                        values
+                                        |> List.filter ((<>) VNull)
+                                        |> List.map (fun value -> lookup [ value ])
+                                        |> tryAllSome
+                                        |> Option.map (fun rowGroups ->
+                                            let seen = HashSet<Value[]>(HashIdentity.Reference)
+                                            rowGroups |> List.collect id |> List.filter seen.Add)))))
+                    | _ -> None)
 
             let rangeCandidates predicate =
                 let bounds =
@@ -14781,7 +14824,9 @@ and private tryMaterializedCorrelatedLookup
 
             let unionCandidates () =
                 let branchCandidates branch =
-                    [ equalityCandidates (Some branch); rangeCandidates (Some branch) ]
+                    [ equalityCandidates (Some branch)
+                      membershipCandidates (Some branch)
+                      rangeCandidates (Some branch) ]
                     |> List.choose id
                     |> function
                         | [] -> None
@@ -14793,7 +14838,10 @@ and private tryMaterializedCorrelatedLookup
 
                 tryCompleteOrCandidates whereExpr branchCandidates merge List.length
 
-            [ equalityCandidates whereExpr; unionCandidates (); rangeCandidates whereExpr ]
+            [ equalityCandidates whereExpr
+              membershipCandidates whereExpr
+              unionCandidates ()
+              rangeCandidates whereExpr ]
             |> List.choose id
             |> intersectSharedRows
             |> Option.map (fun rows -> columns, rows))
