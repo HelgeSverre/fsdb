@@ -4,6 +4,15 @@ The review inspected `ffb9e71d`. This response checks its actionable findings
 against the current implementation and distinguishes completed work from remaining limits. Its
 scores are the reviewer's judgment, not a current measured rating.
 
+The October 15 recheck at `d3935531` confirmed that the review's concrete P0
+and P2 fixes remain in place: PR/main CI, the observer-exception regression,
+bounded subscriptions, runtime OS selection, and the package-consumer example.
+`just check` passed with 3,558 tests, no warnings, and no failures;
+`just package-check` built the package and passed the example consumer. The
+remaining concerns are architectural and operational limits, so the review's
+4/10 production-readiness score should not be read as having been fixed by
+those narrower changes.
+
 | Review finding | Current state | Evidence and next action |
 |---|---|---|
 | No PR or main CI | Resolved for the current workflow | `.github/workflows/ci.yml` runs a Release build, a separate ordinary regression suite, package verification, and a Coverlet job enforcing 65% branch coverage on pushes to main and pull requests. [The `f11a278c` run](https://github.com/HelgeSverre/fsdb/actions/runs/38636418469) passed all three jobs. Earlier parallel coverage runs exhausted a 16 GB runner; a resource trace showed the instrumented process exceeding 15 GB RSS. The CI test jobs now use a 4 GiB .NET GC heap limit and run sequentially. The MySQL differential suite remains a separate gate. |
