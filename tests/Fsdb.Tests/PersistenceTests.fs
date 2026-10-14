@@ -3089,6 +3089,27 @@ let tests =
                       Expect.equal reloaded.Catalog.[defaultDatabase].[normalizeTableName table].TableComment "" (table + " has no historical table comment")
                   | other -> failtestf "expected legacy table '%s' to load, got %A" table other
 
+          testCase "legacy snapshot accepts current writes and reopens after checkpoint"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              File.WriteAllBytes(snapshotPath dir, legacySnapshot "legacy_rows")
+              let store = load dir
+              attach dir store
+
+              let session = Fsdb.Session.create 1 store
+              match handle session "INSERT INTO legacy_rows(id) VALUES (7)" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "current write to recovered legacy table failed: %A" other
+
+              let verify stage =
+                  match scanList (load dir) defaultDatabase "legacy_rows" with
+                  | Ok(_, [ row ]) -> Expect.equal row.[0] (VInt 7L) (stage + " preserves the current write")
+                  | other -> failtestf "expected one row after %s, got %A" stage other
+
+              verify "WAL replay"
+              detach store
+              verify "checkpoint and reopen"
+
           testCase "named HASH partitions survive WAL replay and snapshots"
           <| fun _ ->
               let dir = tempDataDir ()

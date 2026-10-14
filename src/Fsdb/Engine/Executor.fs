@@ -14,6 +14,7 @@ open Fsdb.Functions
 open Fsdb.Temporal
 open Fsdb.Sql
 open Fsdb.Engine
+open Fsdb.MutationTargets
 
 /// Mirrors the wire layer's text-resultset shape (columns as names, rows as
 /// text-protocol option strings) so `QueryHandler` can hand a parsed statement
@@ -335,30 +336,6 @@ type private MutationSource =
     { Qualifier: string
       PhysicalTable: TableRef option
       Columns: ColumnDef list }
-
-type private MutationTargetGroups =
-    { Tables: TableRef array
-      RepresentativeSources: int array
-      SourceGroups: Map<int, int> }
-
-let private physicalTableKey defaultDatabase (tableRef: TableRef) =
-    tableRef.Database |> Option.defaultValue defaultDatabase, normalizeTableName tableRef.Table
-
-let private groupMutationTargets defaultDatabase (targets: (int * TableRef) list) =
-    let key = physicalTableKey defaultDatabase
-    let representatives = targets |> List.distinctBy (snd >> key) |> Array.ofList
-
-    let groupByTable =
-        representatives
-        |> Array.mapi (fun group (_, tableRef) -> key tableRef, group)
-        |> Map.ofArray
-
-    { Tables = representatives |> Array.map snd
-      RepresentativeSources = representatives |> Array.map fst
-      SourceGroups =
-        targets
-        |> List.map (fun (source, tableRef) -> source, Map.find (key tableRef) groupByTable)
-        |> Map.ofList }
 
 let private columnOffsets (sources: MutationSource list) =
     sources
@@ -27062,7 +27039,7 @@ let rec executeAs
                         sources
                         |> List.indexed
                         |> List.choose (fun (index, source) -> source.PhysicalTable |> Option.map (fun tableRef -> index, tableRef))
-                        |> groupMutationTargets dbName
+                        |> MutationTargets.group dbName
 
                     let sourceGroups =
                         sources |> List.mapi (fun index _ -> Map.tryFind index grouped.SourceGroups) |> Array.ofList
@@ -27400,7 +27377,7 @@ let rec executeAs
                     targetIndices
                     |> List.choose (fun index -> sources.[index].PhysicalTable |> Option.map (fun tableRef -> index, tableRef))
 
-                let grouped = groupMutationTargets dbName targetTables
+                let grouped = MutationTargets.group dbName targetTables
 
                 let claimed = grouped.Tables |> Array.map (fun _ -> HashSet<Value[]>(HashIdentity.Reference))
                 let claimedRows = grouped.Tables |> Array.map (fun _ -> ResizeArray<Value[]>())
