@@ -1409,7 +1409,10 @@ implementation effort:
    production scheduling change. [Direct timing](benchmarks/results/2026-10-15-write-dependency-timing.md)
    then measured dependency discovery and expansion at about 9–10 µs per call
    versus about 474 µs for the whole query handler; the sampled dependency
-   monitor is not the dominant wire-write cost.
+   monitor is not the dominant wire-write cost. A [one-versus-eight-writer stage
+   timing](benchmarks/results/2026-10-15-wire-write-stage-timing.md) measured
+   WAL completion inside the handler rising from about 53 to 273 µs per call;
+   handler time outside that completion also rose from about 68 to 211 µs.
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition

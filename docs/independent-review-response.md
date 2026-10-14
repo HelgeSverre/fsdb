@@ -36,7 +36,10 @@ but did not identify the contended lock or a safe scheduling fix. A
 [direct timing follow-up](../benchmarks/results/2026-10-15-write-dependency-timing.md)
 measured dependency discovery and expansion at about 9–10 µs per call against
 about 474 µs for the whole query handler, ruling that path out as the dominant
-wire-write cost.
+wire-write cost. [Stage timing](../benchmarks/results/2026-10-15-wire-write-stage-timing.md)
+then found that both WAL completion and the handler's remaining work grow
+substantially from one to eight writers; neither the cancellation wrapper nor
+response sending dominates.
 
 For joined mutations, `QueryHandler` parses and checks the request;
 `Executor.runMutationJoin` resolves sources and produces joined rows;
@@ -88,9 +91,10 @@ release-blocking defect that can be closed by adding another SQL feature:
    did not improve repeated load, so both were reverted. The queue-stage
    profile separated admission, handoff, batch work, and completion. The
    method-resolved trace narrowed blocked stacks; direct timing ruled out
-   dependency expansion as the dominant cost. Split the remaining handler
-   execution, durable completion, and outside-handler time under a repeatable
-   host-load control before another scheduling change.
+   dependency expansion as the dominant cost. Stage timing shows both WAL
+   completion and non-WAL handler time growing with concurrency; isolate the
+   latter and explain the wire-versus-embedded batch-size difference before
+   another scheduling change.
 2. Continue extracting one cohesive executor responsibility at a time when a
    real edit exposes its boundary. Preserve the existing behavior with tests
    and avoid a file-size-driven rewrite.
