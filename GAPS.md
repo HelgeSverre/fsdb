@@ -1124,6 +1124,10 @@ Unless an artifact header says otherwise, the linked planner profiles compare
 native in-memory fsdb with native durable MySQL. They expose query-shape and
 scaling differences, not deployment-equivalent write cost. Durable write claims
 require the matched WAL/durable pair produced by `just bench-durable`.
+A [focused matched pair](benchmarks/results/c399e5d0-durable-write-pair.md)
+records two native ShortRuns of sixteen sequential autocommit inserts with
+WAL-backed fsdb and durable MySQL 8.4.11; the broader gate did not complete
+on the disk-constrained host.
 
 The [composite-prefix profile](benchmarks/results/582cff7-quick.md) compares a
 maintained left-prefix lookup with an expression-forced scan on the same data.
