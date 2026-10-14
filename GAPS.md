@@ -451,8 +451,12 @@ JSON without maintaining a second builtin-name list.
 ## 7. Transactions and concurrency
 
 Transactions use private snapshots and three-way optimistic merge. Disjoint
-point writes have a fast path; indexed point and range updates or deletes wait
-and rebase. Unique-key claims, incremental index validation, and merged-result
+point writes have a fast path; indexed point and range updates or deletes, and
+single-table full-scan writes, claim row ownership before applying changes.
+Full scans conservatively claim the rows visible when the statement begins,
+then refresh and recheck selected row identities after a wait
+([MySQL 8.4 oracle and regressions](torture/findings/2026-10-14-full-scan-write-scheduling.md)).
+They do not claim gaps or later inserted rows. Unique-key claims, incremental index validation, and merged-result
 foreign-key validation protect publication.
 
 Savepoints follow MySQL establishment order. Autocommit uses implicit
@@ -486,7 +490,7 @@ resolved.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
-| Write parallelism within a database | row-lock concurrency | indexed UPDATE/DELETE paths coordinate row stripes; insert, upsert, and replacement candidates are prepared once, then claim supplied, generated, or defaulted unique keys and refresh existing duplicate rows before publication, including SELECT sources; AUTO_INCREMENT identities are reserved across transaction snapshots; [keyless inserts](benchmarks/results/2026-10-12-keyless-insert-load.md), full-scan, CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
+| Write parallelism within a database | row-lock concurrency | indexed and single-table full-scan UPDATE/DELETE paths coordinate row stripes; full scans conservatively claim current rows but not gaps or later inserts; insert, upsert, and replacement candidates are prepared once, then claim supplied, generated, or defaulted unique keys and refresh existing duplicate rows before publication, including SELECT sources; AUTO_INCREMENT identities are reserved across transaction snapshots; [keyless inserts](benchmarks/results/2026-10-12-keyless-insert-load.md), CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize catalog-wide referential actions, and recorded campaigns show CPU saturation limiting higher worker counts | medium | partial |
 
 ## 8. Persistence and durability

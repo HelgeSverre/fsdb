@@ -20233,11 +20233,6 @@ let private emitJoinHintDiagnostics store registry schema statement =
             expressions |> List.iter emit
         Map.tryFind None children |> Option.defaultValue [] |> List.iter emit
 
-/// Reference identity preserves duplicate-valued rows while matching scan
-/// candidates back to the same immutable table root.
-let private referenceSet (rows: Value[] list) : System.Collections.Generic.HashSet<Value[]> =
-    System.Collections.Generic.HashSet<Value[]>(rows, HashIdentity.Reference)
-
 let evaluateExpression (store: Store) (registry: Registry) (dbName: string) (expression: Expr) : Result<Value, QueryResult> =
     let context = contextFactory store registry dbName Map.empty Map.empty None [||]
     evalExpr context expression |> Result.mapError Err
@@ -24452,7 +24447,7 @@ let rec executeAs
         let callsCustomFunction = updateCallsCustomFunction registry statement
         let write candidates predicate updater =
             Storage.withPermissiveIndexExpressions ignoreErrors (fun () ->
-                updateRowsWithAssignments runStore db table candidates predicate assignedColumns updater)
+                updateRowsWithAssignmentsById runStore db table candidates predicate assignedColumns updater)
         let fireAfter changed =
             triggerStorageResult (fireTriggers runStore db table After TriggerUpdate afterTriggers (List.ofSeq triggerRows))
             |> Result.map (fun () -> changed)
@@ -24461,7 +24456,7 @@ let rec executeAs
             // Evaluate routine and BEFORE writes before storage captures its validation catalog.
             updater row
             |> Result.bind (fun candidate ->
-                match write (Some [ rowId, row ]) (fun _ -> Ok true) (fun _ -> Ok candidate) with
+                match write (Some [ rowId, row ]) (fun _ _ -> Ok true) (fun _ -> Ok candidate) with
                 | Error error when ignoreErrors && Storage.tryIgnoreUpdateConstraintError error -> Ok 0
                 | Error error -> Error error
                 | Ok changed -> fireAfter changed)
@@ -24471,7 +24466,7 @@ let rec executeAs
              && not callsCustomFunction
              && Storage.canBatchIgnoredUpdates runStore db table then
             Storage.withPermissiveIndexExpressions true (fun () ->
-                updateRowsIgnoringConstraintsWithAssignments runStore db table candidates predicate assignedColumns updater)
+                updateRowsIgnoringConstraintsWithAssignmentsById runStore db table candidates predicate assignedColumns updater)
         else
             let selected =
                 match candidates with
@@ -24484,7 +24479,7 @@ let rec executeAs
                     match current.RowsArray.TryFind rowId with
                     | None -> Ok 0
                     | Some row ->
-                        predicate row
+                        predicate rowId row
                         |> Result.bind (fun selected ->
                             if selected then updateOneRow rowId row else Ok 0))))
             |> Result.map List.sum
@@ -24529,7 +24524,7 @@ let rec executeAs
                             |> Result.map (fun () -> 1))
                 | Some row ->
                     let selected =
-                        if obj.ReferenceEquals(row, selectedRow) then Ok true else predicate row
+                        if obj.ReferenceEquals(row, selectedRow) then Ok true else predicate rowId row
                     selected |> Result.mapError storageErr |> Result.bind (fun selected ->
                         if selected then deleteRow rowId row (Map.tryFind rowId selectedImages |> Option.defaultValue row) else Ok 0)))
         |> Result.map List.sum
@@ -26804,18 +26799,20 @@ let rec executeAs
                     match selectMutationTargets ctxFor positionedRows check updateStmt.OrderBy (Option.map rowCount updateStmt.Limit) with
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok targetRows ->
-                        let targetSet = targetRows |> List.map snd |> referenceSet
+                        let targetImages = targetRows |> Map.ofList
 
                         let changedRows = ResizeArray<Value[] option * Value[] option>()
 
-                        let predicate row =
-                            match fullTextPlan, narrowed with
-                            | Some _, _ -> Ok(targetSet.Contains row)
-                            | None, Some _ ->
-                                check row
-                                |> Result.mapError ExpressionError
-                                |> Result.map (fun matches -> matches && targetSet.Contains row)
-                            | None, None -> Ok(targetSet.Contains row)
+                        let predicate rowId row =
+                            match Map.tryFind rowId targetImages with
+                            | None -> Ok false
+                            | Some selected when obj.ReferenceEquals(selected, row) && narrowed.IsNone -> Ok true
+                            | Some _ ->
+                                match fullTextPlan with
+                                | Some plan ->
+                                    whereMatches ctxFor (Some(plan.PredicateFor rowId)) row
+                                    |> Result.mapError ExpressionError
+                                | None -> check row |> Result.mapError ExpressionError
                         let assignedIdxs = indexedAssignments |> List.map fst |> Set.ofList
                         let coercedAssignments =
                             indexedAssignments
@@ -27034,7 +27031,7 @@ let rec executeAs
                                         let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "UPDATE"
                                         let afterTriggers = triggersFor snapshot tdb tname "AFTER" "UPDATE"
                                         let changedRows = ResizeArray<Value[] option * Value[] option>()
-                                        let predicate row = Ok(pending.[i].ContainsKey row)
+                                        let predicate _ row = Ok(pending.[i].ContainsKey row)
 
                                         let updater row =
                                             let updated =
@@ -27204,24 +27201,26 @@ let rec executeAs
                 match selectMutationTargets ctxFor positionedRows check deleteStmt.OrderBy (Option.map rowCount deleteStmt.Limit) with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok targetRows ->
-                    let targetSet = targetRows |> List.map snd |> referenceSet
+                    let targetImages = targetRows |> Map.ofList
                     let deletedRows = targetRows |> List.map (fun (_, row) -> Some row, None)
 
-                    let predicate row =
-                        match fullTextPlan, narrowed with
-                        | Some _, _ -> Ok(targetSet.Contains row)
-                        | None, Some _ ->
-                            check row
-                            |> Result.mapError ExpressionError
-                            |> Result.map (fun matches -> matches && targetSet.Contains row)
-                        | None, None -> Ok(targetSet.Contains row)
+                    let predicate rowId row =
+                        match Map.tryFind rowId targetImages with
+                        | None -> Ok false
+                        | Some selected when obj.ReferenceEquals(selected, row) && narrowed.IsNone -> Ok true
+                        | Some _ ->
+                            match fullTextPlan with
+                            | Some plan ->
+                                whereMatches ctxFor (Some(plan.PredicateFor rowId)) row
+                                |> Result.mapError ExpressionError
+                            | None -> check row |> Result.mapError ExpressionError
 
                     let apply =
                         if deleteStmt.Ignore then
                             deleteIgnoredRows targetStore db table targetRows predicate (fun _ -> None) Map.empty
                         else
                             triggerResult (fireTriggers targetStore db table Before TriggerDelete beforeTriggers deletedRows)
-                            |> Result.bind (fun () -> deleteRowsCandidates targetStore db table targetRows predicate |> Result.mapError storageErr)
+                            |> Result.bind (fun () -> deleteRowsCandidatesById targetStore db table targetRows predicate |> Result.mapError storageErr)
                             |> Result.bind (fun affected ->
                                 triggerResult (fireTriggers targetStore db table After TriggerDelete afterTriggers deletedRows)
                                 |> Result.map (fun () -> affected))
@@ -27336,7 +27335,7 @@ let rec executeAs
                                                 else
                                                     fun _ -> None
                                             let selectedImages = Map.ofList selectedRows
-                                            deleteIgnoredRows snapshot tdb tname selectedRows (fun _ -> Ok true) initialRestriction selectedImages
+                                            deleteIgnoredRows snapshot tdb tname selectedRows (fun _ _ -> Ok true) initialRestriction selectedImages
                                         else
                                             let deletedRows = selectedRows |> List.map (fun (_, row) -> Some row, None)
                                             let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "DELETE"
@@ -27630,7 +27629,11 @@ let transactionWriteTargets
         let database = tableRef.Database |> Option.defaultValue dbName
 
         tryPhysicalCandidates store registry dbName tableRef predicate
-        |> Option.map (fun (_, rows) ->
+        |> Option.map (fun (_, rows) -> rows)
+        |> Option.orElseWith (fun () ->
+            physicalFastPathTable store dbName tableRef
+            |> Option.map (fun table -> table.RowsArray.Indexed |> Seq.toList))
+        |> Option.map (fun rows ->
             database,
             tableRef.Table,
             { RowIds = rows |> List.map fst

@@ -4110,6 +4110,14 @@ let private withWriteLocksFor
 let private withRowLocks store dbName tableName rowIds body =
     withWriteLocksFor (Fsdb.Limits.lockWaitTimeout ()) store dbName tableName rowIds [] body
 
+let private withFullScanRowLocks store dbName tableName body =
+    let rowIds =
+        tableSnapshot store dbName tableName
+        |> Result.toOption
+        |> Option.map (fun table -> table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
+        |> Option.defaultValue []
+    withRowLocks store dbName tableName rowIds body
+
 let private withInsertLocks store dbName tableName rowIds keys body =
     withWriteLocksFor (Fsdb.Limits.lockWaitTimeout ()) store dbName tableName rowIds keys body
 
@@ -10421,7 +10429,7 @@ let private deleteRowsCore
     (dbName: string)
     (tableName: string)
     (candidates: (RowId * Value[]) list option)
-    (predicate: Value[] -> Result<bool, StorageError>)
+    (predicate: RowId -> Value[] -> Result<bool, StorageError>)
     : Result<int, StorageError> =
     let eventsOf
          (_,
@@ -10453,11 +10461,11 @@ let private deleteRowsCore
                         candidates
                         |> List.map fst
                         |> List.distinct
-                        |> List.choose (fun rowId -> table.RowsArray.TryFind rowId))
-                    |> Option.defaultWith (fun () -> table.RowsArray |> List.ofSeq)
+                        |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)))
+                    |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
 
                 rows
-                |> traverse (fun row -> predicate row |> Result.map (fun keep -> keep, row))
+                |> traverse (fun (rowId, row) -> predicate rowId row |> Result.map (fun keep -> keep, row))
                 |> Result.bind (fun flagged ->
                     let toDelete = flagged |> List.filter fst |> List.map snd
 
@@ -10466,7 +10474,7 @@ let private deleteRowsCore
 
     let result =
         match candidates with
-        | None -> apply ()
+        | None -> withFullScanRowLocks store dbName tableName apply
         | Some candidates ->
             candidates
             |> List.map fst
@@ -10482,7 +10490,7 @@ let deleteRows
     (tableName: string)
     (predicate: Value[] -> Result<bool, StorageError>)
     : Result<int, StorageError> =
-    deleteRowsCore store dbName tableName None predicate
+    deleteRowsCore store dbName tableName None (fun _ row -> predicate row)
 
 let deleteRowsCandidates
     (store: Store)
@@ -10491,6 +10499,9 @@ let deleteRowsCandidates
     (candidates: (RowId * Value[]) list)
     (predicate: Value[] -> Result<bool, StorageError>)
     : Result<int, StorageError> =
+    deleteRowsCore store dbName tableName (Some candidates) (fun _ row -> predicate row)
+
+let internal deleteRowsCandidatesById store dbName tableName candidates predicate =
     deleteRowsCore store dbName tableName (Some candidates) predicate
 
 let private validateCatalogForeignKeys (baseCatalog: Catalog) (catalog: Catalog) : unit =
@@ -11057,7 +11068,7 @@ let private updateRowsCore
     (dbName: string)
     (tableName: string)
     (candidates: (RowId * Value[]) list option)
-    (predicate: Value[] -> Result<bool, StorageError>)
+    (predicate: RowId -> Value[] -> Result<bool, StorageError>)
     (updater: Value[] -> Result<Value[], StorageError>)
     : Result<int, StorageError> =
     let eventsOf
@@ -11105,7 +11116,7 @@ let private updateRowsCore
                             match rowId with
                             | None -> Ok(changesRev, index, secondaryIndex, secondaryOrder, cascadeCatalog, visited, cascaded)
                             | Some rowId ->
-                                predicate row
+                                predicate rowId row
                                 |> Result.bind (fun keep ->
                                     if not keep then
                                         Ok(changesRev, index, secondaryIndex, secondaryOrder, cascadeCatalog, visited, cascaded)
@@ -11156,7 +11167,9 @@ let private updateRowsCore
 
     let publish () =
         match candidates with
-        | None -> withReferentialCatalogPublishing store dbName SharedAccess eventsOf (apply None)
+        | None ->
+            withFullScanRowLocks store dbName tableName (fun () ->
+                withReferentialCatalogPublishing store dbName SharedAccess eventsOf (apply None))
         | Some rows ->
             let rowIds = rows |> List.map fst
             let refreshCandidates (db: Database) =
@@ -11189,16 +11202,22 @@ let private updateRowsCore
 
 /// Updates matching rows atomically, failing the statement on a constraint violation.
 let updateRows store database table candidates predicate updater =
-    updateRowsCore (fun _ -> false) None store database table candidates predicate updater
+    updateRowsCore (fun _ -> false) None store database table candidates (fun _ row -> predicate row) updater
 
 let internal updateRowsWithAssignments store database table candidates predicate assignedColumns updater =
+    updateRowsCore (fun _ -> false) (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
+
+let internal updateRowsWithAssignmentsById store database table candidates predicate assignedColumns updater =
     updateRowsCore (fun _ -> false) (Some assignedColumns) store database table candidates predicate updater
 
 /// Skips ignorable constraint failures while retaining accepted rows in one publication.
 let internal updateRowsIgnoringConstraints store database table candidates predicate updater =
-    updateRowsCore tryIgnoreUpdateConstraintError None store database table candidates predicate updater
+    updateRowsCore tryIgnoreUpdateConstraintError None store database table candidates (fun _ row -> predicate row) updater
 
 let internal updateRowsIgnoringConstraintsWithAssignments store database table candidates predicate assignedColumns updater =
+    updateRowsCore tryIgnoreUpdateConstraintError (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
+
+let internal updateRowsIgnoringConstraintsWithAssignmentsById store database table candidates predicate assignedColumns updater =
     updateRowsCore tryIgnoreUpdateConstraintError (Some assignedColumns) store database table candidates predicate updater
 
 /// Per-snapshot memo of `RowsArray` as a `Value[] list`, keyed by the

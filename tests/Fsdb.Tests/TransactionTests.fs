@@ -1315,6 +1315,86 @@ let tests =
               | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ] ]) -> ()
               | result -> failtestf "expected both disjoint updates to survive, got %A" result
 
+          testCase "a full-scan update waits for a transaction changing the same row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_scan_wait (id INT, n INT)" |> ignore
+              handle setup "INSERT INTO tx_scan_wait VALUES (1, 0)" |> ignore
+              let first, _ = handle (create 2 store) "BEGIN"
+              let first, firstUpdate = handle first "UPDATE tx_scan_wait SET n = n + 1 WHERE id = 1"
+              Expect.equal firstUpdate (Affected 1UL) "the first full-scan update changes its row"
+              let second, _ = handle (create 3 store) "BEGIN"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle second "UPDATE tx_scan_wait SET n = n + 1 WHERE id = 1")
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the competing update starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              let firstCommit = handle first "COMMIT" |> snd
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 3.0)) "the competing update completes after commit"
+              let second, secondUpdate = waiting.Result
+              let secondCommit = handle second "COMMIT" |> snd
+              Expect.isTrue blocked "the second full-scan writer waits for the first"
+              Expect.equal firstCommit (Affected 0UL) "the first update commits"
+              Expect.equal secondUpdate (Affected 1UL) "the waiting update changes one row"
+              Expect.equal secondCommit (Affected 0UL) "the waiting update commits"
+              match handle setup "SELECT n FROM tx_scan_wait" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected the two increments to serialize, got %A" result
+
+          testCase "an autocommit full-scan update waits for a transaction changing the same row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_scan_autocommit_wait (id INT, n INT)" |> ignore
+              handle setup "INSERT INTO tx_scan_autocommit_wait VALUES (1, 0)" |> ignore
+              let first, _ = handle (create 2 store) "BEGIN"
+              let first, firstUpdate = handle first "UPDATE tx_scan_autocommit_wait SET n = n + 1 WHERE id = 1"
+              Expect.equal firstUpdate (Affected 1UL) "the first writer changes the row"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle (create 3 store) "UPDATE tx_scan_autocommit_wait SET n = n + 1 WHERE id = 1" |> snd)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the autocommit writer starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first writer commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 3.0)) "the autocommit writer completes after commit"
+              Expect.isTrue blocked "the autocommit full scan waits for the row owner"
+              Expect.equal waiting.Result (Affected 1UL) "the waiting autocommit writer changes one row"
+              match handle setup "SELECT n FROM tx_scan_autocommit_wait" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both autocommit and transaction increments, got %A" result
+
+          testCase "an autocommit full-scan delete rechecks the row after a competing commit"
+          <| fun _ ->
+              for predicate, affected, remaining in
+                  [ "id = 1", Affected 1UL, []
+                    "n = 0", Affected 0UL, [ [ Some "1"; Some "1" ] ] ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_scan_delete_wait (id INT, n INT)" |> ignore
+                  handle setup "INSERT INTO tx_scan_delete_wait VALUES (1, 0)" |> ignore
+                  let first, _ = handle (create 2 store) "BEGIN"
+                  let first, firstUpdate = handle first "UPDATE tx_scan_delete_wait SET n = 1 WHERE id = 1"
+                  Expect.equal firstUpdate (Affected 1UL) "the first writer changes the row"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle (create 3 store) ("DELETE FROM tx_scan_delete_wait WHERE " + predicate) |> snd)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the delete starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the update commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 3.0)) "the delete completes after commit"
+                  Expect.isTrue blocked "the full-scan delete waits for the row owner"
+                  Expect.equal waiting.Result affected "the delete rechecks the committed row"
+                  match handle setup "SELECT id, n FROM tx_scan_delete_wait" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows remaining "the final rows match MySQL 8.4"
+                  | result -> failtestf "expected final rows, got %A" result
+
           testCase "transaction locks on different tables never alias"
           <| fun _ ->
               let stripeCount = 4096
@@ -1795,7 +1875,7 @@ let tests =
               handle reader "ROLLBACK" |> ignore
               ignore setup
 
-          testCase "a stale transaction write conflicts with a concurrent commit"
+          testCase "a transaction update reads the latest committed row after a snapshot read"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup = create 1 store
@@ -1808,15 +1888,15 @@ let tests =
 
               handle (create 3 store) "UPDATE up_t SET v = 1234 WHERE id = 1" |> ignore
 
-              let a, updateResult = handle a "UPDATE up_t SET v = 7 WHERE id = 1"
-              Expect.equal updateResult (Affected 1UL) "the snapshot update succeeds locally"
+              let a, updateResult = handle a "UPDATE up_t SET v = v + 1 WHERE id = 1"
+              Expect.equal updateResult (Affected 1UL) "the update changes the latest committed row"
 
               match handle a "COMMIT" |> snd with
-              | Err(1205, _) -> ()
-              | result -> failtestf "expected the stale writer to conflict, got %A" result
+              | Affected 0UL -> ()
+              | result -> failtestf "expected the current-read update to commit, got %A" result
 
               match handle (create 4 store) "SELECT v FROM up_t" |> snd with
-              | ResultSet(_, [ [ Some "1234" ] ]) -> ()
-              | result -> failtestf "expected the concurrent assignment to remain, got %A" result
+              | ResultSet(_, [ [ Some "1235" ] ]) -> ()
+              | result -> failtestf "expected the increment to use the latest committed value, got %A" result
 
               ignore setup ]
