@@ -1344,6 +1344,55 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected the two increments to serialize, got %A" result
 
+          testCase "joined single-target updates rebase after a competing transaction commits"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_join_wait (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_join_lookup (id INT PRIMARY KEY)" |> ignore
+              handle setup "INSERT INTO tx_join_wait VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_join_lookup VALUES (1)" |> ignore
+              let sql = "UPDATE tx_join_wait t JOIN tx_join_lookup l ON l.id=t.id SET t.n=t.n+1 WHERE t.id=1"
+              let first, _ = handle (create 2 store) "BEGIN"
+              let first, firstUpdate = handle first sql
+              Expect.equal firstUpdate (Affected 1UL) "first joined update changes the row"
+              let second, _ = handle (create 3 store) "BEGIN"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle second sql)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the second writer starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "first writer commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "second writer completes after commit"
+              let second, secondUpdate = waiting.Result
+              Expect.equal secondUpdate (Affected 1UL) "second writer updates the committed row"
+              Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "second writer commits"
+              Expect.isTrue blocked "the second writer waited for the first"
+              match handle setup "SELECT n FROM tx_join_wait WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both joined increments, got %A" result
+
+              let owner, _ = handle (create 4 store) "BEGIN"
+              let owner, ownerUpdate = handle owner sql
+              Expect.equal ownerUpdate (Affected 1UL) "the next transaction changes the row"
+              let autocommitWriter = create 5 store
+              use autocommitStarted = new Threading.ManualResetEventSlim(false)
+              let autocommitUpdate =
+                  Threading.Tasks.Task.Run(fun () ->
+                      autocommitStarted.Set()
+                      handle autocommitWriter sql |> snd)
+              Expect.isTrue (autocommitStarted.Wait(TimeSpan.FromSeconds 1.0)) "autocommit writer starts"
+              let autocommitBlocked = not (autocommitUpdate.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+              Expect.isTrue (autocommitUpdate.Wait(TimeSpan.FromSeconds 5.0)) "autocommit writer resumes"
+              Expect.isTrue autocommitBlocked "autocommit writer waited for the row owner"
+              Expect.equal autocommitUpdate.Result (Affected 1UL) "autocommit writer commits its update"
+              match handle setup "SELECT n FROM tx_join_wait WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "4" ] ]) -> ()
+              | result -> failtestf "expected the autocommit increment after the owner, got %A" result
+
           testCase "an autocommit full-scan update waits for a transaction changing the same row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

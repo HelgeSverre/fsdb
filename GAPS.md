@@ -1300,9 +1300,11 @@ implementation effort:
    or already-materialized source. Correctness holds, but scale still diverges
    from MySQL past small data.
 
-2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements
-   wait and rebase, while the remaining transaction write shapes still rely on
-   optimistic catalog merge.
+2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements,
+   plus single-target joined UPDATE statements with an explicitly qualified
+   first-table target, wait and rebase. Other joined and multi-target writes
+   still rely on optimistic catalog merge
+   ([joined-update oracle and regression](torture/findings/2026-10-14-joined-update-rebase.md)).
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition

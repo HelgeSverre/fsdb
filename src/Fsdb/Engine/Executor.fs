@@ -27771,6 +27771,13 @@ let transactionWriteTargets
 
     match statement with
     | Update update when update.Ctes.IsEmpty && update.Joins.IsEmpty -> targets update.From update.Where
+    | Update update when update.Ctes.IsEmpty && not update.Joins.IsEmpty ->
+        let target = update.From.Alias |> Option.defaultValue update.From.Table
+        if update.Assignments
+           |> List.forall (fun assignment -> assignment.Table |> Option.exists (equalsIgnoreCase target)) then
+            targets update.From update.Where
+        else
+            None
     | Delete delete when delete.Ctes.IsEmpty && delete.Joins.IsEmpty -> targets delete.From delete.Where
     | Insert(tableName, columns, rows, _, _)
     | Replace(tableName, columns, rows) -> literalInsertTargets tableName columns rows
