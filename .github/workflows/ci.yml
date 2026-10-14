@@ -44,18 +44,11 @@ jobs:
         env:
           DOTNET_GCHeapHardLimit: '0x100000000'
         run: |
-          (while sleep 10; do
-            echo "Coverage runner resources at $(date -u +%H:%M:%S):"
-            free -m
-            ps -eo pid,rss,pcpu,comm --sort=-rss | head -8
-          done) &
-          resource_monitor=$!
-          trap 'kill "$resource_monitor" 2>/dev/null || true' EXIT
           dotnet tool restore
           dotnet build tests/Fsdb.Tests -c Debug --nologo
           dotnet tool run coverlet tests/Fsdb.Tests/bin/Debug/net10.0/Fsdb.Tests.dll \
             -t dotnet \
-            -a 'tests/Fsdb.Tests/bin/Debug/net10.0/Fsdb.Tests.dll --sequenced --debug --no-spinner' \
+            -a 'tests/Fsdb.Tests/bin/Debug/net10.0/Fsdb.Tests.dll --sequenced --no-spinner' \
             --include '[Fsdb]*' \
             -f cobertura \
             -o coverage/coverage \
