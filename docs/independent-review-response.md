@@ -1,12 +1,12 @@
 # Response to the October 14 independent review
 
 The review inspected `ffb9e71d`. This response checks its actionable findings
-against the October 14 main branch and distinguishes completed work from remaining limits. Its
+against `64d93f72`, 27 commits later, and distinguishes completed work from remaining limits. Its
 scores are the reviewer's judgment, not a current measured rating.
 
 | Review finding | Current state | Evidence and next action |
 |---|---|---|
-| No PR or main CI | Resolved after the reviewed revision | `.github/workflows/ci.yml` builds, runs the normal tests, verifies the package consumer, and enforces a branch-coverage threshold on pushes to main and pull requests. The MySQL differential suite remains a separate gate. |
+| No PR or main CI | Workflow added; recent runs need investigation | `.github/workflows/ci.yml` builds, runs the normal tests, verifies the package consumer, and enforces a branch-coverage threshold on pushes to main and pull requests. Builds passed on the latest runs, but GitHub canceled the test or coverage step on three consecutive pushes and on a manual rerun of `64d93f72`; those runs are red without an assertion failure in their logs. Earlier runs passed. The workflow exists, but do not treat current main as CI-verified until a complete run succeeds. The MySQL differential suite remains a separate gate. |
 | Observer exceptions can turn committed writes into reported failures | Resolved after the reviewed revision | `Storage.preparePublishedEvents` catches and logs each observer exception and continues to later observers. `EmbeddingIntegrationTests` checks successful write acknowledgement and continued delivery. A synchronous observer can still delay a commit or deadlock by writing back to the store; use the queued subscription for application work. |
 | Unbounded commit subscriptions | Resolved after the reviewed revision | `Db.subscribeCommits` defaults to 1024 events; `subscribeCommitsWithCapacity` accepts a positive limit. Overflow drops new events and increments `DroppedCount`, which requires the consumer to resynchronize. The queue is in-process and is not a durable change stream. |
 | Hardcoded `version_compile_os` | Resolved after the reviewed revision | `Session.fs` selects Windows, macOS, or Linux at runtime. |
