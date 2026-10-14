@@ -13195,11 +13195,7 @@ and private plannerConstantEvaluator (store: Store) (registry: Registry) =
 
     function
     | expression when isSafe expression ->
-        if Expression.exists (function Cast(_, target) -> isNumericIndexType target | _ -> false) expression then
-            let result, conditions = Diagnostics.capture (fun () -> evalExpr context.Value expression)
-            if conditions.IsEmpty then result |> Result.toOption else None
-        else
-            evalExpr context.Value expression |> Result.toOption
+        evalExpr context.Value expression |> Result.toOption
     | _ -> None
 
 and private numericPlannerConstantEvaluator store registry =

@@ -44,11 +44,11 @@ physical probes. A positive unsigned result is converted to a signed stored
 key only when the value fits and the conversion is exact.
 
 MySQL also uses `PRIMARY`/`const` for `CAST('2x' AS SIGNED)` and reports two
-1292 truncation warnings on the audited six-row table. Fsdb retains row
-evaluation for warning-producing casts, preserving the matching row but
-scanning all six rows and reporting six warnings. Plan and warning-count parity
-remain open; this prevents planning from suppressing conversion diagnostics
-while that behavior is investigated.
+1292 truncation warnings on the audited six-row table. An indexed miss or empty
+table reports one warning. Fsdb now follows those SELECT results and counts:
+the planner evaluates the bound once, and the matching row evaluates the
+predicate once more. The matching lookup uses `PRIMARY`/`const`.
+Unindexed warning lifetime and EXPLAIN warning count remain open.
 
 The expanded `numeric-constant-index-bounds` contract in run
 `20261010T161131310-7062` matched MySQL 8.4.11 on all 51 steps.

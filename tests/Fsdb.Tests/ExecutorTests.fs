@@ -6648,10 +6648,31 @@ let tests =
                         let plan = runDefault store ("EXPLAIN " + sql) |> explainRow
                         Expect.equal plan.Key (Some "PRIMARY") (sprintf "constant %s uses the primary key" expression)
 
+                    for bound, expectedRows, warningCount in
+                        [ "2x", [ [ Some "two" ] ], 2
+                          "8x", [], 1 ] do
+                        let sql = sprintf "SELECT label FROM numeric_bounds WHERE id=CAST('%s' AS SIGNED)" bound
+                        let result, warnings = Fsdb.Diagnostics.capture (fun () -> runDefault store sql)
+                        Expect.equal result (ResultSet([ "label" ], expectedRows)) "warning-producing cast result"
+                        Expect.equal
+                            (warnings |> List.map (fun warning -> warning.Code, warning.Message))
+                            (List.replicate warningCount (1292, sprintf "Truncated incorrect INTEGER value: '%s'" bound))
+                            "indexed cast conversion warnings"
+                        if bound = "2x" then
+                            Expect.equal
+                                ((runDefault store ("EXPLAIN " + sql) |> explainRow).Key)
+                                (Some "PRIMARY")
+                                "matching warning-producing cast uses the primary key"
+
+                    runDefault store "CREATE TABLE empty_numeric_bounds(id INT PRIMARY KEY)" |> ignore
+                    let emptyResult, emptyWarnings =
+                        Fsdb.Diagnostics.capture (fun () ->
+                            runDefault store "SELECT id FROM empty_numeric_bounds WHERE id=CAST('2x' AS SIGNED)")
+                    Expect.equal emptyResult (ResultSet([ "id" ], [])) "empty indexed cast has no rows"
                     Expect.equal
-                        (runDefault store "SELECT label FROM numeric_bounds WHERE id=CAST('2x' AS SIGNED)")
-                        (ResultSet([ "label" ], [ [ Some "two" ] ]))
-                        "warning-producing cast retains the matching row"
+                        (emptyWarnings |> List.map (fun warning -> warning.Code, warning.Message))
+                        [ 1292, "Truncated incorrect INTEGER value: '2x'" ]
+                        "empty indexed cast evaluates its bound once"
 
                     let bitCountTextResult, bitCountTextWarnings =
                         Fsdb.Diagnostics.capture (fun () ->
