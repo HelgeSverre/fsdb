@@ -5730,6 +5730,21 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE null_probe" |]
           Coverage = [| "statement:select", [| "text-differential" |] |] }
 
+    let private yearFunctionalIndex =
+        { Name = "year-functional-index"
+          Setup =
+            [| "CREATE TABLE year_probe(id INT PRIMARY KEY,d DATE,KEY ix_year ((YEAR(d))))"
+               "INSERT INTO year_probe VALUES(1,'2024-02-29'),(2,'2023-01-01'),(3,NULL),(4,'2024-12-31')" |]
+          Steps =
+            [| Contract.query "source-years" "SELECT id,YEAR(d) FROM year_probe ORDER BY id"
+               Contract.query "year-key" "SELECT id FROM year_probe WHERE YEAR(d)=2024 ORDER BY id"
+               Contract.query "null-key" "SELECT id FROM year_probe WHERE YEAR(d) IS NULL ORDER BY id"
+               Contract.execute "update" "UPDATE year_probe SET d='2025-01-01' WHERE id=1"
+               Contract.query "old-key-removed" "SELECT id FROM year_probe WHERE YEAR(d)=2024 ORDER BY id"
+               Contract.query "new-key-added" "SELECT id FROM year_probe WHERE YEAR(d)=2025 ORDER BY id" |]
+          Cleanup = [| "DROP TABLE year_probe" |]
+          Coverage = [| "statement:select", [| "text-differential" |] |] }
+
     let private asciiFunctionalIndex =
         { Name = "ascii-functional-index"
           Setup =
@@ -11490,6 +11505,7 @@ module ContractCatalog =
            exactIntegerFunctionalBounds
            numericFunctionalBounds
            isNullFunctionalIndex
+           yearFunctionalIndex
            asciiFunctionalIndex
            ordFunctionalIndex
            unhexFunctionalIndex

@@ -8170,6 +8170,47 @@ let tests =
                             (Affected 3UL)
                             "DELETE evaluates the runtime override"
 
+                testCase "YEAR of a date uses a functional equality index"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed_years (id INT PRIMARY KEY, d DATE, INDEX ix_year ((YEAR(d))))" |> ignore
+                    runDefault store "CREATE TABLE scanned_years (id INT PRIMARY KEY, d DATE)" |> ignore
+                    let rows =
+                        [ for id in 1 .. 300 ->
+                              let date = if id = 17 || id = 219 then "2024-02-29" else "2023-01-01"
+                              sprintf "(%d, '%s')" id date ]
+                        |> String.concat ", "
+                    runDefault store ("INSERT INTO indexed_years VALUES " + rows) |> ignore
+                    runDefault store ("INSERT INTO scanned_years VALUES " + rows) |> ignore
+                    runDefault store "INSERT INTO indexed_years VALUES (301,NULL)" |> ignore
+                    runDefault store "INSERT INTO scanned_years VALUES (301,NULL)" |> ignore
+                    for table in [ "indexed_years"; "scanned_years" ] do
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM {table} WHERE YEAR(d) = 2024 ORDER BY id")
+                            (ResultSet([ "id" ], [ [ Some "17" ]; [ Some "219" ] ]))
+                            "YEAR returns the matching dates"
+                        Expect.equal
+                            (runDefault store $"SELECT id FROM {table} WHERE YEAR(d) IS NULL ORDER BY id")
+                            (ResultSet([ "id" ], [ [ Some "301" ] ]))
+                            "YEAR retains the NULL key"
+                    let plan = runDefault store "EXPLAIN SELECT id FROM indexed_years WHERE YEAR(d) = 2024" |> explainRow
+                    Expect.equal plan.AccessType (Some "ref") "YEAR uses its functional equality key"
+                    Expect.equal plan.KeyLength (Some "2") "MySQL's YEAR key has a two-byte result"
+                    runDefault store "UPDATE indexed_years SET d='2025-01-01' WHERE id=17" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM indexed_years WHERE YEAR(d)=2025")
+                        (ResultSet([ "id" ], [ [ Some "17" ] ]))
+                        "updating a date moves its year key"
+                    runDefault store "CREATE TABLE datetime_years (id INT PRIMARY KEY, d DATETIME, INDEX ix_year ((YEAR(d))))" |> ignore
+                    runDefault store "INSERT INTO datetime_years VALUES (1,'2024-12-31 23:59:59'),(2,'2025-01-01 00:00:00'),(3,NULL)" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM datetime_years WHERE YEAR(d)=2024")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "DATETIME uses its stored calendar year"
+                    let datetimePlan = runDefault store "EXPLAIN SELECT id FROM datetime_years WHERE YEAR(d)=2024" |> explainRow
+                    Expect.equal datetimePlan.AccessType (Some "ref") "the DATETIME year key serves equality"
+                    Expect.equal datetimePlan.KeyLength (Some "2") "the DATETIME year key uses two bytes"
+
                 testCase "functional equality and range probes use expression indexes"
                 <| fun _ ->
                     let mutable calls = 0

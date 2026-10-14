@@ -460,6 +460,7 @@ and IndexTransform =
     | CharacterLength
     | ByteLength
     | BitLength
+    | YearPart
     | FirstByte
     | FirstCharacterCode
     | DecodedHex

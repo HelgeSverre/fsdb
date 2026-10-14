@@ -7,6 +7,7 @@ open System
 open System.Globalization
 open Fsdb.Ast
 open Fsdb.Value
+open Fsdb.Temporal
 
 exception DoubleOutOfRange of string
 exception InvalidLogarithmArgument
@@ -39,6 +40,9 @@ let private definitions =
       { CanonicalName = "BIT_LENGTH"
         Aliases = []
         Transform = BitLength }
+      { CanonicalName = "YEAR"
+        Aliases = []
+        Transform = YearPart }
       { CanonicalName = "ASCII"
         Aliases = []
         Transform = FirstByte }
@@ -344,6 +348,7 @@ let sameLookupTransform (column: ColumnDef) requested stored =
 type private TransformFamily =
     | TextOperation
     | IntegerFromText
+    | IntegerFromDate
     | EncodedTextResult
     | DecodedBinaryResult
     | NumericGeneral
@@ -361,6 +366,7 @@ let private transformFamily = function
     | BitLength
     | FirstByte
     | FirstCharacterCode -> IntegerFromText
+    | YearPart -> IntegerFromDate
     | EncodedHex
     | Md5Digest
     | Sha1Digest -> EncodedTextResult
@@ -485,6 +491,10 @@ let private supportsSingleTransform transform columnType =
         | TGeometry _
         | TVector _ -> false
         | _ -> true
+    | IntegerFromDate ->
+        match columnType with
+        | TDate | TDateTime _ -> true
+        | _ -> false
     | NumericGeneral
     | NumericDoubleResult ->
         isNumeric columnType || isTextOrBinary columnType
@@ -633,6 +643,8 @@ let supportsColumn transform (column: ColumnDef) =
 
 /// These transforms return exact integer values; their encoded key width also
 /// supplies metadata for the hidden functional column.
+let private yearKeyLength = 2
+
 let rec private integerKeyLength = function
     | CharacterLength
     | ByteLength
@@ -643,6 +655,7 @@ let rec private integerKeyLength = function
     | FirstByte
     | Checksum32
     | IsNullResult -> Some 4
+    | YearPart -> Some yearKeyLength
     | Expression expression ->
         tryPhysicalExpression expression
         |> Option.bind (fun physical -> physical.Calls |> List.tryLast |> Option.bind (snd >> integerKeyLength))
@@ -650,6 +663,7 @@ let rec private integerKeyLength = function
 
 /// The hidden result type depends on both source signedness and literal width.
 let tryIntegerExpressionKeyLength columnType = function
+    | YearPart -> Some yearKeyLength
     | Expression expression ->
         match tryPhysicalExpression expression with
         | Some { NullComparison = Some _; Calls = [] } -> nullIfIntegerWidth columnType |> Option.map ((+) 1)
@@ -681,7 +695,7 @@ let rec hasNumericResult = function
             || (physical.Calls |> List.tryLast |> Option.exists (snd >> hasNumericResult)))
     | transform ->
         match transformFamily transform with
-        | IntegerFromText | NumericGeneral | NumericDoubleResult | NullIndicator -> true
+        | IntegerFromText | IntegerFromDate | NumericGeneral | NumericDoubleResult | NullIndicator -> true
         | _ -> false
 
 let private trimBinarySpaces (bytes: byte[]) =
@@ -874,6 +888,7 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
     | Some CharacterLength, _
     | Some ByteLength, _
     | Some BitLength, _
+    | Some YearPart, _
     | Some FirstByte, _
     | Some FirstCharacterCode, _
     | Some IsNullResult, _
@@ -1103,6 +1118,15 @@ let rec projectValueWithStatusUsing textEquals encodeText transform value =
     | Some CharacterLength, value -> VInt(characterLength value), None
     | Some ByteLength, value -> VInt(byteLengthWith encodeText value), None
     | Some BitLength, value -> VInt(byteLengthWith encodeText value * 8L), None
+    | Some YearPart, VDate date -> VInt(int64 date.Year), None
+    | Some YearPart, VDateTime date -> VInt(int64 date.Year), None
+    | Some YearPart, VZeroDate date ->
+        let year, _, _ = zeroDateParts date
+        VInt(int64 year), None
+    | Some YearPart, VZeroDateTime date ->
+        let year, _, _ = zeroDateOfDateTime date |> zeroDateParts
+        VInt(int64 year), None
+    | Some YearPart, _ -> VNull, None
     | Some FirstByte, value ->
         let bytes =
             match tryRawBytes value with
