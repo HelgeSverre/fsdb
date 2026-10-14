@@ -109,6 +109,26 @@ def main():
         print(f"{count} cases; {len(mismatches)} mismatches")
         for mismatch in mismatches:
             print(mismatch)
+        hole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,3 1,3 3,1 3,1 1))"
+        point_count = 0
+        point_mismatches = []
+        for longitude in [1.00001, 1.001, 2.999]:
+            for latitude in [1, 1.00001, 1.001, 1.01, 1.1, 1.5, 2, 2.5, 2.9, 2.999, 2.99999, 3, 3.00001]:
+                point_count += 1
+                point = f"ST_GeomFromText('POINT({latitude} {longitude})',4326)"
+                area = f"ST_GeomFromText('{hole}',4326)"
+                sql = f"SELECT ST_Within({point},{area}),ST_Touches({point},{area}),ST_Intersects({point},{area})"
+                with mysql_connection.cursor() as cursor:
+                    cursor.execute(sql)
+                    expected = cursor.fetchone()
+                with fsdb_connection.cursor() as cursor:
+                    cursor.execute(sql)
+                    actual = cursor.fetchone()
+                if actual != expected:
+                    point_mismatches.append((latitude, longitude, expected, actual))
+        print(f"{point_count} near-hole points; {len(point_mismatches)} point mismatches")
+        for mismatch in point_mismatches:
+            print("point", mismatch)
     finally:
         if fsdb_connection:
             fsdb_connection.close()

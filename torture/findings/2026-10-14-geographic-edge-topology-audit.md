@@ -43,3 +43,16 @@ those rounded distances as exact boundary contact explains the first pair of
 mismatches; replacing the distance check alone shifts the mismatches to the
 opposite edge. A fix needs line/ring topology at the corner, not a wider or
 narrower distance tolerance.
+
+A follow-up sampled 39 points along and just beyond both sides of the hole
+while replaying the 337 line cases. One point differs: `POINT(3 1.00001)` is
+outside the polygon in MySQL but inside it in fsdb. The line classifier's
+internal samples for `LINESTRING(1 1.001,3 1.001)` and the opposite-side
+`LINESTRING(1 2.999,3 2.999)` both start as `HoleBoundary` and continue as
+`Outside`; MySQL nevertheless calls the first crossing and the second
+touching. Point predicates treat `HoleBoundary` as interior, but promoting
+that label throughout line topology would turn the opposite-side case into
+a false crossing. Reducing geodesic sampling from 25 km to 5 km left the
+classification unchanged and made the focused test substantially slower, so
+the sampling change was discarded. The remaining fix needs an oriented
+line/ring intersection rule rather than a point-label or sampling shortcut.
