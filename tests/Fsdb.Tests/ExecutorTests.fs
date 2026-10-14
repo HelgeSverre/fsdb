@@ -8286,6 +8286,16 @@ let tests =
                         (runDefault store "SELECT id FROM indexed_dates WHERE CAST(dt AS DATE)='2025-03-01'")
                         (ResultSet([ "id" ], [ [ Some "17" ] ]))
                         "the cast finds the updated date key"
+                    let grouped =
+                        runDefault store "SELECT CAST(dt AS DATE), COUNT(*) FROM indexed_dates GROUP BY CAST(dt AS DATE) ORDER BY CAST(dt AS DATE)"
+                    match grouped with
+                    | ResultSet(_, rows) ->
+                        Expect.contains rows [ Some "2024-02-29"; Some "1" ] "the date key groups equal projected dates"
+                    | other -> failtestf "expected date groups, got %A" other
+                    let groupedPlan =
+                        runDefault store "EXPLAIN SELECT CAST(dt AS DATE), COUNT(*) FROM indexed_dates GROUP BY CAST(dt AS DATE)"
+                        |> explainRow
+                    Expect.equal groupedPlan.AccessType (Some "index") "the date key serves CAST grouping"
 
                 testCase "functional equality and range probes use expression indexes"
                 <| fun _ ->

@@ -61,3 +61,12 @@ same lookup. The focused regression checks key access and UPDATE maintenance;
 the expanded calendar contract matched all 37 steps against the pinned MySQL
 8.4.11 image in `20261014T033512725-91120/contracts`. The full 151-case,
 19,169-step run retained the same ten unrelated differences.
+
+MySQL also reads that key in index order for `GROUP BY CAST(dt AS DATE)`.
+Fsdb previously grouped correctly but scanned because its order-prefix matcher
+required identical transform syntax. The matcher now recognizes the verified
+`DATE`/`CAST AS DATE` result equivalence for ordered access. The focused
+regression checks `EXPLAIN` index access, and all 38 calendar-contract steps
+matched the pinned MySQL image in `20261014T034328665-21392/contracts`.
+The full 151-case, 19,170-step campaign still has the same ten unrelated
+differences.

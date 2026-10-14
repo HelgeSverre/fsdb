@@ -5768,6 +5768,7 @@ module ContractCatalog =
                Contract.query "date-result-source" "SELECT id,DATE(dt),CAST(dt AS DATE) FROM date_result_probe ORDER BY id"
                Contract.query "date-result-key" "SELECT id FROM date_result_probe WHERE DATE(dt)='2024-02-29' ORDER BY id"
                Contract.query "date-result-cast-alias" "SELECT id FROM date_result_probe WHERE CAST(dt AS DATE)='2024-02-29' ORDER BY id"
+               Contract.query "date-result-cast-groups" "SELECT CAST(dt AS DATE),COUNT(*) FROM date_result_probe GROUP BY CAST(dt AS DATE) ORDER BY CAST(dt AS DATE)"
                Contract.execute "date-result-update" "UPDATE date_result_probe SET dt='2025-03-01 08:30:00' WHERE id=1"
                Contract.query "date-result-old-key-removed" "SELECT id FROM date_result_probe WHERE DATE(dt)='2024-02-29' ORDER BY id"
                Contract.query "date-result-new-key-added" "SELECT id FROM date_result_probe WHERE CAST(dt AS DATE)='2025-03-01' ORDER BY id"

@@ -16522,10 +16522,15 @@ and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
 
     Option.toList primary @ secondary
 
-and private tryIndexPrefix (pinned: Set<string>) (suffix: IndexOrderTerm list) (indexTerms: IndexOrderTerm list) : IndexPrefixMatch option =
-    let sameKey left right =
-        left.Transform = right.Transform
-        && equalsIgnoreCase left.Column right.Column
+and private tryIndexPrefix (table: Table) (pinned: Set<string>) (suffix: IndexOrderTerm list) (indexTerms: IndexOrderTerm list) : IndexPrefixMatch option =
+    let sameKey (left: IndexOrderTerm) (right: IndexOrderTerm) =
+        // DATE and CAST AS DATE share an ordered result; other lookup aliases may not preserve order.
+        equalsIgnoreCase left.Column right.Column
+        && (left.Transform = right.Transform
+            || (right.Transform = Some DateOnlyPart
+                && (table.Columns
+                    |> List.tryFind (fun column -> equalsIgnoreCase column.Name left.Column)
+                    |> Option.exists (fun column -> FunctionalIndex.sameLookupTransform column left.Transform right.Transform))))
 
     let rec pinnedCount count =
         function
@@ -16632,7 +16637,7 @@ and private orderedIndexPrefixMatches
         orderedIndexCandidates table
         |> List.filter (fun candidate -> indexAllowedForOrderedAccess hintScope tref candidate.Name)
         |> List.choose (fun candidate ->
-            tryIndexPrefix pinnedColumns requestedTerms candidate.Terms
+            tryIndexPrefix table pinnedColumns requestedTerms candidate.Terms
             |> Option.bind (fun matched ->
                 matched.Terms
                 |> List.take matched.PinnedCount
