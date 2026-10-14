@@ -30,3 +30,16 @@ The same difference occurs at longitude `1.001`. Separate point probes also
 find near-corner differences, including `POINT(3 1.00001)` and offsets only
 `0.0000001` degree from a hole corner. This audit is a synthetic boundary
 corpus, not a general geographic parity claim.
+
+A narrower MySQL 8.4.11 probe shows why classifying the line solely from its
+endpoints is insufficient. `POINT(1 1.00001)` is within the polygon, while
+`POINT(3 1.00001)` is outside it; the same within/outside split occurs for
+`POINT(1 2.999)` and `POINT(3 2.999)`. Yet every tested line from latitude
+`1` to `1.000001`, `1.0001`, `1.01`, `1.1`, `2`, or `3` crosses beside longitude
+`1.00001` and only touches beside longitude `2.999`. In fsdb, geographic
+point-to-hole-edge distance can round to zero for both near-corner endpoints
+even though the exact point-on-line check says they are off the edge. Treating
+those rounded distances as exact boundary contact explains the first pair of
+mismatches; replacing the distance check alone shifts the mismatches to the
+opposite edge. A fix needs line/ring topology at the corner, not a wider or
+narrower distance tolerance.
