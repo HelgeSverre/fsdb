@@ -1608,8 +1608,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                              || join.Kind = CrossJoin
                              || join.Kind = NaturalJoin))
                      && (select.Joins |> List.forall (fun join -> match join.Table with FromTable _ -> true | _ -> false))
-                     && hasWritableShape select
-                     && select.OrderBy.IsEmpty ->
+                     && hasWritableShape select ->
                 let tableRefs =
                     source
                     :: (select.Joins
@@ -1888,7 +1887,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               Expressions = expressions
                               OrderedColumns = outputNames
                               Predicate = predicate
-                              OrderBy = []
+                              OrderBy = select.OrderBy
                               JoinCheck =
                                 if view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase) then None
                                 else Some { Predicate = predicate }
@@ -26781,7 +26780,7 @@ let rec executeAs
 
         match tryUpdatableView store viewDb updateStmt.From.Table with
         | None -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
-        | Some view when not view.UpdateJoins.IsEmpty && not updateStmt.OrderBy.IsEmpty ->
+        | Some view when not view.UpdateJoins.IsEmpty && (not view.OrderBy.IsEmpty || not updateStmt.OrderBy.IsEmpty) ->
             ids, Err(1221, "Incorrect usage of UPDATE and ORDER BY")
         | Some view when not view.UpdateJoins.IsEmpty && updateStmt.Limit.IsSome ->
             ids, Err(1221, "Incorrect usage of UPDATE and LIMIT")

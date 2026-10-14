@@ -271,6 +271,53 @@ let tests =
                   [ [ Some "1"; Some "changed" ]; [ Some "2"; Some "layered" ]; [ Some "4"; Some "four" ] ]
                   "right-table update persists"
 
+          testCase "ordered join view remains insertable but refuses updates"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE ordered_left (id INT PRIMARY KEY, n INT)") "create left"
+              expectOk (run store "CREATE TABLE ordered_right (id INT PRIMARY KEY, v INT)") "create right"
+              expectOk (run store "INSERT INTO ordered_left VALUES (1, 10), (2, 20)") "seed left"
+              expectOk (run store "INSERT INTO ordered_right VALUES (1, 100), (2, 200), (3, 300)") "seed right"
+              expectOk
+                  (run store "CREATE VIEW ordered_join AS SELECT l.id, l.n, r.v FROM ordered_left l JOIN ordered_right r ON r.id=l.id ORDER BY l.id DESC")
+                  "create ordered join view"
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='ordered_join'")
+                  [ [ Some "YES" ] ]
+                  "MySQL reports the ordered join view as updatable"
+              Expect.equal
+                  (rows store "SELECT id,n,v FROM ordered_join")
+                  [ [ Some "2"; Some "20"; Some "200" ]; [ Some "1"; Some "10"; Some "100" ] ]
+                  "the view retains its saved order"
+
+              for sql in
+                  [ "UPDATE ordered_join SET n=11 WHERE id=1"
+                    "UPDATE ordered_join SET n=n+1 LIMIT 1"
+                    "UPDATE ordered_join SET n=n+1 ORDER BY id DESC LIMIT 1" ] do
+                  match run store sql with
+                  | Err(1221, "Incorrect usage of UPDATE and ORDER BY") -> ()
+                  | other -> failtestf "expected the saved order to reject %s, got %A" sql other
+
+              expectOk (run store "INSERT INTO ordered_join(id,n) VALUES (3,30)") "insert through ordered join"
+              expectOk (run store "CREATE VIEW outer_ordered AS SELECT id,n,v FROM ordered_join") "create outer view"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='outer_ordered'")
+                  [ [ Some "YES" ] ]
+                  "the outer layer remains updatable"
+              match run store "UPDATE outer_ordered SET n=12 WHERE id=1" with
+              | Err(1221, "Incorrect usage of UPDATE and ORDER BY") -> ()
+              | other -> failtestf "expected the inherited order to reject UPDATE, got %A" other
+              expectOk (run store "INSERT INTO ordered_right VALUES (4,400)") "seed fourth join partner"
+              expectOk (run store "INSERT INTO outer_ordered(id,n) VALUES (4,40)") "insert through outer layer"
+              expectOk
+                  (run store "CREATE VIEW checked_ordered AS SELECT l.id,l.n,r.v FROM ordered_left l JOIN ordered_right r ON r.id=l.id ORDER BY l.id DESC WITH CHECK OPTION")
+                  "create checked ordered join view"
+              Expect.equal
+                  (rows store "SELECT id,n FROM ordered_left ORDER BY id")
+                  [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ]; [ Some "4"; Some "40" ] ]
+                  "the insert reaches the left component"
+
           testCase "direct checked join view enforces post-write visibility"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

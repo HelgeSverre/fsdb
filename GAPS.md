@@ -567,7 +567,10 @@ Direct physical inner-join views can update one component table per statement
 and insert through an explicit column list into one insertable component.
 Writable join views also cover `CROSS JOIN`, `JOIN ... USING`, and `NATURAL JOIN`;
 merged `USING` and natural columns bind to the left input when a view write
-references them.
+references them. An [ordered join view](torture/findings/2026-10-14-ordered-join-view.md)
+retains MySQL's updatable metadata and explicit-column insertion through outer
+layers, while UPDATE returns 1221 because its saved `ORDER BY` cannot be used
+with the joined write.
 Direct inner-join views with `WITH CHECK OPTION` validate inserted and updated
 rows against the join and view predicate. Updates retain their originally
 matched join partners; finding a different partner after a key change does not

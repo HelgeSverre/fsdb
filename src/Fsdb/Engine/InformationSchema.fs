@@ -1577,7 +1577,6 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                     && select.Windows.IsEmpty
                     && select.Ctes.IsEmpty
                     && select.Having.IsNone
-                    && (select.Joins.IsEmpty || select.OrderBy.IsEmpty)
                     && select.Limit.IsNone
                     && select.Offset.IsNone
                     && select.Locking.IsEmpty
