@@ -271,6 +271,48 @@ let tests =
                   [ [ Some "1"; Some "changed" ]; [ Some "2"; Some "layered" ]; [ Some "4"; Some "four" ] ]
                   "right-table update persists"
 
+          testCase "direct checked join view enforces post-write visibility"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE checked_join_left (id INT PRIMARY KEY, n INT)") "create left"
+              expectOk (run store "CREATE TABLE checked_join_right (id INT PRIMARY KEY, v INT)") "create right"
+              expectOk (run store "INSERT INTO checked_join_left VALUES (1, 10), (2, 20)") "seed left"
+              expectOk (run store "INSERT INTO checked_join_right VALUES (1, 100), (2, 200), (3, 300)") "seed right"
+              expectOk
+                  (run store "CREATE VIEW checked_join AS SELECT l.id, l.n, r.v FROM checked_join_left l JOIN checked_join_right r ON r.id = l.id WHERE l.n > 0 AND r.v > 0 WITH CASCADED CHECK OPTION")
+                  "create checked join view"
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name = 'checked_join'")
+                  [ [ Some "YES" ] ]
+                  "MySQL marks the checked inner join updatable"
+
+              expectOk (run store "UPDATE checked_join SET n = 11 WHERE id = 1") "visible update"
+
+              expectOk
+                  (run store "CREATE VIEW outer_checked_join AS SELECT id, n, v FROM checked_join")
+                  "create outer layer"
+
+              match run store "UPDATE outer_checked_join SET n = 0 WHERE id = 1" with
+              | Err(1369, "CHECK OPTION failed 'fsdb.outer_checked_join'") -> ()
+              | other -> failtestf "expected inherited join check, got %A" other
+
+              for sql in
+                  [ "UPDATE checked_join SET n = 0 WHERE id = 1"
+                    "UPDATE checked_join SET id = 3 WHERE id = 1"
+                    "UPDATE checked_join SET v = 0 WHERE id = 1"
+                    "INSERT INTO checked_join(id, n) VALUES (4, 40)"
+                    "INSERT INTO checked_join(id, n) VALUES (1, 11) ON DUPLICATE KEY UPDATE n = 11" ] do
+                  match run store sql with
+                  | Err(1369, "CHECK OPTION failed 'fsdb.checked_join'") -> ()
+                  | other -> failtestf "expected CHECK OPTION failure for %s, got %A" sql other
+
+              expectOk (run store "INSERT INTO checked_join(id, n) VALUES (3, 30)") "insert with matching partner"
+              Expect.equal
+                  (rows store "SELECT id, n FROM checked_join_left ORDER BY id")
+                  [ [ Some "1"; Some "11" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]
+                  "rejected writes do not change the base table"
+
           testCase "subquery views follow MySQL updateability boundaries"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

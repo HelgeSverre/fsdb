@@ -114,7 +114,8 @@ type private ViewCheckScope =
       Qualifier: string
       View: string
       CheckPredicate: Expr option
-      VisibilityPredicate: Expr option }
+      VisibilityPredicate: Expr option
+      JoinCheck: (TableRef * Join list * Expr option) option }
 
 type private RangeLookupBounds<'column, 'bound> =
     { Column: 'column
@@ -993,6 +994,8 @@ type private WritableViewSource =
       InsertableTargets: Set<ViewTargetKey>
       Mergeable: bool }
 
+type private JoinViewCheck = { Predicate: Expr option }
+
 type private UpdatableView =
     { ViewDatabase: string
       ViewName: string
@@ -1004,6 +1007,7 @@ type private UpdatableView =
       OrderedColumns: string list
       Predicate: Expr option
       OrderBy: OrderKey list
+      JoinCheck: JoinViewCheck option
       CheckPredicates: Map<ViewTargetKey, Expr>
       Insertable: bool
       InsertableTargets: Set<string * string * string>
@@ -1567,6 +1571,12 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                     underlying |> Option.map _.OrderBy |> Option.defaultValue []
                                 else
                                     ownOrderBy
+                              JoinCheck =
+                                if not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase))
+                                   && (underlying |> Option.exists (fun nested -> not nested.UpdateJoins.IsEmpty)) then
+                                    Some { Predicate = predicate }
+                                else
+                                    underlying |> Option.bind _.JoinCheck
                               CheckPredicates =
                                 match underlying with
                                 | Some nested when not nested.UpdateJoins.IsEmpty -> nested.CheckPredicates
@@ -1594,8 +1604,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                      && (select.Joins |> List.forall (fun join -> join.Kind = InnerJoin || join.Kind = StraightJoin))
                      && (select.Joins |> List.forall (fun join -> match join.Table with FromTable _ -> true | _ -> false))
                      && hasWritableShape select
-                     && select.OrderBy.IsEmpty
-                     && view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase) ->
+                     && select.OrderBy.IsEmpty ->
                 let tableRefs =
                     source
                     :: (select.Joins
@@ -1856,6 +1865,9 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               OrderedColumns = outputNames
                               Predicate = predicate
                               OrderBy = []
+                              JoinCheck =
+                                if view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase) then None
+                                else Some { Predicate = predicate }
                               CheckPredicates = checkPredicates
                               Insertable = not insertableTargets.IsEmpty
                               InsertableTargets = insertableTargets
@@ -24529,28 +24541,102 @@ let rec executeAs
                         if selected then deleteRow rowId row (Map.tryFind rowId selectedImages |> Option.defaultValue row) else Ok 0)))
         |> Result.map List.sum
 
-    let validateViewCandidate (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
+    let validateViewCandidate
+        (runStore: Store)
+        (db: string)
+        (table: string)
+        (columns: ColumnDef list)
+        (oldRow: Value[] option)
+        (candidate: Value[])
+        =
         match viewCheckScope.Value with
         | Some scope
             when scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
                  && scope.Table.Equals(table, System.StringComparison.OrdinalIgnoreCase) ->
-            match scope.CheckPredicate with
-            | None -> Ok candidate
-            | Some predicate ->
-                let context =
-                    contextFactory
-                        runStore
-                        registry
-                        db
-                        (columnIndexOf columns)
-                        (singleQualifier scope.Qualifier columns)
-                        None
-                        candidate
+            let checkPredicate =
+                match scope.CheckPredicate with
+                | None -> Ok candidate
+                | Some predicate ->
+                    let context =
+                        contextFactory
+                            runStore
+                            registry
+                            db
+                            (columnIndexOf columns)
+                            (singleQualifier scope.Qualifier columns)
+                            None
+                            candidate
 
-                match evalExpr { context with Clause = WhereClause } predicate with
-                | Ok value when truthy value = Some true -> Ok candidate
-                | Ok _ -> Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
-                | Error error -> Error(ExpressionError error)
+                    match evalExpr { context with Clause = WhereClause } predicate with
+                    | Ok value when truthy value = Some true -> Ok candidate
+                    | Ok _ -> Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
+                    | Error error -> Error(ExpressionError error)
+
+            let checkJoin (from, joins, checkPredicate) candidate =
+                let overrideFor row =
+                    Map.ofList
+                        [ scope.Qualifier.ToLowerInvariant(),
+                          { Columns = columns
+                            Rows = [ row ]
+                            IdentityOf = fun _ -> None } ]
+
+                let joined row =
+                    runMutationJoin runStore registry db (overrideFor row) from joins
+                    |> Result.mapError (function
+                        | Err(code, message) -> ExpressionError(code, message)
+                        | error -> ExpressionError(1105, sprintf "Join view check failed: %A" error))
+
+                let signatures sources rows =
+                    let offsets = columnOffsets sources
+                    let partners flat =
+                        sources
+                        |> List.mapi (fun index source ->
+                            if source.Qualifier.Equals(scope.Qualifier, System.StringComparison.OrdinalIgnoreCase) then
+                                None
+                            else
+                                Some(Array.sub flat offsets.[index] source.Columns.Length))
+                        |> List.choose id
+                    rows |> List.map (fun (_, flat) -> partners flat, flat)
+
+                let originalPartners =
+                    match oldRow with
+                    | None -> Ok None
+                    | Some old -> joined old |> Result.map (fun (sources, rows) -> signatures sources rows |> List.map fst |> Some)
+
+                originalPartners
+                |> Result.bind (fun original ->
+                    joined candidate
+                    |> Result.bind (fun (sources, rows) ->
+                        let combined = sources |> List.map (fun source -> source.Qualifier, source.Columns)
+                        let context =
+                            contextFactory
+                                runStore
+                                registry
+                                db
+                                (columnIndexOf (combined |> List.collect snd))
+                                (qualifierRanges combined)
+                                None
+
+                        signatures sources rows
+                        |> traverse (fun (partners, flat) ->
+                            if original |> Option.exists (fun allowed -> not (List.contains partners allowed)) then
+                                Ok false
+                            else
+                                match checkPredicate with
+                                | None -> Ok true
+                                | Some predicate ->
+                                    evalExpr { context flat with Clause = WhereClause } predicate
+                                    |> Result.map (fun value -> truthy value = Some true)
+                                    |> Result.mapError ExpressionError)
+                        |> Result.bind (fun visible ->
+                            if List.contains true visible then Ok candidate
+                            else Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View)))))
+
+            checkPredicate
+            |> Result.bind (fun candidate ->
+                match scope.JoinCheck with
+                | None -> Ok candidate
+                | Some join -> checkJoin join candidate)
         | _ -> Ok candidate
 
     let validateViewExisting (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (row: Value[]) =
@@ -24558,9 +24644,10 @@ let rec executeAs
         | Some scope
             when scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
                  && scope.Table.Equals(table, System.StringComparison.OrdinalIgnoreCase) ->
-            match scope.VisibilityPredicate with
-            | None -> Ok()
-            | Some predicate ->
+            match scope.JoinCheck, scope.VisibilityPredicate with
+            | Some _, _ -> Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
+            | None, None -> Ok()
+            | None, Some predicate ->
                 let context =
                     contextFactory
                         runStore
@@ -24675,7 +24762,7 @@ let rec executeAs
 
     let finishInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
         computeGeneratedRow runStore registry db table columns candidate
-        |> Result.bind (validateViewCandidate runStore db table columns)
+        |> Result.bind (validateViewCandidate runStore db table columns None)
 
     let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (omitted: Set<int>) (candidate: Value[]) =
         evaluateFunctionalDefaults runStore db table columns omitted candidate
@@ -24822,17 +24909,15 @@ let rec executeAs
                 let prepare omitted candidate =
                     evaluateFunctionalDefaults s db table tableColumns omitted candidate
                     |> Result.bind (computeGeneratedRow s registry db table tableColumns)
-                    |> Result.bind (validateViewCandidate s db table tableColumns)
-
-                let computeGenerated candidate =
-                    computeGeneratedRow s registry db table tableColumns candidate
-                    |> Result.bind (validateViewCandidate s db table tableColumns)
+                    |> Result.bind (validateViewCandidate s db table tableColumns None)
 
                 let applyUpdate ordinal existing candidate =
                     validateViewExisting s db table tableColumns existing
                     |> Result.bind (fun () ->
                         onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate)
-                    |> Result.bind computeGenerated
+                    |> Result.bind (fun updated ->
+                        computeGeneratedRow s registry db table tableColumns updated
+                        |> Result.bind (validateViewCandidate s db table tableColumns (Some existing)))
 
                 if not (Storage.dynamicWriteRebaseActive s) then
                     upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate (Some coercedAssignments) foundRows
@@ -25038,9 +25123,13 @@ let rec executeAs
 
             let checkPredicate = Map.tryFind targetKey view.CheckPredicates
 
-            match checkPredicate, view.Predicate with
-            | None, None -> execute ()
-            | checkPredicate, visibilityPredicate ->
+            let joinCheck =
+                if view.UpdateJoins.IsEmpty then None
+                else view.JoinCheck |> Option.map (fun check -> view.UpdateFrom, view.UpdateJoins, check.Predicate)
+
+            match checkPredicate, view.Predicate, joinCheck with
+            | None, None, None -> execute ()
+            | checkPredicate, visibilityPredicate, joinCheck ->
                 DynamicScope.withValue
                     viewCheckScope
                     (Some
@@ -25049,7 +25138,8 @@ let rec executeAs
                           Qualifier = target.Qualifier
                           View = view.ViewDatabase + "." + normalizeTableName view.ViewName
                           CheckPredicate = checkPredicate
-                          VisibilityPredicate = visibilityPredicate })
+                          VisibilityPredicate = visibilityPredicate
+                          JoinCheck = joinCheck })
                     execute
 
     let executeWithMutationCtes ctes statement =
@@ -26837,7 +26927,7 @@ let rec executeAs
                                 | _ ->
                                     let validated =
                                         computeGeneratedRow targetStore registry db table columns candidate
-                                        |> Result.bind (validateViewCandidate targetStore db table columns)
+                                        |> Result.bind (validateViewCandidate targetStore db table columns (Some row))
 
                                     match validated with
                                     | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
@@ -27075,7 +27165,7 @@ let rec executeAs
                                                 |> Result.bind (fun () ->
                                                     let validated =
                                                         computeGeneratedRow snapshot registry tdb tname physicalColumns.[i] candidate
-                                                        |> Result.bind (validateViewCandidate snapshot tdb tname physicalColumns.[i])
+                                                        |> Result.bind (validateViewCandidate snapshot tdb tname physicalColumns.[i] (Some row))
 
                                                     match validated with
                                                     | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
