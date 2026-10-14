@@ -12749,6 +12749,36 @@ let tests =
                             | other -> failtestf "expected MySQL 8.4 functional text OR counts, got %A" other
                             Expect.isLessThan calls 30 "the residual sees only functional text OR candidates"
 
+                    for source in
+                        [ "text_or_rows o"
+                          "(SELECT id,code FROM text_or_rows) o" ] do
+                        for predicate in
+                            [ "o.code=u.exact_code OR LOWER(o.code) BETWEEN LOWER(u.lo) AND LOWER(u.hi)"
+                              "o.code BETWEEN u.lo AND u.hi OR LOWER(o.code) BETWEEN LOWER(u.lo2) AND LOWER(u.hi2)" ] do
+                            calls <- 0
+                            match run store registry
+                                ("SELECT u.id,(SELECT COUNT(*) FROM " + source
+                                 + " WHERE (" + predicate + ") AND TOUCH(o.id)=o.id) "
+                                 + "FROM text_or_bounds u ORDER BY u.id") with
+                            | ResultSet(_, [ [ Some "1"; Some "4" ]; [ Some "2"; Some "4" ] ]) -> ()
+                            | other -> failtestf "expected MySQL 8.4 mixed text OR counts, got %A" other
+                            Expect.isLessThan calls 30 "the residual sees only mixed text OR candidates"
+
+                    for source in
+                        [ "text_or_rows o"
+                          "(SELECT id,code FROM text_or_rows) o" ] do
+                        for predicate in
+                            [ "LOWER(o.code)=LOWER(u.lo) OR LOWER(o.code)=LOWER(u.exact_code)"
+                              "o.code=u.lo OR LOWER(o.code)=LOWER(u.exact_code)" ] do
+                            calls <- 0
+                            match run store registry
+                                ("SELECT u.id,(SELECT COUNT(*) FROM " + source
+                                 + " WHERE (" + predicate + ") AND TOUCH(o.id)=o.id) "
+                                 + "FROM text_or_bounds u ORDER BY u.id") with
+                            | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "2" ] ]) -> ()
+                            | other -> failtestf "expected MySQL 8.4 equality OR counts, got %A" other
+                            Expect.isLessThan calls 30 "equality-only OR also uses physical candidates"
+
                     match runDefault store
                         ("SELECT u.id,(SELECT COUNT(*) FROM text_or_rows o "
                          + "WHERE LOWER(o.code) BETWEEN LOWER(u.lo) AND LOWER(u.hi) OR MOD(o.id,1000)=1) "

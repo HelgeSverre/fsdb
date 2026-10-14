@@ -1,4 +1,4 @@
-# Correlated functional-key OR candidates
+# Correlated functional and mixed-index OR candidates
 
 Native MySQL 8.4.11 returned four inner rows for each of two outer bounds in
 both of these disjunctions over `LOWER(code)`:
@@ -17,13 +17,17 @@ combines overlapping three-row ranges; deduplication leaves four rows. The
 [oracle script](../scripts/correlated-text-range-or-oracle.py) checks both
 predicates on physical and pass-through derived sources. It also checks the
 corresponding plain-text predicates on those sources and a stable materialized
-source. An unindexable `MOD(id,1000)=1` OR branch must retain its extra row.
+source. Additional queries mix plain `code` equality or range branches with
+functional `LOWER(code)` equality or range branches. Equality-only mixtures
+return two rows; the range mixtures return four. An unindexable
+`MOD(id,1000)=1` OR branch must retain its extra row.
 
 Before functional OR candidate planning, FSDB returned the right count but
 evaluated the residual `TOUCH` function 1,011 times on the first two-outer-row
-case. Each complete OR branch now obtains functional equality or range row IDs;
-the smallest usable candidate within a branch is selected, and physical row
-IDs are unioned before projection and residual evaluation. The focused
-regression requires fewer than 30 residual evaluations for both predicates on
-both source shapes. An uncovered branch keeps the general path, preserving
-its rows.
+case. A separate mixed plain/functional probe also evaluated the residual
+1,011 times before the follow-up change. Each complete OR branch now compares
+available plain and functional equality or range candidates, then uses the
+smallest one. Physical row IDs are unioned before projection and residual
+evaluation. The focused regression requires fewer than 30 residual evaluations
+for the functional and mixed predicates on both source shapes. An uncovered
+branch keeps the general path, preserving its rows.

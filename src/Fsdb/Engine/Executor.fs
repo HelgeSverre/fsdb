@@ -14223,26 +14223,6 @@ and private tryCorrelatedFunctionalRangeLookup store registry dbName sourceItem 
     tryCorrelatedFunctionalLookup store registry dbName sourceItem outer (fun projection qualifier context ->
         tryCorrelatedFunctionalRangeCandidates store registry projection qualifier context whereExpr)
 
-and private tryCorrelatedFunctionalUnionLookup store registry dbName sourceItem whereExpr outer =
-    tryCorrelatedFunctionalLookup store registry dbName sourceItem outer (fun projection qualifier context ->
-        let branchCandidates branch =
-            [ tryCorrelatedFunctionalEqualityCandidates store registry projection qualifier context (Some branch)
-              tryCorrelatedFunctionalRangeCandidates store registry projection qualifier context (Some branch) ]
-            |> List.choose id
-            |> function
-                | [] -> None
-                | candidates -> Some(List.minBy List.length candidates)
-
-        let merge candidates =
-            candidates
-            |> List.collect id
-            |> List.map fst
-            |> Set.ofList
-            |> Storage.rowsForRowIds projection.PhysicalTable
-            |> Some
-
-        tryCompleteOrCandidates whereExpr branchCandidates merge List.length)
-
 and private tryPhysicalProjection
     (store: Store)
     (registry: Registry)
@@ -14577,7 +14557,18 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     correlatedRangeBounds probeSource (Some branch) outer
                     |> List.choose (tryProjectedPhysicalRangeCandidates store projection)
 
-                equality :: (ranges |> List.map Some)
+                let functional =
+                    if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
+                        outer
+                        |> Option.map (fun context ->
+                            [ tryCorrelatedFunctionalEqualityCandidates store registry projection qualifier context (Some branch)
+                              tryCorrelatedFunctionalRangeCandidates store registry projection qualifier context (Some branch) ]
+                            |> List.choose id)
+                        |> Option.defaultValue []
+                    else
+                        []
+
+                equality :: ((ranges @ functional) |> List.map Some)
                 |> List.choose id
                 |> function
                     | [] -> None
@@ -14878,14 +14869,17 @@ and private tryCorrelatedSourceLookup
             match equality with
             | Some(_, rows) when rows.Length <= 1 -> equality
             | _ ->
+                let equalityUnion = tryCorrelatedEqualityUnionLookup store dbName table whereExpr outer
+                let projectedUnion =
+                    if hasRangePredicate || equalityUnion.IsNone then
+                        tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
+                    else
+                        None
+
                 [ equality
-                  tryCorrelatedEqualityUnionLookup store dbName table whereExpr outer
-                  (if hasRangePredicate then
-                       tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
-                   else
-                       None)
-                  tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer
-                  tryCorrelatedFunctionalUnionLookup store registry dbName source whereExpr outer ]
+                  equalityUnion
+                  projectedUnion
+                  tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
                 |> fewestRows
 
         let physicalFastPath =
@@ -14903,8 +14897,7 @@ and private tryCorrelatedSourceLookup
              physicalIntersection ()
              |> Option.orElseWith (fun () ->
                  [ direct
-                   tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
-                   tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer ]
+                   tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer ]
                  |> fewestRows
                  |> chooseWithRanges false))
         |> Option.orElseWith materializedLookup
@@ -14913,8 +14906,7 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith (fun () ->
             [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
               tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
-              tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer
-              tryCorrelatedFunctionalUnionLookup store registry dbName source whereExpr outer ]
+              tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
             |> fewestRows
             |> chooseWithRanges false)
         |> Option.orElseWith materializedLookup

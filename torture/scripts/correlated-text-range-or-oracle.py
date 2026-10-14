@@ -46,6 +46,27 @@ def verify(client, _writer):
                      "FROM text_or_bounds u ORDER BY u.id")
             oracle["expect"](source_name + " " + predicate_name, client.query(query), "1\t4\n2\t4")
 
+    for source_name, _, source in sources[:2]:
+        for predicate_name, predicate in [
+            ("functional equality/equality", "LOWER(o.code)=LOWER(u.lo) "
+                                             "OR LOWER(o.code)=LOWER(u.exact_code)"),
+            ("mixed equality/equality", "o.code=u.lo OR LOWER(o.code)=LOWER(u.exact_code)"),
+        ]:
+            query = ("SELECT u.id,(SELECT COUNT(*) FROM " + source + " WHERE " + predicate + ") "
+                     "FROM text_or_bounds u ORDER BY u.id")
+            oracle["expect"](source_name + " " + predicate_name, client.query(query), "1\t2\n2\t2")
+
+    for source_name, _, source in sources[:2]:
+        for predicate_name, predicate in [
+            ("mixed equality/range", "o.code=u.exact_code OR "
+                                     "LOWER(o.code) BETWEEN LOWER(u.lo) AND LOWER(u.hi)"),
+            ("mixed range/range", "o.code BETWEEN u.lo AND u.hi OR "
+                                  "LOWER(o.code) BETWEEN LOWER(u.lo2) AND LOWER(u.hi2)"),
+        ]:
+            query = ("SELECT u.id,(SELECT COUNT(*) FROM " + source + " WHERE " + predicate + ") "
+                     "FROM text_or_bounds u ORDER BY u.id")
+            oracle["expect"](source_name + " " + predicate_name, client.query(query), "1\t4\n2\t4")
+
     oracle["expect"](
         "uncovered functional branch",
         client.query("SELECT u.id,(SELECT COUNT(*) FROM text_or_rows o "
