@@ -27,5 +27,11 @@ FSDB choice of the narrower slice still sent hundreds of rows to a residual
 function. Direct physical probes now intersect their candidate row arrays by
 identity before residual evaluation, reducing the focused regression to fewer
 than 20 residual calls while retaining the MySQL result. This path is limited
-to direct physical tables whose read rows are the stored rows; projected
-sources still choose one candidate family.
+to direct physical tables whose read rows are the stored rows.
+
+Pass-through projected sources now intersect the physical row IDs from their
+compatible equality and range lookups before projecting. The same 500-row
+bucket and 400-row range returns two rows on native MySQL 8.4.11 and FSDB;
+FSDB calls the residual fewer than
+20 times, whereas the previous projected path called it 402 times. Other
+projected access families still select one candidate family.
