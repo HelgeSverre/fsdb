@@ -1292,6 +1292,42 @@ let tests =
                   [ [ Some "1"; Some "3" ]; [ Some "2"; Some "1" ] ]
                   "only matched physical rows change"
 
+          testCase "checked merged joins keep a physical view target writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE merged_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE merged_left(id INT PRIMARY KEY,flag INT)"
+                    "CREATE TABLE merged_right(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO merged_target VALUES(1,0),(2,0)"
+                    "INSERT INTO merged_left VALUES(1,7)"
+                    "INSERT INTO merged_right VALUES(1,9)"
+                    "CREATE VIEW merged_aggregate AS SELECT a.id,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) flag FROM merged_left GROUP BY id) d1 NATURAL JOIN merged_target a NATURAL JOIN (SELECT id,SUM(aux) aux FROM merged_right GROUP BY id) d2 WHERE a.n >= 0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW merged_json AS SELECT a.id,a.n,j.id AS jid FROM JSON_TABLE('[1]','$[*]' COLUMNS(id INT PATH '$')) j JOIN merged_target a USING(id) WHERE a.n >= 0 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT table_name,is_updatable FROM information_schema.views WHERE table_name IN ('merged_aggregate','merged_json') ORDER BY table_name")
+                  [ [ Some "merged_aggregate"; Some "YES" ]; [ Some "merged_json"; Some "YES" ] ]
+                  "MySQL 8.4 marks both merged-column joins updatable"
+
+              for view in [ "merged_aggregate"; "merged_json" ] do
+                  Expect.equal (run store $"UPDATE {view} SET n=n+1 WHERE id=1") (Affected 1UL) "the matched target row changes"
+                  match run store $"UPDATE {view} SET n=-1 WHERE id=1" with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected the checked %s view to reject an invalid row, got %A" view other
+                  match run store $"INSERT INTO {view}(id,n) VALUES(3,0)" with
+                  | Err(1471, _) -> ()
+                  | other -> failtestf "expected the %s view to refuse INSERT, got %A" view other
+                  match run store $"DELETE FROM {view} WHERE id=1" with
+                  | Err(1395, _) -> ()
+                  | other -> failtestf "expected the %s view to refuse DELETE, got %A" view other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM merged_target ORDER BY id")
+                  [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ]
+                  "failed writes leave the physical target unchanged"
+
           testCase "join views update mergeable components beside union views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

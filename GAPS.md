@@ -674,6 +674,10 @@ left operand of each `USING` key even when the chain merges different keys.
 [Derived-first `NATURAL JOIN` views](torture/findings/2026-10-15-derived-natural-view.md)
 also update a physical target; moved joins retain the original shared-column
 ownership even when the target has another same-named column.
+An [audited composition of aggregate derived sources and merged `NATURAL`
+keys, or a leading `JSON_TABLE` joined with `USING`](torture/findings/2026-10-15-composed-join-view-writes.md)
+also preserves updateability and `CHECK OPTION` rejection while refusing
+joined-view INSERT and DELETE with MySQL's audited errors.
 [Target-first joins with a dependent lateral source](torture/findings/2026-10-15-lateral-join-view.md)
 also update the physical component and enforce invoker read grants on the
 lateral source. [Audited lateral sources before the physical target](torture/findings/2026-10-15-lateral-before-target-view.md)
