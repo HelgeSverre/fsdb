@@ -138,3 +138,15 @@ geodesic segment membership, as the hole-ring path already did. The focused
 point/polygon regression pins the three cases; the Release oracle now reports
 zero mismatches for four near-exterior probes, zero for 39 near-hole probes,
 and the same five open line/polygon mismatches among 372 line cases.
+
+A higher-latitude extension of the maintained oracle adds +60, +70, +80,
+and +85-degree translations and samples both hole edges more densely. Across
+412 line/polygon pairs, 12 now differ; the original point corpora still have
+zero mismatches. Six added cases are the same `ST_Crosses=1` versus
+`ST_Touches=1` split seen near the lower-latitude hole corners. At +85 degrees,
+`LINESTRING(86 1.00001,88 1.00001)` has a different discrepancy: MySQL reports
+all five relations false, including `ST_Intersects`, while its own
+`ST_Intersection` returns `POINT(86 1)`; fsdb reports crossing and intersecting.
+This native inconsistency and the latitude-dependent transition make an
+offset-based patch especially unsafe. The line/ring geographic overlay remains
+open; the expanded oracle is a guard for a future general fix.
