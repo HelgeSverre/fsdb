@@ -321,7 +321,10 @@ Indexed physical tables and pass-through sources also use compatible
 outer-bound `IN` probes, intersecting multiple groups by stored row identity
 before projection ([oracle and residual probe](torture/findings/2026-10-15-correlated-physical-in.md)).
 More complex correlated expressions without a
-compatible statement-local lookup still re-execute or scan.
+compatible statement-local lookup still re-execute or scan. The [materialized
+functional-equality profile](torture/findings/2026-10-15-correlated-materialized-functional-equality.md)
+shows an `ABS` inner expression taking the scan path even though its direct
+column counterpart uses a six-call statement-local lookup.
 
 ## 3. Built-in functions
 
