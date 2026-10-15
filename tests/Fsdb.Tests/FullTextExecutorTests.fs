@@ -111,6 +111,33 @@ let tests =
               Expect.isLessThan calls 30 "only the ten CJK join candidates need virtual values"
 
               execute "INSERT INTO owners VALUES(43),(97)" |> ignore
+              let cjkLeftJoined =
+                  "SELECT d.id," + cjkScore + " FROM owners o LEFT JOIN cjk_docs d"
+                  + " ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43)"
+                  + " AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+              calls <- 0
+              let cjkLeftActual = execute cjkLeftJoined
+              Expect.equal cjkLeftActual cjkControl "MySQL 8.4 ngram left-join ON bound preserves results and scores"
+              Expect.isLessThan calls 30 "the right-side ON bound restricts CJK candidate preparation"
+              let cjkPreserved =
+                  "SELECT o.id,d.id," + cjkScore + " FROM owners o LEFT JOIN cjk_docs d"
+                  + " ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43)"
+                  + " ORDER BY o.id,d.id"
+              match execute cjkPreserved, cjkControl with
+              | ResultSet(_, rows), ResultSet(_, controlRows) ->
+                  Expect.equal (List.length rows) 11 "the unmatched owner remains visible"
+                  Expect.sequenceEqual
+                      (rows |> List.take 10 |> List.map (fun row -> row.[1], row.[2]))
+                      (controlRows |> List.map (fun row -> row.[0], row.[1]))
+                      "matching CJK rows retain MySQL relevance"
+                  Expect.equal (List.last rows) [ Some "43"; None; Some "0" ] "MySQL 8.4 null-extended score"
+              | actual, _ -> failtestf "expected left-join CJK rows, got %A" actual
+              let cjkRightPreserved =
+                  "SELECT o.id,d.id," + cjkScore + " FROM cjk_docs d RIGHT JOIN owners o"
+                  + " ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43)"
+                  + " ORDER BY o.id,d.id"
+              Expect.equal (execute cjkRightPreserved) (execute cjkPreserved) "nullable CJK scores match across join orientation"
+
               for bound, selected in
                   [ "o.id BETWEEN 42 AND 43", "42,43"
                     "o.id IN (42,97,NULL)", "42,97" ] do

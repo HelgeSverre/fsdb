@@ -20267,6 +20267,22 @@ and private runFullTextSelect
                 sourcePredicatesForInnerJoins fromItem select.Joins joinConsumption select.Where
 
             let select = { select with Where = remainingWhere }
+            // A LEFT JOIN's right-side ON terms can exclude right rows before
+            // scoring, but they cannot filter the preserved left source.
+            let nullableRightOnPredicates =
+                select.Joins
+                |> List.choose (fun join ->
+                    match join.Kind, join.Table with
+                    | LeftJoin, FromTable tableRef ->
+                        let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+
+                        join.On
+                        |> conjuncts
+                        |> List.filter (canPushIntoSource qualifier)
+                        |> combineConjuncts
+                        |> Option.map (fun predicate -> qualifier.ToLowerInvariant(), predicate)
+                    | _ -> None)
+                |> Map.ofList
 
             let prepared =
                 sources
@@ -20288,6 +20304,7 @@ and private runFullTextSelect
                                 |> fun predicate ->
                                     optionalConjuncts predicate
                                     @ optionalConjuncts (Map.tryFind (source.Qualifier.ToLowerInvariant()) inferredBounds)
+                                    @ optionalConjuncts (Map.tryFind (source.Qualifier.ToLowerInvariant()) nullableRightOnPredicates)
                                     |> List.distinct
                                     |> combineConjuncts
 
@@ -20352,11 +20369,37 @@ and private runFullTextSelect
             match prepared with
             | Error error -> error, [], []
             | Ok preparedSources ->
+                let sourceQualifiers source =
+                    FromItem.leaves source
+                    |> List.choose FromItem.tryQualifier
+                    |> List.map _.ToLowerInvariant()
+                    |> Set.ofList
+
+                let nullableSources =
+                    select.Joins
+                    |> List.fold (fun (preceding, nullable) join ->
+                        let joined = sourceQualifiers join.Table
+                        let nullable =
+                            match join.Kind with
+                            | LeftJoin | NaturalLeftJoin -> Set.union nullable joined
+                            | RightJoin | NaturalRightJoin -> Set.union nullable preceding
+                            | _ -> nullable
+                        Set.union preceding joined, nullable)
+                        (sourceQualifiers fromItem, Set.empty)
+                    |> snd
+
                 let replacements =
                     preparedSources
                     |> List.collect (fun plan ->
                         plan.Synthetic
-                        |> List.map (fun (node, name) -> node, QualifiedCol(plan.Source.Qualifier, name)))
+                        |> List.map (fun (node, name) ->
+                            let score = QualifiedCol(plan.Source.Qualifier, name)
+                            let value =
+                                if Set.contains (plan.Source.Qualifier.ToLowerInvariant()) nullableSources then
+                                    Case(None, [ IsNull score, Lit(VDouble 0.0) ], Some score)
+                                else
+                                    score
+                            node, value))
 
                 let sub expression = substituteExprs replacements expression
                 let whereNodes = select.Where |> Option.map collectMatchAgainst |> Option.defaultValue []

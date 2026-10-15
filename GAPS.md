@@ -844,7 +844,10 @@ and assignments.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
-preparation while preserving MySQL's complete-corpus relevance. Other CJK
+preparation while preserving MySQL's complete-corpus relevance. An [audited
+ngram outer join](torture/findings/2026-10-15-ngram-outer-join-scoring.md)
+now applies right-local left-join `ON` bounds before scoring and returns zero
+for a null-extended `MATCH` score on either left or right joins. Other CJK
 join shapes and MeCab remain open.
 
 ## 12. Wire protocol and prepared statements

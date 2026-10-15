@@ -52,6 +52,27 @@ def verify(client, second_client):
                      "\n".join(map(str, range(42, 943, 100))))
 
     client.query("INSERT INTO owners VALUES(43),(97)")
+    cjk_left_joined = (
+        "SELECT d.id," + cjk_score + " FROM owners o LEFT JOIN cjk_docs d "
+        "ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43) "
+        "AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+    )
+    native["expect"]("ngram left join local ON bound", client.query(cjk_left_joined), client.query(cjk_direct))
+    cjk_preserved = (
+        "SELECT o.id,d.id," + cjk_score + " FROM owners o LEFT JOIN cjk_docs d "
+        "ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43) "
+        "ORDER BY o.id,d.id"
+    )
+    preserved_expected = "\n".join("42\t" + row for row in client.query(cjk_direct).splitlines()) + "\n43\tNULL\t0"
+    native["expect"]("ngram left join preserves unmatched owner", client.query(cjk_preserved), preserved_expected)
+    cjk_right_preserved = (
+        "SELECT o.id,d.id," + cjk_score + " FROM cjk_docs d RIGHT JOIN owners o "
+        "ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43) "
+        "ORDER BY o.id,d.id"
+    )
+    native["expect"]("ngram right join preserves unmatched owner", client.query(cjk_right_preserved), preserved_expected)
+    native["expect"]("ngram NULL query score", client.query(
+        "SELECT MATCH(body,title) AGAINST(NULL IN BOOLEAN MODE) FROM cjk_docs WHERE id=42"), "0")
     for bound, selected in [
         ("o.id BETWEEN 42 AND 43", "42,43"),
         ("o.id IN (42,97,NULL)", "42,97"),
