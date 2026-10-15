@@ -195,3 +195,13 @@ measured 0.27× MySQL throughput with eight writers, consistent with the prior
 0.28× checkpoint. Its one-writer ratio was 0.39× with high FSDB variance, so
 that single result is not a precise trend. The performance finding remains
 open; no unproven scheduling prototype was retained.
+
+## Application example follow-up
+
+The README's commit-consumer snippet and `examples/LlmSearch` now use the
+bounded `Db.subscribeCommits` queue. The example drains insert notifications
+after the originating statements return, checks `DroppedCount` before
+processing them, and performs embedding writes outside the commit path. Its
+dry-run path embeds all six sample documents. This removes the synchronous
+callback from the recommended application pattern; it does not change the
+existing `Db.onCommit` contract or make queued notifications durable.

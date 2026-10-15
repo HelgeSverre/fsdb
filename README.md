@@ -982,22 +982,16 @@ Other query shapes use the basic row provider. Tables registered before
 
 ### Consume committed changes
 
-`Db.onCommit` is a multi-subscriber change feed derived from the ordered
-persistence events. Inserts contain stored rows after defaults, coercion, and
+`Db.subscribeCommits` exposes ordered commit notifications to host code.
+Inserts contain stored rows after defaults, coercion, and
 auto-increment assignment; updates contain `(before, after)` pairs; deletes
 contain removed rows. The durable stream's internal row identities are not
 part of this public callback shape. Explicit transactions arrive as one
 `TransactionCommitted` event. Failed statements and rollbacks emit nothing.
 
 ```fsharp
-open System.Collections.Concurrent
-
-let committed = ConcurrentQueue<Storage.CommitEvent>()
-
-let db =
-    Db.create ()
-    |> Db.withDataDir "./fsdb-data"
-    |> Db.onCommit (fun event -> committed.Enqueue event)
+let db = Db.create () |> Db.withDataDir "./fsdb-data"
+use committed = Db.subscribeCommits db
 
 let rec insertedDocs =
     function
@@ -1008,9 +1002,12 @@ let rec insertedDocs =
 let drain () =
     let mutable event = Unchecked.defaultof<Storage.CommitEvent>
 
-    while committed.TryDequeue &event do
+    while committed.Reader.TryRead &event do
         for row in insertedDocs event do
             printfn "committed doc row: %A" row
+
+    if committed.DroppedCount <> 0L then
+        failwith "Commit notifications were dropped; resynchronize from the database."
 ```
 
 Handlers run synchronously under the commit-ordering lock after catalog

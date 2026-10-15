@@ -1,7 +1,7 @@
 /// LlmSearch — the "LLM stuff as extension points" sample: fsdb core knows
 /// nothing about HTTP or models; this host registers `llm_complete`/
 /// `llm_embed` closing over its own model config, exposes that config as
-/// `fsdb.models`, and auto-embeds inserted docs via `Db.onCommit` (the
+/// `fsdb.models`, and auto-embeds inserted docs via `Db.subscribeCommits` (the
 /// pgai-vectorizer pattern). Run against a local Ollama, or `--dry-run` to
 /// stub HTTP with deterministic fake embeddings.
 module LlmSearch.Program
@@ -173,20 +173,17 @@ let escape (s: string) = s.Replace("'", "''")
 let private run argv =
     dryRun <- Array.contains "--dry-run" argv
 
-    // pgai-vectorizer pattern: the commit hook only *queues* (it runs sync
-    // under the commit lock, and writing back from inside it would
-    // deadlock); the host drains the queue with normal UPDATEs afterwards.
-    let pending = ConcurrentQueue<int64 * string>()
-
-    let rec collect event =
+    // Consume committed rows after each statement, outside the commit path.
+    let rec insertedDocs event =
         match event with
         | Storage.RowsInserted("fsdb", "docs", rows) ->
-            for row in rows do
+            rows
+            |> List.choose (fun row ->
                 match row[0], row[1], row[2] with
-                | VInt id, VString body, VNull -> pending.Enqueue(id, body)
-                | _ -> ()
-        | Storage.TransactionCommitted events -> List.iter collect events
-        | _ -> ()
+                | VInt id, VString _, VNull -> Some id
+                | _ -> None)
+        | Storage.TransactionCommitted events -> events |> List.collect insertedDocs
+        | _ -> []
 
     let db =
         Db.create ()
@@ -202,7 +199,7 @@ let private run argv =
                              VString m.Endpoint
                              VString m.ModelName
                              (match m.ApiKeyEnv with Some e -> VString e | None -> VNull) |] ]))
-        |> Db.onCommit collect
+    use commits = Db.subscribeCommits db
 
     let conn = Db.connect db
     query conn "SELECT * FROM fsdb.models"
@@ -218,14 +215,22 @@ let private run argv =
     |> List.iteri (fun i body -> exec conn (sprintf "INSERT INTO docs (id, body) VALUES (%d, '%s')" i (escape body)))
 
     let mutable embedded = 0
-    let mutable item = Unchecked.defaultof<int64 * string>
+    let mutable event = Unchecked.defaultof<Storage.CommitEvent>
 
-    while pending.TryDequeue &item do
-        let id, _ = item
+    // Drain only the insert events collected before these UPDATEs. Updates
+    // enqueue their own notifications, which this example does not need.
+    let pending = ResizeArray<int64>()
+    while commits.Reader.TryRead &event do
+        pending.AddRange(insertedDocs event)
+
+    if commits.DroppedCount <> 0L then
+        failwith "Commit notifications were dropped; rescan docs before embedding."
+
+    for id in pending do
         exec conn (sprintf "UPDATE docs SET embedding = llm_embed('local', body) WHERE id = %d" id)
         embedded <- embedded + 1
 
-    printfn "embedded %d docs via the onCommit queue\n" embedded
+    printfn "embedded %d docs via the commit subscription\n" embedded
 
     let question = "how does fsdb store data durably?"
 
