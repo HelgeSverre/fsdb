@@ -1344,6 +1344,37 @@ let tests =
                   expectOk (run store ("UPDATE " + view + " SET n=n+1 WHERE aid=1")) view
               Expect.equal (rows store "SELECT id,n FROM grouped_star_target") [ [ Some "1"; Some "3" ] ] "base row changed"
 
+          testCase "duplicate derived join rows update one physical target once"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE duplicate_view_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE duplicate_view_source(id INT,flag INT)"
+                    "INSERT INTO duplicate_view_target VALUES(1,0),(2,0)"
+                    "INSERT INTO duplicate_view_source VALUES(1,7),(1,8)"
+                    "CREATE VIEW duplicate_derived_write AS SELECT a.id,a.n,d.flag FROM (SELECT id,flag FROM duplicate_view_source LIMIT 100) d JOIN duplicate_view_target a ON a.id=d.id"
+                    "CREATE VIEW duplicate_derived_checked AS SELECT a.id,a.n,d.flag FROM (SELECT id,flag FROM duplicate_view_source LIMIT 100) d JOIN duplicate_view_target a ON a.id=d.id WHERE a.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW duplicate_derived_partner AS SELECT a.id,a.n,d.flag FROM (SELECT id,flag FROM duplicate_view_source LIMIT 100) d JOIN duplicate_view_target a ON a.id=d.id WHERE d.flag>a.n WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW duplicate_derived_join_check AS SELECT a.id,a.n,d.flag FROM (SELECT id,flag FROM duplicate_view_source LIMIT 100) d JOIN duplicate_view_target a ON a.id=d.id AND d.flag>a.n WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT table_name,is_updatable FROM information_schema.views WHERE table_name LIKE 'duplicate_derived_%' ORDER BY table_name")
+                  [ [ Some "duplicate_derived_checked"; Some "YES" ]; [ Some "duplicate_derived_join_check"; Some "YES" ]; [ Some "duplicate_derived_partner"; Some "YES" ]; [ Some "duplicate_derived_write"; Some "YES" ] ]
+                  "a duplicate read-only source retains a writable physical component"
+              Expect.equal (run store "UPDATE duplicate_derived_write SET n=n+1 WHERE id=1") (Affected 1UL) "update the target once"
+              Expect.equal (rows store "SELECT id,n FROM duplicate_view_target ORDER BY id") [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ] "duplicate matches do not repeat the write"
+              match run store "UPDATE duplicate_derived_checked SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected duplicate joined-view check option rejection, got %A" other
+              match run store "UPDATE duplicate_derived_partner SET n=7 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected every original join partner to satisfy the checked write, got %A" other
+              match run store "UPDATE duplicate_derived_join_check SET n=7 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected a lost original join partner to reject the checked write, got %A" other
+              Expect.equal (rows store "SELECT n FROM duplicate_view_target WHERE id=1") [ [ Some "1" ] ] "rejected write leaves the target unchanged"
+
           testCase "join views update a target inside a grouped source"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

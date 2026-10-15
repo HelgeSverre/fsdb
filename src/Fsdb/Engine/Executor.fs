@@ -25133,19 +25133,38 @@ let rec executeAs
                                 (qualifierRanges combined)
                                 None
 
-                        signatures sources rows
-                        |> traverse (fun (partners, flat) ->
-                            if original |> Option.exists (fun allowed -> not (List.contains partners allowed)) then
-                                Ok false
-                            else
-                                match checkPredicate with
-                                | None -> Ok true
-                                | Some predicate ->
-                                    evalExpr { context flat with Clause = WhereClause } predicate
-                                    |> Result.map (fun value -> truthy value = Some true)
-                                    |> Result.mapError ExpressionError)
+                        let candidatePartners = signatures sources rows
+                        // A checked UPDATE must preserve every original join partner.
+                        let retainedPartners =
+                            match original with
+                            | None -> candidatePartners
+                            | Some allowed ->
+                                candidatePartners
+                                |> List.filter (fun (partners, _) -> List.contains partners allowed)
+
+                        let originalPartnersRetained =
+                            match original with
+                            | None -> true
+                            | Some allowed ->
+                                allowed
+                                |> List.forall (fun partner ->
+                                    retainedPartners |> List.exists (fun (current, _) -> current = partner))
+
+                        retainedPartners
+                        |> traverse (fun (_, flat) ->
+                            match checkPredicate with
+                            | None -> Ok true
+                            | Some predicate ->
+                                evalExpr { context flat with Clause = WhereClause } predicate
+                                |> Result.map (fun value -> truthy value = Some true)
+                                |> Result.mapError ExpressionError)
                         |> Result.bind (fun visible ->
-                            if List.contains true visible then Ok candidate
+                            let valid =
+                                match original with
+                                | None -> List.contains true visible
+                                | Some _ -> originalPartnersRetained && not visible.IsEmpty && List.forall id visible
+
+                            if valid then Ok candidate
                             else Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View)))))
 
             checkPredicate

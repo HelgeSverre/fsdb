@@ -9,6 +9,7 @@ import pymysql
 
 
 SHAPES = {
+    "duplicate derived rows": "SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id",
     "middle aggregates": "SELECT a.id,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=a.id",
     "middle JSON_TABLE": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id",
     "derived JSON_TABLE target": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN JSON_TABLE(JSON_ARRAY(d1.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d1.id JOIN a ON a.id=j.x",
@@ -74,10 +75,10 @@ def main():
                 for sql in [
                     "CREATE DATABASE probe", "USE probe",
                     "CREATE TABLE a(id INT PRIMARY KEY,n INT)",
-                    "CREATE TABLE b(id INT PRIMARY KEY,flag INT)",
+                    "CREATE TABLE b(id INT,flag INT)",
                     "CREATE TABLE c(id INT PRIMARY KEY,aux INT)",
                     "INSERT INTO a VALUES(1,0),(2,0)",
-                    "INSERT INTO b VALUES(1,7)",
+                    "INSERT INTO b VALUES(1,7),(1,8)",
                     "INSERT INTO c VALUES(1,9)",
                 ]:
                     run(connection, sql)
@@ -98,6 +99,19 @@ def main():
                     assert_error(connection, "UPDATE vc SET n=-1 WHERE id=1", 1369)
                     assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 0)), name
                     run(connection, "DROP VIEW vc")
+
+                    if name == "duplicate derived rows":
+                        for first, second in [(7, 8), (8, 7)]:
+                            run(connection, "DELETE FROM b")
+                            run(connection, f"INSERT INTO b VALUES(1,{first}),(1,{second})")
+                            run(connection, "CREATE VIEW vcp AS " + definition + " WHERE d1.flag > a.n WITH CASCADED CHECK OPTION")
+                            assert_error(connection, "UPDATE vcp SET n=7 WHERE id=1", 1369)
+                            assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 0))
+                            run(connection, "DROP VIEW vcp")
+                            run(connection, "CREATE VIEW vcj AS SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id AND d1.flag>a.n WITH CASCADED CHECK OPTION")
+                            assert_error(connection, "UPDATE vcj SET n=7 WHERE id=1", 1369)
+                            assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 0))
+                            run(connection, "DROP VIEW vcj")
 
                 print(f"MySQL {version}: {len(SHAPES)} composed join-view shapes matched the expected write contract")
             finally:

@@ -655,7 +655,10 @@ with the joined write.
 Direct inner-join views with `WITH CHECK OPTION` validate inserted and updated
 rows against the join and view predicate. Updates retain their originally
 matched join partners; finding a different partner after a key change does not
-satisfy the check. Outer view layers inherit the restriction.
+satisfy the check. [Multiple derived-source partners](torture/findings/2026-10-15-duplicate-derived-join-view-check.md)
+must each remain joined and satisfy `CHECK OPTION`, even though an ordinary
+joined UPDATE writes the physical target once. Outer view layers inherit the
+restriction.
 Mergeable component views and simple outer layers preserve the same behavior,
 including inherited CHECK OPTION predicates, when the nested security identity
 is unchanged.
