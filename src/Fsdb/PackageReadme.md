@@ -7,7 +7,7 @@ Fsdb is still a prerelease. MySQL 8.4 is the compatibility target, but some beha
 ## Install
 
 ```sh
-dotnet add package Fsdb --version 0.1.0-preview.14
+dotnet add package Fsdb --version 0.1.0-preview.15
 ```
 
 ## Run SQL in process
