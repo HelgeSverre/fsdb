@@ -1882,6 +1882,26 @@ let tests =
                   [ [ Some "1"; Some "4" ]; [ Some "2"; Some "0" ] ]
                   "the physical target is updated once after both CTE joins"
 
+              for name, cte in
+                  [ "renamed", "d(k,f) AS (SELECT id,flag FROM cte_source)"
+                    "joined_body", "d AS (SELECT s.id,s.flag FROM cte_source s JOIN cte_aux x ON x.id=s.id)"
+                    "joined_renamed", "d(k,f) AS (SELECT s.id,s.flag FROM cte_source s JOIN cte_aux x ON x.id=s.id)" ] do
+                  let view = "cte_" + name
+                  let key = if name = "joined_body" then "id" else "k"
+                  let flag = if name = "joined_body" then "flag" else "f"
+                  let sql = $"CREATE VIEW {view} AS WITH {cte} SELECT a.id,a.n,d.{flag} FROM d JOIN cte_target a ON a.id=d.{key}"
+                  expectOk (run store sql) ("create " + view)
+                  Expect.equal
+                      (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{view}'"))
+                      [ [ Some "YES" ] ]
+                      (view + " is updatable in MySQL 8.4")
+                  expectOk (run store ($"UPDATE {view} SET n=n+1 WHERE id=1")) ("update " + view)
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM cte_target ORDER BY id")
+                  [ [ Some "1"; Some "7" ]; [ Some "2"; Some "0" ] ]
+                  "renamed and joined CTE bodies update the target once"
+
           testCase "a direct view predicate limits UPDATE and DELETE but not INSERT"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

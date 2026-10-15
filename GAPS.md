@@ -717,7 +717,8 @@ now also precede a writable physical target in audited inner-join views;
 the moved target predicate is applied after all its source aliases are bound.
 [Single-use independent CTE sources](torture/findings/2026-10-15-cte-joined-view-writes.md)
 now follow that path for audited aggregate, pass-through, and limited bodies,
-including two leading CTEs, while retaining CHECK OPTION and INSERT rules.
+including two leading CTEs, explicit CTE column names, and a CTE body joining
+physical read sources, while retaining CHECK OPTION and INSERT rules.
 [Audited `STRAIGHT_JOIN` edges](torture/findings/2026-10-15-multiple-derived-straight-view.md)
 between those derived sources or at the physical target retain the same
 writable metadata and target-predicate filtering.

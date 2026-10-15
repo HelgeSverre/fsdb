@@ -1682,17 +1682,38 @@ let internal inlineReadOnlyViewCtes (select: SelectStmt) =
             | _ -> false)
         |> List.length
 
-    let inlineable (cte: CommonTableExpr) =
-        not cte.Recursive
-        && cte.CteColumns.IsEmpty
-        && referenceCount cte.CteName = 1
-        && (match cte.Body with
-            | PlainSelect body when body.Ctes.IsEmpty && body.Joins.IsEmpty ->
-                match body.From with
-                | Some(FromTable table) ->
-                    table.Database.IsSome || not (Set.contains (table.Table.ToLowerInvariant()) cteNames)
-                | _ -> false
-            | _ -> false)
+    let tryInlineBody (cte: CommonTableExpr) =
+        let independent = function
+            | FromTable table ->
+                table.Database.IsSome || not (Set.contains (table.Table.ToLowerInvariant()) cteNames)
+            | _ -> false
+
+        match cte.Body with
+        | PlainSelect body
+            when not cte.Recursive
+                 && referenceCount cte.CteName = 1
+                 && body.Ctes.IsEmpty
+                 && (body.From |> Option.exists independent)
+                 && (body.Joins |> List.forall (_.Table >> independent)) ->
+            if cte.CteColumns.IsEmpty then
+                Some(PlainSelect body)
+            elif
+                cte.CteColumns.Length = body.Projections.Length
+                && (cte.CteColumns |> List.map _.ToLowerInvariant() |> Set.ofList).Count = cte.CteColumns.Length
+                && (body.Projections |> List.forall (fun projection -> match projection.Expression with Star _ -> false | _ -> true))
+            then
+                let projections =
+                    (cte.CteColumns, body.Projections)
+                    ||> List.map2 (fun name projection -> { projection with Alias = Some name })
+                Some(PlainSelect { body with Projections = projections })
+            else
+                None
+        | _ -> None
+
+    let inlineBodies =
+        select.Ctes
+        |> List.choose (fun cte ->
+            tryInlineBody cte |> Option.map (fun body -> cte.CteName.ToLowerInvariant(), body))
 
     if select.Ctes.IsEmpty
        || cteNames.Count <> select.Ctes.Length
@@ -1702,10 +1723,10 @@ let internal inlineReadOnlyViewCtes (select: SelectStmt) =
             | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _ -> true
             | _ -> false)
            (Select select)
-       || not (select.Ctes |> List.forall inlineable) then
+       || inlineBodies.Length <> select.Ctes.Length then
         select
     else
-        let ctes = select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant(), cte.Body) |> Map.ofList
+        let ctes = inlineBodies |> Map.ofList
         let expand = function
             | FromTable table as source when table.Database.IsNone ->
                 ctes
