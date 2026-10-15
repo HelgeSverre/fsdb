@@ -10,10 +10,12 @@ acknowledgement, and queued subscriptions have a bounded capacity and visible
 drop count. The OS variable is selected at runtime. These fixes do not resolve
 the review's broader maintainability, durable-write performance, or recovery
 concerns, and they do not establish a new production-readiness score.
-At the October 15 recheck, both focused observer regressions and the package
-consumer check passed. The [latest completed main CI run](https://github.com/HelgeSverre/fsdb/actions/runs/38679710462)
-also passed; the run for the current head was still in progress at this
-checkpoint.
+At the October 15 recheck of `11925047`, `just check` built without warnings
+and passed all 3,606 regression tests. The [current-head CI run](https://github.com/HelgeSverre/fsdb/actions/runs/38682470537)
+had passed its build/package and regression jobs; branch coverage was still
+running at this checkpoint. The [previous completed main CI run](https://github.com/HelgeSverre/fsdb/actions/runs/38681924661)
+passed all jobs. The review's scores and production-readiness judgment are not
+re-scored from these gate results.
 
 | Review finding | Current state | Evidence and next action |
 |---|---|---|
