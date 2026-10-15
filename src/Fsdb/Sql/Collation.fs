@@ -153,16 +153,27 @@ let private foldKanaVariants (value: string) =
 
         result.ToString()
 
-// UCA 4.0 keeps vertical punctuation distinct; newer MySQL weights fold it.
+// UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
+// newer MySQL weights fold its presentation forms.
 let private foldCjkPunctuationForms modern (value: string) =
     let comma = value.Replace('\uFE50', '\uFF0C')
     if modern then
         comma.Replace('\uFE10', '\uFF0C').Replace('\uFE11', '\u3001')
     else
-        // ICU folds FE11 to the ordinary ideographic comma; MySQL's older
-        // UCA 4.0 table gives it an implicit weight instead. Escape the
-        // marker so literal private-use text stays distinct from FE11.
-        comma.Replace("\uE011", "\uE011\uE011").Replace("\uFE11", "\uE011\uE012")
+        // Escape the marker in source text before encoding vertical forms.
+        // Keep FE11's existing marker so stored ngram keys remain compatible.
+        if comma |> Seq.exists (fun c -> c = '\uE011' || (c >= '\uFE10' && c <= '\uFE19')) then
+            let result = StringBuilder(comma.Length)
+            for c in comma do
+                match c with
+                | '\uE011' -> result.Append("\uE011\uE011") |> ignore
+                | '\uFE11' -> result.Append("\uE011\uE012") |> ignore
+                | c when c >= '\uFE10' && c <= '\uFE19' ->
+                    let marker = if c = '\uFE10' then '\uE010' else char (int '\uE013' + int c - int '\uFE12')
+                    result.Append('\uE011').Append(marker) |> ignore
+                | c -> result.Append(c) |> ignore
+            result.ToString()
+        else comma
 
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale

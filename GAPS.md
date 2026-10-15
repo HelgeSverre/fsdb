@@ -881,6 +881,11 @@ and assignments.
 | Transaction relevance | MySQL uses an approximate global table-row estimate for ranking | visibility cases agree; fsdb uses the committed corpus count rather than estimates that remain changed after rollback until ANALYZE ([controlled oracle](torture/findings/2026-10-07-fulltext-transaction-visibility.md#relevance-and-implementation-boundary)); follows the deliberate statistics policy in section 16 | high (relevance correctness) | deliberate divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | ngram DDL, search modes, stopword and phrase boundaries, mutation, startup token sizes, and preserved postings across WAL/snapshot recovery are implemented; common metadata-only MODIFY/CHANGE column definitions also preserve historical postings ([recovery oracle](torture/findings/2026-10-07-ngram-startup-sizing.md)); [multi-column searches and relevance at startup sizes 1–10](torture/findings/2026-10-07-ngram-fulltext.md) match the audited default-collation MySQL corpus, including Unicode formatting and zero-width controls, combining-mark boundaries, decomposed and voiced kana, width and script variants, compatibility ideographs, ideographic variation selectors, CJK punctuation presentation forms, and numeric symbols, within score tolerance; [legacy `utf8mb4_unicode_ci` ideographic-comma equality and ngram membership](torture/findings/2026-10-15-legacy-ngram-punctuation.md) now match the audited MySQL cases, while exact legacy weight bytes, broader legacy-collation behavior, and MeCab remain open | medium (for CJK) | partial |
 
+The [legacy vertical-punctuation follow-up](torture/findings/2026-10-15-legacy-ngram-punctuation.md#vertical-punctuation-block-follow-up)
+also distinguishes all U+FE10–U+FE19 forms under `utf8mb4_unicode_ci` and
+matches the audited period/vertical-period ngram membership. Its keys retain
+their relative MySQL order, while exact weight bytes remain out of scope.
+
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
 preparation while preserving MySQL's complete-corpus relevance. An [audited

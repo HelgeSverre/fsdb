@@ -1452,6 +1452,9 @@ let tests =
                       "utf8mb4_unicode_520_ci", "、", "︑", true
                       "utf8mb4_unicode_ci", "、", "︑", false
                       "utf8mb4_unicode_ci", "、", "﹑", true
+                      "utf8mb4_unicode_ci", "。", "︒", false
+                      "utf8mb4_unicode_ci", "〖", "︗", false
+                      "utf8mb4_unicode_ci", "〗", "︘", false
                       "utf8mb4_unicode_ci", "︑", "\uE011\uE012", false ]
                     <| fun (name, left, right, expected) ->
                         let col = Fsdb.Collation.tryFind name |> Option.get
@@ -1459,6 +1462,15 @@ let tests =
                         if expected then
                             Expect.equal (col.KeyOf left) (col.KeyOf right) (name + " index key")
                             Expect.equal (col.HashOf left) (col.HashOf right) (name + " hash")
+
+                testCase "legacy vertical punctuation keeps MySQL implicit-weight order"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    let forms = [ 0xFE10 .. 0xFE19 ] |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> List.distinct |> List.length) 10 "each vertical form has its own key"
+                    for left, right in forms |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0 "vertical forms follow their implicit-weight order"
+                    Expect.isFalse (col.Equals "︒" "\uE011\uE013") "a literal private-use marker cannot alias a vertical form"
 
                 testTheory
                     "MySQL 8.4 hiragana and katakana equality follows collation sensitivity"

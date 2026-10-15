@@ -33,3 +33,20 @@ that distinction. The focused equality and SQL ngram regressions pass.
 
 This establishes the audited equality and membership behavior, not exact
 MySQL weight bytes, all legacy UCA 4.0 comparisons, or MeCab support.
+
+## Vertical punctuation block follow-up
+
+A new disposable native MySQL 8.4.11 probe inspected every character from
+U+FE10 through U+FE19 under `utf8mb4_unicode_ci`. MySQL assigns distinct,
+ascending implicit weights `FBC1FE10` through `FBC1FE19`. In particular,
+U+FE12 (`︒`) does not equal the ordinary ideographic period U+3002, whereas
+the host ICU collation previously equated them. Indexed ngram searches over
+`中。文` and `中︒文` returned only the matching row for `中。` and `中︒`,
+respectively. The same probe separately confirmed the existing comma split.
+
+The legacy fold now escapes all ten vertical forms into distinct private-use
+markers before asking ICU for a key. It preserves U+FE11's earlier marker,
+escapes literal marker text, and orders the markers in MySQL's audited
+vertical-block order. Focused equality, key, ordering, and indexed ngram
+regressions cover the change. The audited behavior is limited to this block;
+it does not claim exact `WEIGHT_STRING` bytes or comprehensive UCA 4.0 parity.
