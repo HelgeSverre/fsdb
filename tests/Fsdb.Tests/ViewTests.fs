@@ -715,6 +715,34 @@ let tests =
                   [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
                   "denied updates leave the physical rows unchanged"
 
+              expectOk (run store "GRANT SELECT ON fsdb.derived_grant_flags TO derived_grant_inner_owner") "restore grouped derived read"
+              expectOk (run store "GRANT SELECT ON fsdb.derived_grant_target TO derived_grant_inner_owner") "restore grouped target read"
+              for sql in
+                  [ "CREATE DEFINER='derived_grant_inner_owner'@'%' SQL SECURITY DEFINER VIEW grouped_grant_inner AS SELECT t.id,t.n,d.flag FROM derived_grant_target t JOIN ((SELECT id,SUM(flag) flag FROM derived_grant_flags GROUP BY id) d JOIN derived_grant_aux a ON a.id=d.id) ON t.id=d.id"
+                    "GRANT SELECT,UPDATE ON fsdb.grouped_grant_inner TO derived_grant_outer_owner"
+                    "CREATE DEFINER='derived_grant_outer_owner'@'%' SQL SECURITY DEFINER VIEW grouped_grant_outer AS SELECT id,n AS metric FROM grouped_grant_inner" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='grouped_grant_outer'")
+                  [ [ Some "YES" ] ] "a grouped derived source leaves the physical target writable"
+              let groupedUpdate () = run store "UPDATE grouped_grant_outer SET metric=metric+1 WHERE id=1"
+              Expect.equal (groupedUpdate ()) (Affected 1UL) "grouped join update reaches the target"
+              for table, code in [ "derived_grant_flags", 1356; "derived_grant_aux", 1143; "derived_grant_target", 1143 ] do
+                  expectOk (run store $"REVOKE SELECT ON fsdb.{table} FROM derived_grant_inner_owner") "revoke grouped source read"
+                  match groupedUpdate () with
+                  | Err(actual, _) when actual = code -> ()
+                  | other -> failtestf "expected grouped source %s to return %d, got %A" table code other
+                  expectOk (run store $"GRANT SELECT ON fsdb.{table} TO derived_grant_inner_owner") "restore grouped source read"
+              expectOk (run store "REVOKE SELECT ON fsdb.derived_grant_flags FROM derived_grant_inner_owner") "revoke grouped derived read again"
+              expectOk (run store "REVOKE SELECT ON fsdb.derived_grant_aux FROM derived_grant_inner_owner") "revoke grouped physical read again"
+              match groupedUpdate () with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected grouped derived denial to precede physical join denial, got %A" other
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_grant_target ORDER BY id")
+                  [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ]
+                  "grouped denied updates leave the physical rows unchanged"
+
           testCase "layered JSON_TABLE view checks join columns before view projection grants"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

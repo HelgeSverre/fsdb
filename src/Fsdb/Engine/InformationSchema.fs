@@ -1567,6 +1567,34 @@ let internal tryLeadingReadOnlyWritableTarget (source: FromItem) (joins: Join li
         | _ -> None
     | _ -> None
 
+/// Associate explicit inner joins across a parenthesized right operand when
+/// no USING/NATURAL keys change column ownership. Inner ON columns must be
+/// qualified so moving the group beside earlier sources cannot rebind them.
+/// The outer ON condition is applied after the group's last source is bound.
+let internal flattenInnerJoinedOperands (select: SelectStmt) =
+    let flatten (join: Join) =
+        match join.Table with
+        | FromJoinGroup(first, innerJoins)
+            when join.Kind = InnerJoin
+                 && join.Using.IsEmpty
+                 && not innerJoins.IsEmpty
+                 && (innerJoins
+                     |> List.forall (fun inner ->
+                         inner.Kind = InnerJoin
+                         && inner.Using.IsEmpty
+                         && not (Expression.exists (function Col _ -> true | _ -> false) inner.On))) ->
+            let last = innerJoins.Length - 1
+            { join with Table = first; On = Lit(VInt 1L) }
+            :: (innerJoins
+                |> List.mapi (fun index inner ->
+                    if index = last then
+                        { inner with On = BinOp(And, inner.On, join.On) }
+                    else
+                        inner))
+        | _ -> [ join ]
+
+    { select with Joins = select.Joins |> List.collect flatten }
+
 let private isUpdatableView (catalog: Catalog) (schema: string) (definition: string) =
     let views = viewCatalogEntries catalog
 
@@ -1593,7 +1621,8 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                 |> Option.exists (fun view -> not (Set.contains key seen) && check (Set.add key seen) sourceSchema view.Definition)
 
         match Fsdb.Parser.parse definition with
-        | Ok(Select select) ->
+        | Ok(Select parsed) ->
+            let select = flattenInnerJoinedOperands parsed
             match select.From with
             | Some source ->
                 let sourceAllowsUpdates = function

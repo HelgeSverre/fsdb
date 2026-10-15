@@ -75,6 +75,27 @@ def exercise(connection):
     results.append(("revoked flags and target", outcome(connection, update)))
     run(connection, "GRANT SELECT ON probe.flags TO inner_owner")
     run(connection, "GRANT SELECT ON probe.target TO inner_owner")
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW grouped_inner AS "
+        "SELECT t.id,t.n,d.flag FROM target t JOIN "
+        "((SELECT id,SUM(flag) flag FROM flags GROUP BY id) d "
+        "JOIN aux a ON a.id=d.id) ON t.id=d.id",
+        "GRANT SELECT,UPDATE ON probe.grouped_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW grouped_outer "
+        "AS SELECT id,n AS metric FROM grouped_inner",
+    ]:
+        run(connection, sql)
+    grouped_update = "UPDATE grouped_outer SET metric=metric+1 WHERE id=1"
+    results.append(("grouped metadata", outcome(connection, "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='grouped_outer'")))
+    results.append(("grouped initial", outcome(connection, grouped_update)))
+    for table in ("flags", "aux", "target"):
+        run(connection, f"REVOKE SELECT ON probe.{table} FROM inner_owner")
+        results.append((f"grouped revoked {table}", outcome(connection, grouped_update)))
+        run(connection, f"GRANT SELECT ON probe.{table} TO inner_owner")
+    run(connection, "REVOKE SELECT ON probe.flags FROM inner_owner")
+    run(connection, "REVOKE SELECT ON probe.aux FROM inner_owner")
+    results.append(("grouped revoked flags and aux", outcome(connection, grouped_update)))
     results.append(("final rows", outcome(connection, "SELECT id,n FROM target ORDER BY id")))
     return results
 
