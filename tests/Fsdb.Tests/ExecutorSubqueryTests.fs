@@ -69,6 +69,16 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "empty" ] ] "categories without a published system"
                     | other -> failtestf "expected NOT EXISTS rows, got %A" other
 
+                testCase "decorrelated EXISTS still validates its projected columns"
+                <| fun _ ->
+                    let store = joinedStore ()
+                    for invalidSql in
+                        [ "SELECT EXISTS (SELECT missing_column FROM sys INNER JOIN cat_sys ON sys.id = cat_sys.sys_id WHERE cat.id = cat_sys.cat_id) FROM cat"
+                          "SELECT EXISTS (SELECT 1 FROM sys INNER JOIN cat_sys ON sys.id = cat_sys.sys_id WHERE cat.id = cat_sys.cat_id ORDER BY missing_column) FROM cat" ] do
+                        match runDefault store invalidSql with
+                        | Err(1054, _) -> ()
+                        | other -> failtestf "an invalid EXISTS column must retain MySQL error 1054, got %A" other
+
                 testCase "non-integer outer keys keep exact per-row equality"
                 <| fun _ ->
                     let store = joinedStore ()

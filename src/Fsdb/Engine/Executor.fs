@@ -8577,6 +8577,7 @@ and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : 
         && select.Having.IsNone
         && select.Limit.IsNone
         && select.Offset.IsNone
+        && select.OrderBy.IsEmpty
         && select.Windows.IsEmpty
         && select.Ctes.IsEmpty
         && select.Locking.IsEmpty
@@ -8683,7 +8684,7 @@ and private tryDecorrelatedCount (outer: EvalContext) (select: SelectStmt) : Res
 and private tryDecorrelatedExists (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
     let plainProjection (projection: Projection) =
         match projection.Expression with
-        | Star _ | Col _ | QualifiedCol _ | Lit _ -> true
+        | Star None | Lit _ -> true
         | _ -> false
 
     if select.Projections |> List.forall plainProjection then
