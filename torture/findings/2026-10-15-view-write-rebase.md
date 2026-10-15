@@ -23,8 +23,17 @@ a simple and a joined view wait on the base table's primary key; after the
 first transaction commits, the waiter returns 1062. FSDB already matched
 these two forms because physical insert execution claims the key, so they now
 have a regression without an engine change. This does not establish scheduling
-parity for every view: writes through derived or dependent sources and
-view-addressed INSERT SELECT remain separate cases to audit.
+parity for every view: writes through derived or dependent sources remain
+separate cases to audit.
+
+A native MySQL 8.4.11 two-session probe also inserted a row through an
+inner-join view using `INSERT INTO v(id,n) SELECT id,n FROM source WHERE id=1`.
+The second transaction waited while the first held the physical primary key;
+after the first committed, it returned duplicate-key error 1062, and the base
+table retained the first row. FSDB already follows that path when executing
+the selected insert rows. A focused transaction regression now pins the wait,
+error, and final base row. This verifies the audited view-addressed INSERT
+SELECT case, not every source query or duplicate-key update form.
 
 MySQL 8.4.11 also waits and rebases when the target follows a read-only
 `JSON_TABLE` source in the view definition. The second `UPDATE v SET n=n+1`

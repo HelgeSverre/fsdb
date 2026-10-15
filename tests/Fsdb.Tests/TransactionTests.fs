@@ -2103,41 +2103,48 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "both view increments should be committed, got %A" result
 
-          testCase "literal view inserts wait for the physical primary key"
+          testCase "view VALUES and INSERT SELECT wait for the physical primary key"
           <| fun _ ->
-              for definition in
+              let definitions =
                   [ "SELECT id, n FROM tx_insert_view_target"
-                    "SELECT t.id, t.n, l.id AS lookup_id FROM tx_insert_view_target t JOIN tx_insert_view_lookup l ON l.id = t.id" ] do
-                  let store = Fsdb.Storage.create ()
-                  let setup = create 1 store
-                  let setup, _ = handle setup "CREATE TABLE tx_insert_view_target (id INT PRIMARY KEY, n INT)"
-                  let setup, _ = handle setup "CREATE TABLE tx_insert_view_lookup (id INT PRIMARY KEY)"
-                  let setup, _ = handle setup "INSERT INTO tx_insert_view_lookup VALUES (1)"
-                  let setup, _ = handle setup ("CREATE VIEW tx_insert_view AS " + definition)
-                  let first, _ = handle (create 2 store) "BEGIN"
-                  let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
-                  let second, _ = handle second "BEGIN"
-                  let sql = "INSERT INTO tx_insert_view (id, n) VALUES (1, 10)"
-                  let first, firstInsert = handle first sql
-                  Expect.equal firstInsert (Affected 1UL) "the first view insert succeeds"
+                    "SELECT t.id, t.n, l.id AS lookup_id FROM tx_insert_view_target t JOIN tx_insert_view_lookup l ON l.id = t.id" ]
+              let statements =
+                  [ "INSERT INTO tx_insert_view (id, n) VALUES (1, 10)"
+                    "INSERT INTO tx_insert_view (id, n) SELECT id, n FROM tx_insert_view_source WHERE id = 1" ]
 
-                  let waiting = Threading.Tasks.Task.Run(fun () -> handle second sql)
-                  Expect.isFalse
-                      (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
-                      "the second view insert waits for the physical key owner"
+              for definition in definitions do
+                  for sql in statements do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      let setup, _ = handle setup "CREATE TABLE tx_insert_view_target (id INT PRIMARY KEY, n INT)"
+                      let setup, _ = handle setup "CREATE TABLE tx_insert_view_lookup (id INT PRIMARY KEY)"
+                      let setup, _ = handle setup "CREATE TABLE tx_insert_view_source (id INT PRIMARY KEY, n INT)"
+                      let setup, _ = handle setup "INSERT INTO tx_insert_view_lookup VALUES (1)"
+                      let setup, _ = handle setup "INSERT INTO tx_insert_view_source VALUES (1, 10)"
+                      let setup, _ = handle setup ("CREATE VIEW tx_insert_view AS " + definition)
+                      let first, _ = handle (create 2 store) "BEGIN"
+                      let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+                      let second, _ = handle second "BEGIN"
+                      let first, firstInsert = handle first sql
+                      Expect.equal firstInsert (Affected 1UL) "the first view insert succeeds"
 
-                  Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first view insert commits"
-                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the second view insert resumes"
+                      let waiting = Threading.Tasks.Task.Run(fun () -> handle second sql)
+                      Expect.isFalse
+                          (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          "the second view insert waits for the physical key owner"
 
-                  match waiting.GetAwaiter().GetResult() |> snd with
-                  | Err(1062, _) -> ()
-                  | result -> failtestf "the second insert should find the committed key, got %A" result
+                      Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first view insert commits"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the second view insert resumes"
 
-                  handle second "ROLLBACK" |> ignore
+                      match waiting.GetAwaiter().GetResult() |> snd with
+                      | Err(1062, _) -> ()
+                      | result -> failtestf "the second insert should find the committed key, got %A" result
 
-                  match handle setup "SELECT id, n FROM tx_insert_view_target" |> snd with
-                  | ResultSet(_, [ [ Some "1"; Some "10" ] ]) -> ()
-                  | result -> failtestf "the first inserted row should remain, got %A" result
+                      handle second "ROLLBACK" |> ignore
+
+                      match handle setup "SELECT id, n FROM tx_insert_view_target" |> snd with
+                      | ResultSet(_, [ [ Some "1"; Some "10" ] ]) -> ()
+                      | result -> failtestf "the first inserted row should remain, got %A" result
 
           testCase "literal defaults participate in transaction key claims"
           <| fun _ ->
