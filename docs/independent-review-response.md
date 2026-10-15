@@ -4,6 +4,17 @@ The review inspected `ffb9e71d`. This response checks its actionable findings
 against the current implementation and distinguishes completed work from remaining limits. Its
 scores are the reviewer's judgment, not a current measured rating.
 
+The October 15 recheck at `95d83d9a` confirms that the concrete findings
+still have their intended fixes: CI builds, runs regressions, verifies the
+package consumer, and enforces branch coverage; failing commit observers do
+not change write acknowledgements; commit subscriptions are bounded; and the
+OS variable is selected at runtime. The [main CI run](https://github.com/HelgeSverre/fsdb/actions/runs/38672976364)
+passed its build/package, regression, and branch-coverage jobs. Locally,
+`just package-check` passed, and `just check`
+built without warnings and passed all 3,600 tests. The review's
+historical performance numbers and production-readiness score have not been
+replaced by these checks. The open limits in the table below still apply.
+
 At `3515f38e`, the review's immediate P0 items are already addressed in code:
 PR/main CI runs the ordinary gates, and observer exceptions no longer change
 write acknowledgement. A new WAL-backed regression checks the latter across
