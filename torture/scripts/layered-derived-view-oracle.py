@@ -123,6 +123,29 @@ def exercise(connection):
         run(connection, "REVOKE SELECT ON probe.flags FROM inner_owner")
         run(connection, "REVOKE SELECT ON probe.aux_n FROM inner_owner")
         results.append(("grouped bare revoked flags and aux_n", outcome(connection, bare_update)))
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW json_chain_inner AS "
+        "SELECT t.id,t.n,j.x,k.y FROM JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j "
+        "JOIN JSON_TABLE(JSON_ARRAY(j.x),'$[*]' COLUMNS(y INT PATH '$')) k ON k.y=j.x "
+        "JOIN target t ON t.id=k.y",
+        "GRANT SELECT,UPDATE ON probe.json_chain_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW json_chain_outer "
+        "AS SELECT id,n AS metric FROM json_chain_inner",
+    ]:
+        run(connection, sql)
+    chain_update = "UPDATE json_chain_outer SET metric=metric+1 WHERE id=1"
+    results.append(("JSON chain metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='json_chain_outer'")))
+    results.append(("JSON chain initial", outcome(connection, chain_update)))
+    run(connection, "REVOKE SELECT ON probe.target FROM inner_owner")
+    results.append(("JSON chain revoked target SELECT", outcome(connection, chain_update)))
+    run(connection, "GRANT SELECT ON probe.target TO inner_owner")
+    run(connection, "REVOKE UPDATE ON probe.target FROM inner_owner")
+    results.append(("JSON chain revoked target UPDATE", outcome(connection, chain_update)))
+    run(connection, "GRANT UPDATE ON probe.target TO inner_owner")
+    run(connection, "REVOKE UPDATE ON probe.json_chain_inner FROM outer_owner")
+    results.append(("JSON chain revoked component UPDATE", outcome(connection, chain_update)))
     results.append(("final rows", outcome(connection, "SELECT id,n FROM target ORDER BY id")))
     return results
 
