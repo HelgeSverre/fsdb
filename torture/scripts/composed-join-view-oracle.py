@@ -113,6 +113,17 @@ def main():
                             assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 0))
                             run(connection, "DROP VIEW vcj")
 
+                run(connection, "CREATE TABLE insert_target(id INT PRIMARY KEY,n INT)")
+                run(connection, "CREATE VIEW insert_checked AS SELECT z.id,z.n,b.flag FROM insert_target z JOIN b ON b.id=z.id WHERE b.flag>z.n WITH CASCADED CHECK OPTION")
+                assert_error(connection, "INSERT INTO insert_checked(id,n) VALUES(1,7)", 1369)
+                assert run(connection, "SELECT id,n FROM insert_target") == ()
+                assert run(connection, "INSERT INTO insert_checked(id,n) VALUES(1,6)") == 1
+                assert run(connection, "SELECT id,n FROM insert_target") == ((1, 6),)
+                run(connection, "INSERT INTO b VALUES(2,7),(2,8)")
+                run(connection, "CREATE VIEW insert_on_checked AS SELECT z.id,z.n,b.flag FROM insert_target z JOIN b ON b.id=z.id AND b.flag>z.n WITH CASCADED CHECK OPTION")
+                assert run(connection, "INSERT INTO insert_on_checked(id,n) VALUES(2,7)") == 1
+                assert run(connection, "SELECT id,n FROM insert_target ORDER BY id") == ((1, 6), (2, 7))
+
                 print(f"MySQL {version}: {len(SHAPES)} composed join-view shapes matched the expected write contract")
             finally:
                 if connection:

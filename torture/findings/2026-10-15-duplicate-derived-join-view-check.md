@@ -15,6 +15,14 @@ join-view matrix.
 
 FSDB previously accepted the predicate case because its joined-view check
 required only one retained candidate partner to pass. It now requires every
-original partner to remain joined and satisfy the check for an UPDATE. INSERT
-continues to require at least one matching joined row. The focused view
-regression covers the ordinary update and both checked rejections.
+original partner to remain joined and satisfy the check for an UPDATE.
+
+The same oracle finds a related explicit-column INSERT rule on a direct join
+view. With source flags 7 and 8, inserting `n=7` fails with 1369 when
+`WHERE b.flag>n` because one resulting join row fails; inserting `n=6`
+succeeds. If that comparison is instead in `ON`, the flag-7 row is excluded
+from the joined result and inserting `n=7` succeeds. FSDB previously accepted
+the failing WHERE case because it required only one checked join row to pass.
+It now requires a nonempty joined result whose every row passes. The focused
+regression covers the ordinary update, both checked update rejections, and
+these rejected and accepted INSERT forms.

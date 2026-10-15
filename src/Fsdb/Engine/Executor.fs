@@ -25151,7 +25151,7 @@ let rec executeAs
                                 None
 
                         let candidatePartners = signatures sources rows
-                        // A checked UPDATE must preserve every original join partner.
+                        // Updates preserve every original partner; inserts check every new join row.
                         let retainedPartners =
                             match original with
                             | None -> candidatePartners
@@ -25176,10 +25176,7 @@ let rec executeAs
                                 |> Result.map (fun value -> truthy value = Some true)
                                 |> Result.mapError ExpressionError)
                         |> Result.bind (fun visible ->
-                            let valid =
-                                match original with
-                                | None -> List.contains true visible
-                                | Some _ -> originalPartnersRetained && not visible.IsEmpty && List.forall id visible
+                            let valid = originalPartnersRetained && not visible.IsEmpty && List.forall id visible
 
                             if valid then Ok candidate
                             else Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View)))))

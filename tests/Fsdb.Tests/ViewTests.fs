@@ -1344,7 +1344,7 @@ let tests =
                   expectOk (run store ("UPDATE " + view + " SET n=n+1 WHERE aid=1")) view
               Expect.equal (rows store "SELECT id,n FROM grouped_star_target") [ [ Some "1"; Some "3" ] ] "base row changed"
 
-          testCase "duplicate derived join rows update one physical target once"
+          testCase "duplicate join partners enforce view write checks"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               for sql in
@@ -1374,6 +1374,26 @@ let tests =
               | Err(1369, _) -> ()
               | other -> failtestf "expected a lost original join partner to reject the checked write, got %A" other
               Expect.equal (rows store "SELECT n FROM duplicate_view_target WHERE id=1") [ [ Some "1" ] ] "rejected write leaves the target unchanged"
+
+              expectOk (run store "CREATE TABLE duplicate_insert_target(id INT PRIMARY KEY,n INT)") "create insert target"
+              expectOk
+                  (run store "CREATE VIEW duplicate_insert_checked AS SELECT a.id,a.n,b.flag FROM duplicate_insert_target a JOIN duplicate_view_source b ON b.id=a.id WHERE b.flag>a.n WITH CASCADED CHECK OPTION")
+                  "create checked join insert view"
+              match run store "INSERT INTO duplicate_insert_checked(id,n) VALUES(1,7)" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected every inserted join partner to satisfy the check, got %A" other
+              Expect.equal (rows store "SELECT id,n FROM duplicate_insert_target") [] "rejected insert leaves no target row"
+              Expect.equal (run store "INSERT INTO duplicate_insert_checked(id,n) VALUES(1,6)") (Affected 1UL) "all joined rows satisfy the valid insert"
+              Expect.equal (rows store "SELECT id,n FROM duplicate_insert_target") [ [ Some "1"; Some "6" ] ] "valid insert reaches the target"
+              expectOk (run store "INSERT INTO duplicate_view_source VALUES(2,7),(2,8)") "seed another join key"
+              expectOk
+                  (run store "CREATE VIEW duplicate_insert_on_checked AS SELECT a.id,a.n,b.flag FROM duplicate_insert_target a JOIN duplicate_view_source b ON b.id=a.id AND b.flag>a.n WITH CASCADED CHECK OPTION")
+                  "create checked join-condition insert view"
+              Expect.equal (run store "INSERT INTO duplicate_insert_on_checked(id,n) VALUES(2,7)") (Affected 1UL) "ON removes the failing partner before the check"
+              Expect.equal
+                  (rows store "SELECT id,n FROM duplicate_insert_target ORDER BY id")
+                  [ [ Some "1"; Some "6" ]; [ Some "2"; Some "7" ] ]
+                  "both valid insert forms reach the target"
 
           testCase "join views update a target inside a grouped source"
           <| fun _ ->
