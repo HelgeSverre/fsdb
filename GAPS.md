@@ -654,6 +654,9 @@ columns and allow an outer joined view to update its physical component
 [Multiple leading read-only derived sources](torture/findings/2026-10-15-multiple-derived-join-view.md)
 now also precede a writable physical target in audited inner-join views;
 the moved target predicate is applied after all its source aliases are bound.
+[Audited `STRAIGHT_JOIN` edges](torture/findings/2026-10-15-multiple-derived-straight-view.md)
+between those derived sources or at the physical target retain the same
+writable metadata and target-predicate filtering.
 [Derived-first `USING` chains](torture/findings/2026-10-15-derived-using-view.md)
 also retain writable metadata and update a physical target, including a merged
 key projection; multiple leading derived sources now preserve the original

@@ -1151,6 +1151,32 @@ let tests =
               Expect.equal (update ()) (Affected 1UL) "both source grants permit the update"
               Expect.equal (rows store "SELECT n FROM grouped_target_a") [ [ Some "21" ] ] "authorized update reaches the base row"
 
+          testCase "multiple derived sources preserve writable targets across STRAIGHT_JOIN edges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE straight_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE straight_left(id INT PRIMARY KEY,flag INT)"
+                    "CREATE TABLE straight_right(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO straight_target VALUES(1,0)"
+                    "INSERT INTO straight_left VALUES(1,7)"
+                    "INSERT INTO straight_right VALUES(1,9)"
+                    "CREATE VIEW straight_first AS SELECT a.id AS aid,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) AS flag FROM straight_left GROUP BY id) d1 STRAIGHT_JOIN (SELECT id,SUM(aux) AS aux FROM straight_right GROUP BY id) d2 ON d2.id=d1.id JOIN straight_target a ON a.id=d1.id AND a.id=d2.id"
+                    "CREATE VIEW straight_target_join AS SELECT a.id AS aid,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) AS flag FROM straight_left GROUP BY id) d1 JOIN (SELECT id,SUM(aux) AS aux FROM straight_right GROUP BY id) d2 ON d2.id=d1.id STRAIGHT_JOIN straight_target a ON a.id=d1.id AND a.n<d2.aux"
+                    "CREATE VIEW straight_both AS SELECT a.id AS aid,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) AS flag FROM straight_left GROUP BY id) d1 STRAIGHT_JOIN (SELECT id,SUM(aux) AS aux FROM straight_right GROUP BY id) d2 ON d2.id=d1.id STRAIGHT_JOIN straight_target a ON a.id=d1.id AND a.id=d2.id" ] do
+                  expectOk (run store sql) sql
+
+              for view in [ "straight_first"; "straight_target_join"; "straight_both" ] do
+                  Expect.equal
+                      (rows store ("SELECT is_updatable FROM information_schema.views WHERE table_name='" + view + "'"))
+                      [ [ Some "YES" ] ] "MySQL 8.4 marks the target writable"
+                  expectOk (run store ("UPDATE " + view + " SET n=n+1 WHERE aid=1")) view
+              Expect.equal (rows store "SELECT n FROM straight_target") [ [ Some "3" ] ] "each view updates the target"
+              expectOk (run store "UPDATE straight_target SET n=20 WHERE id=1") "exclude the target row"
+              Expect.equal
+                  (run store "UPDATE straight_target_join SET n=n+1 WHERE aid=1")
+                  (Affected 0UL) "the moved target predicate still filters the write"
+
           testCase "join views update mergeable components beside union views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
