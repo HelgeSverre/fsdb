@@ -930,6 +930,57 @@ let tests =
               | other -> failtestf "expected the ignored-index query to retain MySQL's count, got %A" other
               Expect.isGreaterThan touches 1000 "ignored keys do not narrow the mixed correlated probe"
 
+          testCase "physical correlated OR branches union indexed IN candidates"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE or_bounds(a1 INT,a2 INT,b1 INT,b2 INT)" |> ignore
+              runDefault store "CREATE TABLE or_rows(id INT PRIMARY KEY,a INT,b INT,KEY ix_a(a),KEY ix_b(b))" |> ignore
+              runDefault store "INSERT INTO or_bounds VALUES(1,2,1500,1501)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,%d,%d)" id id (id + 1000))
+              |> String.concat ","
+              |> sprintf "INSERT INTO or_rows VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for prefix, source in
+                  [ "", "or_rows d"
+                    "", "(SELECT id,a,b FROM or_rows) d"
+                    "WITH passed AS (SELECT id,a,b FROM or_rows) ", "passed d" ] do
+                  touches <- 0
+                  let sql =
+                      prefix + "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND (d.a IN(o.a1,o.a2)"
+                      + " OR d.b IN(o.b1,o.b2))) FROM or_bounds o"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "4" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's four indexed matches, got %A" other
+                  Expect.isLessThan touches 20 (sprintf "OR union narrows before residual evaluation for %s" source)
+
+              touches <- 0
+              let uncovered =
+                  "SELECT (SELECT COUNT(*) FROM or_rows d WHERE TOUCH(d.id)=d.id"
+                  + " AND (d.a IN(o.a1,o.a2) OR MOD(d.id,2)=0)) FROM or_bounds o"
+              match run store registry uncovered with
+              | ResultSet(_, [ [ Some "501" ] ]) -> ()
+              | other -> failtestf "expected the uncovered OR branch to retain all matches, got %A" other
+              Expect.isGreaterThan touches 1000 "an uncovered OR branch keeps the scan path"
+
+              touches <- 0
+              let ignored =
+                  "SELECT (SELECT COUNT(*) FROM or_rows d IGNORE INDEX (ix_a,ix_b)"
+                  + " WHERE TOUCH(d.id)=d.id AND (d.a IN(o.a1,o.a2)"
+                  + " OR d.b IN(o.b1,o.b2))) FROM or_bounds o"
+              match run store registry ignored with
+              | ResultSet(_, [ [ Some "4" ] ]) -> ()
+              | other -> failtestf "expected ignored indexes to preserve the OR result, got %A" other
+              Expect.isGreaterThan touches 1000 "ignored indexes cannot narrow OR branches"
+
           testCase "physical correlated text IN respects effective comparison collation"
           <| fun _ ->
               let mutable touches = 0

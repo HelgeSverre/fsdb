@@ -214,7 +214,9 @@ The intersection requires physical reads to preserve stored row identity;
 other projected access families still choose one slice. Complete [functional and mixed plain/functional equality and text-range OR branches](torture/findings/2026-10-14-correlated-functional-or-union.md)
 over direct and pass-through physical sources intersect compatible candidates
 within each branch, then union stored row identities before projection and
-residual evaluation.
+residual evaluation. Complete [correlated physical `IN` OR branches](torture/findings/2026-10-15-correlated-physical-in-or-union.md)
+use the same row-identity union, including direct, pass-through derived, and
+stable CTE sources; an uncovered branch retains the scan path.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,

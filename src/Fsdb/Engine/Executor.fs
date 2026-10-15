@@ -14862,6 +14862,15 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     correlatedRangeBounds probeSource (Some branch) outer
                     |> List.choose (tryProjectedPhysicalRangeCandidates CostedRead store projection)
 
+                let membership =
+                    if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
+                        outer
+                        |> Option.bind (fun context ->
+                            tryProjectedPhysicalCorrelatedInRowIds store projection qualifier (Some branch) context)
+                        |> Option.map (Storage.rowsForRowIds projection.PhysicalTable)
+                    else
+                        None
+
                 let functional =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
                         outer
@@ -14873,7 +14882,7 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     else
                         []
 
-                (equality |> Option.toList) @ ranges @ functional
+                (equality |> Option.toList) @ (membership |> Option.toList) @ ranges @ functional
                 |> intersectPhysicalRows
 
             let merge candidates =
