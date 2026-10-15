@@ -633,6 +633,10 @@ and authorize UPDATE at each definer or invoker boundary, including renamed
 columns and column-level grants through three layers. Explicit-column INSERT
 checks the corresponding layered grants; a missing grant invalidates the outer
 view with MySQL's 1356 error in the audited cases.
+[Direct layered views now return 1356 for revoked intermediate or inner base
+grants](torture/findings/2026-10-15-layered-view-grant-diagnostics.md) during
+UPDATE; a layered `JSON_TABLE` view still differs when the inner owner's base
+SELECT is revoked, returning 1356 rather than MySQL's column-level 1143.
 Joined UPDATE also reaches a mergeable component view with a distinct definer.
 The outer definer must retain access to the component view, while that view's
 definer must retain SELECT on its base tables and UPDATE on the written target;

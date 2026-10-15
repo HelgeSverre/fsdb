@@ -25715,7 +25715,7 @@ let rec executeAs
                     checkPath registry accessPath
                     |> Result.mapError (fun ((code, _) as error) ->
                         if layeredSecurity && (code = 1142 || code = 1143)
-                           && (match statement with Insert _ | InsertSelect _ -> true | _ -> false) then
+                           && (match statement with Insert _ | InsertSelect _ | Update _ -> true | _ -> false) then
                             invalidViewError view.ViewDatabase view.ViewName
                         else error)
                     |> Result.bind checkReadPaths

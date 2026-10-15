@@ -639,6 +639,39 @@ let tests =
                   [ [ Some "1"; Some "14" ]; [ Some "2"; Some "20" ] ]
                   "the denied inserts leave the base table unchanged"
 
+          testCase "layered direct-view writes report revoked grants as invalid views"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE layered_target(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO layered_target VALUES(1,0)"
+                    "CREATE USER layered_inner_owner"
+                    "CREATE USER layered_outer_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.layered_target TO layered_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO layered_inner_owner,layered_outer_owner"
+                    "CREATE DEFINER='layered_inner_owner'@'%' SQL SECURITY DEFINER VIEW layered_inner AS SELECT id,n FROM layered_target"
+                    "GRANT SELECT,UPDATE ON fsdb.layered_inner TO layered_outer_owner"
+                    "CREATE DEFINER='layered_outer_owner'@'%' SQL SECURITY DEFINER VIEW layered_outer AS SELECT id,n AS metric FROM layered_inner" ] do
+                  expectOk (run store sql) sql
+
+              let update view = run store $"UPDATE {view} SET metric=metric+1 WHERE id=1"
+              Expect.equal (update "layered_outer") (Affected 1UL) "the complete grant chain permits the update"
+              expectOk (run store "REVOKE UPDATE ON fsdb.layered_inner FROM layered_outer_owner") "revoke the exposed view grant"
+              match update "layered_outer" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the missing intermediate grant to invalidate the view, got %A" other
+              expectOk (run store "GRANT UPDATE(n) ON fsdb.layered_inner TO layered_outer_owner") "restore the exposed column grant"
+              expectOk (run store "REVOKE SELECT ON fsdb.layered_target FROM layered_inner_owner") "revoke the base read grant"
+              match update "layered_outer" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the direct inner view's missing SELECT to return 1356, got %A" other
+              expectOk (run store "GRANT SELECT ON fsdb.layered_target TO layered_inner_owner") "restore the base read grant"
+              expectOk (run store "REVOKE UPDATE ON fsdb.layered_target FROM layered_inner_owner") "revoke the base write grant"
+              match update "layered_outer" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the direct inner view's missing UPDATE to return 1356, got %A" other
+              Expect.equal (rows store "SELECT n FROM layered_target") [ [ Some "1" ] ] "denied writes leave the base row unchanged"
+
           testCase "join view writes honor a component view's distinct definer"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -1662,8 +1695,8 @@ let tests =
               let _root = apply root "REVOKE UPDATE ON fsdb.secured_rows FROM inner_owner"
 
               match Fsdb.QueryHandler.handle writer "UPDATE outer_secured SET n = 12 WHERE id = 1" |> snd with
-              | Err(1142, message) -> Expect.stringContains message "secured_rows" "the failing inner boundary names its base table"
-              | other -> failtestf "expected the inner definer's revoked privilege to block the write, got %A" other
+              | Err(1356, message) -> Expect.stringContains message "outer_secured" "the invalid outer view is named"
+              | other -> failtestf "expected the inner definer's revoked privilege to invalidate the outer view, got %A" other
 
           testCase "view DELETE subqueries retain the outer definer identity"
           <| fun _ ->
