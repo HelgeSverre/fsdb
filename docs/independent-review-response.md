@@ -205,3 +205,34 @@ processing them, and performs embedding writes outside the commit path. Its
 dry-run path embeds all six sample documents. This removes the synchronous
 callback from the recommended application pattern; it does not change the
 existing `Db.onCommit` contract or make queued notifications durable.
+
+## Current-head review gate before further gap work
+
+The review targeted `ffb9e71d`, while this check is against `c4d37b47`.
+The code-level P0 items remain resolved: `.github/workflows/ci.yml` runs on
+main pushes and pull requests with build, package-consumer verification,
+regressions, and branch coverage; commit observer exceptions are isolated from
+write acknowledgement. Queued subscriptions default to a bounded 1024-event
+channel, expose dropped-event counts, and unregister on disposal. The operating
+system variable is selected at runtime. The repository also documents that
+embedded async operations use `Task.Run`, and it provides stopped-directory
+backup and staging-restore procedures.
+
+Those checks do not make the outstanding items complete. `Db.onCommit` remains
+synchronous under `Store.CommitLock`; a slow callback can delay a write and a
+callback that writes back to the same store can deadlock. The bounded queue is
+the recommended application interface, but drops require resynchronization and
+the events have no durable acknowledgement contract. `registerTable` deliberately
+uses store-wide registration for newly opened sessions; changing it to a pure
+builder would change existing API behavior and needs a separate design.
+
+The latest [same-host durability-matched checkpoint](../benchmarks/results/2026-10-15-current-head-wire-embedded-write-check.md)
+measured 11,401 WAL-backed wire inserts/sec versus 41,615 durable MySQL
+inserts/sec at eight writers (0.27×). An embedded WAL-backed control averaged
+29,404 inserts/sec, but sequential runs cannot isolate protocol or scheduling
+cost. Keep the matched performance gate and require a measured causal change
+before retaining another scheduling optimization. `Executor.fs` still needs
+small, cohesive extractions at real edit boundaries; file size alone is not a
+safe refactor plan. Online backup and general cross-version migration remain
+unsupported. These are open review workstreams, not evidence that the original
+production-readiness score has changed.
