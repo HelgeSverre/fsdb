@@ -926,8 +926,12 @@ now agrees across the audited insensitive collations while ngram tokenization
 retains MySQL's ASCII punctuation boundary.
 The [combined legacy width-form corpus](torture/findings/2026-10-15-legacy-ngram-punctuation.md#combined-width-form-corpus)
 now matches MySQL's cross-block ngram membership and relevance across all ten
-token sizes and three search modes for the audited presentation ranges; exact
-legacy weights and other punctuation families remain open.
+token sizes and three search modes for the audited presentation ranges. An
+[expanded CJK punctuation and kana corpus](torture/findings/2026-10-15-cjk-kana-quote-ngram.md)
+now covers small/full-size kana equality, distinct CJK double-quote forms, and
+unbalanced ngram Boolean parentheses: 936 queries per startup token size from 1 to
+10 match MySQL in membership and relevance. Exact legacy weight bytes, broader
+collation behavior, and MeCab remain open.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

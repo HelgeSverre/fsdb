@@ -1476,6 +1476,29 @@ let tests =
                             Expect.equal (col.KeyOf left) (col.KeyOf right) (name + " index key")
                             Expect.equal (col.HashOf left) (col.HashOf right) (name + " hash")
 
+                testTheory
+                    "MySQL Unicode collations fold small kana but distinguish quote forms"
+                    [ "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci"
+                      "utf8mb4_0900_ai_ci"; "utf8mb4_0900_as_ci" ]
+                    <| fun name ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        for small, large in
+                            List.zip
+                                ([ for c in "ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶ" -> string c ])
+                                ([ for c in "あいうえおつやゆよわかけアイウエオツヤユヨワカケ" -> string c ]) do
+                            Expect.isTrue (col.Equals small large) (name + " " + small + "=" + large)
+                            Expect.equal (col.KeyOf small) (col.KeyOf large) (name + " kana key")
+                            Expect.equal (col.HashOf small) (col.HashOf large) (name + " kana hash")
+                        for quote in [ "〝"; "〞"; "〟" ] do
+                            Expect.isFalse (col.Equals quote "＂") (name + " distinct quote " + quote)
+                        Expect.equal
+                            ([ "〝"; "〞"; "〟" ] |> List.map col.KeyOf |> List.distinct |> List.length)
+                            3
+                            (name + " distinct quote keys")
+                        for left, right in [ "〝", "〞"; "〞", "〟" ] do
+                            Expect.isLessThan (col.ComparePrimary left right) 0 (name + " quote weight order")
+                        Expect.isFalse (col.Equals "〝" "\uE020\uE021") (name + " literal marker cannot alias a quote")
+
                 testCase "legacy vertical punctuation keeps MySQL implicit-weight order"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
