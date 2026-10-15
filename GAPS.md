@@ -593,6 +593,10 @@ A [wire scheduling control](benchmarks/results/2026-10-14-wire-write-scheduling-
 finds statement dispatch dominating measured per-connection wire time and no
 throughput recovery from doubling writers beyond eight. The timing includes
 waits and does not yet isolate publication or WAL completion.
+A [table-lock admission profile](benchmarks/results/2026-10-15-table-lock-admission-profile.md)
+measured roughly 6–9 µs of admission and release per write at eight writers;
+it does not explain the hundreds of microseconds observed in the handler and
+WAL path. Its temporary probe was removed.
 
 ## 8. Persistence and durability
 
