@@ -12907,6 +12907,7 @@ let tests =
                     |> fun values -> runDefault store ("INSERT INTO abs_rows VALUES" + values)
                     |> ignore
                     runDefault store "INSERT INTO abs_rows VALUES(1000,-2147483648)" |> ignore
+                    runDefault store "INSERT INTO abs_rows VALUES(1001,NULL)" |> ignore
 
                     for prefix, source in
                         [ "", "(SELECT DISTINCT id,k FROM abs_rows) d"
@@ -12928,6 +12929,35 @@ let tests =
                         | ResultSet(_, [ [ Some "1"; Some "3" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ]; [ Some "4"; Some "1" ]; [ Some "5"; Some "2" ] ]) -> ()
                         | other -> failtestf "expected signed ABS OR matches, got %A" other
                         Expect.isLessThan calls 80 "complete ABS OR branches bound residual work"
+
+                    for prefix, source in
+                        [ "", "(SELECT DISTINCT id,k FROM abs_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM abs_rows) ", "materialized d" ] do
+                        for predicate, expected in
+                            [ "ABS(d.k)+0=o.x", [ 2; 0; 0; 0; 1 ]
+                              "o.x=ABS(d.k)+0", [ 2; 0; 0; 0; 1 ]
+                              "ABS(d.k)*1=o.x", [ 2; 0; 0; 0; 1 ]
+                              "ABS(d.k)+0=o.x OR d.id=1", [ 3; 1; 1; 1; 2 ] ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                                + "FROM abs_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, rows) ->
+                                let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                                Expect.equal actual (expected |> List.map Some) (source + " " + predicate)
+                            | other -> failtestf "expected materialized expression matches, got %A" other
+                            Expect.isLessThan calls 80 "integer expression keys bound residual work"
+
+                    calls <- 0
+                    match run store registry
+                        ("SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
+                         + "WHERE TOUCH(d.id)=d.id AND ABS(d.k)+0=CAST(o.x AS DECIMAL(10,0))) "
+                         + "FROM abs_bounds o ORDER BY o.id") with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ]; [ Some "4"; Some "0" ]; [ Some "5"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected coerced decimal equality, got %A" other
+                    Expect.isGreaterThan calls 1000 "a decimal bound retains the compatible scan path"
 
                 testCase "physical correlated ABS equality probes indexed signed keys"
                 <| fun _ ->

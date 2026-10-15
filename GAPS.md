@@ -338,8 +338,12 @@ More complex correlated expressions without a
 compatible statement-local lookup still re-execute or scan. The [materialized
 functional-equality profile](torture/findings/2026-10-15-correlated-materialized-functional-equality.md)
 now shows six residual calls for both an exposed-column equality and its
-supported signed-integer `ABS` form. `ABS(d.k)+0=o.x` still takes 4,004 calls
-on the same profile; broader deterministic functional keys remain open.
+supported signed-integer `ABS` form. [A statement-local integer-expression key](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-integer-expression-lookup)
+reduces `ABS(d.k)+0=o.x` from 4,004 to six calls on the same profile.
+The [matched in-memory timing](benchmarks/results/2026-10-15-materialized-integer-expression-lookup.md)
+confirms a repeated-query speedup for this shape. Text, decimal, floating,
+and other deterministic
+functional keys remain open.
 
 ## 3. Built-in functions
 
