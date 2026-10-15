@@ -3817,6 +3817,40 @@ let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parent
         |> VString
     | _ -> parentValue
 
+let private isIntegerKeyType =
+    function
+    | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
+    | _ -> false
+
+/// Equal integer values share one key whichever representation stored them.
+let private canonicalIntegerKey value =
+    match value with
+    | VUInt unsigned when unsigned <= uint64 Int64.MaxValue -> VInt(int64 unsigned)
+    | _ -> value
+
+/// Whether a child row's parent exists. Same-typed integer keys compare by
+/// exact value, so they probe a hashed key set; other key types keep the
+/// type-aware row comparison.
+let private foreignKeyParentProbe (child: Table) (parent: Table) (columnPairs: (int * int) list) : Value[] -> bool =
+    let integerKeyed =
+        columnPairs
+        |> List.forall (fun (childIndex, parentIndex) ->
+            let childType = child.Columns.[childIndex].Type
+            childType = parent.Columns.[parentIndex].Type && isIntegerKeyType childType)
+
+    if integerKeyed then
+        let keyOf (indices: int list) (row: Value[]) = indices |> List.map (fun index -> canonicalIntegerKey row.[index])
+        let childIndices = columnPairs |> List.map fst
+        let parentIndices = columnPairs |> List.map snd
+        let parentKeys = HashSet<Value list>(HashIdentity.Structural)
+
+        for row in parent.RowsArray do
+            parentKeys.Add(keyOf parentIndices row) |> ignore
+
+        fun row -> parentKeys.Contains(keyOf childIndices row)
+    else
+        fun row -> parent.RowsArray |> Seq.exists (foreignKeyRowsMatch child.Columns parent.Columns columnPairs row)
+
 /// A child row that a foreign key cannot resolve, named by its table,
 /// constraint and child key values.
 type private ForeignKeyOrphan =
@@ -3837,16 +3871,13 @@ let private foreignKeyOrphans (db: Database) : ForeignKeyOrphan seq =
                         match foreignKey.Columns |> traverse (resolveColumn table.Columns), foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
                         | Ok childIndices, Ok parentIndices ->
                             let columnPairs = List.zip childIndices parentIndices
+                            let parentExists = foreignKeyParentProbe table parent columnPairs
+
                             for row in table.RowsArray do
                                 let childKey = childIndices |> List.map (fun index -> row.[index])
 
-                                if childKey |> List.forall ((<>) VNull) then
-                                    let parentExists =
-                                        parent.RowsArray
-                                        |> Seq.exists (foreignKeyRowsMatch table.Columns parent.Columns columnPairs row)
-
-                                    if not parentExists then
-                                        yield OrphanRow(tableKey, foreignKey.Name, childKey)
+                                if childKey |> List.forall ((<>) VNull) && not (parentExists row) then
+                                    yield OrphanRow(tableKey, foreignKey.Name, childKey)
                         | _ -> yield UnresolvedColumns(tableKey, foreignKey.Name)
     }
 
