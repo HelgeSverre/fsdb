@@ -103,3 +103,15 @@ contains a short line beginning at the endpoint. At `2.99999` it also
 contains a separate point. This confines the discrepancy to geographic
 intersection construction near the corner; a planar rule, a component-count
 test, or a simple point label would contradict the native result.
+
+The maintained oracle now translates the same exterior and hole by -40, -20,
+0, +20, and +40 degrees of latitude and samples lines near the opposite hole
+edge. Across 372 line/polygon pairs, five comparisons differ: the original
+two near-hole lines in both ring orientations, and the line at longitude
+`2.99999` after a +40-degree translation. The -40, -20, and +20-degree
+translations agree at all tested offsets; at +40 degrees, `2.999` agrees but
+`2.99999` differs. All 39 retained point probes still agree. The location of
+the crossing-to-touching transition changes with latitude, so an offset
+threshold would be incorrect. This additional evidence favors deriving the
+line/ring relation from ellipsoidal intersections rather than coordinate
+proximity or sampled point labels.

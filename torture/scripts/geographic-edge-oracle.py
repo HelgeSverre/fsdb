@@ -63,6 +63,22 @@ def cases():
     for longitude in (1.00001, 1.001, 2.999, 2.99999):
         yield f"LINESTRING(1 {longitude},3 {longitude})", reverse_hole
 
+    for latitude_shift in (-40, -20, 0, 20, 40):
+        exterior = [(latitude_shift, 0), (latitude_shift, 4),
+                    (latitude_shift + 4, 4), (latitude_shift + 4, 0),
+                    (latitude_shift, 0)]
+        hole = [(latitude_shift + 1, 1), (latitude_shift + 3, 1),
+                (latitude_shift + 3, 3), (latitude_shift + 1, 3),
+                (latitude_shift + 1, 1)]
+        rings = []
+        for ring in (exterior, hole):
+            rings.append("(" + ",".join(f"{latitude} {longitude}" for latitude, longitude in ring) + ")")
+        shifted_polygon = "POLYGON(" + ",".join(rings) + ")"
+        longitudes = (2.5, 2.9, 2.99) if latitude_shift == 0 else (1.001, 2.5, 2.9, 2.99, 2.999, 2.99999)
+        for longitude in longitudes:
+            line = f"LINESTRING({latitude_shift + 1} {longitude},{latitude_shift + 3} {longitude})"
+            yield line, shifted_polygon
+
 
 def main():
     if not FSDB.exists():
