@@ -772,6 +772,9 @@ including two leading CTEs, explicit CTE column names, and a CTE body joining
 physical read sources. Repeated references to one CTE share a statement-local
 rowset, including volatile projected values, while duplicate join matches
 update the physical target once and retain CHECK OPTION and INSERT rules.
+[Independent CTE bodies with nested read-only derived sources](torture/findings/2026-10-15-derived-cte-joined-view-writes.md)
+also preserve writable target metadata and UPDATE behavior through audited
+simple, grouped, and two-level derived bodies.
 [Audited `STRAIGHT_JOIN` edges](torture/findings/2026-10-15-multiple-derived-straight-view.md)
 between those derived sources or at the physical target retain the same
 writable metadata and target-predicate filtering.

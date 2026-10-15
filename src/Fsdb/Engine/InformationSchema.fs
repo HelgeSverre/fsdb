@@ -1685,9 +1685,14 @@ let internal inlineReadOnlyViewCtes (select: SelectStmt) =
         |> List.length
 
     let tryInlineBody (cte: CommonTableExpr) =
-        let independent = function
+        let rec independent = function
             | FromTable table ->
                 table.Database.IsSome || not (Set.contains (table.Table.ToLowerInvariant()) cteNames)
+            | FromSubquery(PlainSelect body, _) ->
+                body.Ctes.IsEmpty
+                && not (Expression.hasQualifiedOuterReference body)
+                && (body.From |> Option.exists independent)
+                && (body.Joins |> List.forall (_.Table >> independent))
             | _ -> false
 
         match cte.Body with

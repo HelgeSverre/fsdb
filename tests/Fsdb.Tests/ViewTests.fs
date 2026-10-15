@@ -2036,6 +2036,39 @@ let tests =
                   [ [ Some "1"; Some "7" ]; [ Some "2"; Some "0" ] ]
                   "renamed and joined CTE bodies update the target once"
 
+          testCase "joined views update a target after read-only CTE derived sources"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE derived_cte_target(id INT PRIMARY KEY,n INT)") "create target"
+              expectOk (run store "CREATE TABLE derived_cte_source(id INT,flag INT)") "create source"
+              expectOk (run store "INSERT INTO derived_cte_target VALUES(1,10),(2,20)") "seed target"
+              expectOk (run store "INSERT INTO derived_cte_source VALUES(1,1),(1,2),(2,3)") "seed source"
+
+              for name, body in
+                  [ "simple", "SELECT x.id,x.flag FROM (SELECT id,flag FROM derived_cte_source) x"
+                    "aggregate", "SELECT x.id,SUM(x.flag) AS flag FROM (SELECT id,flag FROM derived_cte_source) x GROUP BY x.id"
+                    "nested", "SELECT x.id,x.flag FROM (SELECT y.id,y.flag FROM (SELECT id,flag FROM derived_cte_source) y) x" ] do
+                  let view = "derived_cte_" + name
+                  let sql =
+                      $"CREATE VIEW {view} AS WITH d(k,f) AS ({body}) SELECT a.id,a.n,d.f FROM d JOIN derived_cte_target a ON a.id=d.k WHERE a.n>=0 WITH CASCADED CHECK OPTION"
+                  expectOk (run store sql) ("create " + view)
+                  Expect.equal
+                      (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{view}'"))
+                      [ [ Some "YES" ] ]
+                      (view + " is updatable in MySQL 8.4")
+                  expectOk (run store ($"UPDATE {view} SET n=n+1 WHERE id=1")) ("update " + view)
+                  match run store ($"UPDATE {view} SET n=-1 WHERE id=1") with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected CHECK OPTION rejection for %s, got %A" view other
+                  match run store ($"INSERT INTO {view}(id,n) VALUES(3,0)") with
+                  | Err(1471, _) -> ()
+                  | other -> failtestf "expected joined-view INSERT rejection for %s, got %A" view other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_cte_target ORDER BY id")
+                  [ [ Some "1"; Some "13" ]; [ Some "2"; Some "20" ] ]
+                  "duplicate CTE rows update the target once per statement"
+
           testCase "joined views update a target after two references to one read-only CTE"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
