@@ -22371,6 +22371,18 @@ let private rewriteViewExpression (view: UpdatableView) (expression: Expr) =
             | None -> Some(QualifiedCol("__fsdb_view", name))
         | _ -> None) expression
 
+let private targetsFirstJoinedView (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
+    let database = update.From.Database |> Option.defaultValue defaultDatabase
+    let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
+
+    tryUpdatableView store database update.From.Table
+    |> Option.exists (fun view ->
+        update.Assignments
+        |> List.exists (fun assignment ->
+            match assignment.Table with
+            | Some owner -> equalsIgnoreCase owner qualifier
+            | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets))
+
 let private resolveViewColumn (view: UpdatableView) (column: string) =
     match Map.tryFind (column.ToLowerInvariant()) view.Columns with
     | Some baseColumn -> Ok baseColumn
@@ -28355,12 +28367,7 @@ let rec executeAs
 
     | Update updateStmt
         when not updateStmt.Joins.IsEmpty
-             && tryUpdatableView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome
-             && (updateStmt.Assignments
-                 |> List.exists (fun assignment ->
-                     assignment.Table
-                     |> Option.exists (fun qualifier ->
-                         equalsIgnoreCase qualifier (updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table)))) ->
+             && targetsFirstJoinedView store dbName updateStmt ->
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
 
         match tryUpdatableView store viewDb updateStmt.From.Table with

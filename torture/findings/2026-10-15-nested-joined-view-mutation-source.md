@@ -15,7 +15,9 @@ The [disposable-server oracle](../scripts/joined-view-nested-mutation-oracle.py)
 runs this with the writable `t` before and after `l` inside the view. In both
 orders, an owner transaction first increments `t.n`; the view-addressed joined
 UPDATE waits for its row, then increments the committed value. The final
-value is 2 and the joined UPDATE affects one row. A `CASCADED CHECK OPTION`
+value is 2 and the joined UPDATE affects one row. Both a qualified `v.n` and
+a uniquely owned bare `n` assignment work; adding `n` to the outer source
+produces MySQL's 1052 ambiguity error. A `CASCADED CHECK OPTION`
 view over the same join rejects a joined UPDATE that would remove the row
 from its view with error 1369, leaving the base row unchanged.
 
@@ -28,7 +30,6 @@ the external read source. The scheduler conservatively claims all rows of the
 physical target for this shape; narrowing those claims without losing
 correctness remains a performance opportunity.
 
-The implementation is limited to statements with an explicitly qualified
-assignment to the first-source view. Bare assignments, more than one physical
-assignment target, and broader join, derived-source, and security-layer
-combinations remain to audit.
+The implementation handles first-source view assignments, qualified or
+uniquely owned bare. More than one physical assignment target and broader
+join, derived-source, and security-layer combinations remain to audit.

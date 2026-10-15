@@ -56,9 +56,10 @@ def main():
                 waiter.select_db("probe")
                 reader.select_db("probe")
 
-                for from_clause in (
-                    "t JOIN l ON l.id=t.id",
-                    "l JOIN t ON l.id=t.id",
+                for from_clause, assignment in (
+                    ("t JOIN l ON l.id=t.id", "v.n=v.n+1"),
+                    ("l JOIN t ON l.id=t.id", "v.n=v.n+1"),
+                    ("l JOIN t ON l.id=t.id", "n=n+1"),
                 ):
                     with owner.cursor() as cursor:
                         cursor.execute("UPDATE t SET n=0 WHERE id=1")
@@ -82,7 +83,7 @@ def main():
                                 started.set()
                                 cursor.execute(
                                     "UPDATE v JOIN x ON x.id=v.id "
-                                    "SET v.n=v.n+1 WHERE v.id=1"
+                                    "SET " + assignment + " WHERE v.id=1"
                                 )
                                 outcome["affected"] = cursor.rowcount
                                 cursor.execute("COMMIT")
@@ -120,9 +121,20 @@ def main():
                         cursor.execute("SELECT id,n FROM t")
                         assert cursor.fetchall() == ((1, 2),)
 
+                with reader.cursor() as cursor:
+                    cursor.execute("ALTER TABLE x ADD COLUMN n INT DEFAULT 0")
+                    try:
+                        cursor.execute(
+                            "UPDATE v JOIN x ON x.id=v.id SET n=n+1 WHERE v.id=1"
+                        )
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1052, error.args
+                    else:
+                        raise AssertionError("shared bare n should be ambiguous")
+
                 print(
-                    f"MySQL {version}: both internal join orders waited and rebased; "
-                    "nested CHECK OPTION returned 1369"
+                    f"MySQL {version}: both join orders and bare target waited and rebased; "
+                    "nested CHECK OPTION returned 1369; shared bare n returned 1052"
                 )
             finally:
                 for connection in connections:

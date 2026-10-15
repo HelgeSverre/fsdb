@@ -2257,13 +2257,20 @@ let tests =
               | ResultSet(_, [ [ Some "3" ] ]) -> ()
               | result -> failtestf "CHECK OPTION must preserve the prior value, got %A" result
 
+              let bareSql =
+                  "UPDATE tx_joined_view v JOIN tx_joined_view_lookup l ON l.id=v.id "
+                  + "SET n=n+1 WHERE v.id=1"
+              Expect.equal (handle setup bareSql |> snd) (Affected 1UL) "unique bare view column updates"
               handle setup "ALTER TABLE tx_joined_view_lookup ADD COLUMN n INT DEFAULT 0" |> ignore
-              let ambiguousSql =
+              match handle setup bareSql |> snd with
+              | Err(1052, _) -> ()
+              | result -> failtestf "expected ambiguous bare target error 1052, got %A" result
+              let ambiguousValueSql =
                   "UPDATE tx_joined_view v JOIN tx_joined_view_lookup l ON l.id=v.id "
                   + "SET v.n=n+1 WHERE v.id=1"
-              match handle setup ambiguousSql |> snd with
+              match handle setup ambiguousValueSql |> snd with
               | Err(1052, _) -> ()
-              | result -> failtestf "expected ambiguous column error 1052, got %A" result
+              | result -> failtestf "expected ambiguous value error 1052, got %A" result
 
           testCase "joined view update checks the caller's outer join reads"
           <| fun _ ->
@@ -2288,9 +2295,10 @@ let tests =
 
           testCase "nested joined view updates wait for the physical target"
           <| fun _ ->
-              for fromClause in
-                  [ "tx_nested_target t JOIN tx_nested_internal l ON l.id=t.id"
-                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id" ] do
+              for fromClause, assignment in
+                  [ "tx_nested_target t JOIN tx_nested_internal l ON l.id=t.id", "v.n=v.n+1"
+                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "v.n=v.n+1"
+                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "n=n+1" ] do
                   let store = Fsdb.Storage.create ()
                   let setup = create 1 store
                   handle setup "CREATE TABLE tx_nested_target (id INT PRIMARY KEY, n INT)" |> ignore
@@ -2307,7 +2315,7 @@ let tests =
                   let waiter, _ = handle (create 3 store) "BEGIN"
                   let sql =
                       "UPDATE tx_nested_view v JOIN tx_nested_outer x ON x.id=v.id "
-                      + "SET v.n=v.n+1 WHERE v.id=1"
+                      + "SET " + assignment + " WHERE v.id=1"
                   let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter sql)
                   Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the nested joined writer waits"
                   Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
@@ -2333,6 +2341,12 @@ let tests =
                   match handle setup "SELECT id,n FROM tx_nested_target" |> snd with
                   | ResultSet(_, [ [ Some "1"; Some "2" ] ]) -> ()
                   | result -> failtestf "CHECK OPTION must preserve the target, got %A" result
+
+                  if assignment = "n=n+1" then
+                      handle setup "ALTER TABLE tx_nested_outer ADD COLUMN n INT DEFAULT 0" |> ignore
+                      match handle setup sql |> snd with
+                      | Err(1052, _) -> ()
+                      | result -> failtestf "expected ambiguous bare n error 1052, got %A" result
 
           testCase "nested joined view update checks the caller's outer join reads"
           <| fun _ ->
