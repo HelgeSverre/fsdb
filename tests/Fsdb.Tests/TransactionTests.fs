@@ -2210,6 +2210,82 @@ let tests =
                   | ResultSet(_, [ [ Some "2" ] ]) -> ()
                   | result -> failtestf "both view increments should be committed, got %A" result
 
+          testCase "joined view updates wait and rebase on the physical row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_joined_view_target (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_joined_view_lookup (id INT PRIMARY KEY)" |> ignore
+              handle setup "INSERT INTO tx_joined_view_target VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_joined_view_lookup VALUES (1)" |> ignore
+              handle setup "CREATE VIEW tx_joined_view AS SELECT id, n FROM tx_joined_view_target" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, ownerWrite = handle owner "UPDATE tx_joined_view_target SET n=n+1 WHERE id=1"
+              Expect.equal ownerWrite (Affected 1UL) "the owner updates the base row"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              let sql =
+                  "UPDATE tx_joined_view v JOIN tx_joined_view_lookup l ON l.id=v.id "
+                  + "SET v.n=v.n+1 WHERE v.id=1"
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter sql)
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the joined view writer waits"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the joined view writer resumes"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 1UL) "the joined view writer updates the rebased row"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the waiter commits"
+              match handle setup "SELECT n FROM tx_joined_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both increments, got %A" result
+
+              handle setup
+                  "CREATE VIEW tx_joined_renamed AS SELECT id AS public_id, n AS score FROM tx_joined_view_target"
+              |> ignore
+              let renamedSql =
+                  "UPDATE tx_joined_renamed v JOIN tx_joined_view_lookup l ON l.id=v.public_id "
+                  + "SET v.score=v.score+1 WHERE v.public_id=1"
+              Expect.equal (handle setup renamedSql |> snd) (Affected 1UL) "renamed view columns write through"
+              handle setup
+                  "CREATE VIEW tx_joined_checked AS SELECT id, n FROM tx_joined_view_target WHERE n>=0 WITH CASCADED CHECK OPTION"
+              |> ignore
+              let rejectedSql =
+                  "UPDATE tx_joined_checked v JOIN tx_joined_view_lookup l ON l.id=v.id "
+                  + "SET v.n=-1 WHERE v.id=1"
+              match handle setup rejectedSql |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected CHECK OPTION error 1369, got %A" result
+              match handle setup "SELECT n FROM tx_joined_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve the prior value, got %A" result
+
+              handle setup "ALTER TABLE tx_joined_view_lookup ADD COLUMN n INT DEFAULT 0" |> ignore
+              let ambiguousSql =
+                  "UPDATE tx_joined_view v JOIN tx_joined_view_lookup l ON l.id=v.id "
+                  + "SET v.n=n+1 WHERE v.id=1"
+              match handle setup ambiguousSql |> snd with
+              | Err(1052, _) -> ()
+              | result -> failtestf "expected ambiguous column error 1052, got %A" result
+
+          testCase "joined view update checks the caller's outer join reads"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              handle root "CREATE TABLE tx_secure_view_target (id INT PRIMARY KEY, n INT)" |> ignore
+              handle root "CREATE TABLE tx_secure_view_lookup (id INT PRIMARY KEY)" |> ignore
+              handle root "INSERT INTO tx_secure_view_target VALUES (1, 0)" |> ignore
+              handle root "INSERT INTO tx_secure_view_lookup VALUES (1)" |> ignore
+              handle root "CREATE VIEW tx_secure_view AS SELECT id, n FROM tx_secure_view_target" |> ignore
+              handle root "CREATE USER view_writer" |> ignore
+              handle root "GRANT SELECT, UPDATE ON fsdb.tx_secure_view TO view_writer" |> ignore
+              let writer = { create 2 store with User = "view_writer" }
+              let sql =
+                  "UPDATE tx_secure_view v JOIN tx_secure_view_lookup l ON l.id=v.id "
+                  + "SET v.n=v.n+1 WHERE v.id=1"
+              match handle writer sql |> snd with
+              | Err(1143, _) | Err(1142, _) -> ()
+              | result -> failtestf "expected denied outer join read, got %A" result
+              handle root "GRANT SELECT ON fsdb.tx_secure_view_lookup TO view_writer" |> ignore
+              Expect.equal (handle writer sql |> snd) (Affected 1UL) "granted lookup read permits the update"
+
           testCase "updatable view delete waits and rechecks the physical row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

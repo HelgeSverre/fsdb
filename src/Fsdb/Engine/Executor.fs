@@ -28353,6 +28353,91 @@ let rec executeAs
         let result, _, _ = runUnionStmtWithOuter store registry dbName first rest orderBy limit offset None
         ids, result
 
+    | Update updateStmt
+        when not updateStmt.Joins.IsEmpty
+             && tryUpdatableView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome
+             && (updateStmt.Assignments
+                 |> List.exists (fun assignment ->
+                     assignment.Table
+                     |> Option.exists (fun qualifier ->
+                         equalsIgnoreCase qualifier (updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table)))) ->
+        let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
+
+        match tryUpdatableView store viewDb updateStmt.From.Table with
+        | None -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
+        | Some view when not view.UpdateJoins.IsEmpty -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
+        | Some view ->
+            let viewQualifier = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
+            let baseQualifier = view.UpdateFrom.Alias |> Option.defaultValue view.UpdateFrom.Table
+            let joinedColumns =
+                updateStmt.Joins
+                |> List.collect (fun join -> FromItem.leaves join.Table)
+                |> List.collect (fun source -> selectSourceColumns store dbName source |> List.choose id)
+                |> List.map (fun column -> column.Name.ToLowerInvariant())
+                |> Set.ofList
+            let mutable ambiguousColumn = None
+            let qualifyView expression =
+                rewriteExprWith (function
+                    | Col name -> Some(QualifiedCol(baseQualifier, name))
+                    | _ -> None) expression
+
+            let rewrite expression =
+                rewriteExprWith (function
+                    | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier viewQualifier ->
+                        Map.tryFind (name.ToLowerInvariant()) view.Expressions
+                        |> Option.map qualifyView
+                        |> Option.orElse (Some(QualifiedCol("__fsdb_view", name)))
+                    | Col name when Map.containsKey (name.ToLowerInvariant()) view.Expressions ->
+                        if Set.contains (name.ToLowerInvariant()) joinedColumns then
+                            ambiguousColumn <- Some name
+                            None
+                        else
+                            Map.tryFind (name.ToLowerInvariant()) view.Expressions |> Option.map qualifyView
+                    | _ -> None) expression
+
+            match
+                updateStmt.Assignments
+                |> traverse (fun assignment ->
+                    if assignment.Table |> Option.exists (fun qualifier -> not (equalsIgnoreCase qualifier viewQualifier)) then
+                        Error(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
+                    elif assignment.Table.IsNone && Set.contains (assignment.Column.ToLowerInvariant()) joinedColumns then
+                        Error(1052, sprintf "Column '%s' in field list is ambiguous" assignment.Column)
+                    else
+                        match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets with
+                        | Some target -> Ok(assignment, target)
+                        | None -> Error(1054, sprintf "Unknown column '%s' in field list" assignment.Column))
+            with
+            | Error(code, message) -> ids, Err(code, message)
+            | Ok assignments ->
+                let targets =
+                    assignments
+                    |> List.map (fun (_, target) -> target.Database.ToLowerInvariant(), target.Table.ToLowerInvariant(), target.Qualifier.ToLowerInvariant())
+                    |> List.distinct
+
+                if targets.Length > 1 then
+                    ids, Err(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName)
+                else
+                    let rewritten =
+                        { updateStmt with
+                            From = view.UpdateFrom
+                            Joins = updateStmt.Joins |> List.map (Join.mapConditions rewrite)
+                            Assignments =
+                                assignments
+                                |> List.map (fun (assignment, target) ->
+                                    { assignment with
+                                        Table = Some target.Qualifier
+                                        Column = target.Column
+                                        Value = rewrite assignment.Value })
+                            Where = combineViewPredicate (view.Predicate |> Option.map qualifyView) (updateStmt.Where |> Option.map rewrite)
+                            OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
+                            Limit = updateStmt.Limit |> Option.map rewrite }
+
+                    match ambiguousColumn with
+                    | Some name -> ids, Err(1052, sprintf "Column '%s' in field list is ambiguous" name)
+                    | None ->
+                        let target = assignments |> List.head |> snd
+                        executeViewWrite view target (Update rewritten) (Some updateStmt)
+
     | Update updateStmt when updateStmt.Joins.IsEmpty && tryStoredView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome ->
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
 
@@ -29442,85 +29527,108 @@ let transactionWriteTargets
             | _ -> []
         | None -> targets update.From update.Where |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
-        let projectedNames body =
-            let projections =
-                match body with
-                | PlainSelect select -> select.Projections
-                | UnionSelect(first, _, _, _, _) -> first.Projections
+        let viewDatabase = update.From.Database |> Option.defaultValue dbName
 
-            let names = projections |> List.map (fun projection -> projection.Alias |> Option.orElse projection.SourceName)
-            if names |> List.forall Option.isSome then names |> List.choose id else []
+        let viewTargets =
+            tryUpdatableView store viewDatabase update.From.Table
+            |> Option.bind (fun view ->
+                if not view.UpdateJoins.IsEmpty then None
+                else
+                    update.Assignments
+                    |> traverse (fun assignment ->
+                        Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
+                        |> function Some target -> Ok target | None -> Error())
+                    |> Result.toOption
+                    |> Option.bind (function
+                        | [] -> None
+                        | first :: rest when rest |> List.forall (fun target -> viewTargetKey target = viewTargetKey first) ->
+                            // An outer join can select any row in the view's base table.
+                            // Claim all its rows before taking the execution snapshot.
+                            targets view.UpdateFrom None
+                        | _ -> None))
 
-        let sourceSchemas =
-            if update.Assignments |> List.forall (fun assignment -> assignment.Table.IsSome) then
-                None
-            else
-                update.Joins
-                |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
-                |> fun joined -> FromTable update.From :: joined
-                |> traverse (fun source ->
-                    match source with
-                    | FromSubquery(body, _)
-                    | FromLateral(body, _) ->
-                        let columns = selectSourceColumns store dbName source
-                        let names =
-                            if columns.IsEmpty || (columns |> List.exists Option.isNone) then
-                                projectedNames body
-                            else
-                                columns |> List.choose id |> List.map _.Name
-                        if names.IsEmpty then Error() else Ok(None, names)
-                    | FromJsonTable(_, _, columns, _) ->
-                        let names = JsonTableColumn.names columns
-                        if names.IsEmpty then Error() else Ok(None, names)
-                    | FromTable tableRef ->
-                        let cte =
-                            if tableRef.Database.IsSome then None
-                            else
-                                update.Ctes
-                                |> List.tryFind (fun cte -> equalsIgnoreCase cte.CteName tableRef.Table)
+        match viewTargets with
+        | Some target -> [ target ]
+        | None ->
+            let projectedNames body =
+                let projections =
+                    match body with
+                    | PlainSelect select -> select.Projections
+                    | UnionSelect(first, _, _, _, _) -> first.Projections
 
-                        match cte with
-                        | Some cte ->
-                            let columns =
-                                if cte.CteColumns.IsEmpty then
-                                    let inferred =
-                                        selectSourceColumns
-                                            store
-                                            dbName
-                                            (FromSubquery(cte.Body, tableRef.Alias |> Option.defaultValue tableRef.Table))
-                                    if inferred.IsEmpty || (inferred |> List.exists Option.isNone) then
-                                        projectedNames cte.Body
-                                    else
-                                        inferred |> List.choose id |> List.map _.Name
+                let names = projections |> List.map (fun projection -> projection.Alias |> Option.orElse projection.SourceName)
+                if names |> List.forall Option.isSome then names |> List.choose id else []
 
+            let sourceSchemas =
+                if update.Assignments |> List.forall (fun assignment -> assignment.Table.IsSome) then
+                    None
+                else
+                    update.Joins
+                    |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
+                    |> fun joined -> FromTable update.From :: joined
+                    |> traverse (fun source ->
+                        match source with
+                        | FromSubquery(body, _)
+                        | FromLateral(body, _) ->
+                            let columns = selectSourceColumns store dbName source
+                            let names =
+                                if columns.IsEmpty || (columns |> List.exists Option.isNone) then
+                                    projectedNames body
                                 else
-                                    cte.CteColumns
+                                    columns |> List.choose id |> List.map _.Name
+                            if names.IsEmpty then Error() else Ok(None, names)
+                        | FromJsonTable(_, _, columns, _) ->
+                            let names = JsonTableColumn.names columns
+                            if names.IsEmpty then Error() else Ok(None, names)
+                        | FromTable tableRef ->
+                            let cte =
+                                if tableRef.Database.IsSome then None
+                                else
+                                    update.Ctes
+                                    |> List.tryFind (fun cte -> equalsIgnoreCase cte.CteName tableRef.Table)
 
-                            if columns.IsEmpty then Error() else Ok(None, columns)
-                        | None ->
-                            match physicalFastPathTable store dbName tableRef with
-                            | Some table -> Ok(Some tableRef, table.Columns |> List.map _.Name)
-                            | None -> Error()
-                    | _ -> Error())
-                |> Result.toOption
+                            match cte with
+                            | Some cte ->
+                                let columns =
+                                    if cte.CteColumns.IsEmpty then
+                                        let inferred =
+                                            selectSourceColumns
+                                                store
+                                                dbName
+                                                (FromSubquery(cte.Body, tableRef.Alias |> Option.defaultValue tableRef.Table))
+                                        if inferred.IsEmpty || (inferred |> List.exists Option.isNone) then
+                                            projectedNames cte.Body
+                                        else
+                                            inferred |> List.choose id |> List.map _.Name
 
-        update.Assignments
-        |> traverse (fun assignment ->
-            match assignment.Table with
-            | Some name -> Ok name
-            | None ->
-                sourceSchemas
-                |> Option.bind (fun schemas ->
-                    schemas
-                    |> List.filter (fun (_, columns) ->
-                        columns |> List.exists (fun column -> equalsIgnoreCase column assignment.Column))
-                    |> function
-                        | [ (Some owner, _) ] -> Some(owner.Alias |> Option.defaultValue owner.Table)
-                        | _ -> None)
-                |> function Some name -> Ok name | None -> Error())
-        |> Result.toOption
-        |> Option.map (fun names -> joinedTargets update.From update.Joins names update.Where)
-        |> Option.defaultValue []
+                                    else
+                                        cte.CteColumns
+
+                                if columns.IsEmpty then Error() else Ok(None, columns)
+                            | None ->
+                                match physicalFastPathTable store dbName tableRef with
+                                | Some table -> Ok(Some tableRef, table.Columns |> List.map _.Name)
+                                | None -> Error()
+                        | _ -> Error())
+                    |> Result.toOption
+
+            update.Assignments
+            |> traverse (fun assignment ->
+                match assignment.Table with
+                | Some name -> Ok name
+                | None ->
+                    sourceSchemas
+                    |> Option.bind (fun schemas ->
+                        schemas
+                        |> List.filter (fun (_, columns) ->
+                            columns |> List.exists (fun column -> equalsIgnoreCase column assignment.Column))
+                        |> function
+                            | [ (Some owner, _) ] -> Some(owner.Alias |> Option.defaultValue owner.Table)
+                            | _ -> None)
+                    |> function Some name -> Ok name | None -> Error())
+            |> Result.toOption
+            |> Option.map (fun names -> joinedTargets update.From update.Joins names update.Where)
+            |> Option.defaultValue []
     | Delete delete when delete.Joins.IsEmpty ->
         let viewDatabase = delete.From.Database |> Option.defaultValue dbName
 
