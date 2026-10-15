@@ -204,6 +204,11 @@ uses the same equality keys for stable non-NULL bounds and indexed NULL
 buckets for NULL bounds on direct, pass-through, and stable materialized
 sources, including complete OR branches. The original `<=>` predicate still
 decides row membership.
+Matching-collation [correlated binary `LIKE` prefixes over direct and
+pass-through physical sources](torture/findings/2026-10-15-correlated-physical-like-prefix.md)
+now use maintained ordered indexes, including complete OR branches and stable
+NULL patterns. A leading-residual probe distinguishes candidate narrowing
+from short-circuit filtering.
 Binary-collated [correlated `LIKE` prefixes over stable materialized derived
 sources and CTEs](torture/findings/2026-10-15-correlated-materialized-like-prefix.md)
 now use statement-local ordered ranges for matching

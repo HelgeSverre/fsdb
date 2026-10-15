@@ -14319,6 +14319,41 @@ and private tryCorrelatedProbeValue source context = function
     | LiteralValue value -> Some value
     | expression -> tryCorrelatedOuterValue source context expression
 
+and private correlatedBinaryLikePrefixes store source context columns predicate =
+    predicate
+    |> optionalConjuncts
+    |> List.choose (function
+        | Like(indexed, patternExpr, _, escape) ->
+            tryCorrelatedInnerColumn source indexed
+            |> Option.bind (fun name ->
+                resolveColumn columns name
+                |> Result.toOption
+                |> Option.bind (fun index ->
+                    let column = columns.[index]
+                    match equalityMembershipDomain store column,
+                          tryCorrelatedProbeValue source context patternExpr with
+                    | Some(TextMembership stored), Some(VString pattern)
+                        when (equalsIgnoreCase stored.Name "utf8mb4_0900_bin"
+                              || equalsIgnoreCase stored.Name "utf8mb4_bin")
+                             && (comparisonCollation
+                                     context "<" indexed (Some column)
+                                     patternExpr (tryColumnDefForExpr context patternExpr)
+                                 |> Result.toOption
+                                 |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)) ->
+                        let prefix = likeLiteralPrefix (escape |> Option.defaultValue '\\') pattern
+                        if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
+                        else
+                            let lower =
+                                if equalsIgnoreCase stored.Name "utf8mb4_bin" then
+                                    likePadSpaceLowerBound prefix
+                                else Some prefix
+                            Some
+                                { Column = name
+                                  Lower = lower |> Option.map (fun value -> VString value, true)
+                                  Upper = likePrefixUpperBound prefix |> Option.map (fun value -> VString value, false) }
+                    | _ -> None))
+        | _ -> None)
+
 and private canSplitCorrelatedExactNumericInequality source (columns: ColumnDef list) outer left right =
     let innerColumn expression =
         tryCorrelatedInnerColumn source expression
@@ -14975,6 +15010,43 @@ and private tryProjectedPhysicalRangeRows store registry dbName projection bound
     tryProjectedPhysicalRangeCandidates CostedRead store projection bounds
     |> Option.bind (projectPhysicalLookupRows store registry dbName projection)
 
+and private tryProjectedPhysicalCorrelatedLikeCandidates
+    policy store (projection: PhysicalProjection) probeSource context whereExpr =
+    if not (storedRowsMatchReadRows store projection.PhysicalTable.Columns) then
+        None
+    else
+        let rejectsEveryRow =
+            whereExpr
+            |> optionalConjuncts
+            |> List.exists (function
+                | Like(indexed, pattern, _, _) ->
+                    tryCorrelatedInnerColumn probeSource indexed
+                    |> Option.bind (tryPhysicalProjectionColumn projection)
+                    |> Option.isSome
+                    && tryCorrelatedProbeValue probeSource context pattern = Some VNull
+                | _ -> false)
+
+        if rejectsEveryRow then Some []
+        else
+            correlatedBinaryLikePrefixes store probeSource context projection.OutputColumns whereExpr
+            |> List.choose (fun bounds ->
+                tryPhysicalProjectionColumn projection bounds.Column
+                |> Option.bind (fun column ->
+                    { bounds with Column = column.Name }
+                    |> tryProjectedPhysicalRangeCandidates policy store projection))
+            |> intersectPhysicalRows
+
+and private tryProjectedPhysicalCorrelatedLikeLookup store registry dbName source whereExpr outer =
+    match FromItem.tryQualifier source, outer with
+    | Some qualifier, Some context ->
+        tryPhysicalProjection store registry dbName source
+        |> Option.bind (fun projection ->
+            tryProjectedPhysicalCorrelatedLikeCandidates
+                CostedRead store projection
+                (correlatedProbeSource qualifier projection.OutputColumns) context whereExpr
+            |> Option.bind (projectPhysicalLookupRows store registry dbName projection))
+    | _ -> None
+
 and private tryProjectedPhysicalNullTestCandidates store (projection: PhysicalProjection) probeSource whereExpr outer =
     let tests =
         whereExpr
@@ -15084,6 +15156,12 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     correlatedRangeBounds probeSource (Some branch) outer
                     |> List.choose (tryProjectedPhysicalRangeCandidates rangePolicy store projection)
 
+                let likePrefixes =
+                    outer
+                    |> Option.bind (fun context ->
+                        tryProjectedPhysicalCorrelatedLikeCandidates
+                            rangePolicy store projection probeSource context (Some branch))
+
                 let functional =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
                         outer
@@ -15095,7 +15173,8 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     else
                         []
 
-                (equality |> Option.toList) @ (nulls |> Option.toList) @ (membership |> Option.toList) @ ranges @ functional
+                (equality |> Option.toList) @ (nulls |> Option.toList) @ (membership |> Option.toList)
+                @ (likePrefixes |> Option.toList) @ ranges @ functional
                 |> intersectPhysicalRows
 
             let merge candidates =
@@ -15165,6 +15244,12 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
                     correlatedRangeBounds probeSource whereExpr outer
                     |> List.choose (tryProjectedPhysicalRangeCandidates rangePolicy store projection)
 
+                let likePrefixes =
+                    outer
+                    |> Option.bind (fun context ->
+                        tryProjectedPhysicalCorrelatedLikeCandidates
+                            rangePolicy store projection probeSource context whereExpr)
+
                 let functional =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
                         outer
@@ -15176,7 +15261,9 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
                     else
                         []
 
-                let candidates = (equality |> Option.toList) @ (nulls |> Option.toList) @ ranges @ membership @ functional
+                let candidates =
+                    (equality |> Option.toList) @ (nulls |> Option.toList) @ ranges
+                    @ (likePrefixes |> Option.toList) @ membership @ functional
 
                 match candidates with
                 | _ :: _ :: _ ->
@@ -15348,39 +15435,7 @@ and private tryMaterializedCorrelatedLookup
                         predicate
 
                 let binaryLikePrefixes =
-                    predicate
-                    |> optionalConjuncts
-                    |> List.choose (function
-                        | Like(indexed, patternExpr, _, escape) ->
-                            tryCorrelatedInnerColumn probeSource indexed
-                            |> Option.bind (fun name ->
-                                resolveColumn columns name
-                                |> Result.toOption
-                                |> Option.bind (fun index ->
-                                    let column = columns.[index]
-                                    match equalityMembershipDomain store column,
-                                          tryCorrelatedProbeValue probeSource context patternExpr with
-                                    | Some(TextMembership stored), Some(VString pattern)
-                                        when (equalsIgnoreCase stored.Name "utf8mb4_0900_bin"
-                                              || equalsIgnoreCase stored.Name "utf8mb4_bin")
-                                             && (comparisonCollation
-                                                     context "<" indexed (Some column)
-                                                     patternExpr (tryColumnDefForExpr context patternExpr)
-                                                 |> Result.toOption
-                                                 |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)) ->
-                                        let prefix = likeLiteralPrefix (escape |> Option.defaultValue '\\') pattern
-                                        if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
-                                        else
-                                            let lower =
-                                                if equalsIgnoreCase stored.Name "utf8mb4_bin" then
-                                                    likePadSpaceLowerBound prefix
-                                                else Some prefix
-                                            Some(
-                                                name,
-                                                lower |> Option.map (fun value -> VString value, true),
-                                                likePrefixUpperBound prefix |> Option.map (fun upper -> VString upper, false))
-                                    | _ -> None))
-                        | _ -> None)
+                    correlatedBinaryLikePrefixes store probeSource context columns predicate
 
                 let nullLikeRejects =
                     predicate
@@ -15440,9 +15495,9 @@ and private tryMaterializedCorrelatedLookup
 
                     let prefixCandidates =
                         binaryLikePrefixes
-                        |> List.choose (fun (name, lower, upper) ->
-                            getMemoized lookups name (fun () -> materializedRangeLookup store columns rows name)
-                            |> Option.bind (fun lookup -> lookup lower upper))
+                        |> List.choose (fun bounds ->
+                            getMemoized lookups bounds.Column (fun () -> materializedRangeLookup store columns rows bounds.Column)
+                            |> Option.bind (fun lookup -> lookup bounds.Lower bounds.Upper))
 
                     ordinaryCandidates @ prefixCandidates
                     |> function
@@ -15531,8 +15586,16 @@ and private tryCorrelatedSourceLookup
             | IsNull _ | IsNotNull _ | BinOp(NullSafeEq, _, _) -> true
             | _ -> false))
 
+    let rec hasLikeBranch = function
+        | Like _ -> true
+        | BinOp(And, left, right)
+        | BinOp(Or, left, right) -> hasLikeBranch left || hasLikeBranch right
+        | _ -> false
+
+    let hasLikePredicate = whereExpr |> Option.exists hasLikeBranch
+
     let physicalIntersection () =
-        if hasRangePredicate || hasFunctionalEqualityPredicate || hasNullTestPredicate then
+        if hasRangePredicate || hasFunctionalEqualityPredicate || hasNullTestPredicate || hasLikePredicate then
             tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
         else
             None
@@ -15546,12 +15609,13 @@ and private tryCorrelatedSourceLookup
     let chooseWithRanges sharedPhysicalRows (equality: (ColumnDef list * Value[] list) option) =
         match equality with
         | Some(_, rows) when rows.Length <= 1 -> equality
-        | Some _ when not hasRangePredicate -> equality
+        | Some _ when not hasRangePredicate && not hasLikePredicate -> equality
         | _ ->
             let candidates =
                 [ equality
                   tryCorrelatedFunctionalRangeLookup store registry dbName source whereExpr outer
-                  tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer ]
+                  tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer
+                  tryProjectedPhysicalCorrelatedLikeLookup store registry dbName source whereExpr outer ]
                 |> List.choose id
 
             match candidates |> List.sortBy (snd >> List.length) with
@@ -15577,14 +15641,6 @@ and private tryCorrelatedSourceLookup
         whereExpr
         |> optionalConjuncts
         |> List.choose (function Like(indexed, pattern, _, _) -> Some(indexed, pattern) | _ -> None)
-
-    let rec hasLikeBranch = function
-        | Like _ -> true
-        | BinOp(And, left, right)
-        | BinOp(Or, left, right) -> hasLikeBranch left || hasLikeBranch right
-        | _ -> false
-
-    let hasLikePredicate = whereExpr |> Option.exists hasLikeBranch
 
     let nullLikeCandidates =
         match source, outer with
@@ -15659,7 +15715,12 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith materializedLookup
         |> chooseWithMembership
     | None, FromSubquery _ ->
-        (if hasLikePredicate then materializedLookup () else None)
+        (if hasLikePredicate then
+             tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
+             |> Option.orElseWith (fun () ->
+                 tryProjectedPhysicalCorrelatedLikeLookup store registry dbName source whereExpr outer)
+             |> Option.orElseWith materializedLookup
+         else None)
         |> Option.orElseWith (fun () ->
             physicalIntersection ()
             |> Option.orElseWith (fun () ->

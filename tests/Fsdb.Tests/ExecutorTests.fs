@@ -12757,7 +12757,26 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected MySQL 8.4 correlated LIKE counts, got %A" other
 
-                    Expect.isLessThan calls 60 "the indexed prefix restricts residual evaluation"
+                    Expect.isLessThan calls 60 "LIKE short-circuits the following residual"
+
+                    calls <- 0
+                    match run store registry
+                        ("SELECT p.id,(SELECT COUNT(*) FROM like_codes c "
+                         + "WHERE TOUCH(c.id)=c.id AND c.code LIKE p.p) "
+                         + "FROM like_patterns p ORDER BY p.id") with
+                    | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected MySQL 8.4 correlated LIKE counts with leading residual, got %A" other
+                    Expect.isLessThan calls 60 "the indexed prefix restricts candidates before a leading residual"
+
+                    for source in [ "like_codes c"; "(SELECT id,code FROM like_codes) c" ] do
+                        calls <- 0
+                        match run store registry
+                            ("SELECT p.id,(SELECT COUNT(*) FROM " + source
+                             + " WHERE TOUCH(c.id)=c.id AND (c.code LIKE p.p OR c.id=1)) "
+                             + "FROM like_patterns p ORDER BY p.id") with
+                        | ResultSet(_, [ [ Some "1"; Some "11" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "1" ] ]) -> ()
+                        | other -> failtestf "expected MySQL 8.4 correlated LIKE OR counts, got %A" other
+                        Expect.isLessThan calls 100 "complete physical LIKE OR branches bound a leading residual"
 
                     match run store registry
                         ("SELECT (SELECT COUNT(*) FROM like_codes c WHERE c.code LIKE p.p AND c.missing=1) "
@@ -12774,7 +12793,7 @@ let tests =
                     calls <- 0
                     match run store registry
                         ("SELECT p.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,code FROM like_codes) c "
-                         + "WHERE c.code LIKE p.p AND TOUCH(c.id)=c.id) "
+                         + "WHERE TOUCH(c.id)=c.id AND c.code LIKE p.p) "
                          + "FROM like_patterns p ORDER BY p.id") with
                     | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected materialized correlated LIKE counts, got %A" other
@@ -12796,7 +12815,7 @@ let tests =
                     match run store registry
                         ("WITH codes AS (SELECT DISTINCT id,code FROM like_codes) "
                          + "SELECT p.id,(SELECT COUNT(*) FROM codes c "
-                         + "WHERE c.code LIKE p.p AND TOUCH(c.id)=c.id) "
+                         + "WHERE TOUCH(c.id)=c.id AND c.code LIKE p.p) "
                          + "FROM like_patterns p ORDER BY p.id") with
                     | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected materialized CTE correlated LIKE counts, got %A" other
@@ -12809,7 +12828,7 @@ let tests =
                         match run store registry
                             (sourcePrefix
                              + "SELECT p.id,(SELECT COUNT(*) FROM " + source
-                             + " WHERE (c.code LIKE p.p OR c.id=1) AND TOUCH(c.id)=c.id) "
+                             + " WHERE TOUCH(c.id)=c.id AND (c.code LIKE p.p OR c.id=1)) "
                              + "FROM like_patterns p ORDER BY p.id") with
                         | ResultSet(_, [ [ Some "1"; Some "11" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "1" ] ]) -> ()
                         | other -> failtestf "expected materialized correlated LIKE OR counts, got %A" other
@@ -12819,8 +12838,16 @@ let tests =
                     runDefault store "ALTER TABLE like_codes MODIFY code VARCHAR(8) COLLATE utf8mb4_0900_bin" |> ignore
                     calls <- 0
                     match run store registry
+                        ("SELECT p.id,(SELECT COUNT(*) FROM like_codes c "
+                         + "WHERE TOUCH(c.id)=c.id AND c.code LIKE p.p) "
+                         + "FROM like_patterns p ORDER BY p.id") with
+                    | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected 0900 binary physical LIKE counts, got %A" other
+                    Expect.isLessThan calls 60 "the 0900 binary physical prefix restricts a leading residual"
+                    calls <- 0
+                    match run store registry
                         ("SELECT p.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,code FROM like_codes) c "
-                         + "WHERE c.code LIKE p.p AND TOUCH(c.id)=c.id) "
+                         + "WHERE TOUCH(c.id)=c.id AND c.code LIKE p.p) "
                          + "FROM like_patterns p ORDER BY p.id") with
                     | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected 0900 binary materialized LIKE counts, got %A" other
