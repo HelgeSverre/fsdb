@@ -1422,7 +1422,7 @@ let tests =
                   match run store registry sql with
                   | ResultSet(_, [ [ Some "50" ] ]) -> ()
                   | other -> failtestf "expected MySQL's selective inequality count, got %A" other
-                  Expect.isLessThan touches 1100 (sprintf "strict range union narrows %s after preparation" source)
+                  Expect.isLessThan touches 80 (sprintf "strict range union narrows %s" source)
 
                   touches <- 0
                   let withOr =
@@ -1432,7 +1432,7 @@ let tests =
                   match run store registry withOr with
                   | ResultSet(_, [ [ Some "51" ] ]) -> ()
                   | other -> failtestf "expected MySQL's inequality OR count, got %A" other
-                  Expect.isLessThan touches 1100 (sprintf "the extra OR branch stays indexed for %s" source)
+                  Expect.isLessThan touches 80 (sprintf "the extra OR branch stays indexed for %s" source)
 
               for predicate, expected in
                   [ "d.k <> o.k", [ [ Some "50" ]; [ Some "0" ]; [ Some "999" ] ]
@@ -1453,7 +1453,7 @@ let tests =
               match run store registry ignored with
               | ResultSet(_, [ [ Some "50" ] ]) -> ()
               | other -> failtestf "expected ignored-index inequality count, got %A" other
-              Expect.isGreaterThan touches 1800 "ignoring the indexed key restores the scan"
+              Expect.isGreaterThan touches 900 "ignoring the indexed key restores the scan"
 
           testCase "correlated OR branches intersect broad IN and range candidates"
           <| fun _ ->

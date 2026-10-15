@@ -14279,7 +14279,7 @@ and private canSplitCorrelatedIntegerInequality source (columns: ColumnDef list)
             | _ -> outer |> Option.bind (fun context -> tryCorrelatedOuterValue source context expression)
 
         value
-        |> Option.exists (function VInt _ | VUInt _ | VBit _ -> true | _ -> false)
+        |> Option.exists (function VNull | VInt _ | VUInt _ | VBit _ -> true | _ -> false)
 
     (innerColumn left && integerBound right)
     || (innerColumn right && integerBound left)
