@@ -259,6 +259,9 @@ groups](torture/findings/2026-10-15-correlated-materialized-in-intersection.md).
 Stable arithmetic expressions over outer columns can also bind materialized
 `IN` probes for derived tables and CTEs
 ([oracle and residual probe](torture/findings/2026-10-15-correlated-materialized-expression-in.md)).
+Stable materialized sources also use [composite equality keys for correlated
+row-valued `IN` tuples](torture/findings/2026-10-15-correlated-materialized-row-in.md),
+including NULL-bearing outer bounds that cannot produce a WHERE-true match.
 Indexed physical tables and pass-through sources also use compatible
 outer-bound `IN` probes, intersecting multiple groups by stored row identity
 before projection ([oracle and residual probe](torture/findings/2026-10-15-correlated-physical-in.md)).

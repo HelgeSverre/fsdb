@@ -15091,40 +15091,39 @@ and private tryMaterializedCorrelatedLookup
                     |> Option.bind (fun lookup -> lookup values)
 
             let membershipCandidates predicate =
-                let boundValue = function
-                    | Lit value -> Some value
-                    | expression -> tryCorrelatedOuterValue probeSource context expression
+                let indexedColumn expression =
+                    tryCorrelatedInnerColumn probeSource expression
+                    |> Option.map (fun name -> name, None)
 
-                predicate
-                |> optionalConjuncts
-                |> List.choose (function
-                    | In(inner, bounds) when not bounds.IsEmpty ->
-                        tryCorrelatedInnerColumn probeSource inner
-                        |> Option.bind (fun name ->
-                            resolveColumn columns name
-                            |> Result.toOption
-                            |> Option.bind (fun index ->
-                                let column = columns.[index]
-                                equalityMembershipDomain store column
-                                |> Option.bind (fun domain ->
-                                    bounds
-                                    |> List.map boundValue
-                                    |> tryAllSome
-                                    |> Option.filter (fun values ->
-                                        List.zip bounds values
-                                        |> List.forall (fun (expression, value) ->
-                                            compatibleCorrelatedMembershipBound context column domain expression value))
-                                    |> Option.bind (fun values ->
-                                        equalityLookup [ name.ToLowerInvariant() ]
-                                        |> Option.bind (fun lookup ->
-                                            values
-                                            |> List.filter ((<>) VNull)
-                                            |> List.map (fun value -> lookup [ value ])
-                                            |> tryAllSome
-                                            |> Option.map (fun rowGroups ->
-                                                let seen = HashSet<Value[]>(HashIdentity.Reference)
-                                                rowGroups |> List.collect id |> List.filter seen.Add))))))
-                    | _ -> None)
+                let boundValue (name, _) expression =
+                    let value =
+                        match expression with
+                        | LiteralValue value -> Some value
+                        | _ -> tryCorrelatedOuterValue probeSource context expression
+
+                    value
+                    |> Option.bind (fun value ->
+                        resolveColumn columns name
+                        |> Result.toOption
+                        |> Option.bind (fun index ->
+                            let column = columns.[index]
+                            equalityMembershipDomain store column
+                            |> Option.filter (fun domain ->
+                                compatibleCorrelatedMembershipBound context column domain expression value)
+                            |> Option.map (fun _ -> value)))
+
+                inProbesWith indexedColumn boundValue predicate
+                |> List.choose (fun probe ->
+                    probe.Columns
+                    |> List.map (fst >> fun name -> name.ToLowerInvariant())
+                    |> equalityLookup
+                    |> Option.bind (fun lookup ->
+                        probe.Values
+                        |> List.map lookup
+                        |> tryAllSome
+                        |> Option.map (fun rowGroups ->
+                            let seen = HashSet<Value[]>(HashIdentity.Reference)
+                            rowGroups |> List.collect id |> List.filter seen.Add)))
                 |> intersectSharedRows
 
             let rangeCandidates predicate =

@@ -775,6 +775,41 @@ let tests =
                   | other -> failtestf "expected the two MySQL 8.4 matches, got %A" other
                   Expect.isLessThan touches 20 "both IN groups narrow before residual evaluation"
 
+          testCase "materialized correlated row IN probes use composite keys"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE row_in_outer(id INT PRIMARY KEY,a INT,b INT,c INT,d INT)" |> ignore
+              runDefault store "CREATE TABLE row_in_inner(id INT PRIMARY KEY,x INT,y INT)" |> ignore
+              runDefault store "INSERT INTO row_in_outer VALUES(1,1,10,2,20),(2,1,NULL,3,30),(3,NULL,10,2,20)" |> ignore
+              runDefault store "INSERT INTO row_in_inner VALUES(1,1,10),(2,2,20),(3,3,30),(4,NULL,10)" |> ignore
+              [ 5..1004 ]
+              |> List.map (fun id -> sprintf "(%d,%d,%d)" id (id + 1000) (id + 2000))
+              |> String.concat ","
+              |> sprintf "INSERT INTO row_in_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for prefix, source in
+                  [ "", "(SELECT id,x,y FROM row_in_inner LIMIT 1004) d"
+                    "WITH materialized AS (SELECT id,x,y FROM row_in_inner LIMIT 1004) ", "materialized d" ] do
+                  touches <- 0
+                  let sql =
+                      prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND (d.x,d.y) IN ((o.a,o.b),(o.c,o.d)))"
+                      + " FROM row_in_outer o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows
+                          [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ] ]
+                          "MySQL 8.4 ignores NULL row components while matching exact pairs"
+                  | other -> failtestf "expected correlated row IN counts, got %A" other
+                  Expect.isLessThan touches 20 "the composite lookup avoids scanning unrelated materialized rows"
+
           testCase "materialized correlated IN probes accept stable outer arithmetic bounds"
           <| fun _ ->
               let mutable touches = 0
