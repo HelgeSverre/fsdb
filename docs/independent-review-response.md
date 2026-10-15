@@ -74,6 +74,12 @@ then returned the leader after its own completion and scheduled one worker to
 drain remaining batches. The focused queue tests passed, but bracketed
 durability-matched runs showed only a small eight-writer difference, with the
 FSDB/MySQL ratio still about 0.27. The prototype was reverted.
+A [current-head durable-write checkpoint](../benchmarks/results/2026-10-15-durable-keyless-write-check.md)
+at `125afe52` measured 6,846 versus 15,639 writes/sec with one worker and
+11,563 versus 41,879 with eight workers. The ratios of 0.44× and 0.28× are
+close to the earlier original-scheduler ratios; trial variability prevents a
+claim of material improvement or regression. The performance concern remains
+open.
 
 For joined mutations, `QueryHandler` parses and checks the request;
 `Executor.runMutationJoin` resolves sources and produces joined rows;
