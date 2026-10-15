@@ -12802,6 +12802,19 @@ let tests =
                     | other -> failtestf "expected materialized CTE correlated LIKE counts, got %A" other
                     Expect.isLessThan calls 60 "the materialized CTE prefix restricts residual evaluation"
 
+                    for sourcePrefix, source in
+                        [ "", "(SELECT DISTINCT id,code FROM like_codes) c"
+                          "WITH codes AS (SELECT DISTINCT id,code FROM like_codes) ", "codes c" ] do
+                        calls <- 0
+                        match run store registry
+                            (sourcePrefix
+                             + "SELECT p.id,(SELECT COUNT(*) FROM " + source
+                             + " WHERE (c.code LIKE p.p OR c.id=1) AND TOUCH(c.id)=c.id) "
+                             + "FROM like_patterns p ORDER BY p.id") with
+                        | ResultSet(_, [ [ Some "1"; Some "11" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "1" ] ]) -> ()
+                        | other -> failtestf "expected materialized correlated LIKE OR counts, got %A" other
+                        Expect.isLessThan calls 100 "complete OR branches bound materialized residual work"
+
                     runDefault store "ALTER TABLE like_patterns MODIFY p VARCHAR(8) COLLATE utf8mb4_0900_bin" |> ignore
                     runDefault store "ALTER TABLE like_codes MODIFY code VARCHAR(8) COLLATE utf8mb4_0900_bin" |> ignore
                     calls <- 0

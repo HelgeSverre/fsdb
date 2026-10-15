@@ -15527,6 +15527,14 @@ and private tryCorrelatedSourceLookup
         |> optionalConjuncts
         |> List.choose (function Like(indexed, pattern, _, _) -> Some(indexed, pattern) | _ -> None)
 
+    let rec hasLikeBranch = function
+        | Like _ -> true
+        | BinOp(And, left, right)
+        | BinOp(Or, left, right) -> hasLikeBranch left || hasLikeBranch right
+        | _ -> false
+
+    let hasLikePredicate = whereExpr |> Option.exists hasLikeBranch
+
     let nullLikeCandidates =
         match source, outer with
         | FromTable tableRef, Some context when not likeConjuncts.IsEmpty ->
@@ -15600,7 +15608,7 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith materializedLookup
         |> chooseWithMembership
     | None, FromSubquery _ ->
-        (if likeConjuncts.IsEmpty then None else materializedLookup ())
+        (if hasLikePredicate then materializedLookup () else None)
         |> Option.orElseWith (fun () ->
             physicalIntersection ()
             |> Option.orElseWith (fun () ->

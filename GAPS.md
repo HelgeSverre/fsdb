@@ -204,7 +204,8 @@ sources and CTEs](torture/findings/2026-10-15-correlated-materialized-like-prefi
 now use statement-local ordered ranges for matching
 `utf8mb4_bin` or `utf8mb4_0900_bin` comparisons. A NULL outer pattern in a
 conjunct yields an empty candidate set, including during metadata probing;
-complete OR branches still retain their other matches. The original residual
+complete OR branches union their bounded candidates and retain other matches.
+The original residual
 probe evaluated 2,024 rows for two selective prefixes and a NULL pattern;
 the focused regression now bounds residual work while checking the same rows.
 [Direct materialized `IS NULL` and `IS NOT NULL` predicates](torture/findings/2026-10-15-correlated-materialized-null.md)

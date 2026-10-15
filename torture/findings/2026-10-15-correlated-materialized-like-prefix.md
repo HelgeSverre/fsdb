@@ -6,6 +6,8 @@ containing `a010`, `a011`, `a990`, `a991`, and `zzz`. Replacing that source with
 a stable CTE returned the same counts. For the NULL pattern, adding an `OR`
 branch matching `id = 1` returned one row. The columns used
 `utf8mb4_0900_bin`; the local regression also covers `utf8mb4_bin`.
+An additional `utf8mb4_bin` oracle with an `OR id = 5` branch outside both
+prefix matches returned `(3, 3, 1)` for the derived and CTE forms.
 
 ```sql
 CREATE TABLE patterns(id INT PRIMARY KEY, p VARCHAR(8) COLLATE utf8mb4_0900_bin);
@@ -32,3 +34,6 @@ empty candidate set. The original filter still checks every candidate. The
 focused derived and CTE regressions keep residual calls below 60 while
 checking result rows, the NULL/OR branch, and invalid-column errors. Other
 collations and patterns without a fixed prefix retain general evaluation.
+Complete `OR` branches containing a prefix or a NULL pattern now feed the
+same materialized candidate union before an outer residual; the focused
+regression keeps those calls below 100 for both source forms.
