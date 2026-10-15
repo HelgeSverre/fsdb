@@ -33,8 +33,9 @@ FSDB's ordinary prerequisite check reports a table-level 1142 before view error
 translation. It now checks join-column requirements first, preserving the
 1143 denial, then performs the full view check that maps a missing projected
 column to 1356. A layered view with an ordinary base-table join also returned
-1143 for the first denied join key in MySQL. Denied writes change no row in
-either engine. A separate inner `SQL SECURITY INVOKER` view under an outer
+1143 for the first denied join key in MySQL. Revoking `SELECT` on the other
+joined base table also returns 1143 for that table's `id` join key. Denied
+writes change no row in either engine. A separate inner `SQL SECURITY INVOKER` view under an outer
 definer view names the outer definer, not the inner view's definer, in its 1143
 join-key denial; FSDB's focused regression checks that effective account.
 Grant ordering across broader join shapes remains unverified.

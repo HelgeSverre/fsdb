@@ -713,6 +713,11 @@ let tests =
               match run store "UPDATE regular_join_outer SET metric=metric WHERE id=1" with
               | Err(1143, message) -> Expect.stringContains message "column 'id'" "ordinary join key is denied first"
               | other -> failtestf "expected an ordinary join-key denial, got %A" other
+              expectOk (run store "GRANT SELECT ON fsdb.json_layer_target TO json_layer_inner_owner") "restore the target read grant"
+              expectOk (run store "REVOKE SELECT ON fsdb.json_layer_companion FROM json_layer_inner_owner") "revoke the joined source grant"
+              match run store "UPDATE regular_join_outer SET metric=metric WHERE id=1" with
+              | Err(1143, message) -> Expect.stringContains message "table 'json_layer_companion'" "joined source key is denied"
+              | other -> failtestf "expected the other join-key denial, got %A" other
 
               for sql in
                   [ "GRANT SELECT,UPDATE ON fsdb.json_layer_target TO json_layer_inner_owner,json_layer_outer_owner"

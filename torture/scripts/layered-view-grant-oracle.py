@@ -121,6 +121,10 @@ def main():
                 denied = assert_error(connection, "UPDATE joined_outer SET metric=metric WHERE id=1", 1143)
                 assert "column 'id'" in denied[1], denied
                 run(connection, "GRANT SELECT ON probe.target TO inner_owner")
+                run(connection, "REVOKE SELECT ON probe.companion FROM inner_owner")
+                denied = assert_error(connection, "UPDATE joined_outer SET metric=metric WHERE id=1", 1143)
+                assert "column 'id' in table 'companion'" in denied[1], denied
+                run(connection, "GRANT SELECT ON probe.companion TO inner_owner")
                 for sql in [
                     "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW dependent_inner AS SELECT a.id,a.n,j.x FROM target a JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id",
                     "GRANT SELECT,UPDATE ON probe.dependent_inner TO outer_owner",
