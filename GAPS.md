@@ -637,8 +637,9 @@ view with MySQL's 1356 error in the audited cases.
 projections](torture/findings/2026-10-15-layered-view-grant-diagnostics.md):
 direct views return 1356 for revoked intermediate or inner base grants, while
 audited joined views return 1143 for the first denied join column and 1356
-when only a projected column remains denied. Broader grant ordering across
-multi-source layers remains open.
+when only a projected column remains denied; an inner INVOKER view under an
+outer DEFINER layer uses the outer definer's base grants. Broader grant
+ordering across multi-source layers remains open.
 Joined UPDATE also reaches a mergeable component view with a distinct definer.
 The outer definer must retain access to the component view, while that view's
 definer must retain SELECT on its base tables and UPDATE on the written target;

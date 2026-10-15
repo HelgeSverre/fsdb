@@ -34,7 +34,10 @@ translation. It now checks join-column requirements first, preserving the
 1143 denial, then performs the full view check that maps a missing projected
 column to 1356. A layered view with an ordinary base-table join also returned
 1143 for the first denied join key in MySQL. Denied writes change no row in
-either engine. Grant ordering across broader join shapes remains unverified.
+either engine. A separate inner `SQL SECURITY INVOKER` view under an outer
+definer view names the outer definer, not the inner view's definer, in its 1143
+join-key denial; FSDB's focused regression checks that effective account.
+Grant ordering across broader join shapes remains unverified.
 
 The inner query in this variant is `SELECT a.id,a.n,j.x FROM target a JOIN
 JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id`; the same

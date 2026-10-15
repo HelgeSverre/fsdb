@@ -132,6 +132,18 @@ def main():
                 assert_error(connection, "UPDATE dependent_outer SET metric=metric+1 WHERE id=1", 1143)
                 assert run(connection, "SELECT n FROM target") == ((4,),)
                 run(connection, "GRANT SELECT ON probe.target TO inner_owner")
+                for sql in [
+                    "GRANT SELECT,UPDATE ON probe.target TO outer_owner",
+                    "CREATE DEFINER='inner_owner'@'%' SQL SECURITY INVOKER VIEW invoker_inner AS SELECT a.id,a.n,j.x FROM target a JOIN JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id",
+                    "GRANT SELECT,UPDATE ON probe.invoker_inner TO outer_owner",
+                    "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW invoker_outer AS SELECT id,n AS metric,x FROM invoker_inner",
+                ]:
+                    run(connection, sql)
+                assert run(connection, "UPDATE invoker_outer SET metric=metric WHERE id=1") == 0
+                run(connection, "REVOKE SELECT ON probe.target FROM outer_owner")
+                denied = assert_error(connection, "UPDATE invoker_outer SET metric=metric WHERE id=1", 1143)
+                assert "outer_owner" in denied[1] and "column 'id'" in denied[1], denied
+                run(connection, "GRANT SELECT ON probe.target TO outer_owner")
                 inner = pymysql.connect(unix_socket=socket, user="inner_owner", autocommit=True, database="probe")
                 try:
                     run(inner, "CREATE VIEW inner_secured AS SELECT id,n FROM target")

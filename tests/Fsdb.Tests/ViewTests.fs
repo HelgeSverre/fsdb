@@ -714,6 +714,23 @@ let tests =
               | Err(1143, message) -> Expect.stringContains message "column 'id'" "ordinary join key is denied first"
               | other -> failtestf "expected an ordinary join-key denial, got %A" other
 
+              for sql in
+                  [ "GRANT SELECT,UPDATE ON fsdb.json_layer_target TO json_layer_inner_owner,json_layer_outer_owner"
+                    "CREATE DEFINER='json_layer_inner_owner'@'%' SQL SECURITY INVOKER VIEW invoker_join_inner AS SELECT a.id,a.n,j.x FROM json_layer_target a JOIN JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id"
+                    "GRANT SELECT,UPDATE ON fsdb.invoker_join_inner TO json_layer_outer_owner"
+                    "CREATE DEFINER='json_layer_outer_owner'@'%' SQL SECURITY DEFINER VIEW invoker_join_outer AS SELECT id,n AS metric,x FROM invoker_join_inner" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (run store "UPDATE invoker_join_outer SET metric=metric WHERE id=1")
+                  (Affected 0UL)
+                  "the inner invoker view can update through the outer definer"
+              expectOk (run store "REVOKE SELECT ON fsdb.json_layer_target FROM json_layer_outer_owner") "revoke the effective invoker's read grant"
+              match run store "UPDATE invoker_join_outer SET metric=metric WHERE id=1" with
+              | Err(1143, message) ->
+                  Expect.stringContains message "json_layer_outer_owner" "the outer definer is the effective invoker"
+                  Expect.stringContains message "column 'id'" "the join key is denied first"
+              | other -> failtestf "expected the inner view's effective invoker to lose its join grant, got %A" other
+
           testCase "join view writes honor a component view's distinct definer"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
