@@ -40,6 +40,15 @@ def result(connection, line, polygon):
         return cursor.fetchone()
 
 
+def point_result(connection, coordinates, polygon):
+    point = f"ST_GeomFromText('POINT({coordinates})',4326)"
+    area = f"ST_GeomFromText('{polygon}',4326)"
+    sql = f"SELECT ST_Within({point},{area}),ST_Touches({point},{area}),ST_Intersects({point},{area})"
+    with connection.cursor() as cursor:
+        cursor.execute(sql)
+        return cursor.fetchone()
+
+
 def cases():
     polygons = [
         "POLYGON((0 0,0 4,4 4,4 0,0 0))",
@@ -147,21 +156,32 @@ def main():
         for longitude in [1.00001, 1.001, 2.999]:
             for latitude in [1, 1.00001, 1.001, 1.01, 1.1, 1.5, 2, 2.5, 2.9, 2.999, 2.99999, 3, 3.00001]:
                 point_count += 1
-                point = f"ST_GeomFromText('POINT({latitude} {longitude})',4326)"
-                area = f"ST_GeomFromText('{hole}',4326)"
-                sql = f"SELECT ST_Within({point},{area}),ST_Touches({point},{area}),ST_Intersects({point},{area})"
-                with mysql_connection.cursor() as cursor:
-                    cursor.execute(sql)
-                    expected = cursor.fetchone()
-                with fsdb_connection.cursor() as cursor:
-                    cursor.execute(sql)
-                    actual = cursor.fetchone()
+                coordinates = f"{latitude} {longitude}"
+                expected = point_result(mysql_connection, coordinates, hole)
+                actual = point_result(fsdb_connection, coordinates, hole)
                 if actual != expected:
                     point_mismatches.append((latitude, longitude, expected, actual))
+        for latitude_shift in (40, 60, 70, 80, 85):
+            polygon = (
+                f"POLYGON(({latitude_shift} 0,{latitude_shift} 4,"
+                f"{latitude_shift + 4} 4,{latitude_shift + 4} 0,{latitude_shift} 0),"
+                f"({latitude_shift + 1} 1,{latitude_shift + 3} 1,"
+                f"{latitude_shift + 3} 3,{latitude_shift + 1} 3,{latitude_shift + 1} 1))"
+            )
+            for latitude in (latitude_shift + 1, latitude_shift + 1.00001,
+                             latitude_shift + 2, latitude_shift + 2.99999,
+                             latitude_shift + 3):
+                for longitude in (0.99999, 1, 1.00001, 2.99999, 3, 3.00001):
+                    point_count += 1
+                    coordinates = f"{latitude} {longitude}"
+                    expected = point_result(mysql_connection, coordinates, polygon)
+                    actual = point_result(fsdb_connection, coordinates, polygon)
+                    if actual != expected:
+                        point_mismatches.append((latitude, longitude, expected, actual))
         print(f"{point_count} near-hole points; {len(point_mismatches)} point mismatches")
         for mismatch in point_mismatches:
             print("point", mismatch)
-        exterior = "ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326)"
+        exterior = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
         edge_probes = [
             ("0 -0.00000000001", "near west edge"),
             ("2 4.00000000001", "near east edge"),
@@ -170,14 +190,8 @@ def main():
         ]
         edge_mismatches = []
         for coordinates, label in edge_probes:
-            point = f"ST_GeomFromText('POINT({coordinates})',4326)"
-            sql = f"SELECT ST_Within({point},{exterior}),ST_Touches({point},{exterior}),ST_Intersects({point},{exterior})"
-            with mysql_connection.cursor() as cursor:
-                cursor.execute(sql)
-                expected = cursor.fetchone()
-            with fsdb_connection.cursor() as cursor:
-                cursor.execute(sql)
-                actual = cursor.fetchone()
+            expected = point_result(mysql_connection, coordinates, exterior)
+            actual = point_result(fsdb_connection, coordinates, exterior)
             if actual != expected:
                 edge_mismatches.append((label, coordinates, expected, actual))
         print(f"{len(edge_probes)} near-exterior points; {len(edge_mismatches)} point mismatches")

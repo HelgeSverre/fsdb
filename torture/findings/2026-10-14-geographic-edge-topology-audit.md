@@ -150,3 +150,21 @@ all five relations false, including `ST_Intersects`, while its own
 This native inconsistency and the latitude-dependent transition make an
 offset-based patch especially unsafe. The line/ring geographic overlay remains
 open; the expanded oracle is a guard for a future general fix.
+
+## High-latitude point follow-up
+
+The maintained oracle now checks another 150 points around translated holes
+at +40, +60, +70, +80, and +85 degrees latitude. Across 189 near-hole point
+cases, one differs: MySQL 8.4.11 reports `POINT(86 1.00001)` outside and
+disjoint from the +85-degree polygon with a hole, while fsdb reports it
+inside and intersecting. This is the start point of the near-polar line for
+which MySQL reports every relation false even though `ST_Intersection`
+returns `POINT(86 1)`. The 412 line cases still have 12 mismatches, and the
+four near-exterior point controls still agree.
+
+Reducing fsdb's geographic ring interpolation step from 25 km to 5 km left
+the point and line mismatch counts unchanged; the more expensive sampling
+was reverted. This rules out coarse ring sampling as the sole cause on this
+corpus. A local coordinate exception would fit the sample but would not
+explain MySQL's overlay and relation behavior, so the point remains an
+explicit open spatial edge case.
