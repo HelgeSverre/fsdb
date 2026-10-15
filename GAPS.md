@@ -203,6 +203,9 @@ intersect their candidate rows before residual evaluation.
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete
 OR branches and exact `INT` minimum magnitude, while other operand types retain
 residual evaluation.
+[Indexed physical and pass-through sources](torture/findings/2026-10-15-correlated-physical-abs.md)
+now probe the same signed keys through maintained equality indexes, including
+complete OR branches and declared-type boundaries.
 [Correlated affine equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-affine.md)
 uses one inverse equality key for bounded signed integer additions and
 subtractions in either operand order, including complete OR branches; other
