@@ -1392,6 +1392,10 @@ SQL texts. Fixed-size atomic admission slots removed that hot spot in the
 audited load; full SQL and parser options still key the parsed statements.
 Durable write throughput and worker scaling remain below MySQL.
 
+An [audited correlated binary LIKE prefix](torture/findings/2026-10-15-correlated-like-prefix-audit.md)
+already uses the indexed range path for actual rows; its metadata probe can
+still scan with an unbound synthetic outer value.
+
 Shared statement setup, computed scan predicates, phrase/proximity matching,
 and broader join-shaped full-text plans remain input-sensitive. Immutable
 [benchmark artifacts](benchmarks/results/) hold the measurements; this ledger

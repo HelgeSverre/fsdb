@@ -18,6 +18,10 @@ to physical candidates. The transaction lock path waits for the first writer,
 rebases, and executes the statement against the latest committed row.
 
 `TransactionTests` covers the three cases above, including the wait and final
-state. This does not establish scheduling parity for every view: writes through
-views with derived or dependent sources and view-addressed inserts remain
-separate cases to audit.
+state. A separate MySQL 8.4.11 probe found that literal INSERTs through both
+a simple and a joined view wait on the base table's primary key; after the
+first transaction commits, the waiter returns 1062. FSDB already matched
+these two forms because physical insert execution claims the key, so they now
+have a regression without an engine change. This does not establish scheduling
+parity for every view: writes through derived or dependent sources and
+view-addressed INSERT SELECT remain separate cases to audit.
