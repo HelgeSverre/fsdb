@@ -160,8 +160,9 @@ release-blocking defect that can be closed by adding another SQL feature:
    method-resolved trace narrowed blocked stacks; direct timing ruled out
    dependency expansion as the dominant cost. Stage timing shows both WAL
    completion and non-WAL handler time growing with concurrency; isolate the
-   latter and explain the wire-versus-embedded batch-size difference before
-   another scheduling change.
+   latter before another scheduling change. The queue-stage profile found
+   similar original batch counts for wire and embedded writes, so it does not
+   support batch size as an explanation by itself.
 2. Continue extracting one cohesive executor responsibility at a time when a
    real edit exposes its boundary. Preserve the existing behavior with tests
    and avoid a file-size-driven rewrite.
@@ -188,3 +189,9 @@ and version-upgrade guarantees. The latest matched write checkpoint still
 measures 0.44× MySQL throughput with one writer and 0.28× with eight writers.
 None of these results changes the preview-grade deployment contract or
 justifies a new production-readiness score.
+
+At `9228587e`, a fresh two-trial [durability-matched wire check](../benchmarks/results/2026-10-15-current-head-review-write-check.md)
+measured 0.27× MySQL throughput with eight writers, consistent with the prior
+0.28× checkpoint. Its one-writer ratio was 0.39× with high FSDB variance, so
+that single result is not a precise trend. The performance finding remains
+open; no unproven scheduling prototype was retained.
