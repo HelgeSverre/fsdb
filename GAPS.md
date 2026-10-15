@@ -230,7 +230,9 @@ NULL-bound results.
 [Matching-collation text `NOT BETWEEN` predicates](torture/findings/2026-10-15-correlated-text-not-between.md)
 now use the same candidate union when one bound is a stable outer value and
 the other is a literal, including NULL-bound cases and statement-local
-materialized lookups.
+materialized lookups. The same mixed-bound form over a compatible `LOWER`
+functional index now uses strict range candidates on physical and pass-through
+sources.
 [Correlated integer inequality predicates](torture/findings/2026-10-15-correlated-integer-inequality.md)
 likewise union strict ranges for a stable integer bound, including complete OR
 branches. [Exact DECIMAL inequalities](torture/findings/2026-10-15-correlated-decimal-inequality.md)

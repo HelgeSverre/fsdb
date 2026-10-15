@@ -14344,7 +14344,7 @@ and private correlatedFunctionalRangeBounds
     =
     let indexed = storedFunctionalColumnFor registry sourceRef
 
-    functionalRangeLookupBounds indexed (tryCorrelatedOuterValue source context) whereExpr
+    functionalRangeLookupBounds indexed (tryCorrelatedProbeValue source context) whereExpr
 
 and private tryCorrelatedEqualityLookup
     (store: Store)

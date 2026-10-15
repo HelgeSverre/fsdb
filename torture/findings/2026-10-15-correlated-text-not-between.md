@@ -24,3 +24,10 @@ accepts a literal or a stable outer value for each strict range produced from
 `NOT BETWEEN`, including the statement-local materialized lookup. The original
 predicate remains the final filter. The focused regression checks all three
 source shapes, both bound forms, and fewer than 100 residual calls per shape.
+
+The same mixed-bound form through `LOWER(code)` also matches MySQL's `(19,29)`
+counts on physical and pass-through derived sources. Before the functional
+range path accepted the literal bound, the physical fixture made 1,051
+residual calls; the indexed candidate union now keeps the count below 100.
+The expression's stored functional-index collation still has to match the
+comparison collation, and the original predicate remains the final filter.

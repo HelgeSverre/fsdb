@@ -12836,6 +12836,15 @@ let tests =
                     for source in
                         [ "text_or_rows o"
                           "(SELECT id,code FROM text_or_rows) o" ] do
+                        calls <- 0
+                        match run store registry
+                            ("SELECT u.id,(SELECT COUNT(*) FROM " + source
+                             + " WHERE LOWER(o.code) NOT BETWEEN LOWER(u.lo) AND 'a990' AND TOUCH(o.id)=o.id) "
+                             + "FROM text_or_bounds u ORDER BY u.id") with
+                        | ResultSet(_, [ [ Some "1"; Some "19" ]; [ Some "2"; Some "29" ] ]) -> ()
+                        | other -> failtestf "expected MySQL 8.4 functional text NOT BETWEEN counts, got %A" other
+                        Expect.isLessThan calls 100 (sprintf "%s functional outside ranges remain selective" source)
+
                         for predicate in
                             [ "LOWER(o.code) BETWEEN LOWER(u.lo) AND LOWER(u.hi) OR LOWER(o.code)=LOWER(u.exact_code)"
                               "LOWER(o.code) BETWEEN LOWER(u.lo) AND LOWER(u.hi) OR LOWER(o.code) BETWEEN LOWER(u.lo2) AND LOWER(u.hi2)" ] do
