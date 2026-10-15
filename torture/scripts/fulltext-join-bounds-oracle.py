@@ -37,6 +37,20 @@ def verify(client, second_client):
         native["expect"](label, actual, expected)
         native["expect"](label + " explicit bound", client.query(query + " AND d.owner_id=42 ORDER BY d.id"), actual)
 
+    client.query("CREATE TABLE cjk_docs(id INT PRIMARY KEY,owner_id INT,body TEXT,title TEXT,"
+                 "KEY(owner_id),FULLTEXT KEY ft(body,title) WITH PARSER ngram)")
+    cjk_values = [f"({i},{i % 100},'{ '日本語' if i % 5 == 0 else '生日快乐'}','祝福')"
+                  for i in range(1, 1001)]
+    client.query("INSERT INTO cjk_docs VALUES " + ",".join(cjk_values))
+    cjk_score = "ROUND(MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE),6)"
+    cjk_direct = ("SELECT d.id," + cjk_score + " FROM cjk_docs d WHERE d.owner_id=42 "
+                  "AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id")
+    cjk_joined = ("SELECT d.id," + cjk_score + " FROM cjk_docs d JOIN owners o ON o.id=d.owner_id "
+                  "WHERE o.id=42 AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id")
+    native["expect"]("ngram join bound", client.query(cjk_joined), client.query(cjk_direct))
+    native["expect"]("ngram join IDs", "\n".join(row.split("\t")[0] for row in client.query(cjk_joined).splitlines()),
+                     "\n".join(map(str, range(42, 943, 100))))
+
     client.query("INSERT INTO owners VALUES(43),(97)")
     for bound, selected in [
         ("o.id BETWEEN 42 AND 43", [42, 43]),

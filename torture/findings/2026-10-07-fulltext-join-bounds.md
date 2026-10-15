@@ -42,6 +42,13 @@ requires fewer than 30 evaluations after inference. Range and IN cases return
 20 rows and require fewer than 50 evaluations, including reversed comparisons
 and an IN list containing NULL.
 
+The oracle also checks a two-column `WITH PARSER ngram` index on 1,000 CJK
+documents. An `owner_id=42` bound propagated through an inner join returns
+the same ten rows and rounded Boolean relevance (`0.009392`) as the explicit
+source-local bound. The focused regression checks those MySQL values and
+requires fewer than 30 prepared candidate rows. This audits one CJK join
+shape; other mixed MATCH/join plans remain open.
+
 ## Targeted performance evidence
 
 These timings measure the qualified-bound implementation at `7b4da9ff`.

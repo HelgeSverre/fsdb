@@ -87,6 +87,29 @@ let tests =
                   Expect.equal actual control "the bound preserves scores from the complete corpus"
                   Expect.isLessThan calls 30 "only the ten matching candidates need virtual values"
 
+              execute "CREATE TABLE cjk_docs(id INT PRIMARY KEY,owner_id INT,body TEXT,title TEXT,observed INT AS (TOUCH(id)) VIRTUAL,KEY(owner_id),FULLTEXT KEY ft(body,title) WITH PARSER ngram)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,%d,'%s','祝福')" id (id % 100) (if id % 5 = 0 then "日本語" else "生日快乐"))
+              |> String.concat ","
+              |> fun values -> execute ("INSERT INTO cjk_docs(id,owner_id,body,title) VALUES " + values) |> ignore
+              let cjkScore = "ROUND(MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE),6)"
+              let cjkDirect =
+                  "SELECT d.id," + cjkScore + " FROM cjk_docs d WHERE d.owner_id=42"
+                  + " AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+              let cjkJoined =
+                  "SELECT d.id," + cjkScore + " FROM cjk_docs d JOIN owners o ON o.id=d.owner_id"
+                  + " WHERE o.id=42 AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+              let cjkControl = execute cjkDirect
+              calls <- 0
+              let cjkActual = execute cjkJoined
+              Expect.equal (ids cjkActual) ([ 42..100..942 ] |> List.map string) "MySQL 8.4 ngram join IDs"
+              Expect.equal cjkActual cjkControl "ngram join bound preserves complete-corpus relevance"
+              match cjkActual with
+              | ResultSet(_, rows) ->
+                  rows |> List.iter (fun row -> Expect.equal row.[1] (Some "0.009392") "MySQL 8.4 ngram relevance")
+              | other -> failtestf "expected scored CJK join rows, got %A" other
+              Expect.isLessThan calls 30 "only the ten CJK join candidates need virtual values"
+
               execute "INSERT INTO owners VALUES(43),(97)" |> ignore
               for bound, selected in
                   [ "o.id BETWEEN 42 AND 43", [ 42; 43 ]
