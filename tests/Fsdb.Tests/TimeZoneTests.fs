@@ -27,7 +27,22 @@ let private expectRow session sql expected =
 
 let tests =
     testList "Time zones"
-        [ testCase "named zones use catalog transitions including daylight saving gaps and folds" <| fun _ ->
+        [ testCase "indexed TIMESTAMP keys compare session-time values"
+          <| fun _ ->
+              let session =
+                  [ "CREATE DATABASE stamped"
+                    "USE stamped"
+                    "CREATE TABLE stamped_key (id INT PRIMARY KEY, at TIMESTAMP NULL, KEY (at))"
+                    "SET time_zone = '+00:00'"
+                    "INSERT INTO stamped_key VALUES (1, '2026-01-01 10:00:00'), (2, '2026-01-01 12:00:00')"
+                    "SET time_zone = '+02:00'" ]
+                  |> List.fold execute (create 1 (Fsdb.Storage.create ()))
+
+              expectRow session "SELECT id FROM stamped_key WHERE at = '2026-01-01 12:00:00'" [ "1" ]
+              expectRow session "SELECT id FROM stamped_key WHERE at IN ('2026-01-01 14:00:00')" [ "2" ]
+              expectRow session "SELECT id FROM stamped_key WHERE id = 2 AND at = '2026-01-01 14:00:00'" [ "2" ]
+
+          testCase "named zones use catalog transitions including daylight saving gaps and folds" <| fun _ ->
               let session = populatedSession ()
               expectRow session
                   "SELECT CONVERT_TZ('2024-01-01 12:00:00','Fsdb/Test_Eastern','+00:00'), CONVERT_TZ('2024-07-01 12:00:00','Fsdb/Test_Eastern','+00:00'), CONVERT_TZ('2024-03-10 02:30:12.123456','Fsdb/Test_Eastern','+00:00'), CONVERT_TZ('2024-11-03 01:30:12.123456','Fsdb/Test_Eastern','+00:00')"
