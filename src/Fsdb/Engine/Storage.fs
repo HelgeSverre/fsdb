@@ -10853,7 +10853,7 @@ let private tryPointUpdate (baseDb: Database) (batchDb: Database) (liveDb: Datab
     | _ -> None
 
 /// Whether `live` differs from `base` only by counters published outside the
-/// transaction boundary: an AUTO_INCREMENT advance or refreshed statistics.
+/// transaction boundary: an AUTO_INCREMENT advance.
 /// Rows, indexes and schema must be the very same immutable values.
 let private onlyCountersAdvanced (baseTable: Table) (liveTable: Table) =
     LanguagePrimitives.PhysicalEquality baseTable.RowsArray liveTable.RowsArray
@@ -10872,6 +10872,7 @@ let private onlyCountersAdvanced (baseTable: Table) (liveTable: Table) =
     && baseTable.TableComment = liveTable.TableComment
     && baseTable.Partitioning = liveTable.Partitioning
     && baseTable.CreateTime = liveTable.CreateTime
+    && baseTable.Statistics = liveTable.Statistics
 
 let private mergeDatabase dbName (baseDb: Database) (batchDb: Database) (liveDb: Database) =
     if obj.ReferenceEquals(liveDb, baseDb) then

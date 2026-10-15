@@ -35,7 +35,38 @@ let private runConcurrentInserts store writerCount insertSql =
 let tests =
     testList
         "Transactions"
-        [ testCase "foreign_key_checks=0 transactions keep inserting rows whose parents do not exist yet"
+        [ testCase "transaction rebases retain concurrent table statistics refreshes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable writer = create 1 store
+              let runWriter sql =
+                  let next, result = handle writer sql
+                  writer <- next
+                  match result with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+
+              runWriter "CREATE TABLE refreshed_stats (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY)"
+              runWriter "BEGIN"
+              runWriter "INSERT INTO refreshed_stats VALUES (NULL)"
+
+              let analyzer = create 2 store
+              match handle analyzer "ANALYZE TABLE refreshed_stats" |> snd with
+              | Err(code, message) -> failtestf "ANALYZE TABLE failed: %d %s" code message
+              | _ -> ()
+
+              let statistics () =
+                  store.Catalog
+                  |> Map.find Fsdb.Storage.defaultDatabase
+                  |> Map.find "refreshed_stats"
+                  |> _.Statistics
+
+              let refreshed = statistics ()
+              Expect.isSome refreshed "ANALYZE TABLE publishes statistics"
+              runWriter "COMMIT"
+              Expect.equal (statistics ()) refreshed "the transaction does not discard the concurrent refresh"
+
+          testCase "foreign_key_checks=0 transactions keep inserting rows whose parents do not exist yet"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
               let run sql =
