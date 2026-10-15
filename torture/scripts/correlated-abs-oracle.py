@@ -1,4 +1,4 @@
-"""Compare correlated ABS equality over materialized sources with MySQL 8.4."""
+"""Compare correlated ABS equality over indexed and materialized sources with MySQL 8.4."""
 
 import pathlib
 import subprocess
@@ -46,7 +46,7 @@ def main():
                     for sql in [
                         "CREATE DATABASE probe", "USE probe",
                         "CREATE TABLE abs_bounds(id INT PRIMARY KEY,x BIGINT)",
-                        "CREATE TABLE abs_rows(id INT PRIMARY KEY,k INT)",
+                        "CREATE TABLE abs_rows(id INT PRIMARY KEY,k INT,KEY ix_k(k))",
                         "INSERT INTO abs_bounds VALUES(1,10),(2,999),(3,NULL),(4,-10),(5,2147483648)",
                     ]:
                         cursor.execute(sql)
@@ -56,11 +56,15 @@ def main():
                     )
 
                     for prefix, source in [
+                        ("", "abs_rows d"),
+                        ("", "(SELECT id,k FROM abs_rows) d"),
+                        ("WITH passthrough AS (SELECT id,k FROM abs_rows) ", "passthrough d"),
                         ("", "(SELECT DISTINCT id,k FROM abs_rows) d"),
                         ("WITH materialized AS (SELECT DISTINCT id,k FROM abs_rows) ", "materialized d"),
                     ]:
                         for predicate, expected in [
                             ("ABS(d.k)=o.x", ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("o.x=ABS(d.k)", ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
                             ("ABS(d.k)=o.x OR d.id=1", ((1, 3), (2, 1), (3, 1), (4, 1), (5, 2))),
                         ]:
                             cursor.execute(
@@ -69,7 +73,32 @@ def main():
                             )
                             actual = cursor.fetchall()
                             assert actual == expected, (predicate, actual, expected)
-                print(f"MySQL {version}: derived and CTE ABS counts match")
+
+                    for index, (column_type, minimum, maximum) in enumerate([
+                        ("TINYINT", -128, 127),
+                        ("SMALLINT", -32768, 32767),
+                        ("MEDIUMINT", -8388608, 8388607),
+                        ("INT", -2147483648, 2147483647),
+                    ]):
+                        table = f"abs_type_{index}"
+                        cursor.execute(f"CREATE TABLE {table}(id INT PRIMARY KEY,k {column_type},KEY ix_k(k))")
+                        cursor.execute(f"INSERT INTO {table} VALUES(1,{minimum}),(2,{maximum})")
+                        cursor.execute("CREATE TABLE IF NOT EXISTS abs_type_bounds(id INT PRIMARY KEY,x BIGINT)")
+                        first_bound = 10 + 3 * index
+                        cursor.execute(
+                            "INSERT INTO abs_type_bounds VALUES(%s,%s),(%s,%s),(%s,%s)",
+                            (first_bound, -minimum, first_bound + 1, maximum,
+                             first_bound + 2, -minimum + 1),
+                        )
+                        cursor.execute(
+                            f"SELECT o.id,(SELECT COUNT(*) FROM {table} d WHERE ABS(d.k)=o.x) "
+                            "FROM abs_type_bounds o WHERE o.id BETWEEN %s AND %s ORDER BY o.id",
+                            (first_bound, first_bound + 2),
+                        )
+                        assert cursor.fetchall() == (
+                            (first_bound, 1), (first_bound + 1, 1), (first_bound + 2, 0)
+                        ), column_type
+                print(f"MySQL {version}: indexed, pass-through, materialized, and signed-boundary ABS counts match")
             finally:
                 if connection:
                     connection.close()

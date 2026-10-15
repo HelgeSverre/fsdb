@@ -12929,6 +12929,73 @@ let tests =
                         | other -> failtestf "expected signed ABS OR matches, got %A" other
                         Expect.isLessThan calls 80 "complete ABS OR branches bound residual work"
 
+                testCase "physical correlated ABS equality probes indexed signed keys"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE abs_physical_bounds(id INT PRIMARY KEY,x BIGINT)" |> ignore
+                    runDefault store "CREATE TABLE abs_physical_rows(id INT PRIMARY KEY,k INT,KEY ix_k(k))" |> ignore
+                    runDefault store "INSERT INTO abs_physical_bounds VALUES(1,10),(2,999),(3,NULL),(4,-10),(5,2147483648)" |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (id - 500))
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO abs_physical_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO abs_physical_rows VALUES(1000,-2147483648)" |> ignore
+
+                    for prefix, source in
+                        [ "", "abs_physical_rows d"
+                          "", "(SELECT id,k FROM abs_physical_rows) d"
+                          "WITH passthrough AS (SELECT id,k FROM abs_physical_rows) ", "passthrough d" ] do
+                        for predicate, expected in
+                            [ "ABS(d.k)=o.x", [ 2; 0; 0; 0; 1 ]
+                              "o.x=ABS(d.k)", [ 2; 0; 0; 0; 1 ]
+                              "ABS(d.k)=o.x OR d.id=1", [ 3; 1; 1; 1; 2 ] ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                                + "FROM abs_physical_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, rows) ->
+                                let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                                Expect.equal actual (expected |> List.map Some) (source + " " + predicate)
+                            | other -> failtestf "expected indexed ABS matches, got %A" other
+                            Expect.isLessThan calls 80 (source + " " + predicate + " must bound residual work")
+
+                    for index, (columnType, minimum, maximum) in
+                        [ "TINYINT", -128L, 127L
+                          "SMALLINT", -32768L, 32767L
+                          "MEDIUMINT", -8388608L, 8388607L
+                          "INT", -2147483648L, 2147483647L ]
+                        |> List.indexed do
+                        let table = "abs_physical_type_" + string index
+                        let firstBound = 10 + 3 * index
+                        runDefault store (sprintf "CREATE TABLE %s(id INT PRIMARY KEY,k %s,KEY ix_k(k))" table columnType)
+                        |> ignore
+                        runDefault store (sprintf "INSERT INTO %s VALUES(1,%d),(2,%d)" table minimum maximum)
+                        |> ignore
+                        runDefault store
+                            (sprintf "INSERT INTO abs_physical_bounds VALUES(%d,%d),(%d,%d),(%d,%d)"
+                                firstBound (-minimum) (firstBound + 1) maximum (firstBound + 2) (-minimum + 1L))
+                        |> ignore
+                        calls <- 0
+                        let sql =
+                            sprintf "SELECT o.id,(SELECT COUNT(*) FROM %s d WHERE TOUCH(d.id)=d.id AND ABS(d.k)=o.x) " table
+                            + sprintf "FROM abs_physical_bounds o WHERE o.id BETWEEN %d AND %d ORDER BY o.id"
+                                firstBound (firstBound + 2)
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual ([ 1; 1; 0 ] |> List.map Some) columnType
+                        | other -> failtestf "expected %s ABS boundary matches, got %A" columnType other
+                        Expect.isLessThan calls 8 (columnType + " out-of-range ABS keys must not scan")
+
                 testCase "materialized correlated affine equality probes inverse signed keys"
                 <| fun _ ->
                     let mutable calls = 0
