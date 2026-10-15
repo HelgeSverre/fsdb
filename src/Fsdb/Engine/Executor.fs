@@ -730,6 +730,7 @@ type private StatementMemo =
       MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>
       MaterializedCorrelatedIntegerExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedDecimalExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
+      MaterializedCorrelatedDoubleExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedTextExpressions: Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
@@ -757,6 +758,8 @@ let private freshStatementMemo () =
       MaterializedCorrelatedIntegerExpressions =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedDecimalExpressions =
+        Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+      MaterializedCorrelatedDoubleExpressions =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedTextExpressions =
         Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>(HashIdentity.Reference)
@@ -5400,15 +5403,25 @@ let private isIntegerColumnType = function
 
 let private isIntegerColumn column = column |> Option.exists (_.Type >> isIntegerColumnType)
 
-let private compareWithColumnDomain (leftColumn: ColumnDef option) left (rightColumn: ColumnDef option) right =
+let private compareWithColumnDomain
+    (leftExpr: Expr) (leftColumn: ColumnDef option) left
+    (rightExpr: Expr) (rightColumn: ColumnDef option) right =
+    // MySQL keeps an integer column exact against a constant DOUBLE
+    // expression, but compares it approximately with a row-derived DOUBLE.
+    let rowDependent expression =
+        Expression.exists (function Col _ | QualifiedCol _ -> true | _ -> false) expression
     match left, right with
-    | VInt integer, VDouble bound when isIntegerColumn leftColumn && rightColumn.IsNone ->
+    | VInt integer, VDouble bound
+        when isIntegerColumn leftColumn && rightColumn.IsNone && not (rowDependent rightExpr) ->
         Value.compareIntegerToDouble (bigint integer) bound
-    | VUInt integer, VDouble bound when isIntegerColumn leftColumn && rightColumn.IsNone ->
+    | VUInt integer, VDouble bound
+        when isIntegerColumn leftColumn && rightColumn.IsNone && not (rowDependent rightExpr) ->
         Value.compareIntegerToDouble (bigint integer) bound
-    | VDouble bound, VInt integer when isIntegerColumn rightColumn && leftColumn.IsNone ->
+    | VDouble bound, VInt integer
+        when isIntegerColumn rightColumn && leftColumn.IsNone && not (rowDependent leftExpr) ->
         -(Value.compareIntegerToDouble (bigint integer) bound)
-    | VDouble bound, VUInt integer when isIntegerColumn rightColumn && leftColumn.IsNone ->
+    | VDouble bound, VUInt integer
+        when isIntegerColumn rightColumn && leftColumn.IsNone && not (rowDependent leftExpr) ->
         -(Value.compareIntegerToDouble (bigint integer) bound)
     | _ -> Value.compare left right
 
@@ -5428,7 +5441,7 @@ let private resolvedCompareWithColumns
     | VString sa, VString sb ->
         comparisonCollation ctx operation leftExpr leftColumn rightExpr rightColumn
         |> Result.map (fun collation -> collation.ComparePrimary sa sb)
-    | _ -> Ok(compareWithColumnDomain leftColumn pa rightColumn pb)
+    | _ -> Ok(compareWithColumnDomain leftExpr leftColumn pa rightExpr rightColumn pb)
 
 let private resolvedCompare (ctx: EvalContext) (operation: string) (leftExpr: Expr) (left: Value) (rightExpr: Expr) (right: Value) : Result<int, EvalError> =
     resolvedCompareWithColumns
@@ -5497,7 +5510,7 @@ let private comparisonResult
                     (collation.ComparePrimary leftText rightText)
                     (collation.Equals leftText rightText))
         | _ ->
-            let compared = compareWithColumnDomain leftColumn comparedLeft rightColumn comparedRight
+            let compared = compareWithColumnDomain leftExpr leftColumn comparedLeft rightExpr rightColumn comparedRight
             Ok(finish compared (compared = 0))
 
 let private comparisonResultWithNulls
@@ -15865,6 +15878,46 @@ and private tryMaterializedCorrelatedLookup
                     | _ -> None)
                 |> intersectSharedRows
 
+            // Numeric bounds compare with a DOUBLE result in the approximate
+            // domain, including exact values that round to the same double.
+            // Text bounds retain the scan because their coercion is broader.
+            let doubleExpressionCandidates predicate =
+                let doubleKey = function
+                    | VDouble number when System.Double.IsFinite number -> Some(VDouble number)
+                    | _ -> None
+                let probeKey = function
+                    | VInt _ | VUInt _ | VDecimal _ | VBit _ as value ->
+                        let number = Value.toDouble value
+                        if System.Double.IsFinite number then Some(VDouble number) else None
+                    | value -> doubleKey value
+
+                let doubleLookup expression =
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedDoubleExpressions source (fun () ->
+                            Dictionary<Expr, MaterializedEqualityLookup option>(HashIdentity.Reference))
+                    getMemoized lookups expression (fun () ->
+                        buildExpressionLookup expression doubleKey probeKey)
+
+                let candidate indexed bound =
+                    if not (rowLocalExpression indexed) then
+                        None
+                    else
+                        tryCorrelatedProbeValue probeSource context bound
+                        |> Option.bind (fun value ->
+                            match value with
+                            | VNull -> doubleLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
+                            | _ when probeKey value |> Option.isSome ->
+                                doubleLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
+                            | _ -> None)
+
+                predicate
+                |> optionalConjuncts
+                |> List.choose (function
+                    | BinOp(Eq, left, right) ->
+                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | _ -> None)
+                |> intersectSharedRows
+
             // The evaluated text expression is a statement-local key over a
             // materialized source. Its collation belongs to the comparison,
             // not necessarily to the source column or the connection.
@@ -16089,6 +16142,7 @@ and private tryMaterializedCorrelatedLookup
                     [ equalityCandidates (Some branch)
                       integerExpressionCandidates (Some branch)
                       decimalExpressionCandidates (Some branch)
+                      doubleExpressionCandidates (Some branch)
                       textExpressionCandidates (Some branch)
                       absoluteCandidates (Some branch)
                       affineCandidates (Some branch)
@@ -16112,6 +16166,7 @@ and private tryMaterializedCorrelatedLookup
             [ equalityCandidates whereExpr
               integerExpressionCandidates whereExpr
               decimalExpressionCandidates whereExpr
+              doubleExpressionCandidates whereExpr
               textExpressionCandidates whereExpr
               absoluteCandidates whereExpr
               affineCandidates whereExpr

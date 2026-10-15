@@ -84,4 +84,29 @@ measures `d.k+0.00=o.x` at **7 residual calls instead of 5,005** on 1,000
 materialized rows. The [MySQL 8.4.11 oracle](../scripts/correlated-materialized-decimal-oracle.py)
 and executor regression cover decimal and integer bounds, reversed equality,
 arithmetic, NULL, a complete OR branch, and DOUBLE fallback. Floating-point
-expression keys remain open.
+expression keys remained open at this point.
+
+## Statement-local finite DOUBLE expression lookup
+
+Finite DOUBLE results now get a statement-local key when the outer bound is
+finite DOUBLE, DECIMAL, integer, or BIT. Exact numeric bounds are converted
+to DOUBLE for the key, matching the runtime comparison domain. This covers
+both exposed DOUBLE columns and stable,
+row-local expressions such as `d.k+0e0`, while preserving the full predicate
+as a residual check. NULL equality produces no candidates. A non-finite or
+non-DOUBLE row result abandons the key for a scan; string and non-finite
+bounds also retain the scan because their coercion is different.
+
+The [DOUBLE profile](../scripts/correlated-materialized-double-profile.fsx)
+reduces `d.k+0e0=o.x` from **5,005 to 7 residual calls** on 1,000 materialized
+rows; direct `d.k=o.x` and the DECIMAL bound also use seven calls, while the
+nonmatching BIGINT bounds use five. The
+[MySQL 8.4.11 oracle](../scripts/correlated-materialized-double-oracle.py)
+and executor regression cover direct and computed DOUBLE equality, reversed
+operands, arithmetic, NULL, signed zero, a complete OR branch, DECIMAL and
+BIGINT bounds, and string fallback. At 2⁵³, the rounded outer DOUBLE matches
+the 2⁵³ row but excludes the distinct 2⁵³+2 row. MySQL also distinguishes
+row-derived DOUBLE values from constant DOUBLE expressions when compared to
+a BIGINT column: the former use approximate comparison, while the latter
+keep the integer exact. FSDB's residual comparison now follows that audited
+provenance rule. String and non-finite floating keys remain open.

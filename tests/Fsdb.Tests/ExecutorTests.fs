@@ -13044,6 +13044,64 @@ let tests =
                         if keyed then Expect.isLessThan calls 80 (predicate + " must bound residual work")
                         else Expect.isGreaterThan calls 1000 "DOUBLE coercion must retain the scan"
 
+                testCase "materialized correlated finite DOUBLE expressions key numeric bounds"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store
+                        "CREATE TABLE double_bounds(id INT PRIMARY KEY,x DOUBLE,d DECIMAL(22,2),i BIGINT,s VARCHAR(32))"
+                    |> ignore
+                    runDefault store "CREATE TABLE double_rows(id INT PRIMARY KEY,k DOUBLE)" |> ignore
+                    runDefault store
+                        ("INSERT INTO double_bounds VALUES"
+                         + "(1,12.5,12.50,12,'12.5'),(2,999.0,999.00,999,'999'),"
+                         + "(3,NULL,NULL,NULL,NULL),(4,-12.5,-12.50,-12,'-12.5'),"
+                         + "(5,-0.0,0.00,0,'0'),"
+                         + "(6,9007199254740993,9007199254740993.00,9007199254740993,'9007199254740993')")
+                    |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,%d.5)" id (id - 500))
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO double_rows VALUES" + values)
+                    |> ignore
+                    runDefault store
+                        ("INSERT INTO double_rows VALUES(1000,NULL),(1001,0.0),"
+                         + "(1002,9007199254740992),(1003,9007199254740994)")
+                    |> ignore
+
+                    for predicate, expected, keyed in
+                        [ "d.k=o.x", [ 1; 0; 0; 1; 1; 1 ], true
+                          "d.k+0e0=o.x", [ 1; 0; 0; 1; 1; 1 ], true
+                          "o.x=d.k+0e0", [ 1; 0; 0; 1; 1; 1 ], true
+                          "d.k*1e0=o.x", [ 1; 0; 0; 1; 1; 1 ], true
+                          "d.k+0e0=o.d", [ 1; 0; 0; 1; 1; 1 ], true
+                          "d.k+0e0=o.i", [ 0; 0; 0; 0; 1; 1 ], true
+                          "d.k+0e0=o.s", [ 1; 0; 0; 1; 1; 1 ], false
+                          "d.k+0e0=o.x OR d.id=12", [ 2; 1; 1; 2; 2; 2 ], true ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                            + "FROM double_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual (expected |> List.map Some) predicate
+                        | other -> failtestf "expected materialized DOUBLE matches for %s, got %A" predicate other
+                        if keyed then Expect.isLessThan calls 80 (predicate + " must bound residual work")
+                        else Expect.isGreaterThan calls 1000 "string coercion must retain the scan"
+
+                    match runDefault store
+                        ("SELECT x=i,x+0e0=i,9007199254740992e0=i,"
+                         + "9007199254740992e0+0e0=i FROM double_bounds WHERE id=6") with
+                    | ResultSet(_, [ [ Some "1"; Some "1"; Some "0"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected row-derived versus constant DOUBLE provenance, got %A" other
+
                 testCase "physical correlated ABS equality probes indexed signed keys"
                 <| fun _ ->
                     let mutable calls = 0

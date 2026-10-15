@@ -1,0 +1,102 @@
+"""Check materialized correlated DOUBLE expression results against MySQL 8.4."""
+
+import pathlib
+import subprocess
+import tempfile
+import time
+
+import pymysql
+
+
+def connect(socket):
+    for _ in range(100):
+        try:
+            return pymysql.connect(unix_socket=socket, user="root", autocommit=True)
+        except pymysql.MySQLError:
+            time.sleep(0.1)
+    raise RuntimeError("MySQL did not become ready")
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix="fsdb-double-oracle-") as directory:
+        root = pathlib.Path(directory)
+        data = root / "data"
+        data.mkdir()
+        socket = str(root / "mysql.sock")
+        server = connection = None
+
+        with (root / "mysql.log").open("w") as log:
+            try:
+                subprocess.run(
+                    ["mysqld", "--no-defaults", "--initialize-insecure", f"--datadir={data}",
+                     "--innodb-redo-log-capacity=64M"],
+                    check=True, stdout=log, stderr=subprocess.STDOUT,
+                )
+                server = subprocess.Popen(
+                    ["mysqld", "--no-defaults", f"--datadir={data}", "--skip-networking",
+                     f"--socket={socket}", f"--pid-file={root / 'mysql.pid'}", "--mysqlx=0",
+                     "--innodb-buffer-pool-size=64M", "--innodb-redo-log-capacity=64M"],
+                    stdout=log, stderr=subprocess.STDOUT,
+                )
+                connection = connect(socket)
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT VERSION()")
+                    version = cursor.fetchone()[0]
+                    assert version.startswith("8.4.11"), version
+                    for query in [
+                        "CREATE DATABASE probe", "USE probe",
+                        "CREATE TABLE outer_bounds(id INT PRIMARY KEY,x DOUBLE,d DECIMAL(22,2),i BIGINT,s VARCHAR(32))",
+                        "CREATE TABLE inner_rows(id INT PRIMARY KEY,k DOUBLE)",
+                        "INSERT INTO outer_bounds VALUES"
+                        "(1,12.5,12.50,12,'12.5'),(2,999.0,999.00,999,'999'),"
+                        "(3,NULL,NULL,NULL,NULL),(4,-12.5,-12.50,-12,'-12.5'),"
+                        "(5,-0.0,0.00,0,'0'),"
+                        "(6,9007199254740993,9007199254740993.00,9007199254740993,'9007199254740993')",
+                    ]:
+                        cursor.execute(query)
+                    cursor.executemany(
+                        "INSERT INTO inner_rows VALUES(%s,%s)",
+                        [(i, f"{i - 500}.5") for i in range(1000)]
+                        + [(1000, None), (1001, 0.0),
+                           (1002, 9007199254740992), (1003, 9007199254740994)],
+                    )
+
+                    cases = [
+                        ("d.k=o.x", (1, 0, 0, 1, 1, 1)),
+                        ("d.k+0e0=o.x", (1, 0, 0, 1, 1, 1)),
+                        ("o.x=d.k+0e0", (1, 0, 0, 1, 1, 1)),
+                        ("d.k*1e0=o.x", (1, 0, 0, 1, 1, 1)),
+                        ("d.k+0e0=o.d", (1, 0, 0, 1, 1, 1)),
+                        ("d.k+0e0=o.i", (0, 0, 0, 0, 1, 1)),
+                        ("d.k+0e0=o.s", (1, 0, 0, 1, 1, 1)),
+                        ("d.k+0e0=o.x OR d.id=12", (2, 1, 1, 2, 2, 2)),
+                    ]
+                    for predicate, expected in cases:
+                        query = (
+                            "SELECT o.id,(SELECT COUNT(*) FROM "
+                            "(SELECT DISTINCT id,k FROM inner_rows) d "
+                            f"WHERE {predicate}) FROM outer_bounds o ORDER BY o.id"
+                        )
+                        cursor.execute(query)
+                        actual = tuple(count for _, count in cursor.fetchall())
+                        assert actual == expected, (predicate, actual, expected)
+                    cursor.execute(
+                        "SELECT x=i,x+0e0=i,9007199254740992e0=i,"
+                        "9007199254740992e0+0e0=i "
+                        "FROM outer_bounds WHERE id=6"
+                    )
+                    assert cursor.fetchone() == (1, 1, 0, 0)
+                    print(f"MySQL {version}: {len(cases)} DOUBLE comparison cases match")
+            finally:
+                if connection:
+                    connection.close()
+                if server and server.poll() is None:
+                    subprocess.run(
+                        ["mysqladmin", "--no-defaults", f"--socket={socket}", "-uroot", "shutdown"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    server.wait(timeout=20)
+
+
+if __name__ == "__main__":
+    main()
