@@ -24,12 +24,17 @@ UPDATE outer_view SET metric=metric+1 WHERE id=1;
 
 A related two-definer view whose inner query joins the base table to
 `JSON_TABLE` behaves differently in MySQL. After the inner owner loses base
-`SELECT`, MySQL returns 1143 for the referenced base `id` column while FSDB
-returns 1356. FSDB's prerequisite check reports a table-level 1142 before
-view error translation. Mapping that error to 1143 would not identify which
-column was denied and could mis-handle partial column grants. This remains an
-open diagnostic and authorization-order gap; the denied write changes no row
-in either engine.
+`SELECT`, MySQL returns 1143 for the join's base `id` column while FSDB
+previously returned 1356. Granting only `SELECT(id)` then changes MySQL's error to 1356;
+granting both `SELECT(id,n)` permits the update. This shows that MySQL checks
+the join key before its view-validity check for the projected `n`, rather than
+simply choosing a different error code for the same failed authorization.
+FSDB's ordinary prerequisite check reports a table-level 1142 before view error
+translation. It now checks join-column requirements first, preserving the
+1143 denial, then performs the full view check that maps a missing projected
+column to 1356. A layered view with an ordinary base-table join also returned
+1143 for the first denied join key in MySQL. Denied writes change no row in
+either engine. Grant ordering across broader join shapes remains unverified.
 
 The inner query in this variant is `SELECT a.id,a.n,j.x FROM target a JOIN
 JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id`; the same

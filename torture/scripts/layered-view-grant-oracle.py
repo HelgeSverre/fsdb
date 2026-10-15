@@ -28,6 +28,7 @@ def assert_error(connection, sql, code):
         run(connection, sql)
     except pymysql.MySQLError as error:
         assert error.args[0] == code, (sql, error)
+        return error.args
     else:
         raise AssertionError(f"Expected MySQL error {code}: {sql}")
 
@@ -97,8 +98,28 @@ def main():
                     run(connection, sql)
                 assert run(connection, "UPDATE json_outer SET metric=metric+1 WHERE id=1") == 1
                 run(connection, "REVOKE SELECT ON probe.target FROM inner_owner")
-                assert_error(connection, "UPDATE json_outer SET metric=metric+1 WHERE id=1", 1143)
+                denied = assert_error(connection, "UPDATE json_outer SET metric=metric+1 WHERE id=1", 1143)
+                assert "column 'id'" in denied[1], denied
+                run(connection, "GRANT SELECT(id) ON probe.target TO inner_owner")
+                assert_error(connection, "UPDATE json_outer SET metric=metric WHERE id=1", 1356)
+                run(connection, "GRANT SELECT(n) ON probe.target TO inner_owner")
+                assert run(connection, "UPDATE json_outer SET metric=metric WHERE id=1") == 0
+                run(connection, "REVOKE SELECT(id,n) ON probe.target FROM inner_owner")
                 assert run(connection, "SELECT n FROM target") == ((3,),)
+                run(connection, "GRANT SELECT ON probe.target TO inner_owner")
+                for sql in [
+                    "CREATE TABLE companion(id INT PRIMARY KEY)",
+                    "INSERT INTO companion VALUES(1)",
+                    "GRANT SELECT ON probe.companion TO inner_owner",
+                    "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW joined_inner AS SELECT a.id,a.n FROM target a JOIN companion b ON b.id=a.id",
+                    "GRANT SELECT,UPDATE ON probe.joined_inner TO outer_owner",
+                    "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW joined_outer AS SELECT id,n AS metric FROM joined_inner",
+                ]:
+                    run(connection, sql)
+                assert run(connection, "UPDATE joined_outer SET metric=metric WHERE id=1") == 0
+                run(connection, "REVOKE SELECT ON probe.target FROM inner_owner")
+                denied = assert_error(connection, "UPDATE joined_outer SET metric=metric WHERE id=1", 1143)
+                assert "column 'id'" in denied[1], denied
                 run(connection, "GRANT SELECT ON probe.target TO inner_owner")
                 for sql in [
                     "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW dependent_inner AS SELECT a.id,a.n,j.x FROM target a JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id",
@@ -129,7 +150,7 @@ def main():
                     assert_error(writer, "UPDATE outer_secured SET n=n+1 WHERE id=1", 1356)
                 finally:
                     writer.close()
-                print(f"MySQL {version}: direct layered grant errors 1356; JSON_TABLE source read error 1143")
+                print(f"MySQL {version}: direct layered grants 1356; joined-view key denial 1143, projection denial 1356")
             finally:
                 if connection:
                     connection.close()

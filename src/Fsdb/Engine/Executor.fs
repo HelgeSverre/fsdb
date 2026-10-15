@@ -961,6 +961,10 @@ type private ViewAccessMode =
     | RetargetedWrite
     | TargetGrantOnly
 
+type private LayeredGrantError =
+    | ViewGrantDenied of int * string
+    | JoinColumnDenied of int * string
+
 type private ViewAccess =
     { SecurityType: string
       Definer: string
@@ -1088,6 +1092,28 @@ let private scalarExecutionAccount = System.Threading.AsyncLocal<Auth.Account op
 let currentScalarExecutionAccount () : Auth.Account option =
     scalarExecutionAccount.Value
 
+let private registryForViewRequirements
+    (store: Store)
+    (registry: Registry)
+    (securityType: string)
+    (definer: string)
+    requirements
+    =
+    if securityType.Equals("INVOKER", System.StringComparison.OrdinalIgnoreCase) then
+        match registryAccount registry with
+        | Some account ->
+            Auth.checkForAccount store account requirements
+            |> Result.map (fun () -> registry)
+        | None -> Error(1449, "The current invoker account does not exist")
+    else
+        match Auth.tryParseAccount definer with
+        | Some account when Auth.tryUserRowForAccount store account |> Option.isNone ->
+            Error(1449, sprintf "The user specified as a definer ('%s') does not exist" definer)
+        | Some account ->
+            Auth.checkForAccount store account requirements
+            |> Result.map (fun () -> registryForDefiner account registry)
+        | None -> Error(1449, "The user specified as a definer ('') does not exist")
+
 let private registryForViewSecurity
     (store: Store)
     (registry: Registry)
@@ -1096,18 +1122,8 @@ let private registryForViewSecurity
     (schema: string)
     (statement: Statement)
     =
-    if securityType.Equals("INVOKER", System.StringComparison.OrdinalIgnoreCase) then
-        match registryAccount registry with
-        | Some account ->
-            Auth.checkForAccount store account (Auth.requiredPrivilegesInStore store schema statement)
-            |> Result.map (fun () -> registry)
-        | None -> Error(1449, "The current invoker account does not exist")
-    else
-        checkStoredDefiner store definer schema statement
-        |> Result.bind (fun () ->
-            match Auth.tryParseAccount definer with
-            | Some account -> Ok(registryForDefiner account registry)
-            | None -> Error(1449, "The user specified as a definer ('') does not exist"))
+    registryForViewRequirements
+        store registry securityType definer (Auth.requiredPrivilegesInStore store schema statement)
 
 let private registryForView (store: Store) (registry: Registry) (view: StoredView) (statement: Statement) =
     registryForViewSecurity store registry view.SecurityType view.Definer view.Schema statement
@@ -25634,7 +25650,7 @@ let rec executeAs
                 let physicalUpdate = Update { authorizationUpdate with From = from; Joins = joins }
 
                 let authorizeLayered () =
-                    let invalid () = Error(invalidViewError view.ViewDatabase view.ViewName)
+                    let invalid () = Error(ViewGrantDenied(invalidViewError view.ViewDatabase view.ViewName))
 
                     let rec check current currentDatabase currentView = function
                         | [] -> invalid ()
@@ -25643,8 +25659,10 @@ let rec executeAs
                                   writableAccessView access.Database access.Table with
                             | Some stored, Some inner ->
                                 parseStoredViewStatement stored
-                                |> Result.mapError (fun _ -> invalidViewError view.ViewDatabase view.ViewName)
-                                |> Result.bind (registryForViewSecurity store current access.SecurityType access.Definer currentDatabase)
+                                |> Result.mapError (fun _ -> ViewGrantDenied(invalidViewError view.ViewDatabase view.ViewName))
+                                |> Result.bind (fun statement ->
+                                    registryForViewSecurity store current access.SecurityType access.Definer currentDatabase statement
+                                    |> Result.mapError ViewGrantDenied)
                                 |> Result.bind (fun effective ->
                                     (match originalUpdate with
                                      | Some original when original.Assignments.Length = authorizationUpdate.Assignments.Length ->
@@ -25676,22 +25694,39 @@ let rec executeAs
                                                 OrderBy = []
                                                 Limit = None }
                                         registryForViewSecurity
-                                            store effective access.SecurityType access.Definer currentDatabase (Update innerUpdate)))
+                                            store effective access.SecurityType access.Definer currentDatabase (Update innerUpdate)
+                                        |> Result.mapError ViewGrantDenied))
                                 |> Result.bind (fun next -> check next access.Database access.Table rest)
                             | _ -> invalid ()
                         | [ access ] when access.Mode = OriginalWrite ->
-                            registryForViewSecurity
-                                store current access.SecurityType access.Definer access.Database physicalUpdate
+                            let joinRequirements =
+                                match physicalUpdate with
+                                | Update update -> Auth.requiredUpdateJoinColumnsInStore store access.Database update
+                                | _ -> []
+
+                            registryForViewRequirements
+                                store current access.SecurityType access.Definer joinRequirements
+                            |> Result.mapError JoinColumnDenied
+                            |> Result.bind (fun _ ->
+                                registryForViewSecurity
+                                    store current access.SecurityType access.Definer access.Database physicalUpdate
+                                |> Result.mapError ViewGrantDenied)
                         | _ -> invalid ()
 
                     check registry view.ViewDatabase view.ViewName view.AccessPath
 
-                (if layeredSecurity then authorizeLayered ()
+                let invalidGrant ((code, _) as error) =
+                    if code = 1142 || code = 1143 then invalidViewError view.ViewDatabase view.ViewName else error
+
+                (if layeredSecurity then
+                     authorizeLayered ()
+                     |> Result.mapError (function
+                         | ViewGrantDenied(code, message) -> invalidGrant (code, message)
+                         | JoinColumnDenied(code, message) -> code, message)
                  else
                      registryForViewSecurity
-                         store registry view.SecurityType view.Definer view.ViewDatabase physicalUpdate)
-                |> Result.mapError (fun ((code, _) as error) ->
-                    if code = 1142 || code = 1143 then invalidViewError view.ViewDatabase view.ViewName else error)
+                         store registry view.SecurityType view.Definer view.ViewDatabase physicalUpdate
+                     |> Result.mapError invalidGrant)
                 |> Result.bind checkReadPaths
                 |> Result.bind (fun current -> checkPath current componentPath)
             | (Insert _ | InsertSelect _), Some _ when not componentPath.IsEmpty ->

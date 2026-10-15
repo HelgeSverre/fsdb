@@ -2825,11 +2825,15 @@ let private targetSource store defaultDb table =
           Partitions = []
           IndexHints = [] }
 
+let private mutationCteNames ctes =
+    ctes
+    |> List.map (fun cte ->
+        cte.CteName.ToLowerInvariant(),
+        if cte.CteColumns.IsEmpty then selectOrUnionProjectionNames cte.Body else cte.CteColumns)
+    |> Map.ofList
+
 let private updateColumnRequirements store defaultDb (update: UpdateStmt) =
-    let cteNames =
-        update.Ctes
-        |> List.map (fun cte -> cte.CteName.ToLowerInvariant(), if cte.CteColumns.IsEmpty then selectOrUnionProjectionNames cte.Body else cte.CteColumns)
-        |> Map.ofList
+    let cteNames = mutationCteNames update.Ctes
 
     let sources, joinRequirements =
         mutationJoinScope store defaultDb cteNames (physicalSource store defaultDb update.From) update.Joins
@@ -2864,11 +2868,16 @@ let private updateColumnRequirements store defaultDb (update: UpdateStmt) =
     @ (update.Ctes
        |> List.collect (fun cte -> selectOrUnionColumnRequirements store defaultDb [] Map.empty cte.Body))
 
+/// Column reads needed to form an UPDATE join, before the update expression or
+/// view projection is checked. A layered view may expose these denials directly.
+let internal requiredUpdateJoinColumnsInStore store defaultDb (update: UpdateStmt) =
+    mutationJoinScope store defaultDb (mutationCteNames update.Ctes) (physicalSource store defaultDb update.From) update.Joins
+    |> snd
+    |> List.filter (function "SELECT", OnColumn _ -> true | _ -> false)
+    |> List.distinct
+
 let private deleteColumnRequirements store defaultDb (delete: DeleteStmt) =
-    let cteNames =
-        delete.Ctes
-        |> List.map (fun cte -> cte.CteName.ToLowerInvariant(), if cte.CteColumns.IsEmpty then selectOrUnionProjectionNames cte.Body else cte.CteColumns)
-        |> Map.ofList
+    let cteNames = mutationCteNames delete.Ctes
 
     let sources, joinRequirements =
         mutationJoinScope store defaultDb cteNames (physicalSource store defaultDb delete.From) delete.Joins

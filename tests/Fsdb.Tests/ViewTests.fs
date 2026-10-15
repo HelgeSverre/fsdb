@@ -672,6 +672,48 @@ let tests =
               | other -> failtestf "expected the direct inner view's missing UPDATE to return 1356, got %A" other
               Expect.equal (rows store "SELECT n FROM layered_target") [ [ Some "1" ] ] "denied writes leave the base row unchanged"
 
+          testCase "layered JSON_TABLE view checks join columns before view projection grants"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE json_layer_target(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO json_layer_target VALUES(1,0)"
+                    "CREATE USER json_layer_inner_owner"
+                    "CREATE USER json_layer_outer_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.json_layer_target TO json_layer_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO json_layer_inner_owner,json_layer_outer_owner"
+                    "CREATE DEFINER='json_layer_inner_owner'@'%' SQL SECURITY DEFINER VIEW json_layer_inner AS SELECT a.id,a.n,j.x FROM json_layer_target a JOIN JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id"
+                    "GRANT SELECT,UPDATE ON fsdb.json_layer_inner TO json_layer_outer_owner"
+                    "CREATE DEFINER='json_layer_outer_owner'@'%' SQL SECURITY DEFINER VIEW json_layer_outer AS SELECT id,n AS metric,x FROM json_layer_inner" ] do
+                  expectOk (run store sql) sql
+
+              let update () = run store "UPDATE json_layer_outer SET metric=metric WHERE id=1"
+              Expect.equal (update ()) (Affected 0UL) "the complete grant chain permits the update"
+              expectOk (run store "REVOKE SELECT ON fsdb.json_layer_target FROM json_layer_inner_owner") "revoke the base read grant"
+              match update () with
+              | Err(1143, message) -> Expect.stringContains message "column 'id'" "join key is denied first"
+              | other -> failtestf "expected the missing join-key grant to return 1143, got %A" other
+              expectOk (run store "GRANT SELECT(id) ON fsdb.json_layer_target TO json_layer_inner_owner") "grant the join key"
+              match update () with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the missing projected-column grant to invalidate the view, got %A" other
+              expectOk (run store "GRANT SELECT(n) ON fsdb.json_layer_target TO json_layer_inner_owner") "grant the projected column"
+              Expect.equal (update ()) (Affected 0UL) "the two column grants permit the update"
+              Expect.equal (rows store "SELECT n FROM json_layer_target") [ [ Some "0" ] ] "denied writes leave the base row unchanged"
+
+              for sql in
+                  [ "CREATE TABLE json_layer_companion(id INT PRIMARY KEY)"
+                    "INSERT INTO json_layer_companion VALUES(1)"
+                    "GRANT SELECT ON fsdb.json_layer_companion TO json_layer_inner_owner"
+                    "CREATE DEFINER='json_layer_inner_owner'@'%' SQL SECURITY DEFINER VIEW regular_join_inner AS SELECT a.id,a.n FROM json_layer_target a JOIN json_layer_companion b ON b.id=a.id"
+                    "GRANT SELECT,UPDATE ON fsdb.regular_join_inner TO json_layer_outer_owner"
+                    "CREATE DEFINER='json_layer_outer_owner'@'%' SQL SECURITY DEFINER VIEW regular_join_outer AS SELECT id,n AS metric FROM regular_join_inner" ] do
+                  expectOk (run store sql) sql
+              expectOk (run store "REVOKE SELECT(id,n) ON fsdb.json_layer_target FROM json_layer_inner_owner") "revoke the base columns"
+              match run store "UPDATE regular_join_outer SET metric=metric WHERE id=1" with
+              | Err(1143, message) -> Expect.stringContains message "column 'id'" "ordinary join key is denied first"
+              | other -> failtestf "expected an ordinary join-key denial, got %A" other
+
           testCase "join view writes honor a component view's distinct definer"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
