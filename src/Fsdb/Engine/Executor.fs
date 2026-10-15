@@ -377,7 +377,7 @@ type private LockingReadSource =
 let private insertSelectSourceAliasPrefix = "\u0000fsdb_odku_source_"
 
 type private EqualityMembershipDomain =
-    | SignedIntegerMembership
+    | IntegerMembership
     | DecimalMembership
     | TextMembership of Collation.Collation
 
@@ -475,9 +475,16 @@ let private nullableJoinQualifiers (select: SelectStmt) =
             Set.union left right, Set.unionMany [ nullable; rightNullable; optional ]) (sourceScope source)
     select.From |> Option.map (fun source -> joinScope source select.Joins |> snd) |> Option.defaultValue Set.empty
 
+/// Signed and unsigned integers share one key when equal: an unsigned value
+/// within the signed range is keyed as its signed twin.
+let private canonicalIntegerKey value =
+    match value with
+    | VUInt unsigned when unsigned <= uint64 System.Int64.MaxValue -> VInt(int64 unsigned)
+    | _ -> value
+
 let private equalityMembershipKey domain value =
     match domain, value with
-    | SignedIntegerMembership, VInt _
+    | IntegerMembership, (VInt _ | VUInt _) -> Some(canonicalIntegerKey value)
     | DecimalMembership, VDecimal _ -> Some value
     | TextMembership collation, VString text -> Some(VString(collation.KeyOf text))
     | _ -> None
@@ -489,7 +496,7 @@ let private equalityMembershipDomain (store: Store) (column: ColumnDef) =
     | TSmallInt _
     | TMediumInt _
     | TInt _
-    | TBigInt false -> Some SignedIntegerMembership
+    | TBigInt _ -> Some IntegerMembership
     | TDecimal _ -> Some DecimalMembership
     | TChar _
     | TVarchar _
@@ -15178,7 +15185,8 @@ and private tryProjectedPhysicalRangeCandidates
         let safeBroadNumericRange =
             let values = [ bounds.Lower; bounds.Upper ] |> List.choose id |> List.map fst
             match equalityMembershipDomain store sourceColumn with
-            | Some SignedIntegerMembership -> values |> List.forall (function VInt _ -> true | _ -> false)
+            | Some IntegerMembership when sourceColumn.Type <> TBigInt true ->
+                values |> List.forall (function VInt _ -> true | _ -> false)
             | Some DecimalMembership -> values |> List.forall (function VDecimal _ -> true | _ -> false)
             | _ -> false
 

@@ -396,6 +396,25 @@ let tests =
               | ResultSet([ "name" ], [ [ Some "bob" ] ]) -> ()
               | other -> failtestf "expected only bob (who has no post), got %A" other
 
+          testCase "IN and NOT IN over BIGINT UNSIGNED candidates match across signedness"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE u_candidates (id BIGINT UNSIGNED)" |> ignore
+              runDefault store "CREATE TABLE u_probes (label VARCHAR(5), u BIGINT UNSIGNED, s BIGINT)" |> ignore
+              runDefault store "INSERT INTO u_candidates VALUES (1), (9223372036854775808), (18446744073709551615)" |> ignore
+              runDefault store "INSERT INTO u_probes VALUES ('one', 1, 1), ('big', 9223372036854775808, -1), ('max', 18446744073709551615, NULL), ('miss', 2, 2)" |> ignore
+
+              match runDefault store "SELECT label, u IN (SELECT id FROM u_candidates) AS by_u, s IN (SELECT id FROM u_candidates) AS by_s, s NOT IN (SELECT id FROM u_candidates) AS not_s FROM u_probes ORDER BY label" with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "big"; Some "1"; Some "0"; Some "1" ]
+                        [ Some "max"; Some "1"; None; None ]
+                        [ Some "miss"; Some "0"; Some "0"; Some "1" ]
+                        [ Some "one"; Some "1"; Some "1"; Some "0" ] ]
+                      "signed 1 matches unsigned 1, -1 never matches the unsigned maximum, and NULL stays unknown"
+              | other -> failtestf "expected unsigned IN results, got %A" other
+
           testCase "IN (SELECT ...): a non-correlated subquery's first column is the candidate set"
           <| fun _ ->
               let store = newStore ()
