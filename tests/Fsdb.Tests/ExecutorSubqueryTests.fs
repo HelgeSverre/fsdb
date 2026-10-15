@@ -1530,6 +1530,93 @@ let tests =
               | other -> failtestf "expected ignored-index decimal count, got %A" other
               Expect.isGreaterThan touches 900 "ignoring the decimal key restores the scan"
 
+          testCase "correlated mixed exact-numeric inequality uses indexed ranges"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE mixed_integer_bounds(id INT PRIMARY KEY,k INT)"
+                    "CREATE TABLE mixed_decimal_bounds(id INT PRIMARY KEY,k DECIMAL(10,2))"
+                    "CREATE TABLE mixed_integer_selective(k INT)"
+                    "CREATE TABLE mixed_decimal_selective(k DECIMAL(10,2))"
+                    "CREATE TABLE mixed_integer_rows(id INT PRIMARY KEY,k INT,KEY ix_k(k))"
+                    "CREATE TABLE mixed_decimal_rows(id INT PRIMARY KEY,k DECIMAL(10,2),KEY ix_k(k))"
+                    "INSERT INTO mixed_integer_bounds VALUES(1,1),(2,NULL),(3,51)"
+                    "INSERT INTO mixed_decimal_bounds VALUES(1,1.00),(2,NULL),(3,51.00)"
+                    "INSERT INTO mixed_integer_selective VALUES(1)"
+                    "INSERT INTO mixed_decimal_selective VALUES(1.00)" ] do
+                  runDefault store sql |> ignore
+              let values =
+                  [ 1..1000 ]
+                  |> List.map (fun id -> id, if id <= 950 then 1 else id - 949)
+              values
+              |> List.map (fun (id, key) -> sprintf "(%d,%d)" id key)
+              |> String.concat ","
+              |> sprintf "INSERT INTO mixed_integer_rows VALUES %s"
+              |> runDefault store
+              |> ignore
+              values
+              |> List.map (fun (id, key) -> sprintf "(%d,%d.00)" id key)
+              |> String.concat ","
+              |> sprintf "INSERT INTO mixed_decimal_rows VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for rowTable, selectiveTable, boundsTable in
+                  [ "mixed_decimal_rows", "mixed_integer_selective", "mixed_integer_bounds"
+                    "mixed_integer_rows", "mixed_decimal_selective", "mixed_decimal_bounds" ] do
+                  for source in
+                      [ sprintf "%s d" rowTable
+                        sprintf "(SELECT id,k FROM %s) d" rowTable
+                        sprintf "(SELECT id+0 AS id,k+0 AS k FROM %s LIMIT 1000) d" rowTable ] do
+                      touches <- 0
+                      let query predicate outer =
+                          "SELECT (SELECT COUNT(*) FROM " + source
+                          + " WHERE TOUCH(d.id)=d.id AND " + predicate + ") FROM " + outer + " o"
+                      match run store registry (query "d.k <> o.k" selectiveTable) with
+                      | ResultSet(_, [ [ Some "50" ] ]) -> ()
+                      | other -> failtestf "expected MySQL's selective mixed count, got %A" other
+                      Expect.isLessThan touches 80 (sprintf "mixed range union narrows %s" source)
+
+                      touches <- 0
+                      match run store registry (query "(d.k <> o.k OR d.id=500)" selectiveTable) with
+                      | ResultSet(_, [ [ Some "51" ] ]) -> ()
+                      | other -> failtestf "expected MySQL's mixed OR count, got %A" other
+                      Expect.isLessThan touches 80 (sprintf "mixed OR branch stays indexed for %s" source)
+
+                  for predicate, expected in
+                      [ "d.k <> o.k", [ [ Some "50" ]; [ Some "0" ]; [ Some "999" ] ]
+                        "NOT (d.k = o.k)", [ [ Some "50" ]; [ Some "0" ]; [ Some "999" ] ]
+                        "d.k <> o.k OR d.id=500", [ [ Some "51" ]; [ Some "1" ]; [ Some "999" ] ] ] do
+                      let sql =
+                          sprintf "SELECT (SELECT COUNT(*) FROM %s d WHERE %s) FROM %s o ORDER BY o.id"
+                              rowTable predicate boundsTable
+                      match run store registry sql with
+                      | ResultSet(_, rows) when rows = expected -> ()
+                      | other -> failtestf "expected MySQL's mixed counts for %s, got %A" predicate other
+
+                  touches <- 0
+                  let nullBound =
+                      sprintf "SELECT (SELECT COUNT(*) FROM %s d WHERE TOUCH(d.id)=d.id AND d.k <> o.k) FROM %s o WHERE o.id=2"
+                          rowTable boundsTable
+                  match run store registry nullBound with
+                  | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's NULL mixed-bound count, got %A" other
+                  Expect.isLessThan touches 80 "a NULL mixed bound has no indexed candidates"
+
+                  touches <- 0
+                  let ignored =
+                      sprintf "SELECT (SELECT COUNT(*) FROM %s d IGNORE INDEX (ix_k) WHERE TOUCH(d.id)=d.id AND d.k <> o.k) FROM %s o"
+                          rowTable selectiveTable
+                  match run store registry ignored with
+                  | ResultSet(_, [ [ Some "50" ] ]) -> ()
+                  | other -> failtestf "expected ignored-index mixed count, got %A" other
+                  Expect.isGreaterThan touches 900 "ignoring the mixed numeric key restores the scan"
+
           testCase "correlated OR branches intersect broad IN and range candidates"
           <| fun _ ->
               let mutable touches = 0

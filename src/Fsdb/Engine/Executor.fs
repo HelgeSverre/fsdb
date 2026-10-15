@@ -14281,7 +14281,9 @@ and private canSplitCorrelatedExactNumericInequality source (columns: ColumnDef 
         match innerColumn indexed, boundValue bound with
         | Some indexedType, Some(VNull | VInt _ | VUInt _ | VBit _)
             when isExactIntegerIndexType indexedType -> true
-        | Some(TDecimal _), Some(VNull | VDecimal _) -> true
+        | Some indexedType, Some(VDecimal _)
+            when isExactIntegerIndexType indexedType -> true
+        | Some(TDecimal _), Some(VNull | VInt _ | VUInt _ | VDecimal _) -> true
         | _ -> false
 
     compatible left right || compatible right left

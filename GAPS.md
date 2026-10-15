@@ -230,8 +230,10 @@ NULL-bound results.
 [Correlated integer inequality predicates](torture/findings/2026-10-15-correlated-integer-inequality.md)
 likewise union strict ranges for a stable integer bound, including complete OR
 branches. [Exact DECIMAL inequalities](torture/findings/2026-10-15-correlated-decimal-inequality.md)
-now use the same union for a stable decimal bound; mixed numeric, text, and
-functional-expression domains remain on their prior paths.
+now use the same union for a stable decimal bound, including exact
+integer/decimal pairs in either key direction. Fractional decimal bounds
+against integer keys, approximate numeric, text, and functional-expression
+domains remain on their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,

@@ -15,6 +15,21 @@ still filters candidate rows. A focused regression keeps residual calls
 below 80 for direct, pass-through, and materialized sources, including a
 complete OR branch and NULL bound; `IGNORE INDEX` restores over 900 calls.
 
-The integer path remains intact. Mixed numeric types, text, functional
-index expressions, and other inequality forms still need separate domain
-evidence before the same candidate rewrite can be used.
+The integer path remains intact.
+
+## Exact integer/decimal bounds
+
+The native oracle also pairs a DECIMAL key containing integral values with an
+INT outer bound, and an INT key with an integral DECIMAL outer bound. Both
+directions retain the same `(50, 0, 999)` counts and `(51, 1, 999)` OR counts
+for direct, pass-through, and stable materialized sources. Before the follow-up,
+the selective DECIMAL-key/INT-bound query evaluated its residual 1,002 times.
+
+The candidate split now accepts these exact numeric pairs. A range lookup
+normalizes an integer bound to the DECIMAL key only when coercion preserves
+the bound's numeric value; rounded or out-of-range conversions fall back to
+the prior scan path. The focused regression keeps residual calls below 80
+for both directions, including OR and NULL bounds, while `IGNORE INDEX`
+restores over 900 calls. Fractional DECIMAL bounds against integer keys,
+approximate numeric values, text, and functional index expressions remain
+on their prior scan paths.

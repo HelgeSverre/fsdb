@@ -90,7 +90,34 @@ def main():
                             )
                             actual = tuple(row[0] for row in cursor.fetchall())
                             assert actual == expected, (source, predicate, expected, actual)
-                print(f"MySQL {version}: integer and DECIMAL inequality counts 50/0/999 and OR counts 51/1/999")
+                    for sql in [
+                        "CREATE TABLE integer_bounds(id INT PRIMARY KEY,k INT)",
+                        "CREATE TABLE decimal_integer_rows(id INT PRIMARY KEY,k DECIMAL(10,2),KEY ix_k(k))",
+                        "CREATE TABLE decimal_integer_bounds(id INT PRIMARY KEY,k DECIMAL(10,2))",
+                        "INSERT INTO integer_bounds VALUES(1,1),(2,NULL),(3,51)",
+                        "INSERT INTO decimal_integer_bounds VALUES(1,1.00),(2,NULL),(3,51.00)",
+                    ]:
+                        cursor.execute(sql)
+                    values = ",".join(
+                        f"({id},{1 if id <= 950 else id - 949}.00)" for id in range(1, 1001)
+                    )
+                    cursor.execute("INSERT INTO decimal_integer_rows VALUES " + values)
+                    for source, bounds in [
+                        ("decimal_integer_rows d", "integer_bounds"),
+                        ("(SELECT id,k FROM decimal_integer_rows) d", "integer_bounds"),
+                        ("(SELECT id+0 AS id,k+0 AS k FROM decimal_integer_rows LIMIT 1000) d", "integer_bounds"),
+                        ("nums d", "decimal_integer_bounds"),
+                        ("(SELECT id,k FROM nums) d", "decimal_integer_bounds"),
+                        ("(SELECT id+0 AS id,k+0 AS k FROM nums LIMIT 1000) d", "decimal_integer_bounds"),
+                    ]:
+                        for predicate, expected in cases:
+                            cursor.execute(
+                                "SELECT (SELECT COUNT(*) FROM " + source + " WHERE " + predicate
+                                + ") FROM " + bounds + " o ORDER BY o.id"
+                            )
+                            actual = tuple(row[0] for row in cursor.fetchall())
+                            assert actual == expected, (source, bounds, predicate, expected, actual)
+                print(f"MySQL {version}: integer, DECIMAL, and mixed exact-numeric inequality counts 50/0/999 and OR counts 51/1/999")
             finally:
                 if connection:
                     connection.close()

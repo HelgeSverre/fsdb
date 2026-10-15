@@ -5289,6 +5289,17 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
         | _ -> None
     | _ -> None
 
+let private exactRangeProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
+    match table.Columns.[index].Type, value with
+    | TDecimal _, (VInt _ | VUInt _) ->
+        // A decimal range may use an integral bound when coercion preserves
+        // its numeric value; rounded or out-of-range bounds retain the scan.
+        Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) table.Columns.[index] value)
+        |> Result.toOption
+        |> Option.filter (function VDecimal _ -> true | _ -> false)
+        |> Option.filter (fun normalized -> Value.compare value normalized = 0)
+    | _ -> exactProbeValue store table index value
+
 let private acceptsExactSingleColumnProbe (store: Store) (table: Table) (literal: Value) (index: EqualityIndex) =
     index.ColumnIndices
     |> List.tryExactlyOne
@@ -5858,7 +5869,7 @@ let private trySecondaryOrderSliceInTable
         let normalizeBoundValue value =
             match probeValues with
             | StoredValues ->
-                exactProbeValue store table index value
+                (if requireBound then exactRangeProbeValue else exactProbeValue) store table index value
                 |> Option.map (projectIndexValue group.Group.Name None table.Columns.[index] group.PrefixLength group.Transform)
             | ProjectedValues when group.PrefixLength.IsNone ->
                 FunctionalIndex.tryNormalizeProbe
