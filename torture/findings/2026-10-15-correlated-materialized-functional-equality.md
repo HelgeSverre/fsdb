@@ -67,4 +67,21 @@ On 1,000 materialized rows, the
 calls from **4,004 to 6** while returning the same rows. MySQL 8.4.11 and
 FSDB agree on binary and explicit case-insensitive collation, reversed
 equality, `UPPER`, NULL bounds, and OR branches. Decimal and floating
+expression keys remained open at this point.
+
+## Statement-local decimal expression lookup
+
+Exact decimal results now get a statement-local equality key when the outer
+bound is decimal, signed integer, or unsigned integer. All keys use the
+decimal numeric domain, including integer bounds; scale does not split equal
+values. The original predicate remains the residual check. NULL results
+contribute no key, and row evaluation errors or non-decimal results fall back
+to a scan. DOUBLE, string, and other coerced bounds retain that scan because
+their comparison domains can merge or reinterpret decimal values.
+
+The [decimal profile](../scripts/correlated-materialized-decimal-profile.fsx)
+measures `d.k+0.00=o.x` at **7 residual calls instead of 5,005** on 1,000
+materialized rows. The [MySQL 8.4.11 oracle](../scripts/correlated-materialized-decimal-oracle.py)
+and executor regression cover decimal and integer bounds, reversed equality,
+arithmetic, NULL, a complete OR branch, and DOUBLE fallback. Floating-point
 expression keys remain open.

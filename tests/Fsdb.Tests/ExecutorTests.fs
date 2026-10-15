@@ -13003,6 +13003,47 @@ let tests =
                         | other -> failtestf "expected materialized text matches for %s, got %A" predicate other
                         Expect.isLessThan calls 80 (predicate + " must bound residual work")
 
+                testCase "materialized correlated decimal expressions key exact bounds only"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE decimal_bounds(id INT PRIMARY KEY,x DECIMAL(12,2),i BIGINT,f DOUBLE)" |> ignore
+                    runDefault store "CREATE TABLE decimal_rows(id INT PRIMARY KEY,k DECIMAL(12,2))" |> ignore
+                    runDefault store
+                        "INSERT INTO decimal_bounds VALUES(1,10.25,10,10.25),(2,999.00,999,999.00),(3,NULL,NULL,NULL),(4,-10.25,-10,-10.25)"
+                    |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,%d.25)" id (id - 500))
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO decimal_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO decimal_rows VALUES(1000,NULL)" |> ignore
+
+                    for predicate, expected, keyed in
+                        [ "d.k+0.00=o.x", [ 1; 0; 0; 1 ], true
+                          "o.x=d.k+0.00", [ 1; 0; 0; 1 ], true
+                          "d.k*1.00=o.x", [ 1; 0; 0; 1 ], true
+                          "d.k+0.00=o.i", [ 0; 0; 0; 0 ], true
+                          "d.k+0.00=o.f", [ 1; 0; 0; 1 ], false
+                          "d.k+0.00=o.x OR d.id=12", [ 2; 1; 1; 2 ], true ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM decimal_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                            + "FROM decimal_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual (expected |> List.map Some) predicate
+                        | other -> failtestf "expected materialized decimal matches for %s, got %A" predicate other
+                        if keyed then Expect.isLessThan calls 80 (predicate + " must bound residual work")
+                        else Expect.isGreaterThan calls 1000 "DOUBLE coercion must retain the scan"
+
                 testCase "physical correlated ABS equality probes indexed signed keys"
                 <| fun _ ->
                     let mutable calls = 0
