@@ -119,6 +119,20 @@ let tests =
               let cjkLeftActual = execute cjkLeftJoined
               Expect.equal cjkLeftActual cjkControl "MySQL 8.4 ngram left-join ON bound preserves results and scores"
               Expect.isLessThan calls 30 "the right-side ON bound restricts CJK candidate preparation"
+              let cjkLeftTransitive =
+                  "SELECT d.id," + cjkScore + " FROM owners o LEFT JOIN cjk_docs d"
+                  + " ON d.owner_id=o.id WHERE o.id=42"
+                  + " AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+              calls <- 0
+              Expect.equal (execute cjkLeftTransitive) cjkControl "preserved owner equality retains CJK scores"
+              Expect.isLessThan calls 30 "the owner key narrows nullable CJK scoring candidates"
+              let cjkLeftOnOwner =
+                  "SELECT d.id," + cjkScore + " FROM owners o LEFT JOIN cjk_docs d"
+                  + " ON d.owner_id=o.id AND o.id=42 WHERE o.id IN(42,43)"
+                  + " AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+              calls <- 0
+              Expect.equal (execute cjkLeftOnOwner) cjkControl "preserved ON bound retains CJK scores"
+              Expect.isLessThan calls 30 "the preserved ON literal narrows nullable CJK scoring"
               let cjkPreserved =
                   "SELECT o.id,d.id," + cjkScore + " FROM owners o LEFT JOIN cjk_docs d"
                   + " ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43)"
@@ -132,6 +146,28 @@ let tests =
                       "matching CJK rows retain MySQL relevance"
                   Expect.equal (List.last rows) [ Some "43"; None; Some "0" ] "MySQL 8.4 null-extended score"
               | actual, _ -> failtestf "expected left-join CJK rows, got %A" actual
+              execute "INSERT INTO owners VALUES(999)" |> ignore
+              let cjkTransitivePreserved =
+                  "SELECT o.id,d.id," + cjkScore + " FROM owners o LEFT JOIN cjk_docs d"
+                  + " ON d.owner_id=o.id WHERE o.id IN(42,999) ORDER BY o.id,d.id"
+              calls <- 0
+              let cjkTransitiveActual = execute cjkTransitivePreserved
+              match cjkTransitiveActual, cjkControl with
+              | ResultSet(_, rows), ResultSet(_, controlRows) ->
+                  Expect.sequenceEqual
+                      (rows |> List.take 10 |> List.map (fun row -> row.[1], row.[2]))
+                      (controlRows |> List.map (fun row -> row.[0], row.[1]))
+                      "an IN bound retains complete-corpus CJK scores"
+                  Expect.equal (List.last rows) [ Some "999"; None; Some "0" ] "unmatched owner keeps its zero score"
+              | actual, _ -> failtestf "expected transitive left-join CJK rows, got %A" actual
+              Expect.isLessThan calls 30 "the preserved IN bound narrows nullable CJK scoring"
+              let cjkRightTransitivePreserved =
+                  "SELECT o.id,d.id," + cjkScore + " FROM cjk_docs d RIGHT JOIN owners o"
+                  + " ON d.owner_id=o.id WHERE o.id IN(42,999) ORDER BY o.id,d.id"
+              calls <- 0
+              Expect.equal (execute cjkRightTransitivePreserved) cjkTransitiveActual "right join retains the same unmatched owner"
+              Expect.isLessThan calls 30 "the right-join IN bound narrows nullable CJK scoring"
+              execute "DELETE FROM owners WHERE id=999" |> ignore
               let cjkRightPreserved =
                   "SELECT o.id,d.id," + cjkScore + " FROM cjk_docs d RIGHT JOIN owners o"
                   + " ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43)"
@@ -144,6 +180,13 @@ let tests =
               calls <- 0
               Expect.equal (execute cjkRightJoined) cjkControl "MySQL 8.4 ngram right-join ON bound preserves results and scores"
               Expect.isLessThan calls 30 "the left-side ON bound restricts CJK candidate preparation"
+              let cjkRightTransitive =
+                  "SELECT d.id," + cjkScore + " FROM cjk_docs d RIGHT JOIN owners o"
+                  + " ON d.owner_id=o.id WHERE o.id=42"
+                  + " AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+              calls <- 0
+              Expect.equal (execute cjkRightTransitive) cjkControl "preserved right-join equality retains scores"
+              Expect.isLessThan calls 30 "the right-join owner key narrows nullable CJK scoring"
               let cjkChainedRightJoined =
                   "SELECT d.id," + cjkScore + " FROM owners p JOIN cjk_docs d ON d.owner_id=p.id"
                   + " RIGHT JOIN owners o ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43)"

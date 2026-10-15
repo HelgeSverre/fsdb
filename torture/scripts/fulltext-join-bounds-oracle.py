@@ -58,6 +58,18 @@ def verify(client, second_client):
         "AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
     )
     native["expect"]("ngram left join local ON bound", client.query(cjk_left_joined), client.query(cjk_direct))
+    cjk_left_transitive = (
+        "SELECT d.id," + cjk_score + " FROM owners o LEFT JOIN cjk_docs d "
+        "ON d.owner_id=o.id WHERE o.id=42 "
+        "AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+    )
+    native["expect"]("ngram left join preserved key bound", client.query(cjk_left_transitive), client.query(cjk_direct))
+    cjk_left_on_owner = (
+        "SELECT d.id," + cjk_score + " FROM owners o LEFT JOIN cjk_docs d "
+        "ON d.owner_id=o.id AND o.id=42 WHERE o.id IN(42,43) "
+        "AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+    )
+    native["expect"]("ngram left join preserved ON bound", client.query(cjk_left_on_owner), client.query(cjk_direct))
     cjk_preserved = (
         "SELECT o.id,d.id," + cjk_score + " FROM owners o LEFT JOIN cjk_docs d "
         "ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43) "
@@ -65,6 +77,20 @@ def verify(client, second_client):
     )
     preserved_expected = "\n".join("42\t" + row for row in client.query(cjk_direct).splitlines()) + "\n43\tNULL\t0"
     native["expect"]("ngram left join preserves unmatched owner", client.query(cjk_preserved), preserved_expected)
+    client.query("INSERT INTO owners VALUES(999)")
+    cjk_transitive_preserved = (
+        "SELECT o.id,d.id," + cjk_score + " FROM owners o LEFT JOIN cjk_docs d "
+        "ON d.owner_id=o.id WHERE o.id IN(42,999) ORDER BY o.id,d.id"
+    )
+    native["expect"]("ngram transitive IN keeps unmatched owner", client.query(cjk_transitive_preserved),
+                     "\n".join("42\t" + row for row in client.query(cjk_direct).splitlines()) + "\n999\tNULL\t0")
+    cjk_right_transitive_preserved = (
+        "SELECT o.id,d.id," + cjk_score + " FROM cjk_docs d RIGHT JOIN owners o "
+        "ON d.owner_id=o.id WHERE o.id IN(42,999) ORDER BY o.id,d.id"
+    )
+    native["expect"]("ngram right transitive IN keeps unmatched owner",
+                     client.query(cjk_right_transitive_preserved), client.query(cjk_transitive_preserved))
+    client.query("DELETE FROM owners WHERE id=999")
     cjk_right_preserved = (
         "SELECT o.id,d.id," + cjk_score + " FROM cjk_docs d RIGHT JOIN owners o "
         "ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43) "
@@ -77,6 +103,12 @@ def verify(client, second_client):
         "AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
     )
     native["expect"]("ngram right join local ON bound", client.query(cjk_right_joined), client.query(cjk_direct))
+    cjk_right_transitive = (
+        "SELECT d.id," + cjk_score + " FROM cjk_docs d RIGHT JOIN owners o "
+        "ON d.owner_id=o.id WHERE o.id=42 "
+        "AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+    )
+    native["expect"]("ngram right join preserved key bound", client.query(cjk_right_transitive), client.query(cjk_direct))
     cjk_chained_right = (
         "SELECT d.id," + cjk_score + " FROM owners p JOIN cjk_docs d ON d.owner_id=p.id "
         "RIGHT JOIN owners o ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43) "
