@@ -5651,6 +5651,10 @@ let private orderedPrefixBounds (entries: ImmutableSortedSet<SecondaryOrderEntry
 /// parts. The NULL slice is contiguous in both ascending and descending keys.
 type private IndexedNullTest = NullRows | NonNullRows
 
+type internal IndexedNullRowIds =
+    { CandidateCount: int
+      RowIds: Lazy<Set<RowId>> }
+
 let private tryOrderedNullTestRowIdsForColumn
     (store: Store)
     (table: Table)
@@ -5658,7 +5662,7 @@ let private tryOrderedNullTestRowIdsForColumn
     (equalities: (string * Value) list)
     allowed
     test
-    : Set<RowId> option =
+    : IndexedNullRowIds option =
     resolveColumn table.Columns columnName
         |> Result.toOption
         |> Option.bind (fun columnIndex ->
@@ -5703,10 +5707,14 @@ let private tryOrderedNullTestRowIdsForColumn
                 let rowIds lower upper =
                     Seq.init (upper - lower) (fun offset -> entries.[lower + offset].RowId)
                 match test with
-                | NullRows -> rowIds nullFirst nullAfterLast |> Set.ofSeq
+                | NullRows ->
+                    { CandidateCount = nullAfterLast - nullFirst
+                      RowIds = lazy (rowIds nullFirst nullAfterLast |> Set.ofSeq) }
                 | NonNullRows ->
-                    Seq.append (rowIds first nullFirst) (rowIds nullAfterLast afterLast)
-                    |> Set.ofSeq))
+                    { CandidateCount = (nullFirst - first) + (afterLast - nullAfterLast)
+                      RowIds = lazy (
+                          Seq.append (rowIds first nullFirst) (rowIds nullAfterLast afterLast)
+                          |> Set.ofSeq) }))
 
 /// Equality probes use SQL's `NULL <> NULL` rule. `IS NULL` can also read a
 /// non-unique single-column key's direct NULL bucket.
@@ -5725,9 +5733,10 @@ let internal tryNullRowIdsForColumn store table columnName equalities allowed : 
 
     singleColumnBucket
     |> Option.orElseWith (fun () ->
-        tryOrderedNullTestRowIdsForColumn store table columnName equalities allowed NullRows)
+        tryOrderedNullTestRowIdsForColumn store table columnName equalities allowed NullRows
+        |> Option.map (fun lookup -> lookup.RowIds.Value))
 
-let internal tryNonNullRowIdsForColumn store table columnName equalities allowed : Set<RowId> option =
+let internal tryNonNullRowIdsForColumn store table columnName equalities allowed : IndexedNullRowIds option =
     tryOrderedNullTestRowIdsForColumn store table columnName equalities allowed NonNullRows
 
 type EqualityIndexMatchLookup =

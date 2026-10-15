@@ -14895,7 +14895,9 @@ and private tryProjectedPhysicalNullTestCandidates store (projection: PhysicalPr
     if tests.IsEmpty || not (storedRowsMatchReadRows store projection.PhysicalTable.Columns) then
         None
     else
-        let allowed = indexHintsFor IndexJoin projection.PhysicalTableRef |> indexAllowedBy
+        let hints = indexHintsFor IndexJoin projection.PhysicalTableRef
+        let allowed = indexAllowedBy hints
+        let forced = hints |> List.exists (fun hint -> hint.Kind = ForceIndex)
         let probeEqualities =
             match outer with
             | Some _ -> correlatedProbeEqualities probeSource whereExpr outer |> Option.defaultValue []
@@ -14918,7 +14920,14 @@ and private tryProjectedPhysicalNullTestCandidates store (projection: PhysicalPr
                         store projection.PhysicalTable column.Name boundEqualities allowed
                 | MatchesNonNull ->
                     Storage.tryNonNullRowIdsForColumn
-                        store projection.PhysicalTable column.Name boundEqualities allowed))
+                        store projection.PhysicalTable column.Name boundEqualities allowed
+                    |> Option.bind (fun lookup ->
+                        if forced
+                           || QueryPlanner.chooseRange projection.PhysicalTable.RowsArray.Count lookup.CandidateCount
+                              = QueryPlanner.IndexRange then
+                            Some lookup.RowIds.Value
+                        else
+                            None)))
         |> function
             | [] -> None
             | first :: rest ->

@@ -977,6 +977,35 @@ let tests =
                   else
                       Expect.isGreaterThan touches 1000 "ignoring the composite key restores the scan"
 
+          testCase "broad physical IS NOT NULL falls back to a scan unless forced"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE dense_nonnull(id INT PRIMARY KEY,k INT,KEY ix_k(k))" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,%s)" id (if id % 100 = 0 then "NULL" else string id))
+              |> String.concat ","
+              |> sprintf "INSERT INTO dense_nonnull VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for hint, forced in [ "", false; "FORCE INDEX (ix_k)", true ] do
+                  touches <- 0
+                  let sql =
+                      "SELECT COUNT(*) FROM dense_nonnull d " + hint
+                      + " WHERE TOUCH(d.id)=d.id AND d.k IS NOT NULL"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "990" ] ]) -> ()
+                  | other -> failtestf "expected 990 non-NULL rows, got %A" other
+                  if forced then
+                      Expect.isLessThan touches 995 "the forced path evaluates only non-NULL candidates"
+                  else
+                      Expect.isGreaterThan touches 999 "the broad slice is less useful than a scan"
+
           testCase "materialized correlated IN probes avoid unrelated rows"
           <| fun _ ->
               let mutable touches = 0

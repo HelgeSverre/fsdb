@@ -43,5 +43,7 @@ values. The focused regression keeps `TOUCH` calls below 30 for conjunctions
 and below 50 for OR, while `IGNORE INDEX` restores more than 1,000 calls.
 The composite `(a, k DESC)` key narrows each outer equality to five rows;
 ignoring it restores the scan. The original predicate remains the final
-result check. This does not add an index path for expression keys or unbound
-later key parts.
+result check. The ordered slice reports its candidate count before collecting
+row IDs, so a dense non-NULL slice falls back to a scan unless `FORCE INDEX`
+requests the indexed path. This does not add an index path for expression keys
+or unbound later key parts.
