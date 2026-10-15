@@ -826,8 +826,11 @@ An UPDATE that explicitly qualifies a single-table updatable view as its
 first joined mutation target rewrites to its base table and waits on the physical
 row under contention; renamed exposed columns and CHECK OPTION match the
 [MySQL oracle](torture/findings/2026-10-15-joined-view-mutation-source.md).
-Joined views used as sources of another joined mutation and bare view-target
-assignments remain open.
+Audited [inner joined views used as the first source of another joined
+mutation](torture/findings/2026-10-15-nested-joined-view-mutation-source.md)
+also update the physical target with either internal source order, retain
+CHECK OPTION, and wait under contention. Bare view-target assignments and
+broader join and security-layer combinations remain open.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
 before a local upload or server-side file read; ordinary inserts remain
 available through their supported forms.
@@ -1614,8 +1617,9 @@ implementation effort:
    and [unqualified targets](torture/findings/2026-10-14-unqualified-joined-update-rebase.md)
    already wait and rebase. A [joined UPDATE addressed to a single-table
    updatable view](torture/findings/2026-10-15-joined-view-mutation-source.md)
-   now claims and rebases its physical row; joined-view sources and broader
-   write shapes remain to audit.
+   now claims and rebases its physical row; [audited inner joined view
+   sources](torture/findings/2026-10-15-nested-joined-view-mutation-source.md)
+   do likewise. Bare assignments and broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in
    the eight-writer keyless-insert path; that experiment was reverted.

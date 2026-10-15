@@ -28365,7 +28365,6 @@ let rec executeAs
 
         match tryUpdatableView store viewDb updateStmt.From.Table with
         | None -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
-        | Some view when not view.UpdateJoins.IsEmpty -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
         | Some view ->
             let viewQualifier = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
             let baseQualifier = view.UpdateFrom.Alias |> Option.defaultValue view.UpdateFrom.Table
@@ -28420,7 +28419,7 @@ let rec executeAs
                     let rewritten =
                         { updateStmt with
                             From = view.UpdateFrom
-                            Joins = updateStmt.Joins |> List.map (Join.mapConditions rewrite)
+                            Joins = view.UpdateJoins @ (updateStmt.Joins |> List.map (Join.mapConditions rewrite))
                             Assignments =
                                 assignments
                                 |> List.map (fun (assignment, target) ->
@@ -29532,20 +29531,24 @@ let transactionWriteTargets
         let viewTargets =
             tryUpdatableView store viewDatabase update.From.Table
             |> Option.bind (fun view ->
-                if not view.UpdateJoins.IsEmpty then None
-                else
-                    update.Assignments
-                    |> traverse (fun assignment ->
-                        Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
-                        |> function Some target -> Ok target | None -> Error())
-                    |> Result.toOption
-                    |> Option.bind (function
-                        | [] -> None
-                        | first :: rest when rest |> List.forall (fun target -> viewTargetKey target = viewTargetKey first) ->
-                            // An outer join can select any row in the view's base table.
-                            // Claim all its rows before taking the execution snapshot.
-                            targets view.UpdateFrom None
-                        | _ -> None))
+                update.Assignments
+                |> traverse (fun assignment ->
+                    Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
+                    |> function Some target -> Ok target | None -> Error())
+                |> Result.toOption
+                |> Option.bind (function
+                    | [] -> None
+                    | first :: rest when rest |> List.forall (fun target -> viewTargetKey target = viewTargetKey first) ->
+                        // An outer join can select any row in the view's physical target.
+                        // Claim that table before taking the execution snapshot.
+                        targets
+                            { Database = Some first.Database
+                              Table = first.Table
+                              Alias = Some first.Qualifier
+                              Partitions = []
+                              IndexHints = [] }
+                            None
+                    | _ -> None))
 
         match viewTargets with
         | Some target -> [ target ]

@@ -2286,6 +2286,79 @@ let tests =
               handle root "GRANT SELECT ON fsdb.tx_secure_view_lookup TO view_writer" |> ignore
               Expect.equal (handle writer sql |> snd) (Affected 1UL) "granted lookup read permits the update"
 
+          testCase "nested joined view updates wait for the physical target"
+          <| fun _ ->
+              for fromClause in
+                  [ "tx_nested_target t JOIN tx_nested_internal l ON l.id=t.id"
+                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_nested_target (id INT PRIMARY KEY, n INT)" |> ignore
+                  handle setup "CREATE TABLE tx_nested_internal (id INT PRIMARY KEY)" |> ignore
+                  handle setup "CREATE TABLE tx_nested_outer (id INT PRIMARY KEY)" |> ignore
+                  handle setup "INSERT INTO tx_nested_target VALUES (1, 0)" |> ignore
+                  handle setup "INSERT INTO tx_nested_internal VALUES (1)" |> ignore
+                  handle setup "INSERT INTO tx_nested_outer VALUES (1)" |> ignore
+                  handle setup ("CREATE VIEW tx_nested_view AS SELECT t.id, t.n FROM " + fromClause)
+                  |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, ownerWrite = handle owner "UPDATE tx_nested_target SET n=n+1 WHERE id=1"
+                  Expect.equal ownerWrite (Affected 1UL) "the owner updates the base row"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  let sql =
+                      "UPDATE tx_nested_view v JOIN tx_nested_outer x ON x.id=v.id "
+                      + "SET v.n=v.n+1 WHERE v.id=1"
+                  let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter sql)
+                  Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the nested joined writer waits"
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the joined writer resumes"
+                  let waiter, result = waiting.GetAwaiter().GetResult()
+                  Expect.equal result (Affected 1UL) "the joined writer updates the rebased row"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the waiter commits"
+                  match handle setup "SELECT n FROM tx_nested_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                  | result -> failtestf "expected both increments, got %A" result
+
+                  handle setup
+                      ("CREATE VIEW tx_nested_checked AS SELECT t.id,t.n FROM "
+                       + fromClause
+                       + " WITH CASCADED CHECK OPTION")
+                  |> ignore
+                  let rejectedSql =
+                      "UPDATE tx_nested_checked v JOIN tx_nested_outer x ON x.id=v.id "
+                      + "SET v.id=2 WHERE v.id=1"
+                  match handle setup rejectedSql |> snd with
+                  | Err(1369, _) -> ()
+                  | result -> failtestf "expected nested CHECK OPTION error 1369, got %A" result
+                  match handle setup "SELECT id,n FROM tx_nested_target" |> snd with
+                  | ResultSet(_, [ [ Some "1"; Some "2" ] ]) -> ()
+                  | result -> failtestf "CHECK OPTION must preserve the target, got %A" result
+
+          testCase "nested joined view update checks the caller's outer join reads"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              handle root "CREATE TABLE tx_nested_secure_target (id INT PRIMARY KEY, n INT)" |> ignore
+              handle root "CREATE TABLE tx_nested_secure_inner (id INT PRIMARY KEY)" |> ignore
+              handle root "CREATE TABLE tx_nested_secure_outer (id INT PRIMARY KEY)" |> ignore
+              handle root "INSERT INTO tx_nested_secure_target VALUES (1, 0)" |> ignore
+              handle root "INSERT INTO tx_nested_secure_inner VALUES (1)" |> ignore
+              handle root "INSERT INTO tx_nested_secure_outer VALUES (1)" |> ignore
+              handle root
+                  "CREATE VIEW tx_nested_secure_view AS SELECT t.id,t.n FROM tx_nested_secure_target t JOIN tx_nested_secure_inner l ON l.id=t.id"
+              |> ignore
+              handle root "CREATE USER nested_writer" |> ignore
+              handle root "GRANT SELECT, UPDATE ON fsdb.tx_nested_secure_view TO nested_writer" |> ignore
+              let writer = { create 2 store with User = "nested_writer" }
+              let sql =
+                  "UPDATE tx_nested_secure_view v JOIN tx_nested_secure_outer x ON x.id=v.id "
+                  + "SET v.n=v.n+1 WHERE v.id=1"
+              match handle writer sql |> snd with
+              | Err(1143, _) | Err(1142, _) -> ()
+              | result -> failtestf "expected denied outer join read, got %A" result
+              handle root "GRANT SELECT ON fsdb.tx_nested_secure_outer TO nested_writer" |> ignore
+              Expect.equal (handle writer sql |> snd) (Affected 1UL) "granted lookup read permits the update"
+
           testCase "updatable view delete waits and rechecks the physical row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
