@@ -4647,12 +4647,21 @@ let private disjuncts (expr: Expr) : Expr list =
 
 let private optionalConjuncts = Option.map conjuncts >> Option.defaultValue []
 
+/// `NOT BETWEEN` is the union of two strict ranges under SQL's three-valued
+/// comparison rules. The original expression remains the residual filter.
+let private candidateDisjuncts expression =
+    disjuncts expression
+    |> List.collect (function
+        | Not(Between(value, lower, upper)) ->
+            [ BinOp(Lt, value, lower); BinOp(Gt, value, upper) ]
+        | branch -> [ branch ])
+
 /// An OR narrows candidates only when every branch has a safe lookup.
 let private tryCompleteOrCandidates whereExpr branchCandidates merge candidateCount =
     whereExpr
     |> optionalConjuncts
     |> List.choose (fun expression ->
-        match disjuncts expression with
+        match candidateDisjuncts expression with
         | [ _ ] -> None
         | branches -> branches |> List.map branchCandidates |> tryAllSome |> Option.bind merge)
     |> function
@@ -6200,15 +6209,21 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             |> Result.bind (fun vlo ->
                 eval hi
                 |> Result.bind (fun vhi ->
-                    match ve, vlo, vhi with
-                    | VNull, _, _
-                    | _, VNull, _
-                    | _, _, VNull -> Ok VNull
-                    | _ ->
-                        resolvedCompare ctx ">=" e ve lo vlo
-                        |> Result.bind (fun lower ->
-                            resolvedCompare ctx "<=" e ve hi vhi
-                            |> Result.map (fun upper -> boolToValue (lower >= 0 && upper <= 0))))))
+                    let lower =
+                        if ve = VNull || vlo = VNull then Ok None
+                        else resolvedCompare ctx ">=" e ve lo vlo |> Result.map (fun comparison -> Some(comparison >= 0))
+                    lower
+                    |> Result.bind (fun lower ->
+                        let upper =
+                            if ve = VNull || vhi = VNull then Ok None
+                            else resolvedCompare ctx "<=" e ve hi vhi |> Result.map (fun comparison -> Some(comparison <= 0))
+                        upper
+                        |> Result.map (fun upper ->
+                            match lower, upper with
+                            | Some false, _
+                            | _, Some false -> VInt 0L
+                            | Some true, Some true -> VInt 1L
+                            | _ -> VNull)))))
     | NamedFunction "DEFAULT" [ argument ] ->
         match tryColumnDefForExpr ctx argument with
         | Some { Default = Some(DExpression expression) } -> eval expression

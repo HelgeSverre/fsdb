@@ -218,6 +218,10 @@ residual evaluation. Complete [correlated physical `IN` OR branches](torture/fin
 use the same row-identity union, including direct, pass-through derived, and
 stable CTE sources; compatible broad numeric ranges can intersect an `IN`
 probe within each branch, while an uncovered branch retains the scan path.
+Correlated [numeric `NOT BETWEEN` predicates](torture/findings/2026-10-15-correlated-not-between.md)
+also union the two strict indexed ranges on physical, pass-through, and stable
+materialized sources while retaining the original row filter and MySQL's
+NULL-bound results.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,

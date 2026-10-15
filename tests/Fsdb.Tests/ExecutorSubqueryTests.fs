@@ -981,6 +981,64 @@ let tests =
               | other -> failtestf "expected ignored indexes to preserve the OR result, got %A" other
               Expect.isGreaterThan touches 1000 "ignored indexes cannot narrow OR branches"
 
+          testCase "correlated NOT BETWEEN unions indexed range candidates"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              match run store registry
+                        "SELECT 5 BETWEEN NULL AND 3,5 BETWEEN 10 AND NULL,5 BETWEEN NULL AND 10,5 NOT BETWEEN NULL AND 3,5 NOT BETWEEN 10 AND NULL,5 NOT BETWEEN NULL AND 10" with
+              | ResultSet(_, [ [ Some "0"; Some "0"; None; Some "1"; Some "1"; None ] ]) -> ()
+              | other -> failtestf "expected MySQL's three-valued BETWEEN results, got %A" other
+              runDefault store "CREATE TABLE outside_bounds(id INT PRIMARY KEY,lo INT,hi INT)" |> ignore
+              runDefault store "CREATE TABLE outside_rows(id INT PRIMARY KEY)" |> ignore
+              runDefault store "INSERT INTO outside_bounds VALUES(1,10,990),(2,NULL,990),(3,10,NULL)" |> ignore
+              [ 1..1000 ]
+              |> List.map (sprintf "(%d)")
+              |> String.concat ","
+              |> sprintf "INSERT INTO outside_rows VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for prefix, source in
+                  [ "", "outside_rows d"
+                    "", "(SELECT id FROM outside_rows) d"
+                    "WITH passed AS (SELECT id FROM outside_rows) ", "passed d"
+                    "", "(SELECT id+0 AS id FROM outside_rows LIMIT 1000) d"
+                    "WITH passed AS (SELECT id+0 AS id FROM outside_rows LIMIT 1000) ", "passed d" ] do
+                  touches <- 0
+                  let sql =
+                      prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.id NOT BETWEEN o.lo AND o.hi)"
+                      + " FROM outside_bounds o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "1"; Some "19" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "9" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's null-sensitive outside counts, got %A" other
+                  Expect.isLessThan touches 80 (sprintf "both outside ranges narrow %s before residual evaluation" source)
+
+              touches <- 0
+              let combined =
+                  "SELECT o.id,(SELECT COUNT(*) FROM outside_rows d"
+                  + " WHERE TOUCH(d.id)=d.id AND (d.id NOT BETWEEN o.lo AND o.hi OR d.id=500))"
+                  + " FROM outside_bounds o ORDER BY o.id"
+              match run store registry combined with
+              | ResultSet(_, [ [ Some "1"; Some "20" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "10" ] ]) -> ()
+              | other -> failtestf "expected the extra OR branch to retain MySQL's rows, got %A" other
+              Expect.isLessThan touches 80 "the larger OR unions the outside ranges and equality"
+
+              touches <- 0
+              let ignored =
+                  "SELECT o.id,(SELECT COUNT(*) FROM outside_rows d IGNORE INDEX (PRIMARY)"
+                  + " WHERE TOUCH(d.id)=d.id AND d.id NOT BETWEEN o.lo AND o.hi)"
+                  + " FROM outside_bounds o ORDER BY o.id"
+              match run store registry ignored with
+              | ResultSet(_, [ [ Some "1"; Some "19" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "9" ] ]) -> ()
+              | other -> failtestf "expected ignored-index counts to match MySQL, got %A" other
+              Expect.isGreaterThan touches 1000 "ignored primary key keeps the scan path"
+
           testCase "correlated OR branches intersect broad IN and range candidates"
           <| fun _ ->
               let mutable touches = 0
