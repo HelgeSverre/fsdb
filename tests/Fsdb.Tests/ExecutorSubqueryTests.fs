@@ -981,6 +981,51 @@ let tests =
               | other -> failtestf "expected ignored indexes to preserve the OR result, got %A" other
               Expect.isGreaterThan touches 1000 "ignored indexes cannot narrow OR branches"
 
+          testCase "correlated OR branches intersect broad IN and range candidates"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE branch_bounds(a1 INT,a2 INT,b1 INT,b2 INT,lo1 INT,hi1 INT,lo2 INT,hi2 INT)" |> ignore
+              runDefault store "CREATE TABLE branch_rows(id INT PRIMARY KEY,a INT,b INT,KEY ix_a(a),KEY ix_b(b))" |> ignore
+              runDefault store "INSERT INTO branch_bounds VALUES(1,999,1,999,499,1000,899,1000)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id ->
+                  let a = if id <= 500 then 1 else id + 1000
+                  let b = if id >= 501 && id <= 900 then 1 else id + 2000
+                  sprintf "(%d,%d,%d)" id a b)
+              |> String.concat ","
+              |> sprintf "INSERT INTO branch_rows VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for prefix, source in
+                  [ "", "branch_rows d"
+                    "", "(SELECT id,a,b FROM branch_rows) d"
+                    "WITH passed AS (SELECT id,a,b FROM branch_rows) ", "passed d" ] do
+                  touches <- 0
+                  let sql =
+                      prefix + "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND ((d.a IN(o.a1,o.a2) AND d.id BETWEEN o.lo1 AND o.hi1)"
+                      + " OR (d.b IN(o.b1,o.b2) AND d.id BETWEEN o.lo2 AND o.hi2))) FROM branch_bounds o"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "4" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's four overlapping branch matches, got %A" other
+                  Expect.isLessThan touches 20 (sprintf "joint branch bounds narrow before residual evaluation for %s" source)
+
+              touches <- 0
+              let ignored =
+                  "SELECT (SELECT COUNT(*) FROM branch_rows d IGNORE INDEX (PRIMARY,ix_a,ix_b)"
+                  + " WHERE TOUCH(d.id)=d.id AND ((d.a IN(o.a1,o.a2) AND d.id BETWEEN o.lo1 AND o.hi1)"
+                  + " OR (d.b IN(o.b1,o.b2) AND d.id BETWEEN o.lo2 AND o.hi2))) FROM branch_bounds o"
+              match run store registry ignored with
+              | ResultSet(_, [ [ Some "4" ] ]) -> ()
+              | other -> failtestf "expected ignored keys to retain the joint branch result, got %A" other
+              Expect.isGreaterThan touches 1000 "ignored keys prevent both membership and range narrowing"
+
           testCase "physical correlated text IN respects effective comparison collation"
           <| fun _ ->
               let mutable touches = 0

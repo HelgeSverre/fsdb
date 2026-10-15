@@ -14858,10 +14858,6 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     correlatedProbeEqualities probeSource (Some branch) outer
                     |> Option.bind (tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection)
 
-                let ranges =
-                    correlatedRangeBounds probeSource (Some branch) outer
-                    |> List.choose (tryProjectedPhysicalRangeCandidates CostedRead store projection)
-
                 let membership =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
                         outer
@@ -14870,6 +14866,11 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                         |> Option.map (Storage.rowsForRowIds projection.PhysicalTable)
                     else
                         None
+
+                let rangePolicy = if membership.IsSome then CandidateNarrowing else CostedRead
+                let ranges =
+                    correlatedRangeBounds probeSource (Some branch) outer
+                    |> List.choose (tryProjectedPhysicalRangeCandidates rangePolicy store projection)
 
                 let functional =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then

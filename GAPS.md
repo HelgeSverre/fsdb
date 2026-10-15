@@ -216,7 +216,8 @@ over direct and pass-through physical sources intersect compatible candidates
 within each branch, then union stored row identities before projection and
 residual evaluation. Complete [correlated physical `IN` OR branches](torture/findings/2026-10-15-correlated-physical-in-or-union.md)
 use the same row-identity union, including direct, pass-through derived, and
-stable CTE sources; an uncovered branch retains the scan path.
+stable CTE sources; compatible broad numeric ranges can intersect an `IN`
+probe within each branch, while an uncovered branch retains the scan path.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
