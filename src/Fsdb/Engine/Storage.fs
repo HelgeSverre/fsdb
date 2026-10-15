@@ -165,6 +165,16 @@ let private compareIndexedValues (collationName: string option) (left: Value) (r
         collationName
         |> Collation.findOrDefault
         |> fun collation -> collation.Compare left right
+    // Keep stored integer order exact above 2^53; a DOUBLE search boundary
+    // is only a candidate cut and the SQL predicate filters the result.
+    | VInt left, VInt right -> Operators.compare left right
+    | VUInt left, VUInt right -> Operators.compare left right
+    | VInt left, VUInt right -> Operators.compare (bigint left) (bigint right)
+    | VUInt left, VInt right -> Operators.compare (bigint left) (bigint right)
+    | VInt left, VDouble right -> Value.compareIntegerToDouble (bigint left) right
+    | VUInt left, VDouble right -> Value.compareIntegerToDouble (bigint left) right
+    | VDouble left, VInt right -> -(Value.compareIntegerToDouble (bigint right) left)
+    | VDouble left, VUInt right -> -(Value.compareIntegerToDouble (bigint right) left)
     | _ -> compareTotal left right
 
 let private compareIndexedKeys
@@ -5299,6 +5309,11 @@ let private exactRangeProbeValue (store: Store) (table: Table) (index: int) (val
         // Every value in these integer domains is exactly representable as a
         // DOUBLE. Keep the fractional boundary instead of coercing it to an
         // integer key; BIGINT can exceed double's exact integer range.
+        Some value
+    | TBigInt _, VDouble number when Double.IsFinite number ->
+        // The index comparator orders integer keys against this boundary
+        // exactly. SQL may compare a DOUBLE outer column approximately, so
+        // the original predicate still filters the candidate superset.
         Some value
     | TDecimal _, (VInt _ | VUInt _) ->
         // A decimal range may use an integral bound when coercion preserves

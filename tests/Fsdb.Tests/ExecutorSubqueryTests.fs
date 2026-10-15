@@ -1691,6 +1691,89 @@ let tests =
                   | ResultSet(_, rows) when rows = expected -> ()
                   | other -> failtestf "expected MySQL's INT-domain DOUBLE-bound counts for %s, got %A" predicate other
 
+              for sql in
+                  [ "CREATE TABLE mixed_big_double_rows(id INT PRIMARY KEY,k BIGINT,KEY ix_k(k))"
+                    "CREATE TABLE mixed_big_double_bounds(id INT PRIMARY KEY,k DOUBLE)"
+                    "INSERT INTO mixed_big_double_rows VALUES(1,-9223372036854775808),(2,-9007199254740993),(3,-9007199254740992),(4,-1),(5,0),(6,9007199254740991),(7,9007199254740992),(8,9007199254740993),(9,9223372036854775807)"
+                    "INSERT INTO mixed_big_double_bounds VALUES(1,9007199254740992e0),(2,-9007199254740992e0),(3,1.5)" ] do
+                  runDefault store sql |> ignore
+              for predicate, expected in
+                  [ "d.k > o.k", [ [ Some "1" ]; [ Some "6" ]; [ Some "4" ] ]
+                    "d.k < o.k", [ [ Some "6" ]; [ Some "1" ]; [ Some "5" ] ] ] do
+                  for hint in [ ""; " IGNORE INDEX (ix_k)" ] do
+                      let sql =
+                          "SELECT (SELECT COUNT(*) FROM mixed_big_double_rows d" + hint
+                          + " WHERE " + predicate + ") FROM mixed_big_double_bounds o ORDER BY o.id"
+                      match run store registry sql with
+                      | ResultSet(_, rows) when rows = expected -> ()
+                      | other -> failtestf "expected MySQL's BIGINT/DOUBLE counts for %s%s, got %A" predicate hint other
+              for hint in [ ""; " IGNORE INDEX (ix_k)" ] do
+                  let sql =
+                      "SELECT id FROM mixed_big_double_rows" + hint
+                      + " WHERE k > 9007199254740992e0 ORDER BY id"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "8" ]; [ Some "9" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's exact BIGINT/DOUBLE literal range%s, got %A" hint other
+
+              runDefault store "CREATE TABLE mixed_big_double_selective(k DOUBLE)" |> ignore
+              runDefault store "CREATE TABLE mixed_big_double_many(id INT PRIMARY KEY,k BIGINT,KEY ix_k(k))" |> ignore
+              runDefault store "INSERT INTO mixed_big_double_selective VALUES(9007199254740992e0)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,%d)" id (9007199254740992L + int64 (if id <= 950 then 0 else id - 950)))
+              |> String.concat ","
+              |> sprintf "INSERT INTO mixed_big_double_many VALUES %s"
+              |> runDefault store
+              |> ignore
+              for source in
+                  [ "mixed_big_double_many d"
+                    "(SELECT id,k FROM mixed_big_double_many) d"
+                    "(SELECT id+0 AS id,k+0 AS k FROM mixed_big_double_many LIMIT 1000) d" ] do
+                  touches <- 0
+                  let sql =
+                      "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.k > o.k) FROM mixed_big_double_selective o"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "49" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's approximate BIGINT/DOUBLE column count, got %A" other
+                  Expect.isLessThan touches 80 (sprintf "BIGINT/DOUBLE column bound narrows %s" source)
+                  touches <- 0
+                  let withOr =
+                      "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND (d.k > o.k OR d.id=500)) FROM mixed_big_double_selective o"
+                  match run store registry withOr with
+                  | ResultSet(_, [ [ Some "50" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's BIGINT/DOUBLE OR count, got %A" other
+                  Expect.isLessThan touches 80 (sprintf "BIGINT/DOUBLE OR branch narrows %s" source)
+              touches <- 0
+              let ignoredBig =
+                  "SELECT (SELECT COUNT(*) FROM mixed_big_double_many d IGNORE INDEX (ix_k)"
+                  + " WHERE TOUCH(d.id)=d.id AND d.k > o.k) FROM mixed_big_double_selective o"
+              match run store registry ignoredBig with
+              | ResultSet(_, [ [ Some "49" ] ]) -> ()
+              | other -> failtestf "expected ignored-index BIGINT/DOUBLE count, got %A" other
+              Expect.isGreaterThan touches 900 "ignoring the BIGINT key restores the scan"
+              touches <- 0
+              match run store registry "SELECT COUNT(*) FROM mixed_big_double_many d WHERE TOUCH(d.id)=d.id AND d.k > 9007199254740992e0" with
+              | ResultSet(_, [ [ Some "50" ] ]) -> ()
+              | other -> failtestf "expected MySQL's exact BIGINT/DOUBLE literal count, got %A" other
+              Expect.isLessThan touches 80 "BIGINT/DOUBLE literal bound also narrows without losing the adjacent row"
+
+              runDefault store "CREATE TABLE mixed_unsigned_double_rows(id INT PRIMARY KEY,k BIGINT UNSIGNED,KEY ix_k(k))" |> ignore
+              runDefault store "INSERT INTO mixed_unsigned_double_rows VALUES(1,9007199254740992),(2,9007199254740993),(3,18446744073709551615)" |> ignore
+              for hint in [ ""; " IGNORE INDEX (ix_k)" ] do
+                  let correlated =
+                      "SELECT (SELECT COUNT(*) FROM mixed_unsigned_double_rows d" + hint
+                      + " WHERE d.k > o.k) FROM mixed_big_double_selective o"
+                  match run store registry correlated with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's unsigned correlated count%s, got %A" hint other
+                  let literal =
+                      "SELECT id FROM mixed_unsigned_double_rows" + hint
+                      + " WHERE k > 9007199254740992e0 ORDER BY id"
+                  match run store registry literal with
+                  | ResultSet(_, [ [ Some "2" ]; [ Some "3" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's unsigned literal rows%s, got %A" hint other
+
           testCase "correlated OR branches intersect broad IN and range candidates"
           <| fun _ ->
               let mutable touches = 0

@@ -157,6 +157,74 @@ def main():
                         )
                         actual = tuple(row[0] for row in cursor.fetchall())
                         assert actual == expected, (predicate, expected, actual)
+                    for sql in [
+                        "CREATE TABLE big_double_rows(id INT PRIMARY KEY,k BIGINT,KEY ix_k(k))",
+                        "CREATE TABLE big_double_bounds(id INT PRIMARY KEY,k DOUBLE)",
+                        "INSERT INTO big_double_rows VALUES(1,-9223372036854775808),(2,-9007199254740993),(3,-9007199254740992),(4,-1),(5,0),(6,9007199254740991),(7,9007199254740992),(8,9007199254740993),(9,9223372036854775807)",
+                        "INSERT INTO big_double_bounds VALUES(1,9007199254740992e0),(2,-9007199254740992e0),(3,1.5)",
+                    ]:
+                        cursor.execute(sql)
+                    for predicate, expected in [
+                        ("d.k > o.k", (1, 6, 4)),
+                        ("d.k < o.k", (6, 1, 5)),
+                    ]:
+                        for hint in ["", " IGNORE INDEX (ix_k)"]:
+                            cursor.execute(
+                                "SELECT (SELECT COUNT(*) FROM big_double_rows d" + hint
+                                + " WHERE " + predicate + ") FROM big_double_bounds o ORDER BY o.id"
+                            )
+                            actual = tuple(row[0] for row in cursor.fetchall())
+                            assert actual == expected, (predicate, hint, expected, actual)
+                    for hint in ["", " IGNORE INDEX (ix_k)"]:
+                        cursor.execute(
+                            "SELECT id FROM big_double_rows" + hint
+                            + " WHERE k > 9007199254740992e0 ORDER BY id"
+                        )
+                        actual = tuple(row[0] for row in cursor.fetchall())
+                        assert actual == (8, 9), (hint, actual)
+                    cursor.execute("CREATE TABLE big_double_many(id INT PRIMARY KEY,k BIGINT,KEY ix_k(k))")
+                    cursor.execute("CREATE TABLE big_double_selective(k DOUBLE)")
+                    cursor.execute("INSERT INTO big_double_selective VALUES(9007199254740992e0)")
+                    values = ",".join(
+                        f"({id},{9007199254740992 + (0 if id <= 950 else id - 950)})"
+                        for id in range(1, 1001)
+                    )
+                    cursor.execute("INSERT INTO big_double_many VALUES " + values)
+                    for source in [
+                        "big_double_many d", "big_double_many d IGNORE INDEX (ix_k)",
+                        "(SELECT id,k FROM big_double_many) d",
+                        "(SELECT id+0 AS id,k+0 AS k FROM big_double_many LIMIT 1000) d",
+                    ]:
+                        cursor.execute(
+                            "SELECT (SELECT COUNT(*) FROM " + source
+                            + " WHERE d.k > o.k) FROM big_double_selective o"
+                        )
+                        actual = cursor.fetchone()[0]
+                        assert actual == 49, (source, actual)
+                        cursor.execute(
+                            "SELECT (SELECT COUNT(*) FROM " + source
+                            + " WHERE d.k > o.k OR d.id=500) FROM big_double_selective o"
+                        )
+                        actual = cursor.fetchone()[0]
+                        assert actual == 50, (source, actual)
+                    cursor.execute("SELECT COUNT(*) FROM big_double_many WHERE k > 9007199254740992e0")
+                    assert cursor.fetchone()[0] == 50
+                    for sql in [
+                        "CREATE TABLE unsigned_double_rows(id INT PRIMARY KEY,k BIGINT UNSIGNED,KEY ix_k(k))",
+                        "INSERT INTO unsigned_double_rows VALUES(1,9007199254740992),(2,9007199254740993),(3,18446744073709551615)",
+                    ]:
+                        cursor.execute(sql)
+                    for hint in ["", " IGNORE INDEX (ix_k)"]:
+                        cursor.execute(
+                            "SELECT (SELECT COUNT(*) FROM unsigned_double_rows d" + hint
+                            + " WHERE d.k > o.k) FROM big_double_selective o"
+                        )
+                        assert cursor.fetchone()[0] == 1, hint
+                        cursor.execute(
+                            "SELECT id FROM unsigned_double_rows" + hint
+                            + " WHERE k > 9007199254740992e0 ORDER BY id"
+                        )
+                        assert tuple(row[0] for row in cursor.fetchall()) == (2, 3), hint
                 print(f"MySQL {version}: integer, DECIMAL, DOUBLE, and mixed numeric range cases passed")
             finally:
                 if connection:

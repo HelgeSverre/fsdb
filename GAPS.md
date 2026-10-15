@@ -238,8 +238,10 @@ branches.
 Finite `DOUBLE` bounds against indexed `TINYINT`, `SMALLINT`, `MEDIUMINT`,
 and `INT` keys also use their original fractional value as an ordered range
 boundary; [the MySQL oracle and residual probe](torture/findings/2026-10-15-correlated-decimal-inequality.md#finite-double-bounds-against-integer-keys)
-cover direct, pass-through, and materialized sources. `BIGINT`/`DOUBLE`,
-other approximate numeric combinations, text, and functional-expression
+cover direct, pass-through, and materialized sources. [BIGINT/DOUBLE bounds](torture/findings/2026-10-15-correlated-decimal-inequality.md#bigint-and-double-bound-provenance)
+also use exact index ordering and residual filtering so a DOUBLE outer column
+and the same DOUBLE literal retain their different results above `2^53`.
+Other approximate numeric combinations, text, and functional-expression
 bounds retain their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 

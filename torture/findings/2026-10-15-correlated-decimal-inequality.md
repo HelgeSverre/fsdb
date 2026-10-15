@@ -64,5 +64,32 @@ times. The range lookup now retains a finite DOUBLE bound against
 domains is exactly representable as a double, so ordered comparison needs
 no integer rounding. The focused regression keeps residual calls below 80
 for the selective direct, pass-through, and materialized probes, including
-the OR branch. `BIGINT` can exceed double's exact integer range and is not
-included in this access-path change.
+the OR branch. `BIGINT` needs the separate index-ordering rule below because
+its stored integers can exceed double's exact integer range.
+
+## BIGINT and DOUBLE bound provenance
+
+The native MySQL 8.4.11 oracle compares a nine-row BIGINT index spanning
+`-2^63`, both sides of `±2^53`, and `2^63-1` with DOUBLE outer columns.
+For `d.k > o.k`, bounds `(2^53, -2^53, 1.5)` return `(1, 6, 4)`;
+`d.k < o.k` returns `(6, 1, 5)`. `IGNORE INDEX` gives the same rows, and
+the focused FSDB regression agrees. The adjacent `2^53+1` row compares
+equal to the DOUBLE-column value `2^53` in this context.
+
+The same value written as a DOUBLE literal is different: MySQL returns
+both `2^53+1` and `2^63-1` for `k > 9007199254740992e0`, with and
+without the index. The index now orders integer keys and DOUBLE probe
+values exactly. Its strict range is a candidate superset for both the
+literal and outer-column forms; the original SQL predicate still applies
+the appropriate comparison to those rows.
+
+On a 1,000-row corpus with 950 keys at `2^53` and 50 keys from
+`2^53+1` onward, MySQL returns 49 for the correlated DOUBLE-column bound
+and 50 for the DOUBLE literal. Before the index change, the selective
+correlated probe evaluated its residual 1,002 times. The regression now
+keeps direct, pass-through, and materialized probes below 80 calls,
+including a complete OR branch; `IGNORE INDEX` restores more than 900.
+The native oracle checks both counts, the nine-row signed-limit corpus, and
+an unsigned BIGINT corpus through `UINT64_MAX`. The unsigned adjacent row
+likewise appears for a DOUBLE literal and is excluded for a DOUBLE outer
+column.
