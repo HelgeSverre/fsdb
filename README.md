@@ -1191,6 +1191,7 @@ moves on.
 |---|---|
 | [Compatibility](docs/compatibility.md) | Validation method and detailed supported behavior |
 | [Open gaps](GAPS.md) | Current, evidence-backed differences from MySQL 8.4 |
+| [Independent review response](docs/independent-review-response.md) | Disposition of the October 14 engineering review and remaining production-readiness work |
 | [Comment style](docs/comment-style.md) | The grading every source comment and maintained document survives |
 | [Torture harness](torture/README.md) | Differential fuzzing against a MySQL 8.4 oracle |
 | [Application smoke tests](smoke/README.md) | Pinned upstream projects exercised over the wire |

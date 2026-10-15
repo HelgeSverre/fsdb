@@ -2,7 +2,10 @@
 
 The review inspected `ffb9e71d`, so its scores and historical benchmarks do not
 describe current main. This is a disposition of its actionable findings, not a
-new production-readiness score.
+new production-readiness score. Rechecked after the October 15 Sysflow workload
+changes in [#50](https://github.com/HelgeSverre/fsdb/pull/50),
+[#51](https://github.com/HelgeSverre/fsdb/pull/51), and
+[#52](https://github.com/HelgeSverre/fsdb/pull/52).
 
 | Finding | Current disposition | Evidence and remaining limit |
 |---|---|---|
@@ -17,6 +20,15 @@ new production-readiness score.
 | Durable write throughput and worker scaling | Open | The [current matched checkpoint](../benchmarks/results/2026-10-15-current-head-write-follow-up.md) measured 12,346 WAL-backed wire inserts/sec against 45,640 durable MySQL inserts/sec with eight writers (0.27×). A WAL-backed embedded control reached 32,672 inserts/sec. Prior admission-lock improvement was retained; unsuccessful scheduling and WAL-handle prototypes were reverted. The stage profiles narrow the cost but do not establish another causal optimization. |
 | Recovery, backup, and upgrades | Partly addressed | The [operations guide](operations.md) covers stopped-directory backup and staging restore. A legacy-snapshot upgrade regression covers one historical format path. Online backup and general cross-version migration remain unsupported. |
 | Mixed-type indexed join discrepancy | Open, narrow | [GAPS](../GAPS.md) records a connection-sensitive MySQL 8.4 result. It does not imply ordinary joins are broken; a change needs an application case and a stable oracle reproduction. |
+
+The Sysflow changes improve a measured application workload: #50 reports the
+home-page `withCount` queries falling from over 300 seconds to 0.09 seconds,
+and #52 reports its foreign-key-checks-off import falling from 15.3 to 8.9
+seconds after the parent-key lookup improvement. These are workload-specific
+measurements from the PRs, not evidence that WAL-backed write throughput or
+general MySQL compatibility has reached parity. #50 also received an
+additional MySQL-backed regression before merge to preserve error 1054 for
+invalid columns in `EXISTS` projections and ordering.
 
 The historical security issues cited in the review were closed before this
 recheck. None of the remaining concerns is evidence that FSDB is a dependable
