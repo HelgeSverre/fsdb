@@ -20,6 +20,15 @@ build/package job](https://github.com/HelgeSverre/fsdb/actions/runs/38652246865/
 also passed. The review's scores remain historical judgments,
 and the outstanding preview limits below remain open.
 
+At `612439cd`, the same gates passed locally: `just check` built without
+warnings and ran 3,570 passing tests, and `just package-check` packed the
+preview library and exercised the standalone package consumer. The [main-branch
+CI run](https://github.com/HelgeSverre/fsdb/actions/runs/38662092779) has
+passed its build/package and regression jobs; branch coverage was still running
+at this checkpoint. These checks confirm the reviewed fixes remain present,
+but do not establish production readiness or resolve the performance and
+maintenance limits below.
+
 | Review finding | Current state | Evidence and next action |
 |---|---|---|
 | No PR or main CI | Resolved for the current workflow | `.github/workflows/ci.yml` runs a Release build, a separate ordinary regression suite, package verification, and a Coverlet job enforcing 65% branch coverage on pushes to main and pull requests. [The `f11a278c` run](https://github.com/HelgeSverre/fsdb/actions/runs/38636418469) passed all three jobs. Earlier parallel coverage runs exhausted a 16 GB runner; a resource trace showed the instrumented process exceeding 15 GB RSS. The CI test jobs now use a 4 GiB .NET GC heap limit and run sequentially. The MySQL differential suite remains a separate gate. |
