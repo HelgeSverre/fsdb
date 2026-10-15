@@ -177,7 +177,7 @@ let tests =
                   [ [ Some "2"; Some "11" ]; [ Some "3"; Some "31" ] ]
                   "legal writes persist"
 
-          testCase "inner join views update or insert one base table at a time"
+          testCase "joined views write one base table and reject outer joins"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               expectOk (run store "CREATE TABLE joined_left (id INT PRIMARY KEY, n INT, hidden INT DEFAULT 7)") "create left"
@@ -260,6 +260,19 @@ let tests =
               match run store "UPDATE outer_joined_rows SET n = 0" with
               | Err(1288, _) -> ()
               | other -> failtestf "expected outer join update rejection, got %A" other
+
+              expectOk
+                  (run store "CREATE VIEW right_joined_rows AS SELECT l.id, l.n, r.note FROM joined_right r RIGHT JOIN joined_left l ON r.id = l.id")
+                  "create right join view"
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name = 'right_joined_rows'")
+                  [ [ Some "NO" ] ]
+                  "right join view is not updatable"
+
+              match run store "UPDATE right_joined_rows SET n = 0" with
+              | Err(1288, _) -> ()
+              | other -> failtestf "expected right join update rejection, got %A" other
 
               Expect.equal
                   (rows store "SELECT id, n, hidden FROM joined_left ORDER BY id")
