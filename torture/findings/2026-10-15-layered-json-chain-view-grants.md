@@ -13,6 +13,12 @@ owner's target `SELECT` returns 1143 for the join key; revoking target
 `UPDATE` returns 1356. Revoking the outer owner's `UPDATE` on the inner view
 also returns 1356. Each denied write leaves the target unchanged.
 
-A focused `ViewTests` regression retains this two-function source order and
-grant chain. This establishes the audited dependency shape; other source
+A focused `ViewTests` regression retains this grant chain and source order.
+
+The same oracle also places the physical target between the two functions.
+The later `JSON_TABLE` reads `t.id`, so its dependency crosses the writable
+target. MySQL and fsdb again report `IS_UPDATABLE=YES`, update one row, return
+1143 when the inner definer loses target `SELECT`, and return 1356 when either
+definer loses the relevant `UPDATE`. Final rows agree. The regression covers
+both source orders without changing the engine's view-write rules. Other
 reorderings and longer definer chains remain open.

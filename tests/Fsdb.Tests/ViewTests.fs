@@ -841,7 +841,7 @@ let tests =
                   Expect.stringContains message "column 'id'" "the join key is denied first"
               | other -> failtestf "expected the inner view's effective invoker to lose its join grant, got %A" other
 
-          testCase "layered JSON_TABLE chains retain writable target grants"
+          testCase "layered JSON_TABLE chains retain writable target grants across source orders"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               for sql in
@@ -850,35 +850,45 @@ let tests =
                     "CREATE USER json_chain_inner_owner"
                     "CREATE USER json_chain_outer_owner"
                     "GRANT SELECT,UPDATE ON fsdb.json_chain_target TO json_chain_inner_owner"
-                    "GRANT CREATE VIEW ON fsdb.* TO json_chain_inner_owner,json_chain_outer_owner"
-                    "CREATE DEFINER='json_chain_inner_owner'@'%' SQL SECURITY DEFINER VIEW json_chain_inner AS SELECT t.id,t.n,j.x,k.y FROM JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j JOIN JSON_TABLE(JSON_ARRAY(j.x),'$[*]' COLUMNS(y INT PATH '$')) k ON k.y=j.x JOIN json_chain_target t ON t.id=k.y"
-                    "GRANT SELECT,UPDATE ON fsdb.json_chain_inner TO json_chain_outer_owner"
-                    "CREATE DEFINER='json_chain_outer_owner'@'%' SQL SECURITY DEFINER VIEW json_chain_outer AS SELECT id,n AS metric FROM json_chain_inner" ] do
+                    "GRANT CREATE VIEW ON fsdb.* TO json_chain_inner_owner,json_chain_outer_owner" ] do
                   expectOk (run store sql) sql
 
-              Expect.equal
-                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='json_chain_outer'")
-                  [ [ Some "YES" ] ]
-                  "the dependent table-function chain leaves the physical target writable"
-              let update () = run store "UPDATE json_chain_outer SET metric=metric+1 WHERE id=1"
-              Expect.equal (update ()) (Affected 1UL) "the layered chain updates its matched target"
-              expectOk (run store "REVOKE SELECT ON fsdb.json_chain_target FROM json_chain_inner_owner") "revoke the target read"
-              match update () with
-              | Err(1143, message) -> Expect.stringContains message "column 'id'" "the target join key is denied"
-              | other -> failtestf "expected a target join-key denial, got %A" other
-              expectOk (run store "GRANT SELECT ON fsdb.json_chain_target TO json_chain_inner_owner") "restore the target read"
-              expectOk (run store "REVOKE UPDATE ON fsdb.json_chain_target FROM json_chain_inner_owner") "revoke the target write"
-              match update () with
-              | Err(1356, _) -> ()
-              | other -> failtestf "expected the inner definer's missing UPDATE to invalidate the view, got %A" other
-              expectOk (run store "GRANT UPDATE ON fsdb.json_chain_target TO json_chain_inner_owner") "restore the target write"
-              expectOk (run store "REVOKE UPDATE ON fsdb.json_chain_inner FROM json_chain_outer_owner") "revoke the component write"
-              match update () with
-              | Err(1356, _) -> ()
-              | other -> failtestf "expected the outer definer's missing component UPDATE to invalidate the view, got %A" other
+              let sourceCases =
+                  [ "json_chain_inner", "json_chain_outer",
+                    "FROM JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j JOIN JSON_TABLE(JSON_ARRAY(j.x),'$[*]' COLUMNS(y INT PATH '$')) k ON k.y=j.x JOIN json_chain_target t ON t.id=k.y"
+                    "json_sandwich_inner", "json_sandwich_outer",
+                    "FROM JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j JOIN json_chain_target t ON t.id=j.x JOIN JSON_TABLE(JSON_ARRAY(t.id),'$[*]' COLUMNS(y INT PATH '$')) k ON k.y=t.id" ]
+
+              for innerName, outerName, source in sourceCases do
+                  for sql in
+                      [ sprintf "CREATE DEFINER='json_chain_inner_owner'@'%%' SQL SECURITY DEFINER VIEW %s AS SELECT t.id,t.n,j.x,k.y %s" innerName source
+                        sprintf "GRANT SELECT,UPDATE ON fsdb.%s TO json_chain_outer_owner" innerName
+                        sprintf "CREATE DEFINER='json_chain_outer_owner'@'%%' SQL SECURITY DEFINER VIEW %s AS SELECT id,n AS metric FROM %s" outerName innerName ] do
+                      expectOk (run store sql) sql
+
+                  Expect.equal
+                      (rows store (sprintf "SELECT is_updatable FROM information_schema.views WHERE table_name='%s'" outerName))
+                      [ [ Some "YES" ] ]
+                      "the dependent table-function chain leaves the physical target writable"
+                  let update () = run store (sprintf "UPDATE %s SET metric=metric+1 WHERE id=1" outerName)
+                  Expect.equal (update ()) (Affected 1UL) "the layered chain updates its matched target"
+                  expectOk (run store "REVOKE SELECT ON fsdb.json_chain_target FROM json_chain_inner_owner") "revoke the target read"
+                  match update () with
+                  | Err(1143, message) -> Expect.stringContains message "column 'id'" "the target join key is denied"
+                  | other -> failtestf "expected a target join-key denial, got %A" other
+                  expectOk (run store "GRANT SELECT ON fsdb.json_chain_target TO json_chain_inner_owner") "restore the target read"
+                  expectOk (run store "REVOKE UPDATE ON fsdb.json_chain_target FROM json_chain_inner_owner") "revoke the target write"
+                  match update () with
+                  | Err(1356, _) -> ()
+                  | other -> failtestf "expected the inner definer's missing UPDATE to invalidate the view, got %A" other
+                  expectOk (run store "GRANT UPDATE ON fsdb.json_chain_target TO json_chain_inner_owner") "restore the target write"
+                  expectOk (run store (sprintf "REVOKE UPDATE ON fsdb.%s FROM json_chain_outer_owner" innerName)) "revoke the component write"
+                  match update () with
+                  | Err(1356, _) -> ()
+                  | other -> failtestf "expected the outer definer's missing component UPDATE to invalidate the view, got %A" other
               Expect.equal
                   (rows store "SELECT id,n FROM json_chain_target ORDER BY id")
-                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
+                  [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ]
                   "denied writes do not alter the target"
 
           testCase "join view writes honor a component view's distinct definer"

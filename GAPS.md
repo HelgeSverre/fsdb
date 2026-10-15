@@ -709,9 +709,10 @@ also preserve writable metadata and target identity through a two-source
 dependency chain. [JSON_TABLE joined views](torture/findings/2026-10-15-json-table-joined-view.md)
 also update a physical component when the table function follows or precedes
 it, including dependent table-function chains; JSON_TABLE columns remain
-read-only. [A two-`JSON_TABLE` chain under distinct definer layers](torture/findings/2026-10-15-layered-json-chain-view-grants.md)
-retains writable metadata and target identity, including MySQL's 1143 join-key
-and 1356 write-grant denials. Broader join-source reorderings and layered
+read-only. [Two dependent `JSON_TABLE` sources under distinct definer layers](torture/findings/2026-10-15-layered-json-chain-view-grants.md)
+retain writable metadata and target identity with the physical target either
+last or between the functions, including MySQL's 1143 join-key and 1356
+write-grant denials. Broader join-source reorderings and layered
 authorization for those chains remain open. [Native MySQL 8.4.11 reports
 audited left- and right-outer-join views as non-updatable](torture/findings/2026-10-15-outer-join-view-updateability.md),
 even when the projection exposes only columns from the preserved side.
