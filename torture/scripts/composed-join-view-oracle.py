@@ -11,6 +11,7 @@ import pymysql
 SHAPES = {
     "middle aggregates": "SELECT a.id,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=a.id",
     "middle JSON_TABLE": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id",
+    "derived JSON_TABLE target": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN JSON_TABLE(JSON_ARRAY(d1.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d1.id JOIN a ON a.id=j.x",
     "middle lateral": "SELECT a.id,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN LATERAL (SELECT SUM(aux) aux FROM c WHERE c.id=a.id) d2 ON TRUE",
     "grouped read-only pair": "SELECT a.id,a.n,d1.flag,d2.aux FROM ((SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=d1.id) JOIN a ON a.id=d1.id",
     "grouped target pair": "SELECT a.id,a.n,d1.flag,d2.aux FROM ((SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id) JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=a.id",

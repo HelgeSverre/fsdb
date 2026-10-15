@@ -1544,6 +1544,39 @@ let tests =
                   [ [ Some "1"; Some "3" ]; [ Some "2"; Some "1" ] ]
                   "only matched physical rows change"
 
+          testCase "aggregate-derived JSON_TABLE chain keeps a later view target writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE derived_json_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE derived_json_source(id INT PRIMARY KEY,flag INT)"
+                    "INSERT INTO derived_json_target VALUES(1,0),(2,0)"
+                    "INSERT INTO derived_json_source VALUES(1,7)"
+                    "CREATE VIEW derived_json_write AS SELECT a.id,a.n,d.flag,j.x FROM (SELECT id,SUM(flag) flag FROM derived_json_source GROUP BY id) d JOIN JSON_TABLE(JSON_ARRAY(d.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d.id JOIN derived_json_target a ON a.id=j.x" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='derived_json_write'")
+                  [ [ Some "YES" ] ] "MySQL 8.4 marks the later physical target writable"
+              Expect.equal (run store "UPDATE derived_json_write SET n=n+1 WHERE id=1") (Affected 1UL) "the matched row changes"
+              Expect.equal (run store "UPDATE derived_json_write SET n=n+1 WHERE id=2") (Affected 0UL) "the missing aggregate row filters the target"
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_json_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ] "only the matched physical row changes"
+              expectOk
+                  (run store "CREATE VIEW derived_json_checked AS SELECT a.id,a.n,d.flag,j.x FROM (SELECT id,SUM(flag) flag FROM derived_json_source GROUP BY id) d JOIN JSON_TABLE(JSON_ARRAY(d.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d.id JOIN derived_json_target a ON a.id=j.x WHERE a.n >= 0 WITH CASCADED CHECK OPTION")
+                  "create checked composed view"
+              match run store "UPDATE derived_json_checked SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected the checked view to reject an invalid target row, got %A" other
+              Expect.equal (rows store "SELECT n FROM derived_json_target WHERE id=1") [ [ Some "1" ] ] "rejected write leaves the target unchanged"
+              match run store "INSERT INTO derived_json_write(id,n) VALUES(3,0)" with
+              | Err(1471, _) -> ()
+              | other -> failtestf "expected joined-view INSERT to fail, got %A" other
+              match run store "DELETE FROM derived_json_write WHERE id=1" with
+              | Err(1395, _) -> ()
+              | other -> failtestf "expected joined-view DELETE to fail, got %A" other
+
           testCase "checked merged joins keep a physical view target writable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

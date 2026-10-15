@@ -708,6 +708,8 @@ An [audited composition of aggregate derived sources and merged `NATURAL`
 keys, or a leading `JSON_TABLE` joined with `USING`](torture/findings/2026-10-15-composed-join-view-writes.md)
 also preserves updateability and `CHECK OPTION` rejection while refusing
 joined-view INSERT and DELETE with MySQL's audited errors.
+An aggregate derived source feeding a dependent `JSON_TABLE` before a physical
+target also retains those write and rejection rules in the same oracle matrix.
 [Target-first joins with a dependent lateral source](torture/findings/2026-10-15-lateral-join-view.md)
 also update the physical component and enforce invoker read grants on the
 lateral source. [Audited lateral sources before the physical target](torture/findings/2026-10-15-lateral-before-target-view.md)

@@ -1,6 +1,6 @@
 # Composed read-only sources in updatable join views
 
-Native MySQL 8.4.11 and fsdb agreed on ten inner-join view arrangements with a
+Native MySQL 8.4.11 and fsdb agreed on eleven inner-join view arrangements with a
 single physical write target. The read-only sources were aggregate derived
 tables, `JSON_TABLE`, or a dependent `LATERAL` subquery, placed before, after,
 and around the target. The matrix included grouped join operands and merged
@@ -8,6 +8,14 @@ and around the target. The matrix included grouped join operands and merged
 matched target row affected one row and left unmatched rows unchanged. The
 [native oracle script](../scripts/composed-join-view-oracle.py) reproduces the
 matrix with a disposable server.
+
+The added arrangement puts an aggregate derived source first, passes its
+`id` to a dependent `JSON_TABLE`, then joins the physical target last. MySQL
+and fsdb both report the view as updatable, update the one matched target row,
+reject an invalid checked update with 1369, and reject joined-view INSERT and
+DELETE with 1471 and 1395. The unmatched target row remains unchanged. This
+tests source dependency and target identity across three different source
+kinds in one view.
 
 Two representative merged-key forms were:
 
