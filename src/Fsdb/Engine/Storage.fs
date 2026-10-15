@@ -5295,6 +5295,11 @@ let private exactRangeProbeValue (store: Store) (table: Table) (index: int) (val
         // The ordered key comparator compares integer and DECIMAL values
         // exactly, so a fractional boundary needs no stored-key coercion.
         Some value
+    | (TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _), VDouble number when Double.IsFinite number ->
+        // Every value in these integer domains is exactly representable as a
+        // DOUBLE. Keep the fractional boundary instead of coercing it to an
+        // integer key; BIGINT can exceed double's exact integer range.
+        Some value
     | TDecimal _, (VInt _ | VUInt _) ->
         // A decimal range may use an integral bound when coercion preserves
         // its numeric value; rounded or out-of-range bounds retain the scan.

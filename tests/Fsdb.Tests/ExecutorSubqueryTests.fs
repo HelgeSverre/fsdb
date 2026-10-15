@@ -1542,17 +1542,21 @@ let tests =
                   [ "CREATE TABLE mixed_integer_bounds(id INT PRIMARY KEY,k INT)"
                     "CREATE TABLE mixed_decimal_bounds(id INT PRIMARY KEY,k DECIMAL(10,2))"
                     "CREATE TABLE mixed_fractional_bounds(id INT PRIMARY KEY,k DECIMAL(10,2))"
+                    "CREATE TABLE mixed_double_bounds(id INT PRIMARY KEY,k DOUBLE)"
                     "CREATE TABLE mixed_integer_selective(k INT)"
                     "CREATE TABLE mixed_decimal_selective(k DECIMAL(10,2))"
                     "CREATE TABLE mixed_fractional_selective(k DECIMAL(10,2))"
+                    "CREATE TABLE mixed_double_selective(k DOUBLE)"
                     "CREATE TABLE mixed_integer_rows(id INT PRIMARY KEY,k INT,KEY ix_k(k))"
                     "CREATE TABLE mixed_decimal_rows(id INT PRIMARY KEY,k DECIMAL(10,2),KEY ix_k(k))"
                     "INSERT INTO mixed_integer_bounds VALUES(1,1),(2,NULL),(3,51)"
                     "INSERT INTO mixed_decimal_bounds VALUES(1,1.00),(2,NULL),(3,51.00)"
                     "INSERT INTO mixed_fractional_bounds VALUES(1,1.50),(2,NULL),(3,51.50)"
+                    "INSERT INTO mixed_double_bounds VALUES(1,1.50),(2,NULL),(3,51.50)"
                     "INSERT INTO mixed_integer_selective VALUES(1)"
                     "INSERT INTO mixed_decimal_selective VALUES(1.00)"
-                    "INSERT INTO mixed_fractional_selective VALUES(1.50)" ] do
+                    "INSERT INTO mixed_fractional_selective VALUES(1.50)"
+                    "INSERT INTO mixed_double_selective VALUES(1.50)" ] do
                   runDefault store sql |> ignore
               let values =
                   [ 1..1000 ]
@@ -1625,35 +1629,37 @@ let tests =
                   [ "mixed_integer_rows d"
                     "(SELECT id,k FROM mixed_integer_rows) d"
                     "(SELECT id+0 AS id,k+0 AS k FROM mixed_integer_rows LIMIT 1000) d" ] do
+                  for selectiveTable in [ "mixed_fractional_selective"; "mixed_double_selective" ] do
+                      touches <- 0
+                      let sql =
+                          "SELECT (SELECT COUNT(*) FROM " + source
+                          + " WHERE TOUCH(d.id)=d.id AND d.k > o.k)"
+                          + " FROM " + selectiveTable + " o"
+                      match run store registry sql with
+                      | ResultSet(_, [ [ Some "50" ] ]) -> ()
+                      | other -> failtestf "expected MySQL's selective fractional-bound count, got %A" other
+                      Expect.isLessThan touches 80 (sprintf "%s narrows %s" selectiveTable source)
+
+                      touches <- 0
+                      let withOr =
+                          "SELECT (SELECT COUNT(*) FROM " + source
+                          + " WHERE TOUCH(d.id)=d.id AND (d.k > o.k OR d.id=500))"
+                          + " FROM " + selectiveTable + " o"
+                      match run store registry withOr with
+                      | ResultSet(_, [ [ Some "51" ] ]) -> ()
+                      | other -> failtestf "expected MySQL's fractional-bound OR count, got %A" other
+                      Expect.isLessThan touches 80 (sprintf "%s OR branch narrows %s" selectiveTable source)
+
+              for selectiveTable in [ "mixed_fractional_selective"; "mixed_double_selective" ] do
                   touches <- 0
-                  let sql =
-                      "SELECT (SELECT COUNT(*) FROM " + source
+                  let ignoredFractional =
+                      "SELECT (SELECT COUNT(*) FROM mixed_integer_rows d IGNORE INDEX (ix_k)"
                       + " WHERE TOUCH(d.id)=d.id AND d.k > o.k)"
-                      + " FROM mixed_fractional_selective o"
-                  match run store registry sql with
+                      + " FROM " + selectiveTable + " o"
+                  match run store registry ignoredFractional with
                   | ResultSet(_, [ [ Some "50" ] ]) -> ()
-                  | other -> failtestf "expected MySQL's selective fractional-bound count, got %A" other
-                  Expect.isLessThan touches 80 (sprintf "fractional decimal bound narrows %s" source)
-
-                  touches <- 0
-                  let withOr =
-                      "SELECT (SELECT COUNT(*) FROM " + source
-                      + " WHERE TOUCH(d.id)=d.id AND (d.k > o.k OR d.id=500))"
-                      + " FROM mixed_fractional_selective o"
-                  match run store registry withOr with
-                  | ResultSet(_, [ [ Some "51" ] ]) -> ()
-                  | other -> failtestf "expected MySQL's fractional-bound OR count, got %A" other
-                  Expect.isLessThan touches 80 (sprintf "fractional OR branch narrows %s" source)
-
-              touches <- 0
-              let ignoredFractional =
-                  "SELECT (SELECT COUNT(*) FROM mixed_integer_rows d IGNORE INDEX (ix_k)"
-                  + " WHERE TOUCH(d.id)=d.id AND d.k > o.k)"
-                  + " FROM mixed_fractional_selective o"
-              match run store registry ignoredFractional with
-              | ResultSet(_, [ [ Some "50" ] ]) -> ()
-              | other -> failtestf "expected ignored-index fractional count, got %A" other
-              Expect.isGreaterThan touches 900 "ignoring the integer key restores the fractional-bound scan"
+                  | other -> failtestf "expected ignored-index %s count, got %A" selectiveTable other
+                  Expect.isGreaterThan touches 900 (sprintf "ignoring the integer key restores the %s scan" selectiveTable)
 
               for predicate, expected in
                   [ "d.k > o.k", [ [ Some "50" ]; [ Some "0" ]; [ Some "0" ] ]
@@ -1661,12 +1667,29 @@ let tests =
                     "d.k < o.k", [ [ Some "950" ]; [ Some "0" ]; [ Some "1000" ] ]
                     "d.k <= o.k", [ [ Some "950" ]; [ Some "0" ]; [ Some "1000" ] ]
                     "d.k > o.k OR d.id=500", [ [ Some "51" ]; [ Some "1" ]; [ Some "1" ] ] ] do
+                  for boundsTable in [ "mixed_fractional_bounds"; "mixed_double_bounds" ] do
+                      let sql =
+                          "SELECT (SELECT COUNT(*) FROM mixed_integer_rows d WHERE " + predicate
+                          + ") FROM " + boundsTable + " o ORDER BY o.id"
+                      match run store registry sql with
+                      | ResultSet(_, rows) when rows = expected -> ()
+                      | other -> failtestf "expected MySQL's %s counts for %s, got %A" boundsTable predicate other
+
+              for sql in
+                  [ "CREATE TABLE mixed_double_edge_rows(k INT,KEY ix_k(k))"
+                    "CREATE TABLE mixed_double_edge_bounds(id INT PRIMARY KEY,k DOUBLE)"
+                    "INSERT INTO mixed_double_edge_rows VALUES(-2147483648),(-2),(-1),(0),(1),(2147483647)"
+                    "INSERT INTO mixed_double_edge_bounds VALUES(1,-1.5),(2,2147483646.5),(3,2147483647.5)" ] do
+                  runDefault store sql |> ignore
+              for predicate, expected in
+                  [ "d.k > o.k", [ [ Some "4" ]; [ Some "1" ]; [ Some "0" ] ]
+                    "d.k < o.k", [ [ Some "2" ]; [ Some "5" ]; [ Some "6" ] ] ] do
                   let sql =
-                      "SELECT (SELECT COUNT(*) FROM mixed_integer_rows d WHERE " + predicate
-                      + ") FROM mixed_fractional_bounds o ORDER BY o.id"
+                      "SELECT (SELECT COUNT(*) FROM mixed_double_edge_rows d WHERE " + predicate
+                      + ") FROM mixed_double_edge_bounds o ORDER BY o.id"
                   match run store registry sql with
                   | ResultSet(_, rows) when rows = expected -> ()
-                  | other -> failtestf "expected MySQL's fractional-bound counts for %s, got %A" predicate other
+                  | other -> failtestf "expected MySQL's INT-domain DOUBLE-bound counts for %s, got %A" predicate other
 
           testCase "correlated OR branches intersect broad IN and range candidates"
           <| fun _ ->

@@ -119,6 +119,8 @@ def main():
                             assert actual == expected, (source, bounds, predicate, expected, actual)
                     cursor.execute("CREATE TABLE fractional_bounds(id INT PRIMARY KEY,k DECIMAL(10,2))")
                     cursor.execute("INSERT INTO fractional_bounds VALUES(1,1.50),(2,NULL),(3,51.50)")
+                    cursor.execute("CREATE TABLE double_bounds(id INT PRIMARY KEY,k DOUBLE)")
+                    cursor.execute("INSERT INTO double_bounds VALUES(1,1.50),(2,NULL),(3,51.50)")
                     fractional_cases = [
                         ("d.k > o.k", (50, 0, 0)),
                         ("d.k >= o.k", (50, 0, 0)),
@@ -130,14 +132,32 @@ def main():
                         "nums d", "(SELECT id,k FROM nums) d",
                         "(SELECT id+0 AS id,k+0 AS k FROM nums LIMIT 1000) d",
                     ]:
-                        for predicate, expected in fractional_cases:
-                            cursor.execute(
-                                "SELECT (SELECT COUNT(*) FROM " + source + " WHERE " + predicate
-                                + ") FROM fractional_bounds o ORDER BY o.id"
-                            )
-                            actual = tuple(row[0] for row in cursor.fetchall())
-                            assert actual == expected, (source, predicate, expected, actual)
-                print(f"MySQL {version}: integer, DECIMAL, mixed exact-numeric, and fractional-bound range cases passed")
+                        for bounds in ["fractional_bounds", "double_bounds"]:
+                            for predicate, expected in fractional_cases:
+                                cursor.execute(
+                                    "SELECT (SELECT COUNT(*) FROM " + source + " WHERE " + predicate
+                                    + ") FROM " + bounds + " o ORDER BY o.id"
+                                )
+                                actual = tuple(row[0] for row in cursor.fetchall())
+                                assert actual == expected, (source, bounds, predicate, expected, actual)
+                    for sql in [
+                        "CREATE TABLE double_edge_rows(k INT,KEY ix_k(k))",
+                        "CREATE TABLE double_edge_bounds(id INT PRIMARY KEY,k DOUBLE)",
+                        "INSERT INTO double_edge_rows VALUES(-2147483648),(-2),(-1),(0),(1),(2147483647)",
+                        "INSERT INTO double_edge_bounds VALUES(1,-1.5),(2,2147483646.5),(3,2147483647.5)",
+                    ]:
+                        cursor.execute(sql)
+                    for predicate, expected in [
+                        ("d.k > o.k", (4, 1, 0)),
+                        ("d.k < o.k", (2, 5, 6)),
+                    ]:
+                        cursor.execute(
+                            "SELECT (SELECT COUNT(*) FROM double_edge_rows d WHERE " + predicate
+                            + ") FROM double_edge_bounds o ORDER BY o.id"
+                        )
+                        actual = tuple(row[0] for row in cursor.fetchall())
+                        assert actual == expected, (predicate, expected, actual)
+                print(f"MySQL {version}: integer, DECIMAL, DOUBLE, and mixed numeric range cases passed")
             finally:
                 if connection:
                     connection.close()

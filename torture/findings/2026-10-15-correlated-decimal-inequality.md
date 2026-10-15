@@ -47,5 +47,22 @@ boundary exactly, including its fractional part, without converting it to
 an integer stored key. Range lookup now retains that boundary for integer
 columns. The focused regression keeps residual calls below 80 for direct,
 pass-through, and materialized sources, including a complete OR branch.
-The original predicate remains the final filter. Approximate numeric,
-text, and functional index expressions remain outside this audited rule.
+The original predicate remains the final filter. Text and functional index
+expressions remain outside this audited rule.
+
+## Finite DOUBLE bounds against integer keys
+
+MySQL 8.4.11 returns the same `(50, 0, 0)` counts for `INT > DOUBLE`
+outer bounds `(1.5, NULL, 51.5)` as for the DECIMAL variant. The native
+oracle also checks `<`, `<=`, `>=`, and an OR branch on direct, pass-through,
+and stable materialized sources. Negative and near-`INT`-limit fractional
+bounds agree on a separate six-row corpus.
+
+Before this change, the selective `>` probe evaluated its residual 1,002
+times. The range lookup now retains a finite DOUBLE bound against
+`TINYINT`, `SMALLINT`, `MEDIUMINT`, or `INT` keys: every stored key in those
+domains is exactly representable as a double, so ordered comparison needs
+no integer rounding. The focused regression keeps residual calls below 80
+for the selective direct, pass-through, and materialized probes, including
+the OR branch. `BIGINT` can exceed double's exact integer range and is not
+included in this access-path change.

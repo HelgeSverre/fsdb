@@ -234,8 +234,13 @@ now use the same union for a stable decimal bound, including exact
 integer/decimal pairs in either key direction. [Fractional DECIMAL bounds
 against integer keys](torture/findings/2026-10-15-correlated-decimal-inequality.md#fractional-bounds-against-integer-keys)
 now use exact ordered range probes when selective, including complete OR
-branches. Approximate numeric, text, and functional-expression domains remain
-on their prior paths.
+branches.
+Finite `DOUBLE` bounds against indexed `TINYINT`, `SMALLINT`, `MEDIUMINT`,
+and `INT` keys also use their original fractional value as an ordered range
+boundary; [the MySQL oracle and residual probe](torture/findings/2026-10-15-correlated-decimal-inequality.md#finite-double-bounds-against-integer-keys)
+cover direct, pass-through, and materialized sources. `BIGINT`/`DOUBLE`,
+other approximate numeric combinations, text, and functional-expression
+bounds retain their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
