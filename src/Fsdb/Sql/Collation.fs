@@ -121,11 +121,12 @@ let private substringExpansions =
       "ĳ", "ij"
       "Ĳ", "IJ" ]
 
-let private foldHalfwidthKana (value: string) =
+let private foldKanaVariants (value: string) =
     let isHalfwidthKana (c: char) = c >= '\uFF61' && c <= '\uFF9F'
+    let isHiragana (c: char) = c >= '\u3041' && c <= '\u3096'
     let mutable first = 0
 
-    while first < value.Length && not (isHalfwidthKana value.[first]) do
+    while first < value.Length && not (isHalfwidthKana value.[first] || isHiragana value.[first]) do
         first <- first + 1
 
     if first = value.Length then
@@ -143,6 +144,9 @@ let private foldHalfwidthKana (value: string) =
                     index <- index + 1
 
                 result.Append(value.Substring(start, index - start).Normalize(NormalizationForm.FormKC)) |> ignore
+            elif isHiragana value.[index] then
+                result.Append(char (int value.[index] + 0x60)) |> ignore
+                index <- index + 1
             else
                 result.Append(value.[index]) |> ignore
                 index <- index + 1
@@ -182,7 +186,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_ci"
-        | "utf8mb4_unicode_520_ci" -> foldHalfwidthKana value
+        | "utf8mb4_unicode_520_ci" -> foldKanaVariants value
         | _ -> value
 
     let primaryText (s: string) = trim s |> foldText

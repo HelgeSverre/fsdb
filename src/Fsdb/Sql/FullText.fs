@@ -1096,7 +1096,7 @@ let private tryRepeatedWordScores candidateIds (view: ReadView<'id>) nodes =
 
 let private tryRepeatedNgramScores candidateIds (view: ReadView<'id>) nodes =
     match view.Rules.Tokenizer with
-    | Ngrams 1 ->
+    | Ngrams _ ->
         let keys = function
             | BWord(word, false) when isExactLookup view.Rules word -> [| word.Key |]
             | BPhrase(words, None) ->

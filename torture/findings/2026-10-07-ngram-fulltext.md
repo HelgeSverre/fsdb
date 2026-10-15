@@ -49,9 +49,9 @@ a disposable database, default token size 2, and enabled default stopwords.
 It asserts ordered results, parser DDL errors, variable scope and labels,
 mutation behavior, and field boundaries for both parsers.
 
-The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 150
+The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 168
 natural-language, boolean, and query-expansion searches at each startup size
-from 1 through 10. All 1,500 query results agree with native MySQL 8.4.11
+from 1 through 10. All 1,680 query results agree with native MySQL 8.4.11
 on the audited mixed Chinese, Japanese, Korean, ASCII, punctuation, emoji,
 supplementary-character, combining-mark, zero-width-joiner, variation-selector,
 nonbreaking-space, newline, Hangul-jamo, and NULL corpus. It checks matching row IDs, query
@@ -76,15 +76,17 @@ all ten startup sizes, with zero differences. These cases probe how non-ASCII
 formatting characters participate in windows; they do not establish arbitrary
 Unicode parity or MeCab behavior.
 
-A later width-variant check adds fullwidth and halfwidth katakana documents and
-queries. MySQL's default `utf8mb4_0900_ai_ci` gives them equal ngram keys and
-relevance. The host ICU did not, so FSDB now folds halfwidth kana runs before
-building equality keys for the verified width-insensitive collations. A focused
-regression checks matching rows and MySQL's score; the expanded multi-column
-oracle has zero differences at token sizes 1–10. A separate exploratory voiced
-halfwidth corpus still has one Boolean relevance difference at size 2 for
-`ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ` (MySQL 14.7452945709, FSDB 21.4573151303); row membership
-agrees. That case is outside the maintained passing corpus and remains open.
+A width-variant check adds fullwidth, halfwidth, voiced, and hiragana/katakana
+documents and queries. MySQL's default `utf8mb4_0900_ai_ci` equates the
+corresponding script and width variants. The host ICU did not, so FSDB folds
+those variants before building equality keys for the verified insensitive
+collations. The voiced halfwidth query `ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ` exposed a separate Boolean
+score difference: its size-2 ngrams can share collation keys. MySQL weights
+both query occurrences but contributes each matched key once. FSDB now applies
+the existing repeated-key rule at every ngram size. Focused regressions pin the
+MySQL row sets and scores; the expanded multi-column oracle has zero differences
+at token sizes 1–10. This remains evidence for the audited corpus, not arbitrary
+CJK text or MeCab behavior.
 
 The `ngram-fulltext` differential contract covers natural, boolean, and
 query-expansion searches through text and prepared protocols, Unicode and

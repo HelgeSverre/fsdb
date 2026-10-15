@@ -1431,6 +1431,23 @@ let tests =
                             Expect.equal (col.HashOf "カタカナ") (col.HashOf "ｶﾀｶﾅ") (name + " hash")
 
                 testTheory
+                    "MySQL 8.4 hiragana and katakana equality follows collation sensitivity"
+                    [ "utf8mb4_0900_ai_ci", "ば", "パ", true
+                      "utf8mb4_0900_ai_ci", "コ", "こ", true
+                      "utf8mb4_0900_as_ci", "ば", "バ", true
+                      "utf8mb4_0900_as_ci", "ば", "パ", false
+                      "utf8mb4_unicode_ci", "が", "ガ", true
+                      "utf8mb4_unicode_520_ci", "ッ", "っ", true
+                      "utf8mb4_0900_as_cs", "コ", "こ", false
+                      "utf8mb4_general_ci", "コ", "こ", false ]
+                    <| fun (name, left, right, expected) ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.equal (col.Equals left right) expected name
+                        if expected then
+                            Expect.equal (col.KeyOf left) (col.KeyOf right) (name + " index key")
+                            Expect.equal (col.HashOf left) (col.HashOf right) (name + " hash")
+
+                testTheory
                     "collations identify when equality fixes one full-order position"
                     [ "utf8mb4_0900_bin", true
                       "utf8mb4_0900_as_cs", true

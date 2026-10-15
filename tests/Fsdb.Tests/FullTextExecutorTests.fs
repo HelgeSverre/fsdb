@@ -220,6 +220,27 @@ let tests =
                           Expect.isLessThan (abs (float score - 0.1476505994796753)) 0.000001 "MySQL 8.4 relevance"
                   | other -> failtestf "expected ngram results, got %A" other
 
+          testCase "repeated collation keys in a voiced ngram phrase contribute once with query frequency"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE kana_scores(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO kana_scores VALUES(1,'ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ')" |> ignore
+              for mode in [ "IN BOOLEAN MODE"; "IN NATURAL LANGUAGE MODE" ] do
+                  match run store ($"SELECT id,MATCH(body) AGAINST('ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ' {mode}) FROM kana_scores") with
+                  | ResultSet(_, [ [ Some "1"; Some score ] ]) ->
+                      Expect.isLessThan (abs (float score - 0.7249524593353271)) 0.000001 ("MySQL 8.4 " + mode)
+                  | other -> failtestf "expected one scored ngram row, got %A" other
+
+          testCase "single-character ngrams share hiragana and katakana postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE kana_script(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO kana_script VALUES(1,'ば'),(2,'パ'),(3,'ｽ'),(4,'abc')" |> ignore
+              for term in [ "ば"; "パ" ] do
+                  let sql = $"SELECT id FROM kana_script WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  Expect.equal (ids (run store sql)) [ "1"; "2" ] sql
+
           testCase "single-character ngram scores count repeated query tokens"
           <| fun _ ->
               let store = create ()
