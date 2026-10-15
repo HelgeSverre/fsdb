@@ -729,6 +729,7 @@ type private StatementMemo =
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
       MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>
       MaterializedCorrelatedIntegerExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
+      MaterializedCorrelatedDecimalExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedTextExpressions: Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
@@ -754,6 +755,8 @@ let private freshStatementMemo () =
       MaterializedCorrelatedEqualities =
         Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedIntegerExpressions =
+        Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+      MaterializedCorrelatedDecimalExpressions =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedTextExpressions =
         Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>(HashIdentity.Reference)
@@ -15721,9 +15724,50 @@ and private tryMaterializedCorrelatedLookup
 
                 getMemoized lookups names (fun () -> materializedEqualityLookup store columns rows names)
 
-            // Only exact integer-valued, row-local arithmetic is keyed here.
-            // Other result domains can compare equal after SQL coercion even
-            // when their Value keys differ, so they retain the scan path.
+            let rowContext =
+                contextFactory store registry dbName
+                    (columnIndexOf columns) (singleQualifier qualifier columns) None
+            let innerScope =
+                { Qualifiers = Set.singleton (qualifier.ToLowerInvariant())
+                  Columns = columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList }
+            let rowLocalExpression expression =
+                Expression.exists (function Col _ | QualifiedCol _ -> true | _ -> false) expression
+                && not (Expression.exists (function
+                    | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _
+                    | MatchAgainst _ | WindowOver _ -> true
+                    | _ -> false) expression)
+                && isStatementStableExpr store registry dbName innerScope expression
+
+            let buildExpressionLookup expression rowKey probeKey =
+                let rowsByKey = Dictionary<Value, ResizeArray<Value[]>>()
+                let mutable compatible = true
+                for row in rows do
+                    if compatible then
+                        match evalExpr (rowContext row) expression with
+                        | Ok VNull -> ()
+                        | Ok value ->
+                            match rowKey value with
+                            | Some key ->
+                                match rowsByKey.TryGetValue key with
+                                | true, matches -> matches.Add row
+                                | _ -> rowsByKey.[key] <- ResizeArray [ row ]
+                            | None -> compatible <- false
+                        | Error _ -> compatible <- false
+                if not compatible then None
+                else
+                    Some(fun values ->
+                        match values with
+                        | [ VNull ] -> Some []
+                        | [ value ] ->
+                            probeKey value
+                            |> Option.bind (fun key ->
+                                match rowsByKey.TryGetValue key with
+                                | true, matches -> Some(List.ofSeq matches)
+                                | _ -> Some [])
+                        | _ -> None)
+
+            // Integer arithmetic needs an exact result domain before its
+            // signed and unsigned values can share one equality key.
             let rec integerKeyExpression = function
                 | LiteralValue(VInt _ | VUInt _) -> true
                 | (Col _ | QualifiedCol _) as expression ->
@@ -15747,34 +15791,10 @@ and private tryMaterializedCorrelatedLookup
                     if not (integerKeyExpression expression) then
                         None
                     else
-                        let rowContext =
-                            contextFactory store registry dbName
-                                (columnIndexOf columns) (singleQualifier qualifier columns) None
-                        let rowsByKey = Dictionary<Value, ResizeArray<Value[]>>()
-                        let mutable compatible = true
-
-                        for row in rows do
-                            if compatible then
-                                match evalExpr (rowContext row) expression with
-                                | Ok VNull -> ()
-                                | Ok(VInt _ | VUInt _ as value) ->
-                                    let key = canonicalIntegerKey value
-                                    match rowsByKey.TryGetValue key with
-                                    | true, matches -> matches.Add row
-                                    | _ -> rowsByKey.[key] <- ResizeArray [ row ]
-                                | _ -> compatible <- false
-
-                        if not compatible then
-                            None
-                        else
-                            Some(fun values ->
-                                match values with
-                                | [ VNull ] -> Some []
-                                | [ VInt _ | VUInt _ as value ] ->
-                                    match rowsByKey.TryGetValue(canonicalIntegerKey value) with
-                                    | true, matches -> Some(List.ofSeq matches)
-                                    | _ -> Some []
-                                | _ -> None))
+                        let integerKey = function
+                            | VInt _ | VUInt _ as value -> Some(canonicalIntegerKey value)
+                            | _ -> None
+                        buildExpressionLookup expression integerKey integerKey)
 
             let integerExpressionCandidates predicate =
                 let candidate indexed bound =
@@ -15806,26 +15826,51 @@ and private tryMaterializedCorrelatedLookup
                     | _ -> None)
                 |> intersectSharedRows
 
+            // Decimal results compare exactly with decimal and integer bounds.
+            // Strings and DOUBLE bounds can compare through other coercion
+            // domains and must retain the scan path.
+            let decimalExpressionCandidates predicate =
+                let decimalKey = function
+                    | VDecimal number -> Some(VDecimal number)
+                    | VInt number -> Some(VDecimal(decimal number))
+                    | VUInt number -> Some(VDecimal(decimal number))
+                    | _ -> None
+
+                let decimalLookup expression =
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedDecimalExpressions source (fun () ->
+                            Dictionary<Expr, MaterializedEqualityLookup option>(HashIdentity.Reference))
+                    getMemoized lookups expression (fun () ->
+                        let rowKey = function
+                            | VDecimal _ as value -> Some value
+                            | _ -> None
+                        buildExpressionLookup expression rowKey decimalKey)
+
+                let candidate indexed bound =
+                    if not (rowLocalExpression indexed) || Option.isSome (tryCorrelatedInnerColumn probeSource indexed) then
+                        None
+                    else
+                        tryCorrelatedProbeValue probeSource context bound
+                        |> Option.bind (fun value ->
+                            match value with
+                            | VNull | VDecimal _ | VInt _ | VUInt _ ->
+                                decimalLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
+                            | _ -> None)
+
+                predicate
+                |> optionalConjuncts
+                |> List.choose (function
+                    | BinOp(Eq, left, right) ->
+                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | _ -> None)
+                |> intersectSharedRows
+
             // The evaluated text expression is a statement-local key over a
             // materialized source. Its collation belongs to the comparison,
             // not necessarily to the source column or the connection.
             let textExpressionCandidates predicate =
-                let rowContext =
-                    contextFactory store registry dbName
-                        (columnIndexOf columns) (singleQualifier qualifier columns) None
-                let innerScope =
-                    { Qualifiers = Set.singleton (qualifier.ToLowerInvariant())
-                      Columns = columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList }
-                let rowLocal expression =
-                    Expression.exists (function Col _ | QualifiedCol _ -> true | _ -> false) expression
-                    && not (Expression.exists (function
-                        | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _
-                        | MatchAgainst _ | WindowOver _ -> true
-                        | _ -> false) expression)
-                    && isStatementStableExpr store registry dbName innerScope expression
-
                 let candidate indexed bound =
-                    if not (rowLocal indexed) || Option.isSome (tryCorrelatedInnerColumn probeSource indexed) then
+                    if not (rowLocalExpression indexed) || Option.isSome (tryCorrelatedInnerColumn probeSource indexed) then
                         None
                     else
                         tryCorrelatedProbeValue probeSource context bound
@@ -15842,28 +15887,10 @@ and private tryMaterializedCorrelatedLookup
                                             Dictionary<Expr * string, MaterializedEqualityLookup option>())
                                     let lookup =
                                         getMemoized lookups (indexed, collation.Name) (fun () ->
-                                            let rowsByKey = Dictionary<Value, ResizeArray<Value[]>>()
-                                            let mutable compatible = true
-                                            for row in rows do
-                                                if compatible then
-                                                    match evalExpr (rowContext row) indexed with
-                                                    | Ok VNull -> ()
-                                                    | Ok(VString text) ->
-                                                        let key = VString(collation.KeyOf text)
-                                                        match rowsByKey.TryGetValue key with
-                                                        | true, matches -> matches.Add row
-                                                        | _ -> rowsByKey.[key] <- ResizeArray [ row ]
-                                                    | _ -> compatible <- false
-                                            if not compatible then None
-                                            else
-                                                Some(fun values ->
-                                                    match values with
-                                                    | [ VNull ] -> Some []
-                                                    | [ VString text ] ->
-                                                        match rowsByKey.TryGetValue(VString(collation.KeyOf text)) with
-                                                        | true, matches -> Some(List.ofSeq matches)
-                                                        | _ -> Some []
-                                                    | _ -> None))
+                                            let textKey = function
+                                                | VString text -> Some(VString(collation.KeyOf text))
+                                                | _ -> None
+                                            buildExpressionLookup indexed textKey textKey)
                                     lookup |> Option.bind (fun probe -> probe [ value ]))
                             | _ -> None)
 
@@ -16061,6 +16088,7 @@ and private tryMaterializedCorrelatedLookup
                 let branchCandidates branch =
                     [ equalityCandidates (Some branch)
                       integerExpressionCandidates (Some branch)
+                      decimalExpressionCandidates (Some branch)
                       textExpressionCandidates (Some branch)
                       absoluteCandidates (Some branch)
                       affineCandidates (Some branch)
@@ -16083,6 +16111,7 @@ and private tryMaterializedCorrelatedLookup
 
             [ equalityCandidates whereExpr
               integerExpressionCandidates whereExpr
+              decimalExpressionCandidates whereExpr
               textExpressionCandidates whereExpr
               absoluteCandidates whereExpr
               affineCandidates whereExpr
