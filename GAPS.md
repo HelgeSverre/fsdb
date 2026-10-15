@@ -822,6 +822,9 @@ even when the projection exposes only columns from the preserved side.
 
 Multi-component writes, outer-join view writes, and join-view DELETE/REPLACE
 are refused with MySQL-compatible errors for the audited shapes.
+An UPDATE that names an updatable view as one source of a larger joined
+mutation still fails before source resolution; MySQL executes it and waits
+on the physical row under contention ([oracle](torture/findings/2026-10-15-joined-view-mutation-source.md)).
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
 before a local upload or server-side file read; ordinary inserts remain
 available through their supported forms.
@@ -1602,12 +1605,14 @@ implementation effort:
    wait and rebase across all target tables. Audited [view-addressed INSERT
    SELECT](torture/findings/2026-10-15-view-write-rebase.md) also waits on the
    physical primary key and reports duplicate key after the owner commits.
-   Other write shapes still
-   rely on optimistic catalog merge
-   ([joined UPDATE](torture/findings/2026-10-14-joined-update-rebase.md),
+   The audited [joined UPDATE](torture/findings/2026-10-14-joined-update-rebase.md),
    [joined DELETE](torture/findings/2026-10-14-joined-delete-rebase.md),
    [multi-target writes](torture/findings/2026-10-14-multi-target-write-rebase.md),
-   [unqualified targets](torture/findings/2026-10-14-unqualified-joined-update-rebase.md)).
+   and [unqualified targets](torture/findings/2026-10-14-unqualified-joined-update-rebase.md)
+   already wait and rebase. A [joined UPDATE addressed to an updatable
+   view](torture/findings/2026-10-15-joined-view-mutation-source.md) still
+   fails source resolution with 1146 before it can claim the physical row;
+   broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in
    the eight-writer keyless-insert path; that experiment was reverted.
