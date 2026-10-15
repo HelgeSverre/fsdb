@@ -92,6 +92,55 @@ let tests =
                   (outcomes |> List.exists (function Err(1205, _) -> true | _ -> false))
                   (sprintf "the orphaning merge is refused, got %A" outcomes)
 
+          testCase "a long transaction and autocommit writers share one AUTO_INCREMENT sequence"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable writer = create 1 store
+              let runWriter sql =
+                  match handle writer sql with
+                  | _, Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | next, result ->
+                      writer <- next
+                      result
+
+              for sql in
+                  [ "CREATE DATABASE seq"
+                    "USE seq"
+                    "CREATE TABLE parent (id BIGINT UNSIGNED PRIMARY KEY)"
+                    "INSERT INTO parent VALUES (1)"
+                    "CREATE TABLE item (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, parent_id BIGINT UNSIGNED NOT NULL, label VARCHAR(10) NOT NULL, UNIQUE KEY (label), CONSTRAINT item_parent FOREIGN KEY (parent_id) REFERENCES parent (id))"
+                    "BEGIN" ] do
+                  runWriter sql |> ignore
+
+              // Autocommit writers run beside the open transaction; a row-lock
+              // stripe they share with it only delays them until COMMIT.
+              let autocommitInsert connectionId label =
+                  Threading.Tasks.Task.Run(fun () ->
+                      let session, _ = handle (create connectionId store) "USE seq"
+                      handle session (sprintf "INSERT INTO item (parent_id, label) VALUES (1, '%s')" label) |> snd)
+
+              let others =
+                  [ for index in 1 .. 30 do
+                        runWriter (sprintf "INSERT INTO item (parent_id, label) VALUES (1, 'tx%d')" index) |> ignore
+                        if index % 10 = 0 then
+                            let task = autocommitInsert (index + 1) (sprintf "auto%d" index)
+                            task.Wait(TimeSpan.FromMilliseconds 200.) |> ignore
+                            yield task ]
+
+              runWriter "COMMIT" |> ignore
+
+              for task in others do
+                  Expect.isTrue (task.Wait(TimeSpan.FromSeconds 30.)) "every autocommit insert finishes after COMMIT"
+                  Expect.equal task.Result (Affected 1UL) "autocommit insert"
+
+              let _, counts = handle writer "SELECT COUNT(*), COUNT(DISTINCT id), MAX(id) FROM item"
+              Expect.equal counts (ResultSet([ "COUNT(*)"; "COUNT(DISTINCT id)"; "MAX(id)" ], [ [ Some "33"; Some "33"; Some "33" ] ])) "33 distinct sequential ids"
+
+              let writerAfter, inserted = handle writer "INSERT INTO item (parent_id, label) VALUES (1, 'next')"
+              Expect.equal inserted (Affected 1UL) "follow-up insert"
+              let _, next = handle writerAfter "SELECT id FROM item WHERE label = 'next'"
+              Expect.equal next (ResultSet([ "id" ], [ [ Some "34" ] ])) "the sequence continues after every writer"
+
           testCase "fulltext transaction reads exclude pending document replacements"
           <| fun _ ->
               for parser, oldTerm, newTerm in [ "", "orchard", "cobalt"; " WITH PARSER ngram", "生日", "中文" ] do

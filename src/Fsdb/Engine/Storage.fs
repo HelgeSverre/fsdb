@@ -10852,6 +10852,27 @@ let private tryPointUpdate (baseDb: Database) (batchDb: Database) (liveDb: Datab
     | [ tableKey, rowIds ] when not rowIds.IsEmpty && canMergePointUpdate tableKey rowIds baseDb batchDb liveDb -> Some(tableKey, rowIds)
     | _ -> None
 
+/// Whether `live` differs from `base` only by counters published outside the
+/// transaction boundary: an AUTO_INCREMENT advance or refreshed statistics.
+/// Rows, indexes and schema must be the very same immutable values.
+let private onlyCountersAdvanced (baseTable: Table) (liveTable: Table) =
+    LanguagePrimitives.PhysicalEquality baseTable.RowsArray liveTable.RowsArray
+    && LanguagePrimitives.PhysicalEquality baseTable.UniqueIndex liveTable.UniqueIndex
+    && LanguagePrimitives.PhysicalEquality baseTable.SecondaryIndex liveTable.SecondaryIndex
+    && LanguagePrimitives.PhysicalEquality baseTable.SecondaryOrder liveTable.SecondaryOrder
+    && LanguagePrimitives.PhysicalEquality baseTable.FullTextIndexes liveTable.FullTextIndexes
+    && LanguagePrimitives.PhysicalEquality baseTable.SpatialIndexes liveTable.SpatialIndexes
+    && LanguagePrimitives.PhysicalEquality baseTable.Columns liveTable.Columns
+    && LanguagePrimitives.PhysicalEquality baseTable.Indexes liveTable.Indexes
+    && LanguagePrimitives.PhysicalEquality baseTable.ForeignKeys liveTable.ForeignKeys
+    && baseTable.SchemaRevision = liveTable.SchemaRevision
+    && baseTable.OriginalName = liveTable.OriginalName
+    && baseTable.TableCharset = liveTable.TableCharset
+    && baseTable.TableCollation = liveTable.TableCollation
+    && baseTable.TableComment = liveTable.TableComment
+    && baseTable.Partitioning = liveTable.Partitioning
+    && baseTable.CreateTime = liveTable.CreateTime
+
 let private mergeDatabase dbName (baseDb: Database) (batchDb: Database) (liveDb: Database) =
     if obj.ReferenceEquals(liveDb, baseDb) then
         batchDb
@@ -10860,6 +10881,17 @@ let private mergeDatabase dbName (baseDb: Database) (batchDb: Database) (liveDb:
         | Some(tableKey, rowIds) -> mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb
         | None ->
             let tableKeys = Set.union (keysOf baseDb) (keysOf batchDb)
+
+            // When no committed table changed its data since the snapshot,
+            // the merge reproduces the transaction's own rows, which already
+            // passed the transaction's foreign key checks.
+            let liveDataChanged =
+                Set.union (keysOf baseDb) (keysOf liveDb)
+                |> Seq.exists (fun tableName ->
+                    match Map.tryFind tableName baseDb, Map.tryFind tableName liveDb with
+                    | Some baseTable, Some liveTable ->
+                        not (obj.ReferenceEquals(baseTable, liveTable) || onlyCountersAdvanced baseTable liveTable)
+                    | _ -> true)
 
             let merged =
                 tableKeys
@@ -10870,12 +10902,16 @@ let private mergeDatabase dbName (baseDb: Database) (batchDb: Database) (liveDb:
                         | Some baseTable, None, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.remove tableName acc
                         | None, Some batchTable, None -> Map.add tableName batchTable acc
                         | Some baseTable, Some batchTable, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.add tableName batchTable acc
+                        | Some baseTable, Some batchTable, Some liveTable when onlyCountersAdvanced baseTable liveTable ->
+                            Map.add tableName { batchTable with NextAutoId = max batchTable.NextAutoId liveTable.NextAutoId } acc
                         | Some baseTable, Some batchTable, Some liveTable when sameTableSchema baseTable batchTable ->
                             Map.add tableName (mergeRows dbName baseTable batchTable liveTable) acc
                         | _ -> raise (LockWaitTimeout dbName))
                     liveDb
 
-            validateMergedForeignKeys dbName [ batchDb; liveDb ] merged
+            if liveDataChanged then
+                validateMergedForeignKeys dbName [ batchDb; liveDb ] merged
+
             merged
 
 let private mergeDatabaseSlotPublishing
