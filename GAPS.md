@@ -893,6 +893,9 @@ The [legacy vertical-punctuation follow-up](torture/findings/2026-10-15-legacy-n
 also distinguishes all U+FE10–U+FE19 forms under `utf8mb4_unicode_ci` and
 matches the audited period/vertical-period ngram membership. Its keys retain
 their relative MySQL order, while exact weight bytes remain out of scope.
+[ASCII, fullwidth, and small comma equality](torture/findings/2026-10-15-legacy-ngram-punctuation.md#ascii-fullwidth-and-small-comma-equality)
+now agrees across the audited insensitive collations while ngram tokenization
+retains MySQL's ASCII punctuation boundary.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

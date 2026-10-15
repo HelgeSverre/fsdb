@@ -1443,9 +1443,19 @@ let tests =
                 testTheory
                     "MySQL 8.4 CJK punctuation presentation forms follow UCA version"
                     [ "utf8mb4_0900_ai_ci", "，", "︐", true
+                      "utf8mb4_0900_ai_ci", ",", "，", true
+                      "utf8mb4_0900_ai_ci", ",", "﹐", true
                       "utf8mb4_0900_as_ci", "，", "︐", true
+                      "utf8mb4_0900_as_ci", ",", "，", true
+                      "utf8mb4_0900_as_ci", ",", "﹐", true
+                      "utf8mb4_0900_as_cs", ",", "，", false
+                      "utf8mb4_0900_as_cs", ",", "﹐", false
                       "utf8mb4_unicode_520_ci", "，", "︐", true
+                      "utf8mb4_unicode_520_ci", ",", "，", true
+                      "utf8mb4_unicode_520_ci", ",", "﹐", true
                       "utf8mb4_unicode_ci", "，", "︐", false
+                      "utf8mb4_unicode_ci", ",", "，", true
+                      "utf8mb4_unicode_ci", ",", "﹐", true
                       "utf8mb4_0900_ai_ci", "，", "﹐", true
                       "utf8mb4_unicode_ci", "，", "﹐", true
                       "utf8mb4_0900_ai_ci", "、", "︑", true

@@ -50,3 +50,22 @@ escapes literal marker text, and orders the markers in MySQL's audited
 vertical-block order. Focused equality, key, ordering, and indexed ngram
 regressions cover the change. The audited behavior is limited to this block;
 it does not claim exact `WEIGHT_STRING` bytes or comprehensive UCA 4.0 parity.
+
+## ASCII, fullwidth, and small comma equality
+
+A further native MySQL 8.4.11 probe found that `,` (U+002C), `，` (U+FF0C),
+and `﹐` (U+FE50) compare equal under
+`utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`, `utf8mb4_0900_ai_ci`, and
+`utf8mb4_0900_as_ci`. Under `utf8mb4_0900_as_cs`, ASCII comma stays distinct
+from the other two. Host ICU previously separated ASCII from fullwidth comma;
+FSDB's small-comma fold inherited that split. The affected insensitive
+collations now normalize all three to one key, while the sensitive collation
+keeps its existing distinction.
+
+This equality does not erase parser boundaries. In a native MySQL ngram table
+with `TEXT COLLATE utf8mb4_unicode_ci`, rows `中,文`, `中，文`, and `中﹐文`
+respond differently: searching `中,` finds no row, while `中，` or `中﹐`
+finds the latter two rows. The focused FSDB regression pins this distinction
+as well as the collation equality, canonical keys, and hashes. Snapshot
+recovery rebuilds full-text postings from saved documents under the current
+collation rules; the preview format does not persist canonical posting keys.

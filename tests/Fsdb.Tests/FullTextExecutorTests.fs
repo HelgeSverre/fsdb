@@ -347,6 +347,18 @@ let tests =
               Expect.equal (search "中。") [ "4" ] "the ordinary period does not match its vertical form"
               Expect.equal (search "中︒") [ "5" ] "the vertical period keeps its implicit UCA 4.0 weight"
 
+          testCase "legacy Unicode ngrams retain small comma token boundaries"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE small_commas(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO small_commas VALUES(1,'中,文'),(2,'中，文'),(3,'中﹐文')" |> ignore
+              let search term =
+                  let sql = $"SELECT id FROM small_commas WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (search "中,") [] "ASCII punctuation splits the ngram token"
+              Expect.equal (search "中，") [ "2"; "3" ] "fullwidth and small comma tokens share a key"
+              Expect.equal (search "中﹐") [ "2"; "3" ] "small comma finds both token forms"
+
           testCase "single-character ngram scores count repeated query tokens"
           <| fun _ ->
               let store = create ()
