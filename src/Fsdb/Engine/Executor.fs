@@ -14635,6 +14635,71 @@ and private correlatedProbeEqualities source (whereExpr: Expr option) (outer: Ev
         |> optionalConjuncts
         |> List.choose (tryCorrelatedProbeEqualityPredicate source context))
 
+and private tryCorrelatedSignedIntegerColumn source (columns: ColumnDef list) expression =
+    tryCorrelatedInnerColumn source expression
+    |> Option.bind (resolveColumn columns >> Result.toOption)
+    |> Option.bind (fun index ->
+        match columns.[index].Type with
+        | TTinyInt false | TSmallInt false | TMediumInt false | TInt false ->
+            Some columns.[index].Name
+        | _ -> None)
+
+and private correlatedAffineEqualityProbes source (columns: ColumnDef list) context (whereExpr: Expr option) =
+    let literalOffset = function
+        | LiteralValue(VInt value) when value >= -2147483647L && value <= 2147483647L ->
+            Some value
+        | Neg(LiteralValue(VInt value)) when value >= 0L && value <= 2147483647L ->
+            Some(-value)
+        | _ -> None
+
+    let inverse indexed bound =
+        let inverseForm column offset transform =
+            Option.map2 (fun name value -> name, transform (decimal value))
+                (tryCorrelatedSignedIntegerColumn source columns column) (literalOffset offset)
+
+        let form =
+            match indexed with
+            | BinOp(Add, column, offset) ->
+                inverseForm column offset (fun value bound -> bound - value)
+                |> Option.orElseWith (fun () ->
+                    inverseForm offset column (fun value bound -> bound - value))
+            | BinOp(Sub, column, offset) ->
+                inverseForm column offset (fun value bound -> bound + value)
+                |> Option.orElseWith (fun () ->
+                    inverseForm offset column (fun value bound -> value - bound))
+            | _ -> None
+
+        form
+        |> Option.bind (fun (name, transform) ->
+            tryCorrelatedProbeValue source context bound
+            |> Option.bind (function
+                | VNull -> Some(name, None)
+                | VInt value ->
+                    let key = transform (decimal value)
+                    let minimum, maximum =
+                        match resolveColumn columns name with
+                        | Ok index ->
+                            match columns.[index].Type with
+                            | TTinyInt false -> -128L, 127L
+                            | TSmallInt false -> -32768L, 32767L
+                            | TMediumInt false -> -8388608L, 8388607L
+                            | TInt false -> -2147483648L, 2147483647L
+                            | _ -> System.Int64.MinValue, System.Int64.MaxValue
+                        | Error _ -> System.Int64.MinValue, System.Int64.MaxValue
+
+                    if key < decimal minimum || key > decimal maximum then
+                        Some(name, None)
+                    else
+                        Some(name, Some(VInt(int64 key)))
+                | _ -> None))
+
+    whereExpr
+    |> optionalConjuncts
+    |> List.choose (function
+        | BinOp(Eq, left, right) ->
+            inverse left right |> Option.orElseWith (fun () -> inverse right left)
+        | _ -> None)
+
 and private correlatedRangeBounds source (whereExpr: Expr option) (outer: EvalContext option) =
     outer
     |> Option.map (fun context ->
@@ -15064,6 +15129,27 @@ and private tryProjectedPhysicalEqualitiesRows policy store registry dbName proj
     tryProjectedPhysicalEqualitiesCandidates policy store projection equalities
     |> Option.bind (projectPhysicalLookupRows store registry dbName projection)
 
+and private tryProjectedPhysicalCorrelatedAffineCandidates store (projection: PhysicalProjection) source context whereExpr =
+    if not (storedRowsMatchReadRows store projection.PhysicalTable.Columns) then
+        None
+    else
+        correlatedAffineEqualityProbes source projection.OutputColumns context whereExpr
+        |> List.choose (function
+            | _, None -> Some []
+            | name, Some key ->
+                tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection [ name, key ])
+        |> intersectPhysicalRows
+
+and private tryProjectedPhysicalCorrelatedAffineLookup store registry dbName source whereExpr outer =
+    match FromItem.tryQualifier source, outer with
+    | Some qualifier, Some context ->
+        tryPhysicalProjection store registry dbName source
+        |> Option.bind (fun projection ->
+            tryProjectedPhysicalCorrelatedAffineCandidates
+                store projection (correlatedProbeSource qualifier projection.OutputColumns) context whereExpr
+            |> Option.bind (projectPhysicalLookupRows store registry dbName projection))
+    | _ -> None
+
 and private tryProjectedPhysicalLiteralInRows store registry dbName (projection: PhysicalProjection) (probe: IndexInProbe) =
     probe.Columns
     |> List.map fst
@@ -15349,6 +15435,12 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     correlatedProbeEqualities probeSource (Some branch) outer
                     |> Option.bind (tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection)
 
+                let affine =
+                    outer
+                    |> Option.bind (fun context ->
+                        tryProjectedPhysicalCorrelatedAffineCandidates
+                            store projection probeSource context (Some branch))
+
                 let nulls = tryProjectedPhysicalNullTestCandidates store projection probeSource (Some branch) outer
 
                 let membership =
@@ -15382,7 +15474,8 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     else
                         []
 
-                (equality |> Option.toList) @ (nulls |> Option.toList) @ (membership |> Option.toList)
+                (equality |> Option.toList) @ (affine |> Option.toList)
+                @ (nulls |> Option.toList) @ (membership |> Option.toList)
                 @ (likePrefixes |> Option.toList) @ ranges @ functional
                 |> intersectPhysicalRows
 
@@ -15573,20 +15666,11 @@ and private tryMaterializedCorrelatedLookup
                     equalityLookup names
                     |> Option.bind (fun lookup -> lookup values)
 
-            let signedIntegerColumn expression =
-                tryCorrelatedInnerColumn probeSource expression
-                |> Option.bind (resolveColumn columns >> Result.toOption)
-                |> Option.bind (fun index ->
-                    match columns.[index].Type with
-                    | TTinyInt false | TSmallInt false | TMediumInt false | TInt false ->
-                        Some columns.[index].Name
-                    | _ -> None)
-
             let absoluteCandidates predicate =
                 let signedColumn expression =
                     match expression with
                     | FuncCall(name, [ indexed ]) when equalsIgnoreCase name "ABS" ->
-                        signedIntegerColumn indexed
+                        tryCorrelatedSignedIntegerColumn probeSource columns indexed
                     | _ -> None
 
                 let inverseKeys indexed bound =
@@ -15620,49 +15704,7 @@ and private tryMaterializedCorrelatedLookup
                 |> intersectSharedRows
 
             let affineCandidates predicate =
-                let literalOffset = function
-                    | LiteralValue(VInt value) when value >= -2147483647L && value <= 2147483647L ->
-                        Some value
-                    | Neg(LiteralValue(VInt value)) when value >= 0L && value <= 2147483647L ->
-                        Some(-value)
-                    | _ -> None
-
-                let inverse indexed bound =
-                    let inverseForm column offset transform =
-                        Option.map2 (fun name value -> name, transform (decimal value))
-                            (signedIntegerColumn column) (literalOffset offset)
-
-                    let form =
-                        match indexed with
-                        | BinOp(Add, column, offset) ->
-                            inverseForm column offset (fun value bound -> bound - value)
-                            |> Option.orElseWith (fun () ->
-                                inverseForm offset column (fun value bound -> bound - value))
-                        | BinOp(Sub, column, offset) ->
-                            inverseForm column offset (fun value bound -> bound + value)
-                            |> Option.orElseWith (fun () ->
-                                inverseForm offset column (fun value bound -> value - bound))
-                        | _ -> None
-
-                    form
-                    |> Option.bind (fun (name, transform) ->
-                        tryCorrelatedProbeValue probeSource context bound
-                        |> Option.bind (function
-                            | VNull -> Some(name, None)
-                            | VInt value ->
-                                let key = transform (decimal value)
-                                if key < decimal System.Int64.MinValue || key > decimal System.Int64.MaxValue then
-                                    Some(name, None)
-                                else
-                                    Some(name, Some(VInt(int64 key)))
-                            | _ -> None))
-
-                predicate
-                |> optionalConjuncts
-                |> List.choose (function
-                    | BinOp(Eq, left, right) ->
-                        inverse left right |> Option.orElseWith (fun () -> inverse right left)
-                    | _ -> None)
+                correlatedAffineEqualityProbes probeSource columns context predicate
                 |> List.choose (function
                     | _, None -> Some []
                     | name, Some key ->
@@ -16000,6 +16042,7 @@ and private tryCorrelatedSourceLookup
                   equalityUnion
                   projectedUnion
                   nullLookup ()
+                  tryProjectedPhysicalCorrelatedAffineLookup store registry dbName source whereExpr outer
                   tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
                 |> fewestRows
 
@@ -16037,6 +16080,7 @@ and private tryCorrelatedSourceLookup
                 [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
                   tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
                   nullLookup ()
+                  tryProjectedPhysicalCorrelatedAffineLookup store registry dbName source whereExpr outer
                   tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
                 |> fewestRows
                 |> chooseWithRanges false))

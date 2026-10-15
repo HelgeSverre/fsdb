@@ -207,6 +207,9 @@ residual evaluation.
 uses one inverse equality key for bounded signed integer additions and
 subtractions in either operand order, including complete OR branches; other
 arithmetic forms retain residual evaluation.
+[Indexed physical and pass-through sources](torture/findings/2026-10-15-correlated-physical-affine.md)
+now use the same inverse key, treating keys outside the signed column's
+declared range as empty candidate sets; other arithmetic forms remain open.
 [Correlated NULL-safe equality](torture/findings/2026-10-15-correlated-null-safe-equality.md)
 uses the same equality keys for stable non-NULL bounds and indexed NULL
 buckets for NULL bounds on direct, pass-through, and stable materialized

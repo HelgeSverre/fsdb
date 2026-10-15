@@ -46,7 +46,7 @@ def main():
                     for sql in [
                         "CREATE DATABASE probe", "USE probe",
                         "CREATE TABLE bound(id INT PRIMARY KEY,x BIGINT)",
-                        "CREATE TABLE vals(id INT PRIMARY KEY,k INT)",
+                        "CREATE TABLE vals(id INT PRIMARY KEY,k INT,KEY ix_k(k))",
                         "INSERT INTO bound VALUES(1,10),(2,1000),(3,NULL),(4,-10),"
                         "(5,2147483648),(6,-2147483647),(7,2147483649)",
                         "INSERT INTO vals VALUES(1,9),(2,11),(3,-11),(4,-9),"
@@ -65,6 +65,9 @@ def main():
                         ("-1-d.k", (1, 0, 0, 1, 0, 0, 0)),
                     ]
                     for prefix, source in [
+                        ("", "vals d"),
+                        ("", "(SELECT id,k FROM vals) d"),
+                        ("WITH passthrough AS (SELECT id,k FROM vals) ", "passthrough d"),
                         ("", "(SELECT DISTINCT id,k FROM vals) d"),
                         ("WITH materialized AS (SELECT DISTINCT id,k FROM vals) ", "materialized d"),
                     ]:
@@ -75,7 +78,28 @@ def main():
                             )
                             actual = tuple(count for _, count in cursor.fetchall())
                             assert actual == expected, (source, expression, actual, expected)
-                print(f"MySQL {version}: derived and CTE affine counts match")
+                    for index, (column_type, minimum, maximum) in enumerate([
+                        ("TINYINT", -128, 127),
+                        ("SMALLINT", -32768, 32767),
+                        ("MEDIUMINT", -8388608, 8388607),
+                        ("INT", -2147483648, 2147483647),
+                    ]):
+                        table = f"vals_type_{index}"
+                        first_id = 10 + 4 * index
+                        cursor.execute(f"CREATE TABLE {table}(id INT PRIMARY KEY,k {column_type},KEY ix_k(k))")
+                        cursor.execute(f"INSERT INTO {table} VALUES(1,{minimum}),(2,{maximum})")
+                        cursor.execute(
+                            "INSERT INTO bound VALUES"
+                            f"({first_id},{minimum + 1}),({first_id + 1},{minimum}),"
+                            f"({first_id + 2},{maximum + 1}),({first_id + 3},{maximum + 2})"
+                        )
+                        cursor.execute(
+                            f"SELECT o.id,(SELECT COUNT(*) FROM {table} d WHERE d.k+1=o.x) "
+                            f"FROM bound o WHERE o.id BETWEEN {first_id} AND {first_id + 3} ORDER BY o.id"
+                        )
+                        actual = tuple(count for _, count in cursor.fetchall())
+                        assert actual == (1, 0, 1, 0), (column_type, actual)
+                print(f"MySQL {version}: physical, pass-through, and materialized affine counts match")
             finally:
                 if connection:
                     connection.close()
