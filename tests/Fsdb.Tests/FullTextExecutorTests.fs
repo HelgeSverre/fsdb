@@ -321,6 +321,19 @@ let tests =
                   let sql = $"SELECT id FROM kana_script WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
                   Expect.equal (ids (run store sql)) [ "1"; "2" ] sql
 
+          testCase "single-character ngrams share MySQL comma presentation forms"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE comma_docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO comma_docs VALUES(1,'，'),(2,'︐'),(3,'﹐'),(4,'、'),(5,'︑'),(6,'﹅'),(7,'中文︐標點')" |> ignore
+              for term in [ "，"; "︐"; "﹐" ] do
+                  let sql = $"SELECT id FROM comma_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  Expect.equal (ids (run store sql)) [ "1"; "2"; "3"; "7" ] sql
+              for term in [ "、"; "︑" ] do
+                  let sql = $"SELECT id FROM comma_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  Expect.equal (ids (run store sql)) [ "4"; "5" ] sql
+
           testCase "single-character ngram scores count repeated query tokens"
           <| fun _ ->
               let store = create ()

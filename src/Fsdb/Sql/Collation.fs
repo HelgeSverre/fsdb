@@ -153,6 +153,14 @@ let private foldKanaVariants (value: string) =
 
         result.ToString()
 
+// UCA 4.0 keeps vertical punctuation distinct; newer MySQL weights fold it.
+let private foldCjkPunctuationForms modern (value: string) =
+    let comma = value.Replace('\uFE50', '\uFF0C')
+    if modern then
+        comma.Replace('\uFE10', '\uFF0C').Replace('\uFE11', '\u3001')
+    else
+        comma
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) = if spec.PadSpace then s.TrimEnd(' ') else s
@@ -185,8 +193,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_general_ci" -> value.Replace("ß", "s").Replace("ẞ", "s")
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
-        | "utf8mb4_unicode_ci"
-        | "utf8mb4_unicode_520_ci" -> foldKanaVariants value
+        | "utf8mb4_unicode_520_ci" -> value |> foldCjkPunctuationForms true |> foldKanaVariants
+        | "utf8mb4_unicode_ci" -> value |> foldCjkPunctuationForms false |> foldKanaVariants
         | _ -> value
 
     let primaryText (s: string) = trim s |> foldText

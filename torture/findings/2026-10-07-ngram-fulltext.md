@@ -49,9 +49,9 @@ a disposable database, default token size 2, and enabled default stopwords.
 It asserts ordered results, parser DDL errors, variable scope and labels,
 mutation behavior, and field boundaries for both parsers.
 
-The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 351
+The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 387
 natural-language, boolean, and query-expansion searches at each startup size
-from 1 through 10. All 3,510 query results agree with native MySQL 8.4.11
+from 1 through 10. All 3,870 query results agree with native MySQL 8.4.11
 on the audited mixed Chinese, Japanese, Korean, ASCII, punctuation, emoji,
 supplementary-character, combining-mark, zero-width-joiner, variation-selector,
 nonbreaking-space, newline, Hangul-jamo, and NULL corpus. It checks matching row IDs, query
@@ -118,6 +118,21 @@ The next corpus adds Korean compatibility-jamo spellings of `학교` and `한글
 and decomposed hiragana dakuten beside `ガラス`. All three search modes agree
 on membership and relevance at startup sizes 1–10. These cases extend the
 Unicode normalization evidence without changing the MeCab limitation.
+
+An October 15 punctuation corpus adds Japanese iteration forms, vertical and
+small comma presentation forms, and CJK punctuation in seven documents and
+twelve searches. At token size 1, MySQL equates `，`, `︐`, and `﹐` under
+`utf8mb4_0900_ai_ci`; fsdb previously separated their postings, causing
+missing rows and different relevance. Native weight probes also show that
+`utf8mb4_unicode_ci` keeps the vertical form distinct while its newer UCA
+counterparts fold it. Collation keys now follow those audited distinctions,
+and focused equality and ngram regressions pin them. The expanded oracle
+compares 387 queries at each startup size 1–10, with zero mismatches across
+all 3,870 queries. This remains a bounded corpus, not general Unicode or
+MeCab parity. The host ICU still equates `、` and `︑` under
+`utf8mb4_unicode_ci`, while MySQL's older weight table distinguishes them;
+that separate legacy-collation gap is not covered by the default-collation
+ngram corpus.
 
 The `ngram-fulltext` differential contract covers natural, boolean, and
 query-expansion searches through text and prepared protocols, Unicode and

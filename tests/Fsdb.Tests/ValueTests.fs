@@ -1441,6 +1441,22 @@ let tests =
                             Expect.equal (col.HashOf "カタカナ") (col.HashOf "ｶﾀｶﾅ") (name + " hash")
 
                 testTheory
+                    "MySQL 8.4 CJK punctuation presentation forms follow UCA version"
+                    [ "utf8mb4_0900_ai_ci", "，", "︐", true
+                      "utf8mb4_0900_as_ci", "，", "︐", true
+                      "utf8mb4_unicode_520_ci", "，", "︐", true
+                      "utf8mb4_unicode_ci", "，", "︐", false
+                      "utf8mb4_0900_ai_ci", "，", "﹐", true
+                      "utf8mb4_unicode_ci", "，", "﹐", true
+                      "utf8mb4_0900_ai_ci", "、", "︑", true ]
+                    <| fun (name, left, right, expected) ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.equal (col.Equals left right) expected name
+                        if expected then
+                            Expect.equal (col.KeyOf left) (col.KeyOf right) (name + " index key")
+                            Expect.equal (col.HashOf left) (col.HashOf right) (name + " hash")
+
+                testTheory
                     "MySQL 8.4 hiragana and katakana equality follows collation sensitivity"
                     [ "utf8mb4_0900_ai_ci", "ば", "パ", true
                       "utf8mb4_0900_ai_ci", "コ", "こ", true
