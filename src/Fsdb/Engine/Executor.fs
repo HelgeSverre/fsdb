@@ -1399,7 +1399,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
             |> Map.ofList
         let select =
             select
-            |> InformationSchema.inlineReadOnlyViewCtes
+            |> InformationSchema.inlineReadOnlyViewCtes store.Catalog view.Schema
             |> InformationSchema.flattenInnerJoinedOperands store.Catalog view.Schema
         let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 

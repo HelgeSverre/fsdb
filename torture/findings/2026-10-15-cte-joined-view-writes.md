@@ -36,9 +36,10 @@ rejects an invalid target value with error 1369. A repeated CTE projecting
 `RAND()` also uses one materialization: equality between the two aliases'
 random values matches, and the target row is updated.
 The original view definition continues to serve reads. Recursive or dependent
-CTEs, nested query expressions, and starred explicit-column projections retain
-the conservative non-updatable path. Independent CTE bodies using plain derived
-sources are covered by the [follow-up oracle](2026-10-15-derived-cte-joined-view-writes.md).
+CTEs and nested query expressions retain the conservative non-updatable path.
+Independent CTE bodies using plain derived sources and audited starred
+explicit-column projections are covered by the
+[follow-up oracle](2026-10-15-derived-cte-joined-view-writes.md).
 
 The native oracle was run against MySQL 8.4.11. The focused Expecto case
 checks three basic one-CTE shapes, a two-CTE composition, renamed columns,

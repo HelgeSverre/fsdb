@@ -2041,16 +2041,24 @@ let tests =
               let store = Fsdb.Storage.create ()
               expectOk (run store "CREATE TABLE derived_cte_target(id INT PRIMARY KEY,n INT)") "create target"
               expectOk (run store "CREATE TABLE derived_cte_source(id INT,flag INT)") "create source"
+              expectOk (run store "CREATE TABLE derived_cte_aux(id INT,marker INT)") "create aux"
               expectOk (run store "INSERT INTO derived_cte_target VALUES(1,10),(2,20)") "seed target"
               expectOk (run store "INSERT INTO derived_cte_source VALUES(1,1),(1,2),(2,3)") "seed source"
+              expectOk (run store "INSERT INTO derived_cte_aux VALUES(1,9),(2,8)") "seed aux"
 
-              for name, body in
-                  [ "simple", "SELECT x.id,x.flag FROM (SELECT id,flag FROM derived_cte_source) x"
-                    "aggregate", "SELECT x.id,SUM(x.flag) AS flag FROM (SELECT id,flag FROM derived_cte_source) x GROUP BY x.id"
-                    "nested", "SELECT x.id,x.flag FROM (SELECT y.id,y.flag FROM (SELECT id,flag FROM derived_cte_source) y) x" ] do
+              for name, columns, body in
+                  [ "simple", "k,f", "SELECT x.id,x.flag FROM (SELECT id,flag FROM derived_cte_source) x"
+                    "aggregate", "k,f", "SELECT x.id,SUM(x.flag) AS flag FROM (SELECT id,flag FROM derived_cte_source) x GROUP BY x.id"
+                    "nested", "k,f", "SELECT x.id,x.flag FROM (SELECT y.id,y.flag FROM (SELECT id,flag FROM derived_cte_source) y) x"
+                    "star", "k,f", "SELECT * FROM derived_cte_source"
+                    "qualified_star", "k,f", "SELECT s.* FROM derived_cte_source s"
+                    "derived_star", "k,f", "SELECT * FROM (SELECT id,flag FROM derived_cte_source) x"
+                    "mixed_star", "k,f,extra", "SELECT s.*,s.flag+1 FROM derived_cte_source s"
+                    "joined_star", "k,f,aux_id,marker", "SELECT * FROM derived_cte_source s JOIN derived_cte_aux q ON q.id=s.id"
+                    "joined_qualified_star", "k,f", "SELECT s.* FROM derived_cte_source s JOIN derived_cte_aux q ON q.id=s.id" ] do
                   let view = "derived_cte_" + name
                   let sql =
-                      $"CREATE VIEW {view} AS WITH d(k,f) AS ({body}) SELECT a.id,a.n,d.f FROM d JOIN derived_cte_target a ON a.id=d.k WHERE a.n>=0 WITH CASCADED CHECK OPTION"
+                      $"CREATE VIEW {view} AS WITH d({columns}) AS ({body}) SELECT a.id,a.n,d.f FROM d JOIN derived_cte_target a ON a.id=d.k WHERE a.n>=0 WITH CASCADED CHECK OPTION"
                   expectOk (run store sql) ("create " + view)
                   Expect.equal
                       (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{view}'"))
@@ -2066,7 +2074,7 @@ let tests =
 
               Expect.equal
                   (rows store "SELECT id,n FROM derived_cte_target ORDER BY id")
-                  [ [ Some "1"; Some "13" ]; [ Some "2"; Some "20" ] ]
+                  [ [ Some "1"; Some "19" ]; [ Some "2"; Some "20" ] ]
                   "duplicate CTE rows update the target once per statement"
 
           testCase "joined views update a target after two references to one read-only CTE"
