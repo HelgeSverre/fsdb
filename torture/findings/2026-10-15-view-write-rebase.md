@@ -1,0 +1,23 @@
+# Updatable-view writes claim their physical transaction target
+
+MySQL 8.4.11 was probed with two connections in explicit transactions and a
+third connection reading committed state. The second write was started while
+the first transaction held the row and was still waiting after 200 ms.
+
+| View and statement | Second statement after first commit | Final base row |
+|---|---:|---|
+| `SELECT id,n FROM t`; `UPDATE v SET n=n+1 WHERE id=1` | 1 affected | `n=2` |
+| `SELECT t.id,t.n FROM t JOIN lookup l ON l.id=t.id`; same `UPDATE` | 1 affected | `n=2` |
+| `SELECT id,n FROM t`; `DELETE FROM v WHERE id=1` | 0 affected | absent |
+
+Before the change, `transactionWriteTargets` returned no physical row claim
+for a view. The second FSDB update could run against its private snapshot, but
+its later `COMMIT` returned 1205 instead of waiting and rebasing. Target
+discovery now resolves the view's writable base target and maps its predicate
+to physical candidates. The transaction lock path waits for the first writer,
+rebases, and executes the statement against the latest committed row.
+
+`TransactionTests` covers the three cases above, including the wait and final
+state. This does not establish scheduling parity for every view: writes through
+views with derived or dependent sources and view-addressed inserts remain
+separate cases to audit.

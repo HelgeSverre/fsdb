@@ -1961,6 +1961,69 @@ let tests =
                   | ResultSet(_, [ [ Some "20" ] ]) -> ()
                   | result -> failtestf "expected the waiting replacement to win, got %A" result)
 
+          testCase "updatable view writes wait and rebase on the physical row"
+          <| fun _ ->
+              for definition in
+                  [ "SELECT id, n FROM tx_view_target"
+                    "SELECT t.id, t.n FROM tx_view_target t JOIN tx_view_lookup l ON l.id = t.id" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  let setup, _ = handle setup "CREATE TABLE tx_view_target (id INT PRIMARY KEY, n INT)"
+                  let setup, _ = handle setup "CREATE TABLE tx_view_lookup (id INT PRIMARY KEY)"
+                  let setup, _ = handle setup "INSERT INTO tx_view_target VALUES (1, 0)"
+                  let setup, _ = handle setup "INSERT INTO tx_view_lookup VALUES (1)"
+                  let setup, _ = handle setup ("CREATE VIEW tx_view_write AS " + definition)
+                  let first, _ = handle (create 2 store) "BEGIN"
+                  let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+                  let second, _ = handle second "BEGIN"
+                  let sql = "UPDATE tx_view_write SET n = n + 1 WHERE id = 1"
+                  let first, firstWrite = handle first sql
+                  Expect.equal firstWrite (Affected 1UL) "the first view update succeeds"
+
+                  let waiting = Threading.Tasks.Task.Run(fun () -> handle second sql)
+                  Expect.isFalse
+                      (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      "the second view update waits for the physical row owner"
+
+                  Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first view update commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the second view update resumes"
+                  let second, secondWrite = waiting.GetAwaiter().GetResult()
+                  Expect.equal secondWrite (Affected 1UL) "the second view update sees the committed row"
+                  Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the second view update commits"
+
+                  match handle setup "SELECT n FROM tx_view_target WHERE id = 1" |> snd with
+                  | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                  | result -> failtestf "both view increments should be committed, got %A" result
+
+          testCase "updatable view delete waits and rechecks the physical row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_delete_view_target (id INT PRIMARY KEY, n INT)"
+              let setup, _ = handle setup "INSERT INTO tx_delete_view_target VALUES (1, 0)"
+              let setup, _ = handle setup "CREATE VIEW tx_delete_view AS SELECT id, n FROM tx_delete_view_target"
+              let first, _ = handle (create 2 store) "BEGIN"
+              let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+              let second, _ = handle second "BEGIN"
+              let sql = "DELETE FROM tx_delete_view WHERE id = 1"
+              let first, firstDelete = handle first sql
+              Expect.equal firstDelete (Affected 1UL) "the first view delete succeeds"
+
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle second sql)
+              Expect.isFalse
+                  (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  "the second view delete waits for the physical row owner"
+
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first view delete commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the second view delete resumes"
+              let second, secondDelete = waiting.GetAwaiter().GetResult()
+              Expect.equal secondDelete (Affected 0UL) "the second delete sees the committed absence"
+              Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the second view delete commits"
+
+              match handle setup "SELECT id FROM tx_delete_view_target" |> snd with
+              | ResultSet(_, []) -> ()
+              | result -> failtestf "the physical row should be absent, got %A" result
+
           testCase "literal defaults participate in transaction key claims"
           <| fun _ ->
               [ "INSERT INTO tx_default_key (id, tenant) VALUES (%d, 7)"

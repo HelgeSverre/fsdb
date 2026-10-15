@@ -1423,6 +1423,8 @@ implementation effort:
 
 2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements,
    plus audited joined UPDATE and DELETE statements with named physical targets,
+   [audited single-table updatable-view UPDATE and DELETE statements and joined-view
+   UPDATE statements with one writable physical target](torture/findings/2026-10-15-view-write-rebase.md),
    and joined UPDATE assignments whose unqualified column has one physical
    owner, including [CTE-joined physical targets and uniquely owned bare assignments](torture/findings/2026-10-14-cte-joined-write-rebase.md)
    [targets inside join groups](torture/findings/2026-10-14-grouped-joined-write-rebase.md),

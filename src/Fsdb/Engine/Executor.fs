@@ -28371,7 +28371,31 @@ let transactionWriteTargets
 
     match statement with
     | Update update when update.Joins.IsEmpty ->
-        targets update.From update.Where |> Option.toList
+        let viewDatabase = update.From.Database |> Option.defaultValue dbName
+
+        match tryUpdatableView store viewDatabase update.From.Table with
+        | Some view ->
+            let assignmentTargets =
+                update.Assignments
+                |> traverse (fun assignment ->
+                    Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
+                    |> function Some target -> Ok target | None -> Error())
+                |> Result.toOption
+                |> Option.map (List.distinctBy viewTargetKey)
+
+            match assignmentTargets with
+            | Some [ target ] ->
+                let predicate =
+                    update.Where
+                    |> Option.map (rewriteViewExpression view)
+                    |> combineViewPredicate view.Predicate
+
+                if view.UpdateJoins.IsEmpty then
+                    targets view.UpdateFrom predicate |> Option.toList
+                else
+                    joinedTargets view.UpdateFrom view.UpdateJoins [ target.Qualifier ] predicate
+            | _ -> []
+        | None -> targets update.From update.Where |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
         let projectedNames body =
             let projections =
@@ -28449,7 +28473,17 @@ let transactionWriteTargets
         |> Option.map (fun names -> joinedTargets update.From update.Joins names update.Where)
         |> Option.defaultValue []
     | Delete delete when delete.Joins.IsEmpty ->
-        targets delete.From delete.Where |> Option.toList
+        let viewDatabase = delete.From.Database |> Option.defaultValue dbName
+
+        match tryUpdatableView store viewDatabase delete.From.Table with
+        | Some view when view.UpdateJoins.IsEmpty ->
+            let predicate =
+                delete.Where
+                |> Option.map (rewriteViewExpression view)
+                |> combineViewPredicate view.Predicate
+
+            targets view.UpdateFrom predicate |> Option.toList
+        | _ -> targets delete.From delete.Where |> Option.toList
     | Delete delete when not delete.Joins.IsEmpty ->
         joinedTargets delete.From delete.Joins delete.Targets delete.Where
     | Insert(tableName, columns, rows, _, _)
