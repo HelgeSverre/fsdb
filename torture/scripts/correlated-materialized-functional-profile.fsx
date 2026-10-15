@@ -40,4 +40,5 @@ let probe predicate =
 
 probe "d.k"
 probe "ABS(d.k)"
+probe "ABS(d.k)+0"
 (connection :> System.IDisposable).Dispose()

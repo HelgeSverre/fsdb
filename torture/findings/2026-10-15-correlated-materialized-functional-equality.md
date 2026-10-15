@@ -27,3 +27,7 @@ preview.16 head produces the expected rows and **6 residual calls for both
 `d.k=o.x` and `ABS(d.k)=o.x`**. The executor regression also covers negative
 inner keys, NULL outer values, and OR branches. Other functional expressions
 without a safe inverse or statement-local functional key remain a scale gap.
+For example, `ABS(d.k)+0=o.x` returns the same audited rows but evaluates the
+residual **4,004 times** on the same profile. The next lookup design must key
+the evaluated expression with its comparison domain, exclude volatile or
+outer-dependent expressions, and retain the predicate as a residual check.

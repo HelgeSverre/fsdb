@@ -338,7 +338,8 @@ More complex correlated expressions without a
 compatible statement-local lookup still re-execute or scan. The [materialized
 functional-equality profile](torture/findings/2026-10-15-correlated-materialized-functional-equality.md)
 now shows six residual calls for both an exposed-column equality and its
-supported signed-integer `ABS` form; other functional expressions remain open.
+supported signed-integer `ABS` form. `ABS(d.k)+0=o.x` still takes 4,004 calls
+on the same profile; broader deterministic functional keys remain open.
 
 ## 3. Built-in functions
 
