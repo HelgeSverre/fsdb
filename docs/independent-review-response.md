@@ -171,3 +171,20 @@ release-blocking defect that can be closed by adding another SQL feature:
 4. Treat online backup, general cross-version migration, and durable change
    delivery as unsupported preview capabilities until they have explicit
    contracts and end-to-end validation.
+
+## October 15 disposition at `949441e6`
+
+The review's P0 actions are implemented on current main: PR/main CI builds,
+tests, checks the package consumer, and enforces branch coverage; observer
+exceptions no longer turn a committed write into a reported failure. Commit
+subscriptions are bounded and expose drops, and `version_compile_os` is chosen
+at runtime. The `3aa41906` CI run passed all jobs; the `949441e6` run was still
+in progress at this check. Locally, `just check` built with no warnings and
+passed all 3,615 tests.
+
+The outstanding review priorities remain the synchronous `onCommit` callback
+contract, gradual executor decomposition, durable-write throughput, and backup
+and version-upgrade guarantees. The latest matched write checkpoint still
+measures 0.44× MySQL throughput with one writer and 0.28× with eight writers.
+None of these results changes the preview-grade deployment contract or
+justifies a new production-readiness score.
