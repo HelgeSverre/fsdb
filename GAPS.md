@@ -337,8 +337,8 @@ before projection ([oracle and residual probe](torture/findings/2026-10-15-corre
 More complex correlated expressions without a
 compatible statement-local lookup still re-execute or scan. The [materialized
 functional-equality profile](torture/findings/2026-10-15-correlated-materialized-functional-equality.md)
-shows an `ABS` inner expression taking the scan path even though its direct
-column counterpart uses a six-call statement-local lookup.
+now shows six residual calls for both an exposed-column equality and its
+supported signed-integer `ABS` form; other functional expressions remain open.
 
 ## 3. Built-in functions
 

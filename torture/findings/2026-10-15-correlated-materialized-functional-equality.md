@@ -11,15 +11,19 @@ SELECT o.id,
 FROM outer_bounds o ORDER BY o.id;
 ```
 
-FSDB returns the same rows. Its stable materialized lookup covers exposed
-columns, but does not build a statement-local key for the functional inner
-expression. The reproducible [profile](../scripts/correlated-materialized-functional-profile.fsx)
-places a `TOUCH(d.id)=d.id` residual before the equality: `d.k=o.x` evaluates
-that residual 6 times, while `ABS(d.k)=o.x` evaluates it 4,004 times on the
-same rows. The count includes the engine's metadata probe. The source is
-materialized by `DISTINCT`, so a physical functional index on `inner_rows`
-cannot directly serve the exposed `d` rowset.
+FSDB returns the same rows. The initial profile found that the stable
+materialized lookup covered exposed columns but not `ABS(d.k)`: with a
+`TOUCH(d.id)=d.id` residual before the equality, `d.k=o.x` evaluated the
+residual 6 times and `ABS(d.k)=o.x` evaluated it 4,004 times. The count
+includes the engine's metadata probe. The source is materialized by
+`DISTINCT`, so a physical functional index on `inner_rows` cannot directly
+serve the exposed `d` rowset.
 
-A fix needs a safe statement-local functional key, with result-domain and NULL
-semantics retained for the residual predicate. This is a scale gap, not a
-result-membership discrepancy on the audited corpus.
+The current implementation inverts `ABS` over supported signed integer
+columns to one or two statement-local equality probes, retaining the original
+predicate as a residual check. Replaying the
+[profile](../scripts/correlated-materialized-functional-profile.fsx) on the
+preview.16 head produces the expected rows and **6 residual calls for both
+`d.k=o.x` and `ABS(d.k)=o.x`**. The executor regression also covers negative
+inner keys, NULL outer values, and OR branches. Other functional expressions
+without a safe inverse or statement-local functional key remain a scale gap.
