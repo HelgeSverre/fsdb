@@ -1620,8 +1620,10 @@ implementation effort:
    updatable view](torture/findings/2026-10-15-joined-view-mutation-source.md)
    now claims and rebases its physical row; [audited inner joined view
    sources](torture/findings/2026-10-15-nested-joined-view-mutation-source.md)
-   do likewise, including uniquely owned bare assignments. Broader write
-   shapes remain to audit.
+   do likewise, including uniquely owned bare assignments. Literal equality
+   on the writable physical target avoids waiting for an unrelated row, and
+   generic joined writes now lock their matched rows at storage publication.
+   Broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in
    the eight-writer keyless-insert path; that experiment was reverted.

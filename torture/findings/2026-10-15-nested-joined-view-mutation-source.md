@@ -26,9 +26,12 @@ rewrite rejected views containing their own joins. It now appends the view's
 join to the physical source, rewrites exposed columns in the external join,
 and claims the physical assignment target before execution. Tests cover both
 internal source orders, rebasing, the CHECK OPTION, and caller permission on
-the external read source. The scheduler conservatively claims all rows of the
-physical target for this shape; narrowing those claims without losing
-correctness remains a performance opportunity.
+the external read source. A literal equality on an exposed column mapped to
+the writable physical table narrows the pre-execution row claim; other shapes
+conservatively claim all its rows. The generic joined writer now passes its
+matched physical rows to storage, avoiding a later full-table lock. With an
+owner holding `t.id=2`, a joined view update restricted to `v.id=1` completes
+before the owner commits, matching the oracle's disjoint-row result.
 
 The implementation handles first-source view assignments, qualified or
 uniquely owned bare. More than one physical assignment target and broader

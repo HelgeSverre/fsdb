@@ -2373,6 +2373,65 @@ let tests =
               handle root "GRANT SELECT ON fsdb.tx_nested_secure_outer TO nested_writer" |> ignore
               Expect.equal (handle writer sql |> snd) (Affected 1UL) "granted lookup read permits the update"
 
+          testCase "disjoint joined view updates do not wait for another physical row"
+          <| fun _ ->
+              for fromClause in
+                  [ "tx_disjoint_target t JOIN tx_disjoint_inner l ON l.id=t.id"
+                    "tx_disjoint_inner l JOIN tx_disjoint_target t ON l.id=t.id" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_disjoint_target (id INT PRIMARY KEY, n INT)" |> ignore
+                  handle setup "CREATE TABLE tx_disjoint_inner (id INT PRIMARY KEY)" |> ignore
+                  handle setup "CREATE TABLE tx_disjoint_outer (id INT PRIMARY KEY)" |> ignore
+                  handle setup "INSERT INTO tx_disjoint_target VALUES (1,0),(2,0)" |> ignore
+                  handle setup "INSERT INTO tx_disjoint_inner VALUES (1),(2)" |> ignore
+                  handle setup "INSERT INTO tx_disjoint_outer VALUES (1),(2)" |> ignore
+                  handle setup ("CREATE VIEW tx_disjoint_view AS SELECT t.id,t.n FROM " + fromClause)
+                  |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, owned = handle owner "UPDATE tx_disjoint_target SET n=n+1 WHERE id=2"
+                  Expect.equal owned (Affected 1UL) "the owner holds row 2"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  let sql =
+                      "UPDATE tx_disjoint_view v JOIN tx_disjoint_outer x ON x.id=v.id "
+                      + "SET v.n=v.n+1 WHERE v.id=1"
+                  let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter sql)
+                  let completedBeforeOwnerCommit = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
+                  let ownerCommit = handle owner "COMMIT" |> snd
+                  Expect.equal ownerCommit (Affected 0UL) "the owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the view writer completes"
+                  Expect.isTrue completedBeforeOwnerCommit "row 1 does not wait for the owner of row 2"
+                  let waiter, result = waiting.GetAwaiter().GetResult()
+                  Expect.equal result (Affected 1UL) "the view writer changes row 1"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the view writer commits"
+                  match handle setup "SELECT id,n FROM tx_disjoint_target ORDER BY id" |> snd with
+                  | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ]) -> ()
+                  | result -> failtestf "expected both disjoint writes, got %A" result
+
+          testCase "disjoint physical joined updates lock only their matched row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_direct_disjoint (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_direct_lookup (id INT PRIMARY KEY)" |> ignore
+              handle setup "INSERT INTO tx_direct_disjoint VALUES (1,0),(2,0)" |> ignore
+              handle setup "INSERT INTO tx_direct_lookup VALUES (1),(2)" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, owned = handle owner "UPDATE tx_direct_disjoint SET n=n+1 WHERE id=2"
+              Expect.equal owned (Affected 1UL) "the owner holds row 2"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              let sql =
+                  "UPDATE tx_direct_disjoint t JOIN tx_direct_lookup l ON l.id=t.id "
+                  + "SET t.n=t.n+1 WHERE t.id=1"
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter sql)
+              let completedBeforeOwnerCommit = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the joined writer completes"
+              Expect.isTrue completedBeforeOwnerCommit "the joined writer does not wait on row 2"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 1UL) "the joined writer changes row 1"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the joined writer commits"
+
           testCase "updatable view delete waits and rechecks the physical row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

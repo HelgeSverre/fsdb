@@ -28845,6 +28845,16 @@ let rec executeAs
                                         let afterTriggers = triggersFor snapshot tdb tname "AFTER" "UPDATE"
                                         let changedRows = ResizeArray<Value[] option * Value[] option>()
                                         let predicate _ row = Ok(pending.[i].ContainsKey row)
+                                        let candidates =
+                                            tableSnapshot snapshot tdb tname
+                                            |> Result.toOption
+                                            |> Option.bind (fun table ->
+                                                let rows =
+                                                    table.RowsArray.Indexed
+                                                    |> Seq.filter (fun (_, row) -> pending.[i].ContainsKey row)
+                                                    |> Seq.toList
+
+                                                if rows.Length = pending.[i].Count then Some rows else None)
 
                                         let updater row =
                                             let updated =
@@ -28902,7 +28912,7 @@ let rec executeAs
                                                         changedRows.Add(Some(Array.copy row), Some candidate)
                                                         Ok candidate)
 
-                                        applyUpdateRows updateStmt snapshot tdb tname None predicate coercedAssignmentsByGroup.[i] updater changedRows beforeTriggers afterTriggers)
+                                        applyUpdateRows updateStmt snapshot tdb tname candidates predicate coercedAssignmentsByGroup.[i] updater changedRows beforeTriggers afterTriggers)
                                 |> Array.toList
                                 |> traverse id)
 
@@ -29546,15 +29556,34 @@ let transactionWriteTargets
                 |> Option.bind (function
                     | [] -> None
                     | first :: rest when rest |> List.forall (fun target -> viewTargetKey target = viewTargetKey first) ->
-                        // An outer join can select any row in the view's physical target.
-                        // Claim that table before taking the execution snapshot.
+                        let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
+                        let physicalEquality (qualifier: string) (name: string) (literal: Expr) =
+                            Map.tryFind (name.ToLowerInvariant()) view.Targets
+                            |> Option.filter (fun column ->
+                                equalsIgnoreCase qualifier viewQualifier
+                                && viewTargetKey column = viewTargetKey first)
+                            |> Option.map (fun column ->
+                                BinOp(Eq, QualifiedCol(first.Qualifier, column.Column), literal))
+
+                        let physicalPredicate =
+                            update.Where
+                            |> optionalConjuncts
+                            |> List.tryPick (function
+                                | BinOp(Eq, QualifiedCol(qualifier, name), (LiteralValue _ as literal)) ->
+                                    physicalEquality qualifier name literal
+                                | BinOp(Eq, (LiteralValue _ as literal), QualifiedCol(qualifier, name)) ->
+                                    physicalEquality qualifier name literal
+                                | _ -> None)
+
+                        // A matching physical equality narrows the row claim.
+                        // Without one, claim the table before taking the snapshot.
                         targets
                             { Database = Some first.Database
                               Table = first.Table
                               Alias = Some first.Qualifier
                               Partitions = []
                               IndexHints = [] }
-                            None
+                            physicalPredicate
                     | _ -> None))
 
         match viewTargets with

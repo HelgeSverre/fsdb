@@ -132,9 +132,43 @@ def main():
                     else:
                         raise AssertionError("shared bare n should be ambiguous")
 
+                with owner.cursor() as cursor:
+                    cursor.execute("INSERT INTO t VALUES(2,0)")
+                    cursor.execute("INSERT INTO l VALUES(2)")
+                    cursor.execute("INSERT INTO x(id) VALUES(2)")
+                    cursor.execute("BEGIN")
+                    cursor.execute("UPDATE t SET n=n+1 WHERE id=2")
+                disjoint_done = threading.Event()
+                disjoint_outcome = {}
+
+                def disjoint_update():
+                    try:
+                        with waiter.cursor() as cursor:
+                            cursor.execute("BEGIN")
+                            cursor.execute(
+                                "UPDATE v JOIN x ON x.id=v.id "
+                                "SET v.n=v.n+1 WHERE v.id=1"
+                            )
+                            disjoint_outcome["affected"] = cursor.rowcount
+                            cursor.execute("COMMIT")
+                    except Exception as error:
+                        disjoint_outcome["error"] = error
+                    finally:
+                        disjoint_done.set()
+
+                disjoint_thread = threading.Thread(target=disjoint_update, daemon=True)
+                disjoint_thread.start()
+                completed_before_owner_commit = disjoint_done.wait(0.2)
+                owner.commit()
+                assert disjoint_done.wait(5), "disjoint UPDATE did not complete"
+                disjoint_thread.join()
+                assert completed_before_owner_commit, disjoint_outcome
+                assert disjoint_outcome == {"affected": 1}, disjoint_outcome
+
                 print(
                     f"MySQL {version}: both join orders and bare target waited and rebased; "
-                    "nested CHECK OPTION returned 1369; shared bare n returned 1052"
+                    "nested CHECK OPTION returned 1369; shared bare n returned 1052; "
+                    "disjoint rows did not wait"
                 )
             finally:
                 for connection in connections:
