@@ -19,8 +19,11 @@ column names, metadata, UPDATE, CHECK OPTION, INSERT refusal, and final base
 rows. A follow-up expands `SELECT *` and qualified stars against the source's
 resolved columns before applying explicit CTE names. It covers physical,
 nested-derived, and ordinary joined read sources, including a star mixed with
-an expression. MySQL 8.4.11 marks all nine audited views updatable, and each
-UPDATE affects the physical target once. `USING` and `NATURAL` joins retain
-the conservative path because their merged-column ownership needs separate
-resolution; recursive or dependent CTEs and nested query expressions also
-remain outside this normalization.
+an expression. A second follow-up uses the shared logical join-column plan to
+expand `SELECT *` through `USING`, `NATURAL`, and right-side `USING` joins,
+retaining MySQL's merged key owner and output order. Qualified `s.*` still
+exposes the source's own columns. MySQL 8.4.11 marks all 13 audited views
+updatable, and each UPDATE affects the physical target once while CHECK OPTION
+and joined-view INSERT retain their expected errors. Grouped join operands,
+recursive or dependent CTEs, and nested query expressions remain outside this
+normalization.
