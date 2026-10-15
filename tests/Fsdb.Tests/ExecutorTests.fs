@@ -52,6 +52,25 @@ let tests =
                     let _, doCount = withExaminedRows (fun () -> runDefault store "DO 1")
                     Expect.equal doCount 1L "DO examines its scalar input"
 
+                testCase "signed literals probe BIGINT UNSIGNED indexes exactly"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE unsigned_keys (id BIGINT UNSIGNED PRIMARY KEY, owner_id BIGINT UNSIGNED, KEY (owner_id))" |> ignore
+                    let rows = [ 1 .. 300 ] |> List.map (fun id -> sprintf "(%d, %d)" id (id % 30)) |> String.concat ","
+                    runDefault store ("INSERT INTO unsigned_keys VALUES " + rows) |> ignore
+
+                    let byId, idExamined = withExaminedRows (fun () -> runDefault store "SELECT owner_id FROM unsigned_keys WHERE id = 5")
+                    Expect.equal byId (ResultSet([ "owner_id" ], [ [ Some "5" ] ])) "primary-key lookup"
+                    Expect.equal idExamined 1L "the primary key reads one row"
+
+                    let byOwner, ownerExamined = withExaminedRows (fun () -> runDefault store "SELECT COUNT(*) FROM unsigned_keys WHERE owner_id = 7")
+                    Expect.equal byOwner (ResultSet([ "COUNT(*)" ], [ [ Some "10" ] ])) "secondary-key lookup"
+                    Expect.equal ownerExamined 10L "the secondary key reads its ten candidates"
+
+                    match runDefault store "SELECT COUNT(*) FROM unsigned_keys WHERE id = -1 OR owner_id = -1" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "negative probes match no unsigned key, got %A" other
+
                 testCase "SELECT * expands every column"
                 <| fun _ ->
                     let store = newStore ()

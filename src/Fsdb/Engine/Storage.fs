@@ -5274,6 +5274,11 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
         | VUInt number -> integerColumn && number <= uint64 Int64.MaxValue
         | _ -> false
 
+    let exactNonNegativeSigned =
+        match value with
+        | VInt number -> integerColumn && number >= 0L
+        | _ -> false
+
     let coerced =
         match column.Type, value with
         // In-range signed integers already have the exact stored representation.
@@ -5298,6 +5303,10 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
     | Ok coerced when exactPositiveUnsigned ->
         match coerced, value with
         | VInt integer, VUInt bound when integer >= 0L && uint64 integer = bound -> Some coerced
+        | _ -> None
+    | Ok coerced when exactNonNegativeSigned ->
+        match coerced, value with
+        | VUInt integer, VInt bound when uint64 bound = integer -> Some coerced
         | _ -> None
     | _ -> None
 
