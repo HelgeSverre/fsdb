@@ -20741,6 +20741,53 @@ and private runFullTextSelect
                     |> Option.map (fun predicate -> qualifier, predicate))
                 |> Map.ofList
 
+            // A bound on the preserved side of one outer join can reach its
+            // nullable side through an exact ON equality. Reuse the ordinary
+            // join-bound inference, but feed it only preserved-side WHERE
+            // terms and retain only nullable-side results. This narrows score
+            // and input-row preparation, never the original join predicates.
+            let transitiveNullableBounds =
+                let outerJoins =
+                    select.Joins
+                    |> List.indexed
+                    |> List.filter (fun (_, join) ->
+                        match join.Kind with
+                        | LeftJoin | RightJoin -> true
+                        | _ -> false)
+
+                match outerJoins with
+                | [ index, outerJoin ] ->
+                    let preceding =
+                        (select.From |> Option.toList |> List.collect sourceQualifiers)
+                        @ (select.Joins |> List.take index |> List.collect (fun join -> sourceQualifiers join.Table))
+                    let joined = sourceQualifiers outerJoin.Table
+                    let preserved, nullable =
+                        match outerJoin.Kind with
+                        | LeftJoin -> preceding, joined
+                        | RightJoin -> joined, preceding
+                        | _ -> [], []
+
+                    let preservedWhere =
+                        select.Where
+                        |> optionalConjuncts
+                        |> List.filter (fun predicate ->
+                            preserved |> List.exists (fun qualifier -> canPushIntoSource qualifier predicate))
+                        |> combineConjuncts
+
+                    let inferred =
+                        { select with
+                            Joins =
+                                select.Joins
+                                |> List.mapi (fun position join ->
+                                    if position = index then { join with Kind = InnerJoin } else join)
+                            Where = preservedWhere }
+                        |> fullTextJoinBounds sources
+
+                    inferred
+                    |> Map.filter (fun qualifier _ ->
+                        nullable |> List.exists (fun name -> equalsIgnoreCase name qualifier))
+                | _ -> Map.empty
+
             let prepared =
                 sources
                 |> traverse (fun (source: FullTextPhysicalSource) ->
@@ -20762,6 +20809,7 @@ and private runFullTextSelect
                                     optionalConjuncts predicate
                                     @ optionalConjuncts (Map.tryFind (source.Qualifier.ToLowerInvariant()) inferredBounds)
                                     @ optionalConjuncts (Map.tryFind (source.Qualifier.ToLowerInvariant()) nullableOnPredicates)
+                                    @ optionalConjuncts (Map.tryFind (source.Qualifier.ToLowerInvariant()) transitiveNullableBounds)
                                     |> List.distinct
                                     |> combineConjuncts
 
@@ -20797,7 +20845,11 @@ and private runFullTextSelect
                                     rows :> (RowId * Value[]) seq
                                 | None ->
                                     match source.Item with
-                                    | FromTable tableRef when select.Joins.IsEmpty && select.Locking.IsEmpty ->
+                                    | FromTable tableRef
+                                        when select.Locking.IsEmpty
+                                             && (select.Joins.IsEmpty
+                                                 || Map.containsKey (source.Qualifier.ToLowerInvariant()) nullableOnPredicates
+                                                 || Map.containsKey (source.Qualifier.ToLowerInvariant()) transitiveNullableBounds) ->
                                         physicalCandidates
                                         |> Option.map (snd >> Seq.ofList)
                                         |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed)

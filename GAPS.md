@@ -915,8 +915,11 @@ also propagates equality, range, and `IN` owner bounds before full-text row
 preparation while preserving MySQL's complete-corpus relevance. An [audited
 ngram outer join](torture/findings/2026-10-15-ngram-outer-join-scoring.md)
 now applies local `ON` bounds from the nullable side of left and right joins
-before scoring and returns zero for a null-extended `MATCH` score. Other CJK
-join shapes and MeCab remain open.
+before scoring and returns zero for a null-extended `MATCH` score.
+[Preserved-side literal bounds across one outer-join equality](torture/findings/2026-10-15-ngram-outer-transitive-bound.md)
+also narrow nullable ngram scoring and row preparation for audited left and
+right joins, including `IN` bounds that retain unmatched owners. Broader outer
+join graphs and MeCab remain open.
 
 ## 12. Wire protocol and prepared statements
 
