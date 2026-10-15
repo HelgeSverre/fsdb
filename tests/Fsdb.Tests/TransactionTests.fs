@@ -2024,6 +2024,37 @@ let tests =
               | ResultSet(_, []) -> ()
               | result -> failtestf "the physical row should be absent, got %A" result
 
+          testCase "JSON_TABLE-first view updates wait on the physical target"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_json_view_target (id INT PRIMARY KEY, n INT)"
+              let setup, _ = handle setup "INSERT INTO tx_json_view_target VALUES (1, 0)"
+              let setup, _ =
+                  handle setup
+                      "CREATE VIEW tx_json_view AS SELECT t.id,t.n,j.x FROM JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j JOIN tx_json_view_target t ON t.id=j.x"
+              let first, _ = handle (create 2 store) "BEGIN"
+              let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+              let second, _ = handle second "BEGIN"
+              let sql = "UPDATE tx_json_view SET n=n+1 WHERE id=1"
+              let first, firstWrite = handle first sql
+              Expect.equal firstWrite (Affected 1UL) "the first view update succeeds"
+
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle second sql)
+              Expect.isFalse
+                  (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  "the second view update waits for the physical target"
+
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first view update commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the second view update resumes"
+              let second, secondWrite = waiting.GetAwaiter().GetResult()
+              Expect.equal secondWrite (Affected 1UL) "the rebased update sees the committed row"
+              Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the second view update commits"
+
+              match handle setup "SELECT n FROM tx_json_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "both view increments should be committed, got %A" result
+
           testCase "literal view inserts wait for the physical primary key"
           <| fun _ ->
               for definition in

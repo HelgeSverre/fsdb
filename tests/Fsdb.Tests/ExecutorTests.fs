@@ -12737,13 +12737,13 @@ let tests =
                     let registry =
                         builtins
                         |> registerScalar "TOUCH" (fun values ->
-                            if not (isMetadataProbe ()) then calls <- calls + 1
+                            calls <- calls + 1
                             List.exactlyOne values)
 
                     let store = newStore ()
                     runDefault store "CREATE TABLE like_patterns(id INT PRIMARY KEY,p VARCHAR(8) COLLATE utf8mb4_bin)" |> ignore
                     runDefault store "CREATE TABLE like_codes(id INT PRIMARY KEY,code VARCHAR(8) COLLATE utf8mb4_bin,KEY ix_code(code))" |> ignore
-                    runDefault store "INSERT INTO like_patterns VALUES(1,'a01%'),(2,'a99%')" |> ignore
+                    runDefault store "INSERT INTO like_patterns VALUES(1,'a01%'),(2,'a99%'),(3,NULL)" |> ignore
                     [ 0..999 ]
                     |> List.map (fun id -> sprintf "(%d,'a%03d')" id id)
                     |> String.concat ","
@@ -12754,10 +12754,22 @@ let tests =
                         ("SELECT p.id,(SELECT COUNT(*) FROM like_codes c "
                          + "WHERE c.code LIKE p.p AND TOUCH(c.id)=c.id) "
                          + "FROM like_patterns p ORDER BY p.id") with
-                    | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ] ]) -> ()
+                    | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected MySQL 8.4 correlated LIKE counts, got %A" other
 
                     Expect.isLessThan calls 60 "the indexed prefix restricts residual evaluation"
+
+                    match run store registry
+                        ("SELECT (SELECT COUNT(*) FROM like_codes c WHERE c.code LIKE p.p AND c.missing=1) "
+                         + "FROM like_patterns p WHERE p.id=3") with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "an invalid inner column must still be rejected, got %A" other
+
+                    match run store registry
+                        ("SELECT (SELECT COUNT(*) FROM like_codes c WHERE c.code LIKE p.p OR c.id=1) "
+                         + "FROM like_patterns p WHERE p.id=3") with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "an OR branch can match beside a NULL pattern, got %A" other
 
                 testCase "correlated text range OR probes bounded candidates"
                 <| fun _ ->

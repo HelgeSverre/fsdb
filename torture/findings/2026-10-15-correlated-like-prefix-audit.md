@@ -9,7 +9,11 @@ the same test with and without the new code, so it was removed.
 
 The initial measurement included metadata validation, which evaluates a
 subquery with a synthetic outer row before the actual correlated probes. That
-probe could not bind either prefix and accounted for roughly 1,000 additional
-calls to the test scalar. The regression counts only execution outside metadata
-validation to measure index candidate selection. Metadata-probe work is a
-separate setup cost and remains an area for planner work.
+probe could not bind either prefix and scanned roughly 1,000 rows. An actual
+outer row with a NULL pattern caused another 1,000-row scan. MySQL returns zero
+matches for the NULL pattern. FSDB now recognizes a top-level conjunct whose
+direct inner column is `LIKE` a stable NULL outer pattern and supplies an empty
+candidate set. The ordinary predicate validation still runs: an unknown inner
+column returns 1054, and a `LIKE` inside `OR` cannot suppress matches from its
+other branch. The regression now counts metadata and runtime calls together,
+and remains below 60 for three outer rows.

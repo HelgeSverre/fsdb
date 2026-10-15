@@ -15284,8 +15284,40 @@ and private tryCorrelatedSourceLookup
             |> fewestRows
         | _ -> selected
 
-    match source with
-    | FromTable table ->
+    let likeConjuncts =
+        whereExpr
+        |> optionalConjuncts
+        |> List.choose (function Like(indexed, pattern, _, _) -> Some(indexed, pattern) | _ -> None)
+
+    let nullLikeCandidates =
+        match source, outer with
+        | FromTable tableRef, Some context when not likeConjuncts.IsEmpty ->
+            // A direct-column LIKE with a stable NULL outer pattern rejects
+            // every row; the caller still validates the full predicate.
+            physicalFastPathTable store dbName tableRef
+            |> Option.filter (fun table -> storedRowsMatchReadRows store table.Columns)
+            |> Option.bind (fun table ->
+                let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+                let probeSource = correlatedProbeSource qualifier table.Columns
+                let nullPattern = function
+                    | LiteralValue VNull -> true
+                    | expression -> tryCorrelatedOuterValue probeSource context expression = Some VNull
+
+                let rejectsEveryRow =
+                    likeConjuncts
+                    |> List.exists (fun (indexed, pattern) ->
+                        if nullPattern pattern then
+                            rangeColumnNameFor BareOrQualifiedColumn tableRef indexed
+                            |> Option.exists (fun name ->
+                                table.Columns |> List.exists (fun column -> equalsIgnoreCase column.Name name))
+                        else false)
+
+                if rejectsEveryRow then Some(table.Columns, []) else None)
+        | _ -> None
+
+    match nullLikeCandidates, source with
+    | Some candidates, _ -> Some candidates
+    | None, FromTable table ->
         let equality =
             tryCorrelatedEqualityLookup store dbName table whereExpr outer
             |> Option.map (fun (columns, rows) -> columns, rows |> List.map snd)
@@ -15327,7 +15359,7 @@ and private tryCorrelatedSourceLookup
                  |> chooseWithRanges false))
         |> Option.orElseWith materializedLookup
         |> chooseWithMembership
-    | FromSubquery _ ->
+    | None, FromSubquery _ ->
         physicalIntersection ()
         |> Option.orElseWith (fun () ->
             [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
@@ -15337,7 +15369,7 @@ and private tryCorrelatedSourceLookup
             |> chooseWithRanges false)
         |> Option.orElseWith materializedLookup
         |> chooseWithMembership
-    | _ -> materializedLookup () |> chooseWithMembership
+    | None, _ -> materializedLookup () |> chooseWithMembership
 
 and private tryCorrelatedCountEqualityPredicate source context =
     let boundValue expression =

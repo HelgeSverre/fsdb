@@ -25,3 +25,9 @@ these two forms because physical insert execution claims the key, so they now
 have a regression without an engine change. This does not establish scheduling
 parity for every view: writes through derived or dependent sources and
 view-addressed INSERT SELECT remain separate cases to audit.
+
+MySQL 8.4.11 also waits and rebases when the target follows a read-only
+`JSON_TABLE` source in the view definition. The second `UPDATE v SET n=n+1`
+affects one row after the first commits, leaving the physical value at 2.
+`TransactionTests` confirms the same wait, acknowledgement, and final value in
+FSDB; this shape was already covered by the physical-target resolution above.
