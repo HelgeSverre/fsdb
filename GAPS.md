@@ -249,6 +249,9 @@ groups](torture/findings/2026-10-15-correlated-materialized-in-intersection.md).
 Stable arithmetic expressions over outer columns can also bind materialized
 `IN` probes for derived tables and CTEs
 ([oracle and residual probe](torture/findings/2026-10-15-correlated-materialized-expression-in.md)).
+Indexed physical tables and pass-through sources also use compatible
+outer-bound `IN` probes, intersecting multiple groups by stored row identity
+before projection ([oracle and residual probe](torture/findings/2026-10-15-correlated-physical-in.md)).
 More complex correlated expressions without a
 compatible statement-local lookup still re-execute or scan.
 

@@ -13614,7 +13614,7 @@ and private storedFunctionalColumnFor registry tref expression =
     |> Option.bind (fun (column, transform) ->
         transform |> Option.map (fun transform -> column.ToLowerInvariant(), transform))
 
-and private inProbesWith indexedColumn valueFor (whereExpr: Expr option) : IndexInProbe list =
+and private inProbesWithEligible indexedColumn eligible valueFor (whereExpr: Expr option) : IndexInProbe list =
     let candidateTuple indexedExpressions candidate =
         match indexedExpressions, candidate with
         | [ _ ], expression -> Some [ expression ]
@@ -13633,12 +13633,16 @@ and private inProbesWith indexedColumn valueFor (whereExpr: Expr option) : Index
             indexedExpressions
             |> List.map indexedColumn
             |> tryAllSome
+            |> Option.filter eligible
             |> Option.bind (fun columns ->
                 candidates
                 |> List.map (candidateTuple indexedExpressions >> Option.bind (List.map2 valueFor columns >> tryAllSome))
                 |> tryAllSome
                 |> Option.map (fun values -> { Columns = columns; Values = values }))
         | _ -> None)
+
+and private inProbesWith indexedColumn valueFor whereExpr =
+    inProbesWithEligible indexedColumn (fun _ -> true) valueFor whereExpr
 
 and private literalInProbesWith indexedColumn =
     let literalValue _ = function
@@ -14696,6 +14700,89 @@ and private tryProjectedPhysicalLiteralInRows store registry dbName (projection:
                 else
                     None)))
 
+and private compatibleCorrelatedMembershipBound context (column: ColumnDef) domain expression value =
+    match value, domain with
+    | VNull, _ -> true
+    | VString _, TextMembership stored ->
+        comparisonCollation
+            context
+            "="
+            (Col column.Name)
+            (Some column)
+            expression
+            (tryColumnDefForExpr context expression)
+        |> Result.toOption
+        |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)
+    | _, TextMembership _ -> false
+    | _ -> equalityMembershipKey domain value |> Option.isSome
+
+and private tryProjectedPhysicalCorrelatedInLookup store registry dbName source whereExpr outer =
+    match FromItem.tryQualifier source, outer with
+    | Some qualifier, Some context ->
+        tryPhysicalProjection store registry dbName source
+        |> Option.filter (fun projection -> storedRowsMatchReadRows store projection.PhysicalTable.Columns)
+        |> Option.bind (fun projection ->
+            let probeSource = correlatedProbeSource qualifier projection.OutputColumns
+            let table = projection.PhysicalTable
+            let joinHints = indexHintsFor IndexJoin projection.PhysicalTableRef
+            let allowed = indexAllowedBy joinHints
+            let forced = joinHints |> List.exists (fun hint -> hint.Kind = ForceIndex)
+            let tryIndex names =
+                names
+                |> List.map (tryPhysicalProjectionColumn projection)
+                |> tryAllSome
+                |> Option.bind (fun physicalColumns ->
+                    let sourceNames = physicalColumns |> List.map _.Name
+                    Storage.equalityIndexesForColumns table sourceNames
+                    |> List.tryFind (fun index -> allowed index.Name)
+                    |> Option.map (fun index -> sourceNames, index))
+            let indexedColumn expression =
+                tryCorrelatedInnerColumn probeSource expression
+                |> Option.map (fun name -> name, None)
+            let boundValue (name, _) expression =
+                let value =
+                    match expression with
+                    | LiteralValue value -> Some value
+                    | _ -> tryCorrelatedOuterValue probeSource context expression
+
+                value
+                |> Option.bind (fun value ->
+                    resolveColumn projection.OutputColumns name
+                    |> Result.toOption
+                    |> Option.bind (fun index ->
+                        let outputColumn = projection.OutputColumns.[index]
+                        tryPhysicalProjectionColumn projection name
+                        |> Option.bind (equalityMembershipDomain store)
+                        |> Option.filter (fun domain ->
+                            compatibleCorrelatedMembershipBound context outputColumn domain expression value)
+                        |> Option.map (fun _ -> value)))
+
+            let candidateIds (probe: IndexInProbe) =
+                let names = probe.Columns |> List.map fst
+                tryIndex names
+                |> Option.bind (fun (sourceNames, index) ->
+                    probe.Values
+                    |> List.filter (List.contains VNull >> not)
+                    |> List.distinct
+                    |> List.map (fun tuple ->
+                        orderedEqualityValues table index sourceNames tuple
+                        |> Option.bind (Storage.tryEqualityRowIdsForIndex store table index))
+                    |> tryAllSome
+                    |> Option.map Set.unionMany)
+
+            inProbesWithEligible indexedColumn (List.map fst >> tryIndex >> Option.isSome) boundValue whereExpr
+            |> List.choose candidateIds
+            |> function
+                | [] -> None
+                | first :: rest ->
+                    let rowIds = rest |> List.fold Set.intersect first
+                    if forced || isUsefulEqualityCardinality table.RowsArray.Count rowIds.Count then
+                        Storage.rowsForRowIds table rowIds
+                        |> projectPhysicalLookupRows store registry dbName projection
+                    else
+                        None)
+    | _ -> None
+
 and private tryProjectedPhysicalRangeCandidates
     store
     (projection: PhysicalProjection)
@@ -14938,22 +15025,6 @@ and private tryMaterializedCorrelatedLookup
                     | Lit value -> Some value
                     | expression -> tryCorrelatedOuterValue probeSource context expression
 
-                let compatibleBound (column: ColumnDef) domain expression value =
-                    match value, domain with
-                    | VNull, _ -> true
-                    | VString _, TextMembership stored ->
-                        comparisonCollation
-                            context
-                            "="
-                            (Col column.Name)
-                            (Some column)
-                            expression
-                            (tryColumnDefForExpr context expression)
-                        |> Result.toOption
-                        |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)
-                    | _, TextMembership _ -> false
-                    | _ -> equalityMembershipKey domain value |> Option.isSome
-
                 predicate
                 |> optionalConjuncts
                 |> List.choose (function
@@ -14972,7 +15043,7 @@ and private tryMaterializedCorrelatedLookup
                                     |> Option.filter (fun values ->
                                         List.zip bounds values
                                         |> List.forall (fun (expression, value) ->
-                                            compatibleBound column domain expression value))
+                                            compatibleCorrelatedMembershipBound context column domain expression value))
                                     |> Option.bind (fun values ->
                                         equalityLookup [ name.ToLowerInvariant() ]
                                         |> Option.bind (fun lookup ->
@@ -15129,6 +15200,15 @@ and private tryCorrelatedSourceLookup
                 |> Option.map (fun rows -> fst shortest, rows)
             | shortest :: _ -> Some shortest
 
+    let chooseWithMembership (selected: (ColumnDef list * Value[] list) option) =
+        match selected with
+        | Some(_, rows) when rows.Length <= 1 -> selected
+        | _ when whereExpr |> optionalConjuncts |> List.exists (function In _ -> true | _ -> false) ->
+            [ selected
+              tryProjectedPhysicalCorrelatedInLookup store registry dbName source whereExpr outer ]
+            |> fewestRows
+        | _ -> selected
+
     match source with
     | FromTable table ->
         let equality =
@@ -15171,6 +15251,7 @@ and private tryCorrelatedSourceLookup
                  |> fewestRows
                  |> chooseWithRanges false))
         |> Option.orElseWith materializedLookup
+        |> chooseWithMembership
     | FromSubquery _ ->
         physicalIntersection ()
         |> Option.orElseWith (fun () ->
@@ -15180,7 +15261,8 @@ and private tryCorrelatedSourceLookup
             |> fewestRows
             |> chooseWithRanges false)
         |> Option.orElseWith materializedLookup
-    | _ -> materializedLookup ()
+        |> chooseWithMembership
+    | _ -> materializedLookup () |> chooseWithMembership
 
 and private tryCorrelatedCountEqualityPredicate source context =
     let boundValue expression =

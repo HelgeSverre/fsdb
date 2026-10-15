@@ -810,6 +810,118 @@ let tests =
                   | other -> failtestf "expected correlated counts, got %A" other
                   Expect.isLessThan touches 20 "the materialized lookup narrows before residual evaluation"
 
+          testCase "physical correlated IN probes use a maintained key through pass-through sources"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE indexed_outer(id INT PRIMARY KEY,a INT,b INT)" |> ignore
+              runDefault store "CREATE TABLE indexed_inner(id INT PRIMARY KEY,k INT,KEY ix_k(k))" |> ignore
+              runDefault store "INSERT INTO indexed_outer VALUES(1,1,3),(2,2,NULL),(3,NULL,1)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,%d)" id id)
+              |> String.concat ","
+              |> sprintf "INSERT INTO indexed_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for prefix, source in
+                  [ "", "indexed_inner d"
+                    "", "(SELECT id,k FROM indexed_inner) d"
+                    "WITH passed AS (SELECT id,k FROM indexed_inner) ", "passed d" ] do
+                  touches <- 0
+                  let sql =
+                      prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.k IN(o.a+0,o.b+0))"
+                      + " FROM indexed_outer o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows
+                          [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ] ]
+                          "MySQL 8.4 correlated membership"
+                  | other -> failtestf "expected indexed correlated counts, got %A" other
+                  Expect.isLessThan touches 20 "indexed membership narrows before residual evaluation"
+
+              touches <- 0
+              let ignored =
+                  "SELECT o.id,(SELECT COUNT(*) FROM indexed_inner d IGNORE INDEX (ix_k) "
+                  + "WHERE TOUCH(d.id)=d.id AND d.k IN(o.a+0,o.b+0))"
+                  + " FROM indexed_outer o ORDER BY o.id"
+              match run store registry ignored with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows
+                      [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ] ]
+                      "ignoring the key preserves membership results"
+              | other -> failtestf "expected ignored-index correlated counts, got %A" other
+              Expect.isGreaterThan touches 1000 "IGNORE INDEX prevents the correlated key lookup"
+
+          testCase "physical correlated IN groups intersect indexed row identities"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE indexed_bounds(a1 INT,a2 INT,b1 INT,b2 INT)" |> ignore
+              runDefault store "CREATE TABLE indexed_pairs(id INT PRIMARY KEY,a INT,b INT,KEY ix_a(a),KEY ix_b(b))" |> ignore
+              runDefault store "INSERT INTO indexed_bounds VALUES(1,999,1,999)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id ->
+                  let a = if id <= 500 then 1 else 1000 + id
+                  let b = if id >= 499 && id <= 898 then 1 else 2000 + id
+                  sprintf "(%d,%d,%d)" id a b)
+              |> String.concat ","
+              |> sprintf "INSERT INTO indexed_pairs VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              let sql =
+                  "SELECT (SELECT COUNT(*) FROM indexed_pairs d "
+                  + "WHERE TOUCH(d.id)=d.id AND d.a IN(o.a1,o.a2) AND d.b IN(o.b1,o.b2)) "
+                  + "FROM indexed_bounds o"
+              match run store registry sql with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected MySQL's two indexed matches, got %A" other
+              Expect.isLessThan touches 20 "both maintained keys narrow before residual evaluation"
+
+          testCase "physical correlated text IN respects effective comparison collation"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE indexed_ci_inner(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci,KEY ix_k(k))" |> ignore
+              runDefault store "CREATE TABLE indexed_ci_outer(k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci)" |> ignore
+              runDefault store "CREATE TABLE indexed_bin_outer(k VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+              runDefault store "INSERT INTO indexed_ci_outer VALUES('ALPHA')" |> ignore
+              runDefault store "INSERT INTO indexed_bin_outer VALUES('ALPHA')" |> ignore
+              runDefault store "INSERT INTO indexed_ci_inner VALUES(1,'alpha'),(2,'ALPHA'),(3,'beta')" |> ignore
+              [ 4..103 ]
+              |> List.map (fun id -> sprintf "(%d,'filler%03d')" id id)
+              |> String.concat ","
+              |> sprintf "INSERT INTO indexed_ci_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              let countFrom outerTable =
+                  sprintf
+                      "SELECT (SELECT COUNT(*) FROM indexed_ci_inner d WHERE TOUCH(d.id)=d.id AND d.k IN(o.k)) FROM %s o"
+                      outerTable
+                  |> run store registry
+              match countFrom "indexed_ci_outer" with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected two case-insensitive matches, got %A" other
+              Expect.isLessThan touches 20 "matching collation uses the maintained text key"
+              match countFrom "indexed_bin_outer" with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected one binary comparison match, got %A" other
+
           testCase "materialized correlated decimal IN probes preserve exact keys"
           <| fun _ ->
               let mutable touches = 0
