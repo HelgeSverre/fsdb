@@ -76,7 +76,19 @@ def main():
                         " WHERE d.k IS NULL AND d.a=o.a) FROM outer_rows o ORDER BY o.id"
                     )
                     assert cursor.fetchall() == ((1, 5), (2, 5), (3, 0))
-                print(f"MySQL {version}: physical and materialized NULL counts (5, 5, 0); OR counts (11, 11, 11)")
+                    cursor.execute(
+                        "CREATE TABLE leading_null_inner(id INT PRIMARY KEY,a INT,k INT,"
+                        "UNIQUE KEY uq_k(k),KEY ix_ka(k,a))"
+                    )
+                    cursor.execute("INSERT INTO leading_null_inner VALUES " + values)
+                    for hint in ["IGNORE INDEX (ix_ka)", "IGNORE INDEX (uq_k)",
+                                 "IGNORE INDEX (uq_k,ix_ka)"]:
+                        cursor.execute(
+                            "SELECT o.id,(SELECT COUNT(*) FROM leading_null_inner d " + hint
+                            + " WHERE d.k IS NULL AND d.a=o.a) FROM outer_rows o ORDER BY o.id"
+                        )
+                        assert cursor.fetchall() == ((1, 5), (2, 5), (3, 0))
+                print(f"MySQL {version}: physical, materialized, unique, and composite NULL counts (5, 5, 0); OR counts (11, 11, 11)")
             finally:
                 if connection:
                     connection.close()

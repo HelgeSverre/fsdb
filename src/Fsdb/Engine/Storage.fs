@@ -5580,20 +5580,6 @@ let internal tryEqualityRowIdsForIndex
     : Set<RowId> option =
     equalityLookupRowIds store table index StoredValues values
 
-/// Equality probes use SQL's `NULL <> NULL` rule. `IS NULL` instead reads the
-/// NULL bucket of a visible, non-unique single-column secondary key.
-let internal tryNullRowIdsForColumn (table: Table) (columnName: string) allowed : Set<RowId> option =
-    equalityIndexesForColumns table [ columnName ]
-    |> List.tryFind (fun index -> not index.Unique && allowed index.Name)
-    |> Option.bind (fun index ->
-        let key =
-            makeProbeRow table [ index.ColumnIndices.Head, VNull ]
-            |> encodeIndexKey table.Columns (equalityKeyGroup index)
-
-        table.SecondaryIndex
-        |> Map.tryFind index.Name
-        |> Option.map (Map.tryFind key >> Option.defaultValue Set.empty))
-
 let tryProjectedEqualityLookupForIndex
     (store: Store)
     (table: Table)
@@ -5660,6 +5646,40 @@ let private orderedPrefixBounds (entries: ImmutableSortedSet<SecondaryOrderEntry
             sortedInsertionPoint boundary entries.Count (fun current -> comparePrefix entries.[current])
 
         insertionIndex FirstEqual, insertionIndex AfterEqual
+
+/// Equality probes use SQL's `NULL <> NULL` rule. `IS NULL` instead reads a
+/// visible key's NULL bucket, including the leading slice of an ordered key.
+let internal tryNullRowIdsForColumn (table: Table) (columnName: string) allowed : Set<RowId> option =
+    let singleColumnBucket =
+        equalityIndexesForColumns table [ columnName ]
+        |> List.tryFind (fun index -> not index.Unique && allowed index.Name)
+        |> Option.bind (fun index ->
+            let key =
+                makeProbeRow table [ index.ColumnIndices.Head, VNull ]
+                |> encodeIndexKey table.Columns (equalityKeyGroup index)
+
+            table.SecondaryIndex
+            |> Map.tryFind index.Name
+            |> Option.map (Map.tryFind key >> Option.defaultValue Set.empty))
+
+    singleColumnBucket
+    |> Option.orElseWith (fun () ->
+        resolveColumn table.Columns columnName
+        |> Result.toOption
+        |> Option.bind (fun columnIndex ->
+            rangeKeyGroups table
+            |> visibleGroups
+            |> List.tryFind (fun group ->
+                List.tryHead group.Indices = Some columnIndex
+                && allowed group.Name
+                && Map.containsKey group.Name table.SecondaryOrder)
+            |> Option.bind (fun group ->
+                table.SecondaryOrder
+                |> Map.tryFind group.Name
+                |> Option.map (fun entries ->
+                    let first, afterLast = orderedPrefixBounds entries [ VNull ]
+                    Seq.init (afterLast - first) (fun offset -> entries.[first + offset].RowId)
+                    |> Set.ofSeq))))
 
 type EqualityIndexMatchLookup =
     { CandidateCount: int

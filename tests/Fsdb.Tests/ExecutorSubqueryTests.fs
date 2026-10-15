@@ -787,6 +787,36 @@ let tests =
               | other -> failtestf "expected ignored-index NULL counts, got %A" other
               Expect.isGreaterThan touches 1000 "IGNORE INDEX excludes the NULL bucket"
 
+              runDefault store "CREATE TABLE leading_null_inner(id INT PRIMARY KEY,a INT,k INT,UNIQUE KEY uq_k(k),KEY ix_ka(k,a))" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id ->
+                  sprintf "(%d,%d,%s)" id (if id <= 500 then 1 else 2) (if id % 100 = 0 then "NULL" else string id))
+              |> String.concat ","
+              |> sprintf "INSERT INTO leading_null_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for hint in [ "IGNORE INDEX (ix_ka)"; "IGNORE INDEX (uq_k)" ] do
+                  touches <- 0
+                  let sql =
+                      "SELECT o.id,(SELECT COUNT(*) FROM leading_null_inner d " + hint
+                      + " WHERE TOUCH(d.id)=d.id AND d.k IS NULL AND d.a=o.a)"
+                      + " FROM physical_null_outer o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "1"; Some "5" ]; [ Some "2"; Some "5" ]; [ Some "3"; Some "0" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's nullable unique/composite counts, got %A" other
+                  Expect.isLessThan touches 30 (sprintf "%s leaves one usable NULL prefix" hint)
+
+              touches <- 0
+              let ignoredLeading =
+                  "SELECT o.id,(SELECT COUNT(*) FROM leading_null_inner d IGNORE INDEX (uq_k,ix_ka)"
+                  + " WHERE TOUCH(d.id)=d.id AND d.k IS NULL AND d.a=o.a)"
+                  + " FROM physical_null_outer o ORDER BY o.id"
+              match run store registry ignoredLeading with
+              | ResultSet(_, [ [ Some "1"; Some "5" ]; [ Some "2"; Some "5" ]; [ Some "3"; Some "0" ] ]) -> ()
+              | other -> failtestf "expected the fully ignored NULL counts, got %A" other
+              Expect.isGreaterThan touches 1000 "ignoring both NULL-capable keys restores the scan"
+
           testCase "materialized correlated IN probes avoid unrelated rows"
           <| fun _ ->
               let mutable touches = 0
