@@ -49,9 +49,9 @@ a disposable database, default token size 2, and enabled default stopwords.
 It asserts ordered results, parser DDL errors, variable scope and labels,
 mutation behavior, and field boundaries for both parsers.
 
-The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 279
+The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 309
 natural-language, boolean, and query-expansion searches at each startup size
-from 1 through 10. All 2,790 query results agree with native MySQL 8.4.11
+from 1 through 10. All 3,090 query results agree with native MySQL 8.4.11
 on the audited mixed Chinese, Japanese, Korean, ASCII, punctuation, emoji,
 supplementary-character, combining-mark, zero-width-joiner, variation-selector,
 nonbreaking-space, newline, Hangul-jamo, and NULL corpus. It checks matching row IDs, query
@@ -98,6 +98,14 @@ Boolean ngram phrases too. Native MySQL also indexes three-character ordinary
 word tokens made from these numerals and ignores a one-character word below
 the default minimum. Focused regressions cover both tokenizers. The expanded
 oracle agrees on row membership and relevance across all ten ngram sizes.
+
+A further October 15 extension adds zero-width non-joiner, word joiner,
+combining grapheme joiner, Mongolian vowel separator, zero-width space,
+decomposed kana dakuten/handakuten, and a circled-number sequence to the
+multi-column corpus. The maintained oracle agrees on row membership, errors,
+and relevance for all 309 searches at each startup size from 1 through 10.
+This strengthens the tested Unicode boundary without implying arbitrary
+Unicode parity or MeCab support.
 
 The `ngram-fulltext` differential contract covers natural, boolean, and
 query-expansion searches through text and prepared protocols, Unicode and
