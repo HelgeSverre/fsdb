@@ -199,6 +199,13 @@ matching-collation text `IN` lists bound to direct outer columns or literals
 reuse statement-local equality keys. [Multiple compatible materialized `IN`
 predicates](torture/findings/2026-10-15-correlated-materialized-in-intersection.md)
 intersect their candidate rows before residual evaluation.
+Binary-collated correlated `LIKE` prefixes over stable materialized derived
+sources still scan those rows. A 1,000-row derived-source probe with two
+outer prefixes returned the expected ten matches per prefix but evaluated its
+residual 2,024 times; the equivalent physical-table path bounds candidates.
+The materialized lookup hook currently sees a NULL outer pattern during its
+probe, so adding prefix bounds there alone does not reduce the scan. Trace the
+outer binding and lookup selection before adding another range shortcut.
 [Direct materialized `IS NULL` and `IS NOT NULL` predicates](torture/findings/2026-10-15-correlated-materialized-null.md)
 reuse statement-local NULL or non-NULL buckets, including complete OR unions.
 [Physical and pass-through correlated `IS NULL` and `IS NOT NULL` predicates](torture/findings/2026-10-15-correlated-physical-null.md)
