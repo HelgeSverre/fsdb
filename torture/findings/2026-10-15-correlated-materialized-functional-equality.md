@@ -31,3 +31,21 @@ For example, `ABS(d.k)+0=o.x` returns the same audited rows but evaluates the
 residual **4,004 times** on the same profile. The next lookup design must key
 the evaluated expression with its comparison domain, exclude volatile or
 outer-dependent expressions, and retain the predicate as a residual check.
+
+## Statement-local integer expression lookup
+
+FSDB now builds a statement-local key for exact integer-valued row-local
+arithmetic (`+`, `-`, `*`, unary negation, and `ABS`) over exposed integer
+columns and integer constants. It evaluates each expression once per
+materialized row, keys signed and compatible unsigned integers together, and
+keeps the full SQL predicate as the residual check. NULL rows contribute no
+equality key. An evaluation error, a noninteger result, or a noninteger outer
+bound falls back to the normal scan so numeric coercion cannot cause a false
+negative. The lookup also participates in complete OR-branch unions.
+
+The same [profile](../scripts/correlated-materialized-functional-profile.fsx)
+now reports **6 residual calls** for `ABS(d.k)+0=o.x`, down from 4,004.
+MySQL 8.4.11 agrees with the focused signed, NULL, reversed-equality,
+arithmetic, OR, and DECIMAL-bound result corpus. This does not claim a general
+functional key for text, decimal, floating, volatile, or outer-dependent
+expressions.

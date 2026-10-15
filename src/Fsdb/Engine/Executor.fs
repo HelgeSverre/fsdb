@@ -728,6 +728,7 @@ type private StatementMemo =
       Regexes: Dictionary<Expr, MemoizedRegex>
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
       MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>
+      MaterializedCorrelatedIntegerExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
@@ -751,6 +752,8 @@ let private freshStatementMemo () =
       CorrelatedEqualities = Dictionary<string * string * string, Storage.TransientEqualityLookup option>()
       MaterializedCorrelatedEqualities =
         Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+      MaterializedCorrelatedIntegerExpressions =
+        Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedRanges =
         Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedNullBuckets =
@@ -15715,6 +15718,91 @@ and private tryMaterializedCorrelatedLookup
 
                 getMemoized lookups names (fun () -> materializedEqualityLookup store columns rows names)
 
+            // Only exact integer-valued, row-local arithmetic is keyed here.
+            // Other result domains can compare equal after SQL coercion even
+            // when their Value keys differ, so they retain the scan path.
+            let rec integerKeyExpression = function
+                | LiteralValue(VInt _ | VUInt _) -> true
+                | (Col _ | QualifiedCol _) as expression ->
+                    (tryCorrelatedInnerColumn probeSource expression
+                     |> Option.bind (resolveColumn columns >> Result.toOption)
+                     |> Option.bind (fun index -> equalityMembershipDomain store columns.[index]))
+                    |> Option.exists (function IntegerMembership -> true | _ -> false)
+                | Neg expression -> integerKeyExpression expression
+                | FuncCall(name, [ expression ]) when equalsIgnoreCase name "ABS" ->
+                    integerKeyExpression expression
+                | BinOp((Add | Sub | Mul), left, right) ->
+                    integerKeyExpression left && integerKeyExpression right
+                | _ -> false
+
+            let integerExpressionLookup expression =
+                let lookups =
+                    getMemoized memo.MaterializedCorrelatedIntegerExpressions source (fun () ->
+                        Dictionary<Expr, MaterializedEqualityLookup option>(HashIdentity.Reference))
+
+                getMemoized lookups expression (fun () ->
+                    if not (integerKeyExpression expression) then
+                        None
+                    else
+                        let rowContext =
+                            contextFactory store registry dbName
+                                (columnIndexOf columns) (singleQualifier qualifier columns) None
+                        let rowsByKey = Dictionary<Value, ResizeArray<Value[]>>()
+                        let mutable compatible = true
+
+                        for row in rows do
+                            if compatible then
+                                match evalExpr (rowContext row) expression with
+                                | Ok VNull -> ()
+                                | Ok(VInt _ | VUInt _ as value) ->
+                                    let key = canonicalIntegerKey value
+                                    match rowsByKey.TryGetValue key with
+                                    | true, matches -> matches.Add row
+                                    | _ -> rowsByKey.[key] <- ResizeArray [ row ]
+                                | _ -> compatible <- false
+
+                        if not compatible then
+                            None
+                        else
+                            Some(fun values ->
+                                match values with
+                                | [ VNull ] -> Some []
+                                | [ VInt _ | VUInt _ as value ] ->
+                                    match rowsByKey.TryGetValue(canonicalIntegerKey value) with
+                                    | true, matches -> Some(List.ofSeq matches)
+                                    | _ -> Some []
+                                | _ -> None))
+
+            let integerExpressionCandidates predicate =
+                let candidate indexed bound =
+                    let hasInnerColumn =
+                        indexed
+                        |> Expression.exists (function
+                            | Col _ | QualifiedCol _ -> true
+                            | _ -> false)
+                    let alreadyIndexed =
+                        tryCorrelatedInnerColumn probeSource indexed |> Option.isSome
+                        || (match indexed with
+                            | FuncCall(name, [ column ]) when equalsIgnoreCase name "ABS" ->
+                                tryCorrelatedSignedIntegerColumn probeSource columns column |> Option.isSome
+                            | _ -> false)
+
+                    if hasInnerColumn && not alreadyIndexed && integerKeyExpression indexed then
+                        tryCorrelatedProbeValue probeSource context bound
+                        |> Option.bind (fun value ->
+                            integerExpressionLookup indexed
+                            |> Option.bind (fun lookup -> lookup [ value ]))
+                    else
+                        None
+
+                predicate
+                |> optionalConjuncts
+                |> List.choose (function
+                    | BinOp(Eq, left, right) ->
+                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | _ -> None)
+                |> intersectSharedRows
+
             let equalityCandidates predicate =
                 let equalities = correlatedProbeEqualities probeSource predicate (Some context) |> Option.defaultValue []
 
@@ -15900,6 +15988,7 @@ and private tryMaterializedCorrelatedLookup
             let unionCandidates () =
                 let branchCandidates branch =
                     [ equalityCandidates (Some branch)
+                      integerExpressionCandidates (Some branch)
                       absoluteCandidates (Some branch)
                       affineCandidates (Some branch)
                       nullCandidates (Some branch)
@@ -15920,6 +16009,7 @@ and private tryMaterializedCorrelatedLookup
                     List.length
 
             [ equalityCandidates whereExpr
+              integerExpressionCandidates whereExpr
               absoluteCandidates whereExpr
               affineCandidates whereExpr
               nullCandidates whereExpr
