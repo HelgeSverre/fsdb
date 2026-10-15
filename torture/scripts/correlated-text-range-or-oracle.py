@@ -17,6 +17,9 @@ def verify(client, _writer):
         "KEY ix_code(code),KEY ix_lower ((LOWER(code))));"
         "INSERT INTO text_or_bounds VALUES(1,'a010','a012','a011','a013','a015'),"
         "(2,'a020','a022','a021','a023','a025');"
+        "CREATE TABLE text_not_bounds(id INT PRIMARY KEY,lo VARCHAR(8) COLLATE utf8mb4_bin,"
+        "hi VARCHAR(8) COLLATE utf8mb4_bin);"
+        "INSERT INTO text_not_bounds VALUES(3,NULL,'a990'),(4,'a010',NULL);"
         f"INSERT INTO text_or_rows VALUES{values}"
     )
 
@@ -34,6 +37,15 @@ def verify(client, _writer):
             query = (prefix + " SELECT u.id,(SELECT COUNT(*) FROM " + source + " WHERE " + predicate + ") "
                      "FROM text_or_bounds u ORDER BY u.id")
             oracle["expect"](source_name + " " + predicate_name, client.query(query), "1\t4\n2\t4")
+
+        query = ("SELECT u.id,(SELECT COUNT(*) FROM " + source
+                 + " WHERE o.code NOT BETWEEN u.lo AND 'a990') "
+                 "FROM text_or_bounds u ORDER BY u.id")
+        oracle["expect"](source_name + " text NOT BETWEEN", client.query(query), "1\t19\n2\t29")
+        null_query = ("SELECT u.id,(SELECT COUNT(*) FROM " + source
+                      + " WHERE o.code NOT BETWEEN u.lo AND u.hi) "
+                      "FROM text_not_bounds u ORDER BY u.id")
+        oracle["expect"](source_name + " text NOT BETWEEN nullable", client.query(null_query), "3\t9\n4\t10")
 
     for source_name, _, source in sources[:2]:
         for predicate_name, predicate in [

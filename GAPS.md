@@ -227,6 +227,10 @@ Correlated [numeric `NOT BETWEEN` predicates](torture/findings/2026-10-15-correl
 also union the two strict indexed ranges on physical, pass-through, and stable
 materialized sources while retaining the original row filter and MySQL's
 NULL-bound results.
+[Matching-collation text `NOT BETWEEN` predicates](torture/findings/2026-10-15-correlated-text-not-between.md)
+now use the same candidate union when one bound is a stable outer value and
+the other is a literal, including NULL-bound cases and statement-local
+materialized lookups.
 [Correlated integer inequality predicates](torture/findings/2026-10-15-correlated-integer-inequality.md)
 likewise union strict ranges for a stable integer bound, including complete OR
 branches. [Exact DECIMAL inequalities](torture/findings/2026-10-15-correlated-decimal-inequality.md)

@@ -14266,6 +14266,10 @@ and private tryCorrelatedOuterValue source context expression =
     |> Option.filter (fun scope -> isStatementStableExpr context.Store context.Registry context.DbName scope expression)
     |> Option.bind (fun _ -> evalExpr context expression |> Result.toOption)
 
+and private tryCorrelatedProbeValue source context = function
+    | LiteralValue value -> Some value
+    | expression -> tryCorrelatedOuterValue source context expression
+
 and private canSplitCorrelatedExactNumericInequality source (columns: ColumnDef list) outer left right =
     let innerColumn expression =
         tryCorrelatedInnerColumn source expression
@@ -14327,7 +14331,7 @@ and private correlatedRangeBounds source (whereExpr: Expr option) (outer: EvalCo
     |> Option.map (fun context ->
         collectRangeBounds
             (tryCorrelatedInnerColumn source)
-            (tryCorrelatedOuterValue source context)
+            (tryCorrelatedProbeValue source context)
             whereExpr)
     |> Option.defaultValue []
 
@@ -15288,7 +15292,7 @@ and private tryMaterializedCorrelatedLookup
                 let bounds =
                     functionalRangeLookupBounds
                         (tryCorrelatedInnerColumn probeSource)
-                        (tryCorrelatedOuterValue probeSource context)
+                        (tryCorrelatedProbeValue probeSource context)
                         predicate
 
                 let usesStoredCollation (bound: RangeLookupBounds<string, Expr * Value>) =

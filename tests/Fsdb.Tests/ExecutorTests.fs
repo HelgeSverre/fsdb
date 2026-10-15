@@ -12790,6 +12790,10 @@ let tests =
                     runDefault store
                         "INSERT INTO text_or_bounds VALUES(1,'a010','a012','a011','a013','a015'),(2,'a020','a022','a021','a023','a025')"
                     |> ignore
+                    runDefault store
+                        "CREATE TABLE text_not_bounds(id INT PRIMARY KEY,lo VARCHAR(8) COLLATE utf8mb4_bin,hi VARCHAR(8) COLLATE utf8mb4_bin)"
+                    |> ignore
+                    runDefault store "INSERT INTO text_not_bounds VALUES(3,NULL,'a990'),(4,'a010',NULL)" |> ignore
                     [ 0..999 ]
                     |> List.map (fun id -> sprintf "(%d,'a%03d')" id id)
                     |> String.concat ","
@@ -12800,6 +12804,23 @@ let tests =
                         [ "text_or_rows o"
                           "(SELECT id,code FROM text_or_rows) o"
                           "(SELECT id,CONCAT(code,'') AS code FROM text_or_rows LIMIT 1000) o" ] do
+                        calls <- 0
+                        match run store registry
+                            ("SELECT u.id,(SELECT COUNT(*) FROM " + source
+                             + " WHERE o.code NOT BETWEEN u.lo AND 'a990' AND TOUCH(o.id)=o.id) "
+                             + "FROM text_or_bounds u ORDER BY u.id") with
+                        | ResultSet(_, [ [ Some "1"; Some "19" ]; [ Some "2"; Some "29" ] ]) -> ()
+                        | other -> failtestf "expected MySQL 8.4 text NOT BETWEEN counts, got %A" other
+                        Expect.isLessThan calls 100 (sprintf "%s residual sees only the outside text ranges" source)
+                        calls <- 0
+                        match run store registry
+                            ("SELECT u.id,(SELECT COUNT(*) FROM " + source
+                             + " WHERE o.code NOT BETWEEN u.lo AND u.hi AND TOUCH(o.id)=o.id) "
+                             + "FROM text_not_bounds u ORDER BY u.id") with
+                        | ResultSet(_, [ [ Some "3"; Some "9" ]; [ Some "4"; Some "10" ] ]) -> ()
+                        | other -> failtestf "expected MySQL 8.4 nullable text NOT BETWEEN counts, got %A" other
+                        Expect.isLessThan calls 100 (sprintf "%s nullable outside ranges remain selective" source)
+
                         for predicate in
                             [ "o.code BETWEEN u.lo AND u.hi OR o.code=u.exact_code"
                               "o.code BETWEEN u.lo AND u.hi OR o.code BETWEEN u.lo2 AND u.hi2" ] do
