@@ -64,6 +64,10 @@ def main():
                         ("mixed_star", "k,f,extra", "SELECT s.*,s.flag+1 FROM source s"),
                         ("joined_star", "k,f,aux_id,marker", "SELECT * FROM source s JOIN aux q ON q.id=s.id"),
                         ("joined_qualified_star", "k,f", "SELECT s.* FROM source s JOIN aux q ON q.id=s.id"),
+                        ("using_star", "k,f,marker", "SELECT * FROM source s JOIN aux q USING(id)"),
+                        ("natural_star", "k,f,marker", "SELECT * FROM source s NATURAL JOIN aux q"),
+                        ("using_qualified_star", "k,f", "SELECT s.* FROM source s JOIN aux q USING(id)"),
+                        ("using_right_star", "k,f,marker", "SELECT * FROM aux q RIGHT JOIN source s USING(id)"),
                     ]:
                         view = f"derived_cte_{name}"
                         cursor.execute(
@@ -91,7 +95,7 @@ def main():
                                 raise AssertionError(f"expected {error_code}: {statement}")
 
                     cursor.execute("SELECT id,n FROM target ORDER BY id")
-                    assert cursor.fetchall() == ((1, 19), (2, 20))
+                    assert cursor.fetchall() == ((1, 23), (2, 20))
                 print(f"MySQL {version}: nested and starred derived CTE views remain updatable")
             finally:
                 if connection:

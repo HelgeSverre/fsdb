@@ -1691,12 +1691,6 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
 
         if not hasStar then
             Some body.Projections
-        elif body.Joins |> List.exists (fun join ->
-            not join.Using.IsEmpty
-            || join.Kind = NaturalJoin
-            || join.Kind = NaturalLeftJoin
-            || join.Kind = NaturalRightJoin) then
-            None
         else
             body.From
             |> Option.bind (fun first ->
@@ -1708,6 +1702,11 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                     None
                 else
                     let sources = resolved |> List.choose id
+                    let namesFor qualifier =
+                        match sources |> List.filter (fun (name, _) -> eqI name qualifier) with
+                        | [ (_, names) ] -> names
+                        | _ -> []
+                    let logical = FromItem.logicalSelectColumns namesFor body |> Result.toOption
                     let projections (qualifier, names) =
                         names
                         |> List.map (fun name -> Projection.create (QualifiedCol(qualifier, name)) None)
@@ -1718,7 +1717,11 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                         |> Option.bind (fun previous ->
                             match projection.Expression with
                             | Star None ->
-                                Some(previous @ (sources |> List.collect projections))
+                                logical
+                                |> Option.map (fun columns ->
+                                    previous
+                                    @ (columns
+                                       |> List.map (fun column -> Projection.create column.Expression (Some column.Name))))
                             | Star(Some starQualifier) ->
                                 match sources |> List.filter (fun (qualifier, _) -> eqI starQualifier qualifier) with
                                 | [ source ] -> Some(previous @ projections source)

@@ -2055,7 +2055,11 @@ let tests =
                     "derived_star", "k,f", "SELECT * FROM (SELECT id,flag FROM derived_cte_source) x"
                     "mixed_star", "k,f,extra", "SELECT s.*,s.flag+1 FROM derived_cte_source s"
                     "joined_star", "k,f,aux_id,marker", "SELECT * FROM derived_cte_source s JOIN derived_cte_aux q ON q.id=s.id"
-                    "joined_qualified_star", "k,f", "SELECT s.* FROM derived_cte_source s JOIN derived_cte_aux q ON q.id=s.id" ] do
+                    "joined_qualified_star", "k,f", "SELECT s.* FROM derived_cte_source s JOIN derived_cte_aux q ON q.id=s.id"
+                    "using_star", "k,f,marker", "SELECT * FROM derived_cte_source s JOIN derived_cte_aux q USING(id)"
+                    "natural_star", "k,f,marker", "SELECT * FROM derived_cte_source s NATURAL JOIN derived_cte_aux q"
+                    "using_qualified_star", "k,f", "SELECT s.* FROM derived_cte_source s JOIN derived_cte_aux q USING(id)"
+                    "using_right_star", "k,f,marker", "SELECT * FROM derived_cte_aux q RIGHT JOIN derived_cte_source s USING(id)" ] do
                   let view = "derived_cte_" + name
                   let sql =
                       $"CREATE VIEW {view} AS WITH d({columns}) AS ({body}) SELECT a.id,a.n,d.f FROM d JOIN derived_cte_target a ON a.id=d.k WHERE a.n>=0 WITH CASCADED CHECK OPTION"
@@ -2074,7 +2078,7 @@ let tests =
 
               Expect.equal
                   (rows store "SELECT id,n FROM derived_cte_target ORDER BY id")
-                  [ [ Some "1"; Some "19" ]; [ Some "2"; Some "20" ] ]
+                  [ [ Some "1"; Some "23" ]; [ Some "2"; Some "20" ] ]
                   "duplicate CTE rows update the target once per statement"
 
           testCase "joined views update a target after two references to one read-only CTE"
