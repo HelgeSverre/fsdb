@@ -506,7 +506,38 @@ let tests =
 
           testList
               "group commit queue"
-              [ testCase "writes arriving during a flush share the next batch"
+              [ testCase "a continuously replenished queue drains without growing the leader stack"
+                <| fun _ ->
+                    let count = 256
+                    let mutable enqueueNext = fun (_: int) -> ()
+                    let mutable firstDepth = 0
+                    let mutable lastDepth = 0
+                    let batches = ResizeArray<int>()
+
+                    let queue =
+                        Fsdb.GroupCommit.Queue<int>(
+                            2,
+                            (fun batch ->
+                                let value = List.exactlyOne batch
+                                batches.Add value
+
+                                if value = 0 then
+                                    firstDepth <- Diagnostics.StackTrace().FrameCount
+                                elif value = count - 1 then
+                                    lastDepth <- Diagnostics.StackTrace().FrameCount
+
+                                if value + 1 < count then
+                                    enqueueNext (value + 1)),
+                            ignore
+                        )
+
+                    enqueueNext <- fun value -> queue.Enqueue value |> ignore
+                    queue.Enqueue 0 ()
+
+                    Expect.sequenceEqual batches [ 0 .. count - 1 ] "every replenished batch drains in order"
+                    Expect.isTrue (lastDepth - firstDepth < 12) "the leader uses bounded stack depth"
+
+                testCase "writes arriving during a flush share the next batch"
                 <| fun _ ->
                     let batches = ResizeArray<int list>()
                     use flushStarted = new Threading.ManualResetEventSlim()

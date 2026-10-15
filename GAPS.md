@@ -1533,6 +1533,12 @@ implementation effort:
    again measured about 0.45× MySQL throughput with one writer and 0.28×
    with eight. The write-scaling gap remains open; that matched run does not
    justify changing queue ownership or WAL policy.
+   The group-commit leader now drains successive batches iteratively. A
+   continuously replenished queue previously grew one call frame per batch;
+   the [focused regression and matched write check](benchmarks/results/2026-10-15-iterative-group-commit-drain.md)
+   demonstrate bounded stack depth without changing ordering, checkpoint,
+   failure, or backpressure semantics. This addresses sustained-drain safety,
+   not the measured write-throughput gap.
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition

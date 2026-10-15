@@ -53,34 +53,37 @@ module internal GroupCommit =
 
             loop [] work
 
-        let rec drain () =
-            let work =
-                lock gate (fun () ->
-                    if pending.Count = 0 then
-                        hasLeader <- false
-                        []
-                    else
-                        let work = [ while pending.Count > 0 do pending.Dequeue() ]
-                        Monitor.PulseAll gate
-                        work)
+        let drain () =
+            let mutable draining = true
 
-            match work with
-            | [] -> ()
-            | work ->
-                try
-                    processWork work
-                    drain ()
-                with error ->
-                    let abandoned =
-                        lock gate (fun () ->
-                            failure <- Some error
+            while draining do
+                let work =
+                    lock gate (fun () ->
+                        if pending.Count = 0 then
                             hasLeader <- false
-                            let abandoned = [ while pending.Count > 0 do pending.Dequeue() ]
+                            []
+                        else
+                            let work = [ while pending.Count > 0 do pending.Dequeue() ]
                             Monitor.PulseAll gate
-                            abandoned)
+                            work)
 
-                    work |> List.iter (fun item -> fail item error)
-                    abandoned |> List.iter (fun item -> fail item error)
+                match work with
+                | [] -> draining <- false
+                | work ->
+                    try
+                        processWork work
+                    with error ->
+                        let abandoned =
+                            lock gate (fun () ->
+                                failure <- Some error
+                                hasLeader <- false
+                                let abandoned = [ while pending.Count > 0 do pending.Dequeue() ]
+                                Monitor.PulseAll gate
+                                abandoned)
+
+                        work |> List.iter (fun item -> fail item error)
+                        abandoned |> List.iter (fun item -> fail item error)
+                        draining <- false
 
         let enqueue (work: Work<'T>) (completion: TaskCompletionSource<unit>) =
             let leader =
