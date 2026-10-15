@@ -58,8 +58,13 @@ The [publication and queue-role follow-up](../benchmarks/results/2026-10-15-publ
 found only about 12 µs of publication-slot wait per eight-writer insert, while
 the WAL acknowledgement action averaged about 261 µs. Group-commit leaders
 spent about 502 µs continuing to drain other batches after their own completion
-signal. This identifies a latency mechanism, but moving drain ownership has
-not been designed or shown to improve throughput. Temporary probes were removed.
+signal. This identifies a latency mechanism but does not establish a throughput
+improvement from moving drain ownership. Temporary probes were removed.
+A [leader-handoff prototype](../benchmarks/results/2026-10-15-group-commit-leader-handoff-check.md)
+then returned the leader after its own completion and scheduled one worker to
+drain remaining batches. The focused queue tests passed, but bracketed
+durability-matched runs showed only a small eight-writer difference, with the
+FSDB/MySQL ratio still about 0.27. The prototype was reverted.
 
 For joined mutations, `QueryHandler` parses and checks the request;
 `Executor.runMutationJoin` resolves sources and produces joined rows;

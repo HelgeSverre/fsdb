@@ -1450,6 +1450,11 @@ implementation effort:
    502 µs after their own completion signal because they continued draining
    later batches. The latter is a concrete latency cost, but no safe handoff
    implementation or repeated throughput improvement has been established.
+   A [bounded leader-handoff prototype](benchmarks/results/2026-10-15-group-commit-leader-handoff-check.md)
+   moved the remaining drain to one thread-pool worker. Two-trial A/B/A runs
+   showed only a 1–3% eight-writer throughput difference and no material
+   improvement in the FSDB/MySQL ratio; the added scheduler complexity was
+   reverted.
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition
