@@ -5580,6 +5580,20 @@ let internal tryEqualityRowIdsForIndex
     : Set<RowId> option =
     equalityLookupRowIds store table index StoredValues values
 
+/// Equality probes use SQL's `NULL <> NULL` rule. `IS NULL` instead reads the
+/// NULL bucket of a visible, non-unique single-column secondary key.
+let internal tryNullRowIdsForColumn (table: Table) (columnName: string) allowed : Set<RowId> option =
+    equalityIndexesForColumns table [ columnName ]
+    |> List.tryFind (fun index -> not index.Unique && allowed index.Name)
+    |> Option.bind (fun index ->
+        let key =
+            makeProbeRow table [ index.ColumnIndices.Head, VNull ]
+            |> encodeIndexKey table.Columns (equalityKeyGroup index)
+
+        table.SecondaryIndex
+        |> Map.tryFind index.Name
+        |> Option.map (Map.tryFind key >> Option.defaultValue Set.empty))
+
 let tryProjectedEqualityLookupForIndex
     (store: Store)
     (table: Table)

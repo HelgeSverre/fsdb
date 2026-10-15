@@ -14874,6 +14874,41 @@ and private tryProjectedPhysicalRangeRows store registry dbName projection bound
     tryProjectedPhysicalRangeCandidates CostedRead store projection bounds
     |> Option.bind (projectPhysicalLookupRows store registry dbName projection)
 
+and private tryProjectedPhysicalNullCandidates store (projection: PhysicalProjection) probeSource whereExpr =
+    let names =
+        whereExpr
+        |> optionalConjuncts
+        |> List.choose (function
+            | IsNull expression -> tryCorrelatedInnerColumn probeSource expression
+            | _ -> None)
+
+    if names.IsEmpty || not (storedRowsMatchReadRows store projection.PhysicalTable.Columns) then
+        None
+    else
+        let allowed = indexHintsFor IndexJoin projection.PhysicalTableRef |> indexAllowedBy
+
+        names
+        |> List.choose (fun name ->
+            tryPhysicalProjectionColumn projection name
+            |> Option.bind (fun column ->
+                Storage.tryNullRowIdsForColumn projection.PhysicalTable column.Name allowed))
+        |> function
+            | [] -> None
+            | first :: rest ->
+                rest
+                |> List.fold Set.intersect first
+                |> Storage.rowsForRowIds projection.PhysicalTable
+                |> Some
+
+and private tryProjectedPhysicalCorrelatedNullLookup store registry dbName source whereExpr =
+    FromItem.tryQualifier source
+    |> Option.bind (fun qualifier ->
+        tryPhysicalProjection store registry dbName source
+        |> Option.bind (fun projection ->
+            tryProjectedPhysicalNullCandidates
+                store projection (correlatedProbeSource qualifier projection.OutputColumns) whereExpr
+            |> Option.bind (projectPhysicalLookupRows store registry dbName projection)))
+
 and private tryProjectedPhysicalCorrelatedEqualityLookup
     (store: Store)
     (registry: Registry)
@@ -14908,6 +14943,8 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     correlatedProbeEqualities probeSource (Some branch) outer
                     |> Option.bind (tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection)
 
+                let nulls = tryProjectedPhysicalNullCandidates store projection probeSource (Some branch)
+
                 let membership =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
                         outer
@@ -14933,7 +14970,7 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     else
                         []
 
-                (equality |> Option.toList) @ (membership |> Option.toList) @ ranges @ functional
+                (equality |> Option.toList) @ (nulls |> Option.toList) @ (membership |> Option.toList) @ ranges @ functional
                 |> intersectPhysicalRows
 
             let merge candidates =
@@ -14982,6 +15019,7 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
             match equality with
             | Some equalRows when equalRows.Length <= 1 -> None
             | _ ->
+                let nulls = tryProjectedPhysicalNullCandidates store projection probeSource whereExpr
                 let membership =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
                         outer
@@ -15008,7 +15046,7 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
                     else
                         []
 
-                let candidates = (equality |> Option.toList) @ ranges @ membership @ functional
+                let candidates = (equality |> Option.toList) @ (nulls |> Option.toList) @ ranges @ membership @ functional
 
                 match candidates with
                 | _ :: _ :: _ ->
@@ -15293,9 +15331,19 @@ and private tryCorrelatedSourceLookup
         |> optionalConjuncts
         |> List.exists (function In _ -> true | _ -> false)
 
+    let hasNullPredicate =
+        whereExpr
+        |> Option.exists (Expression.exists (function IsNull _ -> true | _ -> false))
+
     let physicalIntersection () =
-        if hasRangePredicate || hasFunctionalEqualityPredicate then
+        if hasRangePredicate || hasFunctionalEqualityPredicate || hasNullPredicate then
             tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
+        else
+            None
+
+    let nullLookup () =
+        if hasNullPredicate then
+            tryProjectedPhysicalCorrelatedNullLookup store registry dbName source whereExpr
         else
             None
 
@@ -15381,6 +15429,7 @@ and private tryCorrelatedSourceLookup
                 [ equality
                   equalityUnion
                   projectedUnion
+                  nullLookup ()
                   tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
                 |> fewestRows
 
@@ -15392,13 +15441,14 @@ and private tryCorrelatedSourceLookup
              (match direct with
               | Some(_, rows) when rows.Length <= 1 -> None
               | Some _ -> physicalIntersection ()
-              | None when hasMultipleConjunctiveRanges || (hasMembershipPredicate && hasRangePredicate) -> physicalIntersection ()
+              | None when hasMultipleConjunctiveRanges || (hasMembershipPredicate && hasRangePredicate) || hasNullPredicate -> physicalIntersection ()
               | None -> None)
              |> Option.orElseWith (fun () -> chooseWithRanges true direct)
          else
              physicalIntersection ()
              |> Option.orElseWith (fun () ->
                  [ direct
+                   nullLookup ()
                    tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer ]
                  |> fewestRows
                  |> chooseWithRanges false))
@@ -15409,6 +15459,7 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith (fun () ->
             [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
               tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
+              nullLookup ()
               tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
             |> fewestRows
             |> chooseWithRanges false)

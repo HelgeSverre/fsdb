@@ -45,7 +45,7 @@ def main():
                     for sql in [
                         "CREATE DATABASE probe", "USE probe",
                         "CREATE TABLE outer_rows(id INT PRIMARY KEY,a INT)",
-                        "CREATE TABLE inner_rows(id INT PRIMARY KEY,a INT,k INT)",
+                        "CREATE TABLE inner_rows(id INT PRIMARY KEY,a INT,k INT,KEY ix_a(a),KEY ix_k(k))",
                         "INSERT INTO outer_rows VALUES(1,1),(2,2),(3,3)",
                     ]:
                         cursor.execute(sql)
@@ -55,6 +55,9 @@ def main():
                     )
                     cursor.execute("INSERT INTO inner_rows VALUES " + values)
                     for prefix, source in [
+                        ("", "inner_rows d"),
+                        ("", "(SELECT id,a,k FROM inner_rows) d"),
+                        ("WITH passed AS (SELECT id,a,k FROM inner_rows) ", "passed d"),
                         ("", "(SELECT id+0 AS id,a+0 AS a,k+0 AS k FROM inner_rows LIMIT 1000) d"),
                         ("WITH materialized AS (SELECT id+0 AS id,a+0 AS a,k+0 AS k FROM inner_rows LIMIT 1000) ", "materialized d"),
                     ]:
@@ -68,7 +71,12 @@ def main():
                             + " WHERE d.k IS NULL OR d.id=o.id) FROM outer_rows o ORDER BY o.id"
                         )
                         assert cursor.fetchall() == ((1, 11), (2, 11), (3, 11))
-                print(f"MySQL {version}: derived and CTE NULL counts (5, 5, 0); OR counts (11, 11, 11)")
+                    cursor.execute(
+                        "SELECT o.id,(SELECT COUNT(*) FROM inner_rows d IGNORE INDEX (ix_k)"
+                        " WHERE d.k IS NULL AND d.a=o.a) FROM outer_rows o ORDER BY o.id"
+                    )
+                    assert cursor.fetchall() == ((1, 5), (2, 5), (3, 0))
+                print(f"MySQL {version}: physical and materialized NULL counts (5, 5, 0); OR counts (11, 11, 11)")
             finally:
                 if connection:
                     connection.close()
