@@ -1177,6 +1177,44 @@ let tests =
                   (run store "UPDATE straight_target_join SET n=n+1 WHERE aid=1")
                   (Affected 0UL) "the moved target predicate still filters the write"
 
+          testCase "join view updates a physical target beside a dependent lateral source"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE lateral_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE lateral_source(id INT PRIMARY KEY,flag INT)"
+                    "INSERT INTO lateral_target VALUES(1,0),(2,0)"
+                    "INSERT INTO lateral_source VALUES(1,7)"
+                    "CREATE VIEW lateral_write AS SELECT a.id,a.n,d.flag FROM lateral_target a JOIN LATERAL (SELECT flag FROM lateral_source b WHERE b.id=a.id LIMIT 1) d ON TRUE" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='lateral_write'")
+                  [ [ Some "YES" ] ] "MySQL 8.4 keeps the physical target writable"
+              Expect.equal
+                  (run store "UPDATE lateral_write SET n=n+1 WHERE id=1")
+                  (Affected 1UL) "the dependent source permits the matched target write"
+              Expect.equal
+                  (run store "UPDATE lateral_write SET n=n+1 WHERE id=2")
+                  (Affected 0UL) "the lateral source still filters unmatched targets"
+              Expect.equal
+                  (rows store "SELECT id,n FROM lateral_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ] "only the matched physical row changes"
+
+              for sql in
+                  [ "CREATE SQL SECURITY INVOKER VIEW lateral_invoker AS SELECT a.id,a.n,d.flag FROM lateral_target a JOIN LATERAL (SELECT flag FROM lateral_source b WHERE b.id=a.id LIMIT 1) d ON TRUE"
+                    "CREATE USER lateral_reader"
+                    "GRANT SELECT,UPDATE ON fsdb.lateral_target TO lateral_reader"
+                    "GRANT SELECT,UPDATE ON fsdb.lateral_invoker TO lateral_reader" ] do
+                  expectOk (run store sql) sql
+              let reader = { Fsdb.Session.create 1 store with User = "lateral_reader" }
+              let update () = Fsdb.QueryHandler.handle reader "UPDATE lateral_invoker SET n=n+1 WHERE id=1" |> snd
+              match update () with
+              | Err(1356, _) -> ()
+              | other -> failtestf "missing lateral-source grant must invalidate the view, got %A" other
+              expectOk (run store "GRANT SELECT ON fsdb.lateral_source TO lateral_reader") "grant lateral read"
+              Expect.equal (update ()) (Affected 1UL) "the granted lateral source permits the write"
+              Expect.equal (rows store "SELECT n FROM lateral_target WHERE id=1") [ [ Some "2" ] ] "authorized write reaches the target"
+
           testCase "join views update mergeable components beside union views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

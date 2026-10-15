@@ -1610,7 +1610,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                          || join.Kind = StraightJoin
                          || join.Kind = CrossJoin
                          || join.Kind = NaturalJoin)
-                        && (match join.Table with FromTable _ | FromSubquery _ -> true | _ -> false))
+                        && (match join.Table with FromTable _ | FromSubquery _ | FromLateral _ -> true | _ -> false))
                 let shapeAllowsUpdates =
                     ((select.Joins.IsEmpty && match source with FromTable _ -> true | _ -> false)
                      || (sourceOrderAllowsUpdates && joinsSupported && not select.Joins.IsEmpty))

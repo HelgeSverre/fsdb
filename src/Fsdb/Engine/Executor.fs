@@ -1617,7 +1617,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                              || join.Kind = CrossJoin
                              || join.Kind = NaturalJoin))
                      && (source :: (select.Joins |> List.map _.Table)
-                         |> List.forall (function FromTable _ | FromSubquery _ -> true | _ -> false))
+                         |> List.forall (function FromTable _ | FromSubquery _ | FromLateral _ -> true | _ -> false))
                      && hasWritableShape select ->
                 let sourceItems =
                     source
@@ -1825,7 +1825,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                 let resolveSourceItem = function
                     | FromTable tableRef -> resolveSource tableRef
-                    | FromSubquery(body, qualifier) as reference ->
+                    | (FromSubquery(body, qualifier) | FromLateral(body, qualifier)) as reference ->
                         derivedColumnNames body
                         |> Option.filter (fun columns -> tryDuplicateIgnoreCase id columns |> Option.isNone)
                         |> Option.map (fun columns ->

@@ -664,7 +664,10 @@ left operand of each `USING` key even when the chain merges different keys.
 [Derived-first `NATURAL JOIN` views](torture/findings/2026-10-15-derived-natural-view.md)
 also update a physical target; moved joins retain the original shared-column
 ownership even when the target has another same-named column.
-Broader join-source reorderings and lateral or outer-join writes remain open.
+[Target-first joins with a dependent lateral source](torture/findings/2026-10-15-lateral-join-view.md)
+also update the physical component and enforce invoker read grants on the
+lateral source. Broader join-source reorderings, lateral dependencies that
+precede the write target, and outer-join writes remain open.
 
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
 refused with MySQL-compatible errors.
