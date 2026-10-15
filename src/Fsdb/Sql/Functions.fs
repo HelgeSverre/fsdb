@@ -2696,6 +2696,12 @@ let private dateFn: Scalar =
 let private warnTruncatedTime value =
     Diagnostics.warning 1292 (sprintf "Truncated incorrect time value: '%s'" value)
 
+/// Input that is neither a TIME nor a DATETIME reads as NULL with MySQL's
+/// truncation warning.
+let private invalidTimeResult value =
+    warnTruncatedTime (toText value |> Option.defaultValue "")
+    VNull
+
 let private parsedTimeValue value =
     value
     |> toText
@@ -2718,7 +2724,20 @@ let private timeFn: Scalar =
     | [ v ] when not (anyNull [ v ]) ->
         match parsedTimeValue v with
         | Some time -> VTime time
-        | None -> tryDateTimeValue v |> Option.map (fun value -> VTime(timeValueOrClamp value.TimeOfDay.Ticks)) |> Option.defaultValue VNull
+        | None ->
+            match tryDateTimeValue v with
+            | Some value -> VTime(timeValueOrClamp value.TimeOfDay.Ticks)
+            | None -> invalidTimeResult v
+    | _ -> VNull
+
+/// MySQL converts the argument exactly as `TIME(x)` does, then truncates the
+/// fractional seconds toward zero.
+let private timeToSecFn: Scalar =
+    function
+    | [ value ] ->
+        match timeFn [ value ] with
+        | VTime time -> VInt(timeTicks time / TimeSpan.TicksPerSecond)
+        | _ -> VNull
     | _ -> VNull
 
 let private datePartFn (f: DateTime -> int) : Scalar =
@@ -2766,7 +2785,10 @@ let private zeroAwareTimePart (fromZero: ZeroDateTime -> int) (fromTime: TimeVal
     | [ value ] when not (anyNull [ value ]) ->
         match parsedTimeValue value with
         | Some time -> VInt(int64 (fromTime time))
-        | None -> tryDateTimeValue value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
+        | None ->
+            match tryDateTimeValue value with
+            | Some dateTime -> VInt(int64 (fromDateTime dateTime))
+            | None -> invalidTimeResult value
     | _ -> VNull
 
 let internal dayNameFn (locale: TemporalLocale.Names) : Scalar =
@@ -6956,6 +6978,7 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "SUBTIME" (exactArity "SUBTIME" 2 (addTimeFn -1L))
     |> registerScalar "TIMEDIFF" (exactArity "TIMEDIFF" 2 timeDiffFn)
     |> registerScalar "SEC_TO_TIME" (exactArity "SEC_TO_TIME" 1 secToTimeFn)
+    |> registerScalar "TIME_TO_SEC" (exactArity "TIME_TO_SEC" 1 timeToSecFn)
     |> registerScalar "MAKETIME" (exactArity "MAKETIME" 3 makeTimeFn)
     |> registerScalar "TIME_FORMAT" (exactArity "TIME_FORMAT" 2 timeFormatFn)
     |> registerScalar "GET_FORMAT" (exactArity "GET_FORMAT" 2 getFormatFn)

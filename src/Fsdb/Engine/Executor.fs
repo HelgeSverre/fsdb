@@ -7832,6 +7832,7 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | "SEC_TO_TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | "MAKETIME", [ _; _; _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | "TIME_FORMAT", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 1024u }
+        | "TIME_TO_SEC", _ -> Some { Value.columnMetadata TypeLongLong with ColumnLength = 10u }
         | "GET_FORMAT", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 64u }
         | ("PERIOD_ADD" | "PERIOD_DIFF" | "TO_DAYS" | "DATEDIFF" | "TIMESTAMPDIFF" | "EXTRACT"), _ -> simple TypeLongLong
         | "FROM_DAYS", _ -> Some(ColumnWire.metadataOfType TDate)
