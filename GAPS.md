@@ -822,9 +822,12 @@ even when the projection exposes only columns from the preserved side.
 
 Multi-component writes, outer-join view writes, and join-view DELETE/REPLACE
 are refused with MySQL-compatible errors for the audited shapes.
-An UPDATE that names an updatable view as one source of a larger joined
-mutation still fails before source resolution; MySQL executes it and waits
-on the physical row under contention ([oracle](torture/findings/2026-10-15-joined-view-mutation-source.md)).
+An UPDATE that explicitly qualifies a single-table updatable view as its
+first joined mutation target rewrites to its base table and waits on the physical
+row under contention; renamed exposed columns and CHECK OPTION match the
+[MySQL oracle](torture/findings/2026-10-15-joined-view-mutation-source.md).
+Joined views used as sources of another joined mutation and bare view-target
+assignments remain open.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
 before a local upload or server-side file read; ordinary inserts remain
 available through their supported forms.
@@ -1609,10 +1612,10 @@ implementation effort:
    [joined DELETE](torture/findings/2026-10-14-joined-delete-rebase.md),
    [multi-target writes](torture/findings/2026-10-14-multi-target-write-rebase.md),
    and [unqualified targets](torture/findings/2026-10-14-unqualified-joined-update-rebase.md)
-   already wait and rebase. A [joined UPDATE addressed to an updatable
-   view](torture/findings/2026-10-15-joined-view-mutation-source.md) still
-   fails source resolution with 1146 before it can claim the physical row;
-   broader write shapes remain to audit.
+   already wait and rebase. A [joined UPDATE addressed to a single-table
+   updatable view](torture/findings/2026-10-15-joined-view-mutation-source.md)
+   now claims and rebases its physical row; joined-view sources and broader
+   write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in
    the eight-writer keyless-insert path; that experiment was reverted.

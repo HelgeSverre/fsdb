@@ -98,7 +98,50 @@ def main():
                     cursor.execute("SELECT n FROM t WHERE id=1")
                     assert cursor.fetchone() == (2,)
 
-                print(f"MySQL {version}: joined view UPDATE waited, affected one row, final n=2")
+                    cursor.execute(
+                        "CREATE VIEW renamed AS SELECT id AS public_id,n AS score FROM t"
+                    )
+                    cursor.execute(
+                        "UPDATE renamed JOIN l ON l.id=renamed.public_id "
+                        "SET renamed.score=renamed.score+1 WHERE renamed.public_id=1"
+                    )
+                    assert cursor.rowcount == 1
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (3,)
+
+                    cursor.execute("ALTER TABLE l ADD COLUMN n INT DEFAULT 0")
+                    try:
+                        cursor.execute(
+                            "UPDATE v JOIN l ON l.id=v.id "
+                            "SET v.n=n+1 WHERE v.id=1"
+                        )
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1052, error.args
+                    else:
+                        raise AssertionError("ambiguous bare n should fail")
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (3,)
+
+                    cursor.execute(
+                        "CREATE VIEW checked AS SELECT id,n FROM t WHERE n>=0 "
+                        "WITH CASCADED CHECK OPTION"
+                    )
+                    try:
+                        cursor.execute(
+                            "UPDATE checked JOIN l ON l.id=checked.id "
+                            "SET checked.n=-1 WHERE checked.id=1"
+                        )
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error.args
+                    else:
+                        raise AssertionError("joined view CHECK OPTION should reject n=-1")
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (3,)
+
+                print(
+                    f"MySQL {version}: joined view UPDATE waited and rebased; "
+                    "renamed columns updated; CHECK OPTION rejected n=-1; bare n was ambiguous"
+                )
             finally:
                 for connection in connections:
                     connection.close()
