@@ -78,3 +78,22 @@ lateral reordering or distinct definer layers.
 
 This audit covers the stated inner-join shapes, not arbitrary join graphs,
 distinct security identities, or authorization through layered views.
+
+## Independent lateral source first
+
+Native MySQL 8.4.11 also marks a view updatable when its first source is an
+independent `LATERAL (SELECT 1 x)` and the physical target follows it. A
+dependent `JSON_TABLE` may sit between that source and the target. Both views
+update only the matched target row, reject an invalid checked update with
+1369, and reject INSERT and DELETE with 1471 and 1395. The maintained oracle
+passes 20 composed shapes, including these and the aggregate/lateral/JSON
+source chains.
+
+FSDB previously reported `IS_UPDATABLE=NO` for the lateral-first view. The
+source-order classifier and joined-write rewriter admitted leading derived
+and `JSON_TABLE` sources but omitted a leading `LATERAL`. Both now accept that
+source kind and retain the original dependency order after moving the
+physical target to the write anchor. Focused regressions cover metadata,
+matched and unmatched updates, CHECK OPTION rejection, INSERT/DELETE errors,
+and the dependent JSON chain. A lateral source depending on an outer query
+scope or distinct security identities remains outside this audit.

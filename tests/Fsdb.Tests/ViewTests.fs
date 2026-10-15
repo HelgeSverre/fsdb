@@ -1697,6 +1697,86 @@ let tests =
               Expect.equal (run store "UPDATE lateral_aggregate_chain SET n=n+1 WHERE id=1") (Affected 1UL) "the second dependent source reaches the target"
               Expect.equal (rows store "SELECT n FROM lateral_aggregate_target WHERE id=1") [ [ Some "2" ] ] "the later target changes once"
 
+          testCase "aggregate lateral and JSON chains keep a later view target writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE composed_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE composed_source(id INT,flag INT)"
+                    "INSERT INTO composed_target VALUES(1,0),(2,0)"
+                    "INSERT INTO composed_source VALUES(1,7),(1,8)" ] do
+                  expectOk (run store sql) sql
+              let shapes =
+                  [ "SELECT a.id,a.n,d.flag,e.x,j.y FROM (SELECT id,SUM(flag) flag FROM composed_source GROUP BY id) d JOIN LATERAL (SELECT d.id x) e ON TRUE JOIN JSON_TABLE(JSON_ARRAY(e.x),'$[*]' COLUMNS(y INT PATH '$')) j ON j.y=e.x JOIN composed_target a ON a.id=j.y"
+                    "SELECT a.id,a.n,d.flag,j.x,e.y FROM (SELECT id,SUM(flag) flag FROM composed_source GROUP BY id) d JOIN JSON_TABLE(JSON_ARRAY(d.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d.id JOIN LATERAL (SELECT j.x y) e ON TRUE JOIN composed_target a ON a.id=e.y"
+                    "SELECT a.id,a.n,d.flag,e.x,j.y FROM ((SELECT id,SUM(flag) flag FROM composed_source GROUP BY id) d JOIN LATERAL (SELECT d.id x) e ON TRUE JOIN JSON_TABLE(JSON_ARRAY(e.x),'$[*]' COLUMNS(y INT PATH '$')) j ON j.y=e.x) JOIN composed_target a ON a.id=j.y" ]
+              for definition in shapes do
+                  expectOk (run store "UPDATE composed_target SET n=0") "reset target"
+                  expectOk (run store ("CREATE VIEW composed_write AS " + definition)) "create composed view"
+                  Expect.equal
+                      (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='composed_write'")
+                      [ [ Some "YES" ] ] "MySQL marks the target writable"
+                  Expect.equal (run store "UPDATE composed_write SET n=n+1 WHERE id=1") (Affected 1UL) "matched target changes once"
+                  Expect.equal (run store "UPDATE composed_write SET n=n+1 WHERE id=2") (Affected 0UL) "unmatched target stays unchanged"
+                  Expect.equal
+                      (rows store "SELECT id,n FROM composed_target ORDER BY id")
+                      [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ] "only the matched target changes"
+                  match run store "INSERT INTO composed_write(id,n) VALUES(3,0)" with
+                  | Err(1471, _) -> ()
+                  | other -> failtestf "expected joined-view INSERT refusal, got %A" other
+                  match run store "DELETE FROM composed_write WHERE id=1" with
+                  | Err(1395, _) -> ()
+                  | other -> failtestf "expected joined-view DELETE refusal, got %A" other
+                  expectOk (run store "DROP VIEW composed_write") "drop composed view"
+
+                  expectOk
+                      (run store ("CREATE VIEW composed_checked AS " + definition + " WHERE a.n>=0 WITH CASCADED CHECK OPTION"))
+                      "create checked composed view"
+                  match run store "UPDATE composed_checked SET n=-1 WHERE id=1" with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+                  Expect.equal (rows store "SELECT n FROM composed_target WHERE id=1") [ [ Some "1" ] ] "rejected update leaves target unchanged"
+                  expectOk (run store "DROP VIEW composed_checked") "drop checked composed view"
+
+          testCase "independent lateral source before a view target remains writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE first_lateral_target(id INT PRIMARY KEY,n INT)") "create target"
+              expectOk (run store "INSERT INTO first_lateral_target VALUES(1,0),(2,0)") "seed target"
+              expectOk
+                  (run store "CREATE VIEW first_lateral_write AS SELECT a.id,a.n,e.x FROM LATERAL (SELECT 1 x) e JOIN first_lateral_target a ON a.id=e.x")
+                  "create lateral-first view"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='first_lateral_write'")
+                  [ [ Some "YES" ] ] "MySQL marks the physical target writable"
+              Expect.equal (run store "UPDATE first_lateral_write SET n=n+1 WHERE id=1") (Affected 1UL) "matched target changes"
+              Expect.equal (run store "UPDATE first_lateral_write SET n=n+1 WHERE id=2") (Affected 0UL) "unmatched target stays unchanged"
+              Expect.equal
+                  (rows store "SELECT id,n FROM first_lateral_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ] "only matched row changes"
+              match run store "INSERT INTO first_lateral_write(id,n) VALUES(3,0)" with
+              | Err(1471, _) -> ()
+              | other -> failtestf "expected joined-view INSERT refusal, got %A" other
+              match run store "DELETE FROM first_lateral_write WHERE id=1" with
+              | Err(1395, _) -> ()
+              | other -> failtestf "expected joined-view DELETE refusal, got %A" other
+              expectOk
+                  (run store "CREATE VIEW first_lateral_checked AS SELECT a.id,a.n,e.x FROM LATERAL (SELECT 1 x) e JOIN first_lateral_target a ON a.id=e.x WHERE a.n>=0 WITH CASCADED CHECK OPTION")
+                  "create checked lateral-first view"
+              match run store "UPDATE first_lateral_checked SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM first_lateral_target WHERE id=1") [ [ Some "1" ] ] "rejected write leaves target unchanged"
+
+              expectOk
+                  (run store "CREATE VIEW first_lateral_json AS SELECT a.id,a.n,e.x,j.y FROM LATERAL (SELECT 1 x) e JOIN JSON_TABLE(JSON_ARRAY(e.x),'$[*]' COLUMNS(y INT PATH '$')) j ON j.y=e.x JOIN first_lateral_target a ON a.id=j.y")
+                  "create dependent JSON chain"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='first_lateral_json'")
+                  [ [ Some "YES" ] ] "a second read-only source preserves writable metadata"
+              Expect.equal (run store "UPDATE first_lateral_json SET n=n+1 WHERE id=1") (Affected 1UL) "the later target changes once"
+              Expect.equal (rows store "SELECT n FROM first_lateral_target WHERE id=1") [ [ Some "2" ] ] "the chain reaches the physical target"
+
           testCase "checked merged joins keep a physical view target writable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

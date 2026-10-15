@@ -1536,6 +1536,7 @@ let private viewsColumns =
 let internal tryLeadingReadOnlyWritableTarget (source: FromItem) (joins: Join list) =
     match source with
     | FromSubquery _
+    | FromLateral _
     | FromJsonTable _ ->
         let leadingJoins =
             joins
@@ -1777,7 +1778,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                 let sourceOrderAllowsUpdates =
                     match source, select.Joins with
                     | FromTable _, _ -> true
-                    | (FromSubquery _ | FromJsonTable _), _ :: _ ->
+                    | (FromSubquery _ | FromLateral _ | FromJsonTable _), _ :: _ ->
                         tryLeadingReadOnlyWritableTarget source select.Joins |> Option.isSome
                     | _ -> false
                 let joinsSupported =

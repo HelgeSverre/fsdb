@@ -776,7 +776,9 @@ also retain writable metadata, target identity, and CHECK OPTION behavior
 when the physical target is last. [JSON_TABLE joined views](torture/findings/2026-10-15-json-table-joined-view.md)
 also update a physical component when the table function follows or precedes
 it, including dependent table-function chains; JSON_TABLE columns remain
-read-only. [Two dependent `JSON_TABLE` sources under distinct definer layers](torture/findings/2026-10-15-layered-json-chain-view-grants.md)
+read-only. An [independent `LATERAL` first source](torture/findings/2026-10-15-composed-join-view-writes.md#independent-lateral-source-first)
+also precedes a writable target, directly or through a dependent `JSON_TABLE`.
+[Two dependent `JSON_TABLE` sources under distinct definer layers](torture/findings/2026-10-15-layered-json-chain-view-grants.md)
 retain writable metadata and target identity with the physical target either
 last or between the functions, including MySQL's 1143 join-key and 1356
 write-grant denials. Broader join-source reorderings and layered

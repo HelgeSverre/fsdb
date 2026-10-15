@@ -2047,7 +2047,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             match source, sources, select.Joins with
                             | FromTable original, { Reference = FromTable physical } :: _, _ ->
                                 Some(physical, rewrittenJoins, original, select.Joins)
-                            | (FromSubquery _ | FromJsonTable _), derived :: { Reference = FromTable physical } :: _, join :: trailing
+                            | (FromSubquery _ | FromLateral _ | FromJsonTable _), derived :: { Reference = FromTable physical } :: _, join :: trailing
                                 when (join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin || join.Kind = NaturalJoin) ->
                                 let reordered =
                                     { join with
@@ -2055,7 +2055,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                         On = rewriteSources join.On }
                                 let authorizationJoin = { join with Table = derived.Reference }
                                 Some(physical, reordered :: List.tail rewrittenJoins, physical, authorizationJoin :: trailing)
-                            | (FromSubquery _ | FromJsonTable _), _, _ ->
+                            | (FromSubquery _ | FromLateral _ | FromJsonTable _), _, _ ->
                                 match InformationSchema.tryLeadingReadOnlyWritableTarget source select.Joins with
                                 | Some leadingCount when leadingCount >= 2 && leadingCount < sources.Length ->
                                     match sources.[leadingCount].Reference with
