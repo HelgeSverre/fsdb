@@ -5681,9 +5681,7 @@ let internal tryNullRowIdsForColumn
                     |> Option.map (fun index -> index, value))
                 |> Map.ofList
 
-            rangeKeyGroups table
-            |> visibleGroups
-            |> List.choose (fun group ->
+            let tryBoundPrefix (group: IndexKeyGroup) =
                 group.Indices
                 |> List.tryFindIndex ((=) columnIndex)
                 |> Option.bind (fun nullPosition ->
@@ -5695,18 +5693,25 @@ let internal tryNullRowIdsForColumn
                         |> Option.bind (exactProbeValue store table index)
                         |> Option.map (projectIndexValue group.Name None table.Columns.[index] None None))
                     |> tryAllSome
-                    |> Option.map (fun prefix -> nullPosition, group.Name, prefix)))
-            |> List.sortByDescending (fun (position, _, _) -> position)
-            |> List.tryPick (fun (_, name, prefix) ->
-                if not (allowed name) then
+                    |> Option.map (fun prefix -> nullPosition, prefix))
+
+            rangeKeyGroups table
+            |> visibleGroups
+            |> List.choose (fun group ->
+                if not (allowed group.Name) then
                     None
                 else
                     table.SecondaryOrder
-                    |> Map.tryFind name
-                    |> Option.map (fun entries ->
-                        let first, afterLast = orderedPrefixBounds entries (prefix @ [ VNull ])
-                        Seq.init (afterLast - first) (fun offset -> entries.[first + offset].RowId)
-                        |> Set.ofSeq))))
+                    |> Map.tryFind group.Name
+                    |> Option.bind (fun entries ->
+                        tryBoundPrefix group
+                        |> Option.map (fun (position, prefix) -> position, prefix, entries)))
+            |> List.sortByDescending (fun (position, _, _) -> position)
+            |> List.tryHead
+            |> Option.map (fun (_, prefix, entries) ->
+                let first, afterLast = orderedPrefixBounds entries (prefix @ [ VNull ])
+                Seq.init (afterLast - first) (fun offset -> entries.[first + offset].RowId)
+                |> Set.ofSeq)))
 
 type EqualityIndexMatchLookup =
     { CandidateCount: int

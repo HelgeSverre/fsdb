@@ -49,9 +49,9 @@ a disposable database, default token size 2, and enabled default stopwords.
 It asserts ordered results, parser DDL errors, variable scope and labels,
 mutation behavior, and field boundaries for both parsers.
 
-The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 333
+The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 351
 natural-language, boolean, and query-expansion searches at each startup size
-from 1 through 10. All 3,330 query results agree with native MySQL 8.4.11
+from 1 through 10. All 3,510 query results agree with native MySQL 8.4.11
 on the audited mixed Chinese, Japanese, Korean, ASCII, punctuation, emoji,
 supplementary-character, combining-mark, zero-width-joiner, variation-selector,
 nonbreaking-space, newline, Hangul-jamo, and NULL corpus. It checks matching row IDs, query
@@ -111,8 +111,13 @@ The next corpus extension includes supplementary ideographic variation selector
 U+E0100 beside both BMP and supplementary CJK characters, plus a text variation
 selector in a Chinese phrase. Queries include base and variant spellings and
 Boolean phrase/required forms. The full size-1–10 run agrees on membership,
-errors, ordering, and relevance for all 333 searches per size. This does not
+errors, ordering, and relevance for the audited searches at each size. This does not
 establish parity for every Unicode variation sequence.
+
+The next corpus adds Korean compatibility-jamo spellings of `학교` and `한글`
+and decomposed hiragana dakuten beside `ガラス`. All three search modes agree
+on membership and relevance at startup sizes 1–10. These cases extend the
+Unicode normalization evidence without changing the MeCab limitation.
 
 The `ngram-fulltext` differential contract covers natural, boolean, and
 query-expansion searches through text and prepared protocols, Unicode and
