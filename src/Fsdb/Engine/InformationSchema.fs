@@ -1568,10 +1568,81 @@ let internal tryLeadingReadOnlyWritableTarget (source: FromItem) (joins: Join li
     | _ -> None
 
 /// Associate explicit inner joins across a parenthesized right operand when
-/// no USING/NATURAL keys change column ownership. Inner ON columns must be
-/// qualified so moving the group beside earlier sources cannot rebind them.
-/// The outer ON condition is applied after the group's last source is bound.
-let internal flattenInnerJoinedOperands (select: SelectStmt) =
+/// no USING/NATURAL keys change column ownership. Bind bare inner ON columns
+/// within the group before moving it beside earlier sources.
+let internal flattenInnerJoinedOperands (catalog: Catalog) schema (select: SelectStmt) =
+    let projectionName (projection: Projection) =
+        projection.Alias
+        |> Option.orElse projection.SourceName
+        |> Option.orElseWith (fun () ->
+            match projection.Expression with
+            | Col name | QualifiedCol(_, name) -> Some name
+            | _ -> None)
+
+    let sourceColumns = function
+        | FromTable table ->
+            relationColumns catalog (table.Database |> Option.defaultValue schema) table.Table
+            |> Option.map (fun columns -> table.Alias |> Option.defaultValue table.Table, columns)
+        | FromSubquery(PlainSelect body, alias)
+        | FromLateral(PlainSelect body, alias) ->
+            let names = body.Projections |> List.map projectionName
+            if names |> List.exists Option.isNone then None
+            else Some(alias, names |> List.choose id)
+        | _ -> None
+
+    let bareColumns expression =
+        Expression.fold (fun names node ->
+            match node with
+            | Col name -> Expression.Prune(name :: names)
+            | _ -> Expression.Descend names) [] expression
+        |> List.distinctBy _.ToLowerInvariant()
+
+    let bindInnerJoins first (innerJoins: Join list) =
+        if innerJoins |> List.forall (fun inner -> (bareColumns inner.On).IsEmpty) then
+            Some innerJoins
+        else
+            let items = first :: (innerJoins |> List.map _.Table)
+            let columns = items |> List.map sourceColumns
+            if columns |> List.exists Option.isNone then
+                None
+            else
+                let columns = columns |> List.choose id
+                innerJoins
+                |> List.mapi (fun index inner ->
+                    let names = bareColumns inner.On
+                    if names.IsEmpty then
+                        Some inner
+                    elif not (Expression.collectSubqueries inner.On).IsEmpty then
+                        None
+                    else
+                        let visible = columns |> List.take (index + 2)
+                        let bindings =
+                            names
+                            |> List.map (fun name ->
+                                let owners =
+                                    visible
+                                    |> List.collect (fun (qualifier, sourceNames) ->
+                                        sourceNames
+                                        |> List.filter (fun column -> eqI column name)
+                                        |> List.map (fun _ -> qualifier))
+                                match owners with
+                                | [ qualifier ] -> Some(name.ToLowerInvariant(), qualifier)
+                                | _ -> None)
+                        if bindings |> List.exists Option.isNone then
+                            None
+                        else
+                            let bindings = bindings |> List.choose id |> Map.ofList
+                            let on =
+                                inner.On
+                                |> Expression.rewrite (function
+                                    | Col name ->
+                                        bindings
+                                        |> Map.tryFind (name.ToLowerInvariant())
+                                        |> Option.map (fun qualifier -> QualifiedCol(qualifier, name))
+                                    | _ -> None)
+                            Some { inner with On = on })
+                |> fun bound -> if bound |> List.exists Option.isNone then None else Some(bound |> List.choose id)
+
     let flatten (join: Join) =
         match join.Table with
         | FromJoinGroup(first, innerJoins)
@@ -1581,16 +1652,18 @@ let internal flattenInnerJoinedOperands (select: SelectStmt) =
                  && (innerJoins
                      |> List.forall (fun inner ->
                          inner.Kind = InnerJoin
-                         && inner.Using.IsEmpty
-                         && not (Expression.exists (function Col _ -> true | _ -> false) inner.On))) ->
-            let last = innerJoins.Length - 1
-            { join with Table = first; On = Lit(VInt 1L) }
-            :: (innerJoins
-                |> List.mapi (fun index inner ->
-                    if index = last then
-                        { inner with On = BinOp(And, inner.On, join.On) }
-                    else
-                        inner))
+                         && inner.Using.IsEmpty)) ->
+            match bindInnerJoins first innerJoins with
+            | Some bound ->
+                let last = bound.Length - 1
+                { join with Table = first; On = Lit(VInt 1L) }
+                :: (bound
+                    |> List.mapi (fun index inner ->
+                        if index = last then
+                            { inner with On = BinOp(And, inner.On, join.On) }
+                        else
+                            inner))
+            | None -> [ join ]
         | _ -> [ join ]
 
     { select with Joins = select.Joins |> List.collect flatten }
@@ -1622,7 +1695,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
 
         match Fsdb.Parser.parse definition with
         | Ok(Select parsed) ->
-            let select = flattenInnerJoinedOperands parsed
+            let select = flattenInnerJoinedOperands catalog schema parsed
             match select.From with
             | Some source ->
                 let sourceAllowsUpdates = function

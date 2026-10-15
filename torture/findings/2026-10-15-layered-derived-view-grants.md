@@ -21,9 +21,12 @@ the target; FSDB previously marked it non-updatable and returned 1288. Both
 engines now report 1356 for a revoked derived-source read, 1143 for either
 physical join source, and 1356 when derived and physical reads are both
 revoked. The write planner and `information_schema` use the same normalization
-for explicit inner joins without `USING` and with qualified inner `ON`
-references, so their writable classification agrees. The original stored
-SELECT retains its parenthesized join association.
+for explicit inner joins without `USING`. A further native case uses bare `n`
+inside the group while both the group and the earlier target have an `n`
+column. FSDB resolves that name inside the group before flattening; MySQL and
+FSDB both mark the view updatable and update the target. Ambiguous or unknown
+bare names leave the grouped operand intact. The original stored SELECT retains
+its parenthesized join association.
 
 The [native oracle](../scripts/layered-derived-view-oracle.py) starts disposable
 MySQL and FSDB servers, checks the MySQL version, and compares metadata, error

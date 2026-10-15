@@ -743,6 +743,25 @@ let tests =
                   [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ]
                   "grouped denied updates leave the physical rows unchanged"
 
+              for sql in
+                  [ "GRANT SELECT ON fsdb.derived_grant_flags TO derived_grant_inner_owner"
+                    "GRANT SELECT ON fsdb.derived_grant_aux TO derived_grant_inner_owner"
+                    "CREATE TABLE derived_grant_aux_n(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO derived_grant_aux_n VALUES(1,7)"
+                    "GRANT SELECT ON fsdb.derived_grant_aux_n TO derived_grant_inner_owner"
+                    "CREATE DEFINER='derived_grant_inner_owner'@'%' SQL SECURITY DEFINER VIEW bare_grant_inner AS SELECT t.id,t.n,d.flag FROM derived_grant_target t JOIN ((SELECT id,SUM(flag) flag FROM derived_grant_flags GROUP BY id) d JOIN derived_grant_aux_n a ON n=d.flag) ON t.id=d.id"
+                    "GRANT SELECT,UPDATE ON fsdb.bare_grant_inner TO derived_grant_outer_owner"
+                    "CREATE DEFINER='derived_grant_outer_owner'@'%' SQL SECURITY DEFINER VIEW bare_grant_outer AS SELECT id,n AS metric FROM bare_grant_inner" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='bare_grant_outer'")
+                  [ [ Some "YES" ] ] "the bare inner ON binds to the group's source"
+              Expect.equal
+                  (run store "UPDATE bare_grant_outer SET metric=metric+1 WHERE id=1")
+                  (Affected 1UL)
+                  "the bound grouped write reaches the target"
+              Expect.equal (rows store "SELECT n FROM derived_grant_target WHERE id=1") [ [ Some "3" ] ] "the matched target changes"
+
           testCase "layered JSON_TABLE view checks join columns before view projection grants"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

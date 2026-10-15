@@ -96,6 +96,33 @@ def exercise(connection):
     run(connection, "REVOKE SELECT ON probe.flags FROM inner_owner")
     run(connection, "REVOKE SELECT ON probe.aux FROM inner_owner")
     results.append(("grouped revoked flags and aux", outcome(connection, grouped_update)))
+    run(connection, "GRANT SELECT ON probe.flags TO inner_owner")
+    run(connection, "GRANT SELECT ON probe.aux TO inner_owner")
+    run(connection, "CREATE TABLE aux_n(id INT PRIMARY KEY,n INT)")
+    run(connection, "INSERT INTO aux_n VALUES(1,7)")
+    run(connection, "GRANT SELECT ON probe.aux_n TO inner_owner")
+    bare_create = outcome(connection,
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW grouped_bare_inner AS "
+        "SELECT t.id,t.n,d.flag FROM target t JOIN "
+        "((SELECT id,SUM(flag) flag FROM flags GROUP BY id) d "
+        "JOIN aux_n a ON n=d.flag) ON t.id=d.id")
+    results.append(("grouped bare create", bare_create))
+    if bare_create[0] == "ok":
+        run(connection, "GRANT SELECT,UPDATE ON probe.grouped_bare_inner TO outer_owner")
+        run(connection, "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW grouped_bare_outer "
+            "AS SELECT id,n AS metric FROM grouped_bare_inner")
+        results.append(("grouped bare metadata", outcome(connection,
+            "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+            "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='grouped_bare_outer'")))
+        bare_update = "UPDATE grouped_bare_outer SET metric=metric+1 WHERE id=1"
+        results.append(("grouped bare initial", outcome(connection, bare_update)))
+        for table in ("flags", "aux_n", "target"):
+            run(connection, f"REVOKE SELECT ON probe.{table} FROM inner_owner")
+            results.append((f"grouped bare revoked {table}", outcome(connection, bare_update)))
+            run(connection, f"GRANT SELECT ON probe.{table} TO inner_owner")
+        run(connection, "REVOKE SELECT ON probe.flags FROM inner_owner")
+        run(connection, "REVOKE SELECT ON probe.aux_n FROM inner_owner")
+        results.append(("grouped bare revoked flags and aux_n", outcome(connection, bare_update)))
     results.append(("final rows", outcome(connection, "SELECT id,n FROM target ORDER BY id")))
     return results
 
