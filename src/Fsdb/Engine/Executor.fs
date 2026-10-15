@@ -612,7 +612,11 @@ let private materializedRangeLookup
                         | _ -> Value.compare left right
 
                     Some(compare, (function VString _ -> true | _ -> false))
-                | _ -> None
+                | _ ->
+                    match column.Type with
+                    | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob ->
+                        Some(Value.compare, (function VBytes _ -> true | _ -> false))
+                    | _ -> None
 
         domain
         |> Option.bind (fun (compare, compatibleValue) ->
@@ -3077,6 +3081,23 @@ let private likeBytePrefixUpperBound (prefix: byte[]) =
         let successor = Array.sub prefix 0 (last + 1)
         successor[last] <- successor[last] + 1uy
         Some successor
+
+let private byteLikePrefixBounds escape (bytes: byte[]) =
+    let prefix =
+        bytes
+        |> System.Text.Encoding.Latin1.GetString
+        |> likeLiteralPrefix escape
+        |> System.Text.Encoding.Latin1.GetBytes
+    if prefix.Length = 0 then None
+    else
+        Some(
+            Some(VBytes prefix, true),
+            likeBytePrefixUpperBound prefix |> Option.map (fun value -> VBytes value, false))
+
+let rec private hasExplicitCollation expression =
+    match expression with
+    | Expression.CollationOverride _ -> true
+    | _ -> Expression.children expression |> List.exists hasExplicitCollation
 
 let private likePadSpaceLowerBound (prefix: string) =
     let significant = prefix.TrimEnd(' ')
@@ -13860,11 +13881,6 @@ and private plannerRangePredicatesFor
 
 /// Binary text collations and byte-valued keys keep fixed LIKE prefixes in ordered intervals.
 and private likePrefixRangePredicate constantValue textCharset scope (table: Table) tref expression =
-    let rec hasExplicitCollation expression =
-        match expression with
-        | Expression.CollationOverride _ -> true
-        | _ -> Expression.children expression |> List.exists hasExplicitCollation
-
     let rec usesOnlyCollation expected expression =
         match expression with
         | Expression.CollationOverride(value, name) ->
@@ -13915,17 +13931,7 @@ and private likePrefixRangePredicate constantValue textCharset scope (table: Tab
                                     | VString text -> Some(Charset.encode (textCharset patternExpression) text)
                                     | _ -> None)
                             bytes
-                            |> Option.bind (fun bytes ->
-                                let prefix =
-                                    bytes
-                                    |> System.Text.Encoding.Latin1.GetString
-                                    |> likeLiteralPrefix escape
-                                    |> System.Text.Encoding.Latin1.GetBytes
-                                if prefix.Length = 0 then None
-                                else
-                                    Some(
-                                        Some(VBytes prefix, true),
-                                        likeBytePrefixUpperBound prefix |> Option.map (fun value -> VBytes value, false)))
+                            |> Option.bind (byteLikePrefixBounds escape)
                         | _ -> None
                     bounds
                     |> Option.map (fun (lower, upper) ->
@@ -14330,9 +14336,23 @@ and private correlatedBinaryLikePrefixes store source context columns predicate 
                 |> Result.toOption
                 |> Option.bind (fun index ->
                     let column = columns.[index]
-                    match equalityMembershipDomain store column,
+                    match column.Type,
+                          equalityMembershipDomain store column,
                           tryCorrelatedProbeValue source context patternExpr with
-                    | Some(TextMembership stored), Some(VString pattern)
+                    | (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob), _, Some pattern
+                        when (escape |> Option.defaultValue '\\') <= '\u007F'
+                             && not (hasExplicitCollation patternExpr) ->
+                        let bytes =
+                            tryRawBytes pattern
+                            |> Option.orElseWith (fun () ->
+                                match pattern with
+                                | VEncodedString(_, bytes) -> Some bytes
+                                | _ -> None)
+                        bytes
+                        |> Option.bind (byteLikePrefixBounds (escape |> Option.defaultValue '\\'))
+                        |> Option.map (fun (lower, upper) ->
+                            { Column = name; Lower = lower; Upper = upper })
+                    | _, Some(TextMembership stored), Some(VString pattern)
                         when (equalsIgnoreCase stored.Name "utf8mb4_0900_bin"
                               || equalsIgnoreCase stored.Name "utf8mb4_bin")
                              && (comparisonCollation

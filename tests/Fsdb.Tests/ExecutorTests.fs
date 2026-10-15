@@ -12853,6 +12853,46 @@ let tests =
                     | other -> failtestf "expected 0900 binary materialized LIKE counts, got %A" other
                     Expect.isLessThan calls 60 "the 0900 binary prefix restricts residual evaluation"
 
+                testCase "correlated byte LIKE prefixes bound physical and materialized candidates"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE byte_patterns(id INT PRIMARY KEY,p VARBINARY(8))" |> ignore
+                    runDefault store "CREATE TABLE byte_codes(id INT PRIMARY KEY,code VARBINARY(8),KEY ix_code(code))" |> ignore
+                    runDefault store "INSERT INTO byte_patterns VALUES(1,0x61303125),(2,0x61393925),(3,NULL)" |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,'a%03d')" id id)
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO byte_codes VALUES" + values)
+                    |> ignore
+
+                    for source in
+                        [ "byte_codes c"
+                          "(SELECT id,code FROM byte_codes) c"
+                          "(SELECT DISTINCT id,code FROM byte_codes) c" ] do
+                        calls <- 0
+                        match run store registry
+                            ("SELECT p.id,(SELECT COUNT(*) FROM " + source
+                             + " WHERE TOUCH(c.id)=c.id AND c.code LIKE p.p) "
+                             + "FROM byte_patterns p ORDER BY p.id") with
+                        | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "0" ] ]) -> ()
+                        | other -> failtestf "expected MySQL 8.4 byte LIKE counts, got %A" other
+                        Expect.isLessThan calls 80 "the byte prefix narrows candidates before a leading residual"
+
+                        calls <- 0
+                        match run store registry
+                            ("SELECT p.id,(SELECT COUNT(*) FROM " + source
+                             + " WHERE TOUCH(c.id)=c.id AND (c.code LIKE p.p OR c.id=1)) "
+                             + "FROM byte_patterns p ORDER BY p.id") with
+                        | ResultSet(_, [ [ Some "1"; Some "11" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "1" ] ]) -> ()
+                        | other -> failtestf "expected MySQL 8.4 byte LIKE OR counts, got %A" other
+                        Expect.isLessThan calls 120 "complete byte LIKE branches narrow the leading residual"
+
                 testCase "correlated text range OR probes bounded candidates"
                 <| fun _ ->
                     let mutable calls = 0

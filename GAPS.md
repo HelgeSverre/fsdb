@@ -209,6 +209,9 @@ pass-through physical sources](torture/findings/2026-10-15-correlated-physical-l
 now use maintained ordered indexes, including complete OR branches and stable
 NULL patterns. A leading-residual probe distinguishes candidate narrowing
 from short-circuit filtering.
+[Stable byte-valued correlated `LIKE` patterns](torture/findings/2026-10-15-correlated-physical-like-prefix.md#byte-valued-correlated-patterns)
+also use maintained ordered ranges on physical sources and statement-local
+byte-ordered ranges on materialized sources, including complete OR branches.
 Binary-collated [correlated `LIKE` prefixes over stable materialized derived
 sources and CTEs](torture/findings/2026-10-15-correlated-materialized-like-prefix.md)
 now use statement-local ordered ranges for matching
