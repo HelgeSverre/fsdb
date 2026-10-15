@@ -729,6 +729,7 @@ type private StatementMemo =
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
       MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>
       MaterializedCorrelatedIntegerExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
+      MaterializedCorrelatedTextExpressions: Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
@@ -754,6 +755,8 @@ let private freshStatementMemo () =
         Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedIntegerExpressions =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+      MaterializedCorrelatedTextExpressions =
+        Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedRanges =
         Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedNullBuckets =
@@ -15803,6 +15806,75 @@ and private tryMaterializedCorrelatedLookup
                     | _ -> None)
                 |> intersectSharedRows
 
+            // The evaluated text expression is a statement-local key over a
+            // materialized source. Its collation belongs to the comparison,
+            // not necessarily to the source column or the connection.
+            let textExpressionCandidates predicate =
+                let rowContext =
+                    contextFactory store registry dbName
+                        (columnIndexOf columns) (singleQualifier qualifier columns) None
+                let innerScope =
+                    { Qualifiers = Set.singleton (qualifier.ToLowerInvariant())
+                      Columns = columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList }
+                let rowLocal expression =
+                    Expression.exists (function Col _ | QualifiedCol _ -> true | _ -> false) expression
+                    && not (Expression.exists (function
+                        | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _
+                        | MatchAgainst _ | WindowOver _ -> true
+                        | _ -> false) expression)
+                    && isStatementStableExpr store registry dbName innerScope expression
+
+                let candidate indexed bound =
+                    if not (rowLocal indexed) || Option.isSome (tryCorrelatedInnerColumn probeSource indexed) then
+                        None
+                    else
+                        tryCorrelatedProbeValue probeSource context bound
+                        |> Option.bind (fun value ->
+                            match value with
+                            | VString _ | VNull ->
+                                resolveOperandCollation "="
+                                    (collationOperand (rowContext [||]) indexed None)
+                                    (collationOperand context bound (tryColumnDefForExpr context bound))
+                                |> Result.toOption
+                                |> Option.bind (fun collation ->
+                                    let lookups =
+                                        getMemoized memo.MaterializedCorrelatedTextExpressions source (fun () ->
+                                            Dictionary<Expr * string, MaterializedEqualityLookup option>())
+                                    let lookup =
+                                        getMemoized lookups (indexed, collation.Name) (fun () ->
+                                            let rowsByKey = Dictionary<Value, ResizeArray<Value[]>>()
+                                            let mutable compatible = true
+                                            for row in rows do
+                                                if compatible then
+                                                    match evalExpr (rowContext row) indexed with
+                                                    | Ok VNull -> ()
+                                                    | Ok(VString text) ->
+                                                        let key = VString(collation.KeyOf text)
+                                                        match rowsByKey.TryGetValue key with
+                                                        | true, matches -> matches.Add row
+                                                        | _ -> rowsByKey.[key] <- ResizeArray [ row ]
+                                                    | _ -> compatible <- false
+                                            if not compatible then None
+                                            else
+                                                Some(fun values ->
+                                                    match values with
+                                                    | [ VNull ] -> Some []
+                                                    | [ VString text ] ->
+                                                        match rowsByKey.TryGetValue(VString(collation.KeyOf text)) with
+                                                        | true, matches -> Some(List.ofSeq matches)
+                                                        | _ -> Some []
+                                                    | _ -> None))
+                                    lookup |> Option.bind (fun probe -> probe [ value ]))
+                            | _ -> None)
+
+                predicate
+                |> optionalConjuncts
+                |> List.choose (function
+                    | BinOp(Eq, left, right) ->
+                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | _ -> None)
+                |> intersectSharedRows
+
             let equalityCandidates predicate =
                 let equalities = correlatedProbeEqualities probeSource predicate (Some context) |> Option.defaultValue []
 
@@ -15989,6 +16061,7 @@ and private tryMaterializedCorrelatedLookup
                 let branchCandidates branch =
                     [ equalityCandidates (Some branch)
                       integerExpressionCandidates (Some branch)
+                      textExpressionCandidates (Some branch)
                       absoluteCandidates (Some branch)
                       affineCandidates (Some branch)
                       nullCandidates (Some branch)
@@ -16010,6 +16083,7 @@ and private tryMaterializedCorrelatedLookup
 
             [ equalityCandidates whereExpr
               integerExpressionCandidates whereExpr
+              textExpressionCandidates whereExpr
               absoluteCandidates whereExpr
               affineCandidates whereExpr
               nullCandidates whereExpr
