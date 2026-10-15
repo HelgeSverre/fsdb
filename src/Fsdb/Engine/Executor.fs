@@ -14874,7 +14874,7 @@ and private tryProjectedPhysicalRangeRows store registry dbName projection bound
     tryProjectedPhysicalRangeCandidates CostedRead store projection bounds
     |> Option.bind (projectPhysicalLookupRows store registry dbName projection)
 
-and private tryProjectedPhysicalNullCandidates store (projection: PhysicalProjection) probeSource whereExpr =
+and private tryProjectedPhysicalNullCandidates store (projection: PhysicalProjection) probeSource whereExpr outer =
     let names =
         whereExpr
         |> optionalConjuncts
@@ -14886,12 +14886,21 @@ and private tryProjectedPhysicalNullCandidates store (projection: PhysicalProjec
         None
     else
         let allowed = indexHintsFor IndexJoin projection.PhysicalTableRef |> indexAllowedBy
+        let boundEqualities =
+            correlatedProbeEqualities probeSource whereExpr outer
+            |> Option.defaultValue []
+            |> List.choose (fun (name, value) ->
+                tryPhysicalProjectionColumn projection name
+                |> Option.map (fun column -> column.Name, value))
+            |> List.filter (fun (name, value) ->
+                equalityPinsOneStoredKey projection.PhysicalTable name value)
 
         names
         |> List.choose (fun name ->
             tryPhysicalProjectionColumn projection name
             |> Option.bind (fun column ->
-                Storage.tryNullRowIdsForColumn projection.PhysicalTable column.Name allowed))
+                Storage.tryNullRowIdsForColumn
+                    store projection.PhysicalTable column.Name boundEqualities allowed))
         |> function
             | [] -> None
             | first :: rest ->
@@ -14900,13 +14909,13 @@ and private tryProjectedPhysicalNullCandidates store (projection: PhysicalProjec
                 |> Storage.rowsForRowIds projection.PhysicalTable
                 |> Some
 
-and private tryProjectedPhysicalCorrelatedNullLookup store registry dbName source whereExpr =
+and private tryProjectedPhysicalCorrelatedNullLookup store registry dbName source whereExpr outer =
     FromItem.tryQualifier source
     |> Option.bind (fun qualifier ->
         tryPhysicalProjection store registry dbName source
         |> Option.bind (fun projection ->
             tryProjectedPhysicalNullCandidates
-                store projection (correlatedProbeSource qualifier projection.OutputColumns) whereExpr
+                store projection (correlatedProbeSource qualifier projection.OutputColumns) whereExpr outer
             |> Option.bind (projectPhysicalLookupRows store registry dbName projection)))
 
 and private tryProjectedPhysicalCorrelatedEqualityLookup
@@ -14943,7 +14952,7 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     correlatedProbeEqualities probeSource (Some branch) outer
                     |> Option.bind (tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection)
 
-                let nulls = tryProjectedPhysicalNullCandidates store projection probeSource (Some branch)
+                let nulls = tryProjectedPhysicalNullCandidates store projection probeSource (Some branch) outer
 
                 let membership =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
@@ -15019,7 +15028,7 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
             match equality with
             | Some equalRows when equalRows.Length <= 1 -> None
             | _ ->
-                let nulls = tryProjectedPhysicalNullCandidates store projection probeSource whereExpr
+                let nulls = tryProjectedPhysicalNullCandidates store projection probeSource whereExpr outer
                 let membership =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
                         outer
@@ -15343,7 +15352,7 @@ and private tryCorrelatedSourceLookup
 
     let nullLookup () =
         if hasNullPredicate then
-            tryProjectedPhysicalCorrelatedNullLookup store registry dbName source whereExpr
+            tryProjectedPhysicalCorrelatedNullLookup store registry dbName source whereExpr outer
         else
             None
 

@@ -88,6 +88,16 @@ def main():
                             + " WHERE d.k IS NULL AND d.a=o.a) FROM outer_rows o ORDER BY o.id"
                         )
                         assert cursor.fetchall() == ((1, 5), (2, 5), (3, 0))
+                    cursor.execute(
+                        "CREATE TABLE later_null_inner(id INT PRIMARY KEY,a INT,k INT,KEY ix_ak(a,k))"
+                    )
+                    cursor.execute("INSERT INTO later_null_inner VALUES " + values)
+                    for hint in ["", "IGNORE INDEX (ix_ak)"]:
+                        cursor.execute(
+                            "SELECT o.id,(SELECT COUNT(*) FROM later_null_inner d " + hint
+                            + " WHERE d.a=o.a AND d.k IS NULL) FROM outer_rows o ORDER BY o.id"
+                        )
+                        assert cursor.fetchall() == ((1, 5), (2, 5), (3, 0))
                 print(f"MySQL {version}: physical, materialized, unique, and composite NULL counts (5, 5, 0); OR counts (11, 11, 11)")
             finally:
                 if connection:

@@ -5648,8 +5648,14 @@ let private orderedPrefixBounds (entries: ImmutableSortedSet<SecondaryOrderEntry
         insertionIndex FirstEqual, insertionIndex AfterEqual
 
 /// Equality probes use SQL's `NULL <> NULL` rule. `IS NULL` instead reads a
-/// visible key's NULL bucket, including the leading slice of an ordered key.
-let internal tryNullRowIdsForColumn (table: Table) (columnName: string) allowed : Set<RowId> option =
+/// visible key's NULL bucket after any exact bound leading key parts.
+let internal tryNullRowIdsForColumn
+    (store: Store)
+    (table: Table)
+    (columnName: string)
+    (equalities: (string * Value) list)
+    allowed
+    : Set<RowId> option =
     let singleColumnBucket =
         equalityIndexesForColumns table [ columnName ]
         |> List.tryFind (fun index -> not index.Unique && allowed index.Name)
@@ -5667,19 +5673,40 @@ let internal tryNullRowIdsForColumn (table: Table) (columnName: string) allowed 
         resolveColumn table.Columns columnName
         |> Result.toOption
         |> Option.bind (fun columnIndex ->
+            let boundValues =
+                equalities
+                |> List.choose (fun (name, value) ->
+                    resolveColumn table.Columns name
+                    |> Result.toOption
+                    |> Option.map (fun index -> index, value))
+                |> Map.ofList
+
             rangeKeyGroups table
             |> visibleGroups
-            |> List.tryFind (fun group ->
-                List.tryHead group.Indices = Some columnIndex
-                && allowed group.Name
-                && Map.containsKey group.Name table.SecondaryOrder)
-            |> Option.bind (fun group ->
-                table.SecondaryOrder
-                |> Map.tryFind group.Name
-                |> Option.map (fun entries ->
-                    let first, afterLast = orderedPrefixBounds entries [ VNull ]
-                    Seq.init (afterLast - first) (fun offset -> entries.[first + offset].RowId)
-                    |> Set.ofSeq))))
+            |> List.choose (fun group ->
+                group.Indices
+                |> List.tryFindIndex ((=) columnIndex)
+                |> Option.bind (fun nullPosition ->
+                    group.Indices
+                    |> List.take nullPosition
+                    |> List.map (fun index ->
+                        boundValues
+                        |> Map.tryFind index
+                        |> Option.bind (exactProbeValue store table index)
+                        |> Option.map (projectIndexValue group.Name None table.Columns.[index] None None))
+                    |> tryAllSome
+                    |> Option.map (fun prefix -> nullPosition, group.Name, prefix)))
+            |> List.sortByDescending (fun (position, _, _) -> position)
+            |> List.tryPick (fun (_, name, prefix) ->
+                if not (allowed name) then
+                    None
+                else
+                    table.SecondaryOrder
+                    |> Map.tryFind name
+                    |> Option.map (fun entries ->
+                        let first, afterLast = orderedPrefixBounds entries (prefix @ [ VNull ])
+                        Seq.init (afterLast - first) (fun offset -> entries.[first + offset].RowId)
+                        |> Set.ofSeq))))
 
 type EqualityIndexMatchLookup =
     { CandidateCount: int

@@ -817,6 +817,29 @@ let tests =
               | other -> failtestf "expected the fully ignored NULL counts, got %A" other
               Expect.isGreaterThan touches 1000 "ignoring both NULL-capable keys restores the scan"
 
+              runDefault store "CREATE TABLE later_null_inner(id INT PRIMARY KEY,a INT,k INT,KEY ix_ak(a,k))" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id ->
+                  sprintf "(%d,%d,%s)" id (if id <= 500 then 1 else 2) (if id % 100 = 0 then "NULL" else string id))
+              |> String.concat ","
+              |> sprintf "INSERT INTO later_null_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for hint in [ ""; "IGNORE INDEX (ix_ak)" ] do
+                  touches <- 0
+                  let sql =
+                      "SELECT o.id,(SELECT COUNT(*) FROM later_null_inner d " + hint
+                      + " WHERE TOUCH(d.id)=d.id AND d.a=o.a AND d.k IS NULL)"
+                      + " FROM physical_null_outer o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "1"; Some "5" ]; [ Some "2"; Some "5" ]; [ Some "3"; Some "0" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's later composite NULL counts, got %A" other
+                  if hint = "" then
+                      Expect.isLessThan touches 30 "the bound prefix narrows to its NULL slice"
+                  else
+                      Expect.isGreaterThan touches 1000 "ignoring the composite key restores the scan"
+
           testCase "materialized correlated IN probes avoid unrelated rows"
           <| fun _ ->
               let mutable touches = 0
