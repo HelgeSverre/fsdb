@@ -1459,6 +1459,10 @@ found process-wide contention in parsed-statement admission for unique literal
 SQL texts. Fixed-size atomic admission slots removed that hot spot in the
 audited load; full SQL and parser options still key the parsed statements.
 Durable write throughput and worker scaling remain below MySQL.
+A [current-head durability-matched checkpoint](benchmarks/results/2026-10-15-current-head-wire-embedded-write-check.md)
+still measures about 0.27× MySQL throughput with eight wire writers; the same
+WAL workload reaches about 2.58× the FSDB wire rate through the embedded API.
+That comparison does not isolate a server function or scheduling lock.
 
 An [audited correlated binary LIKE prefix](torture/findings/2026-10-15-correlated-like-prefix-audit.md)
 already uses the indexed range path for actual rows. A NULL outer pattern now
