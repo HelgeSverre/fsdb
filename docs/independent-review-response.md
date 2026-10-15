@@ -54,6 +54,12 @@ WAL completion from about 49 to 274 µs. Parsing and stored-function lookup
 were much smaller. These are concurrent wall times, not CPU costs or proof of
 a specific lock. The temporary probes were removed and the normal Release
 binary was rebuilt.
+The [publication and queue-role follow-up](../benchmarks/results/2026-10-15-publication-and-queue-role-profile.md)
+found only about 12 µs of publication-slot wait per eight-writer insert, while
+the WAL acknowledgement action averaged about 261 µs. Group-commit leaders
+spent about 502 µs continuing to drain other batches after their own completion
+signal. This identifies a latency mechanism, but moving drain ownership has
+not been designed or shown to improve throughput. Temporary probes were removed.
 
 For joined mutations, `QueryHandler` parses and checks the request;
 `Executor.runMutationJoin` resolves sources and produces joined rows;

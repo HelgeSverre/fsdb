@@ -1439,6 +1439,12 @@ implementation effort:
    An [async MySqlConnector control](benchmarks/results/2026-10-15-async-wire-client-control.md)
    kept FSDB near 12,000 eight-writer inserts/sec while lowering the MySQL
    control; changing the client call path did not close FSDB's wire gap.
+   A [publication and queue-role profile](benchmarks/results/2026-10-15-publication-and-queue-role-profile.md)
+   measured about 12 µs waiting for the database publication slot versus 261 µs
+   in WAL acknowledgement at eight writers. Group-commit leaders returned about
+   502 µs after their own completion signal because they continued draining
+   later batches. The latter is a concrete latency cost, but no safe handoff
+   implementation or repeated throughput improvement has been established.
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition
