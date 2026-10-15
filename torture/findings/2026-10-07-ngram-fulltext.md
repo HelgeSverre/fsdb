@@ -49,9 +49,9 @@ a disposable database, default token size 2, and enabled default stopwords.
 It asserts ordered results, parser DDL errors, variable scope and labels,
 mutation behavior, and field boundaries for both parsers.
 
-The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 168
+The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 279
 natural-language, boolean, and query-expansion searches at each startup size
-from 1 through 10. All 1,680 query results agree with native MySQL 8.4.11
+from 1 through 10. All 2,790 query results agree with native MySQL 8.4.11
 on the audited mixed Chinese, Japanese, Korean, ASCII, punctuation, emoji,
 supplementary-character, combining-mark, zero-width-joiner, variation-selector,
 nonbreaking-space, newline, Hangul-jamo, and NULL corpus. It checks matching row IDs, query
@@ -87,6 +87,17 @@ the existing repeated-key rule at every ngram size. Focused regressions pin the
 MySQL row sets and scores; the expanded multi-column oracle has zero differences
 at token sizes 1–10. This remains evidence for the audited corpus, not arbitrary
 CJK text or MeCab behavior.
+
+An additional corpus probes compatibility ideographs, kana digraphs, decomposed
+Hangul, and Unicode number forms. At ngram size 1, Boolean searches for the
+circled digit `①` and Roman numeral `Ⅳ` initially returned no rows in FSDB:
+the Boolean word reader discarded Unicode numeric categories beyond decimal
+digits. MySQL matched both, including quoted, required, and prefix spellings.
+The word reader now recognizes Unicode numbers, preserving those tokens in
+Boolean ngram phrases too. Native MySQL also indexes three-character ordinary
+word tokens made from these numerals and ignores a one-character word below
+the default minimum. Focused regressions cover both tokenizers. The expanded
+oracle agrees on row membership and relevance across all ten ngram sizes.
 
 The `ngram-fulltext` differential contract covers natural, boolean, and
 query-expansion searches through text and prepared protocols, Unicode and

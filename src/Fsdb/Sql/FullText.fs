@@ -80,7 +80,8 @@ let private stopwords = Set.ofList defaultStopwords
 let private idfFloor = 4.3427276e-5
 
 let private isWordChar (c: char) =
-    Char.IsLetterOrDigit c
+    Char.IsLetter c
+    || Char.IsNumber c
     || c = '_'
     || (match Globalization.CharUnicodeInfo.GetUnicodeCategory c with
         | Globalization.UnicodeCategory.NonSpacingMark

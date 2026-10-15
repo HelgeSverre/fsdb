@@ -170,6 +170,26 @@ let tests =
                   Expect.equal (booleanScores changed "ORCH*" |> Map.keys |> Seq.toList) [ 1 ] "mutation removes normalized prefixes"
                   Expect.equal (naturalScores changed "Orchard" |> Map.keys |> Seq.toList) [ 1 ] "mutation removes normalized exact postings"
 
+          testCase "boolean ngram terms retain Unicode number characters"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }
+              let index =
+                  buildIndexWithDocumentSettings rules defaultCollation
+                      [ 1, rules, [ "①一" ]; 2, rules, [ "Ⅳ四" ]; 3, rules, [ "zz" ] ]
+              for query in [ "①"; "\"①\""; "+①"; "①*" ] do
+                  Expect.equal (booleanScores index query |> Map.keys |> Seq.toList) [ 1 ] "circled digit remains a Boolean term"
+              for query in [ "Ⅳ"; "\"Ⅳ\""; "+Ⅳ"; "Ⅳ*" ] do
+                  Expect.equal (booleanScores index query |> Map.keys |> Seq.toList) [ 2 ] "Roman numeral remains a Boolean term"
+              for query, id in [ "①一", 1; "\"①一\"", 1; "Ⅳ四", 2; "\"Ⅳ四\"", 2 ] do
+                  Expect.equal (booleanScores index query |> Map.keys |> Seq.toList) [ id ] "adjacent ngrams retain both positions"
+
+          testCase "word full-text indexes Unicode number tokens at the configured length"
+          <| fun _ ->
+              let index = buildIndexWith defaultCollation [ 1, "①①①"; 2, "ⅣⅣⅣ"; 3, "ordinary ordinary ordinary" ]
+              Expect.equal (booleanScores index "①①①" |> Map.keys |> Seq.toList) [ 1 ] "circled digits form an indexed word"
+              Expect.equal (booleanScores index "ⅣⅣⅣ" |> Map.keys |> Seq.toList) [ 2 ] "Roman numerals form an indexed word"
+              Expect.isEmpty (booleanScores index "①") "the ordinary word-length minimum still applies"
+
           testCase "case-sensitive nonbinary full-text retains accent sensitivity"
           <| fun _ ->
               let collation = tryFind "utf8mb4_0900_as_cs" |> Option.get
