@@ -1542,6 +1542,7 @@ let internal tryLeadingReadOnlyWritableTarget (source: FromItem) (joins: Join li
             |> List.takeWhile (fun join ->
                 match join.Table with
                 | FromSubquery _
+                | FromLateral _
                 | FromJsonTable _ -> true
                 | _ -> false)
         let count = leadingJoins.Length

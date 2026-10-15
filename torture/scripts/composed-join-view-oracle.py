@@ -15,6 +15,8 @@ SHAPES = {
     "derived JSON_TABLE target": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN JSON_TABLE(JSON_ARRAY(d1.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d1.id JOIN a ON a.id=j.x",
     "grouped dependent JSON_TABLE": "SELECT a.id,a.n,d1.flag,j.x FROM ((SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN JSON_TABLE(JSON_ARRAY(d1.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d1.id) JOIN a ON a.id=j.x",
     "middle lateral": "SELECT a.id,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN LATERAL (SELECT SUM(aux) aux FROM c WHERE c.id=a.id) d2 ON TRUE",
+    "aggregate lateral target": "SELECT a.id,a.n,d1.flag,e.extra FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN LATERAL (SELECT d1.flag+1 extra) e ON TRUE JOIN a ON a.id=d1.id",
+    "aggregate lateral chain target": "SELECT a.id,a.n,d1.flag,e.extra,f.next_extra FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN LATERAL (SELECT d1.flag+1 extra) e ON TRUE JOIN LATERAL (SELECT e.extra+1 next_extra) f ON TRUE JOIN a ON a.id=d1.id",
     "grouped read-only pair": "SELECT a.id,a.n,d1.flag,d2.aux FROM ((SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=d1.id) JOIN a ON a.id=d1.id",
     "grouped target pair": "SELECT a.id,a.n,d1.flag,d2.aux FROM ((SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id) JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=a.id",
     "target JSON_TABLE aggregate": "SELECT a.id,a.n,j.x,d1.flag FROM a JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id JOIN (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 ON d1.id=j.x",

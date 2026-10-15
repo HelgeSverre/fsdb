@@ -52,9 +52,29 @@ JOIN a ON a.id=j.x
 The view remains updatable and changes only the matched target row. A checked
 variant rejects an invalid update with 1369; joined-view INSERT and DELETE
 still return 1471 and 1395. The focused FSDB regression pins those outcomes
-and the unchanged target after rejected writes. The maintained oracle now
-covers twelve composed arrangements, but not arbitrary grouped dependency
-graphs or layered authorization through this grouped source.
+and the unchanged target after rejected writes. Arbitrary grouped dependency
+graphs and layered authorization through this grouped source remain open.
+
+## Aggregate source followed by dependent lateral sources
+
+Native MySQL 8.4.11 marks a join view as updatable when an aggregate-derived
+source feeds one or two dependent `LATERAL` projections before the physical
+write target. Both arrangements update the one matched base row once; an
+unmatched target remains unchanged. The checked variant rejects an invalid
+update with 1369 and leaves the base row intact. Joined-view INSERT and
+DELETE return 1471 and 1395. The maintained
+[oracle](../scripts/composed-join-view-oracle.py) now passes 15 composed
+shapes, including these two.
+
+FSDB previously marked the first arrangement `IS_UPDATABLE=NO` and returned
+1288 for UPDATE. Its shared source-order classifier counted derived and
+`JSON_TABLE` sources before a writable target but omitted `LATERAL` sources.
+The classifier now includes a leading lateral source; write rewriting retains
+the original dependency order after moving the physical target to the write
+anchor. The focused regression covers both chain lengths, metadata, successful
+and unmatched updates, CHECK OPTION rejection, INSERT/DELETE errors, and final
+base rows. This establishes the audited inner-join chains, not arbitrary
+lateral reordering or distinct definer layers.
 
 This audit covers the stated inner-join shapes, not arbitrary join graphs,
 distinct security identities, or authorization through layered views.

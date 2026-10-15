@@ -765,7 +765,10 @@ including when the dependent read-only pair forms a parenthesized join operand.
 also update the physical component and enforce invoker read grants on the
 lateral source. [Audited lateral sources before the physical target](torture/findings/2026-10-15-lateral-before-target-view.md)
 also preserve writable metadata and target identity through a two-source
-dependency chain. [JSON_TABLE joined views](torture/findings/2026-10-15-json-table-joined-view.md)
+dependency chain. [Aggregate-derived sources followed by one or two dependent
+`LATERAL` projections](torture/findings/2026-10-15-composed-join-view-writes.md#aggregate-source-followed-by-dependent-lateral-sources)
+also retain writable metadata, target identity, and CHECK OPTION behavior
+when the physical target is last. [JSON_TABLE joined views](torture/findings/2026-10-15-json-table-joined-view.md)
 also update a physical component when the table function follows or precedes
 it, including dependent table-function chains; JSON_TABLE columns remain
 read-only. [Two dependent `JSON_TABLE` sources under distinct definer layers](torture/findings/2026-10-15-layered-json-chain-view-grants.md)

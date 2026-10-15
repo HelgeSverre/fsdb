@@ -1656,6 +1656,47 @@ let tests =
                   (rows store "SELECT id,n FROM derived_json_target ORDER BY id")
                   [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ] "rejected grouped writes leave the target unchanged"
 
+          testCase "aggregate-derived lateral chain keeps a later view target writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE lateral_aggregate_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE lateral_aggregate_source(id INT,flag INT)"
+                    "INSERT INTO lateral_aggregate_target VALUES(1,0),(2,0)"
+                    "INSERT INTO lateral_aggregate_source VALUES(1,7),(1,8)"
+                    "CREATE VIEW lateral_aggregate_write AS SELECT a.id,a.n,d.flag,e.extra FROM (SELECT id,SUM(flag) flag FROM lateral_aggregate_source GROUP BY id) d JOIN LATERAL (SELECT d.flag+1 extra) e ON TRUE JOIN lateral_aggregate_target a ON a.id=d.id" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='lateral_aggregate_write'")
+                  [ [ Some "YES" ] ] "MySQL 8.4 marks the later physical target writable"
+              Expect.equal (run store "UPDATE lateral_aggregate_write SET n=n+1 WHERE id=1") (Affected 1UL) "the matched row changes"
+              Expect.equal (run store "UPDATE lateral_aggregate_write SET n=n+1 WHERE id=2") (Affected 0UL) "the missing aggregate row filters the write"
+              Expect.equal
+                  (rows store "SELECT id,n FROM lateral_aggregate_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ] "the unmatched target remains unchanged"
+              match run store "INSERT INTO lateral_aggregate_write(id,n) VALUES(3,0)" with
+              | Err(1471, _) -> ()
+              | other -> failtestf "expected MySQL's non-insertable join-view error, got %A" other
+              match run store "DELETE FROM lateral_aggregate_write WHERE id=1" with
+              | Err(1395, _) -> ()
+              | other -> failtestf "expected MySQL's joined-view DELETE error, got %A" other
+              expectOk
+                  (run store "CREATE VIEW lateral_aggregate_checked AS SELECT a.id,a.n,d.flag,e.extra FROM (SELECT id,SUM(flag) flag FROM lateral_aggregate_source GROUP BY id) d JOIN LATERAL (SELECT d.flag+1 extra) e ON TRUE JOIN lateral_aggregate_target a ON a.id=d.id WHERE a.n>=0 WITH CASCADED CHECK OPTION")
+                  "create checked lateral chain"
+              match run store "UPDATE lateral_aggregate_checked SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM lateral_aggregate_target WHERE id=1") [ [ Some "1" ] ] "rejected update leaves target unchanged"
+
+              expectOk
+                  (run store "CREATE VIEW lateral_aggregate_chain AS SELECT a.id,a.n,d.flag,e.extra,f.next_extra FROM (SELECT id,SUM(flag) flag FROM lateral_aggregate_source GROUP BY id) d JOIN LATERAL (SELECT d.flag+1 extra) e ON TRUE JOIN LATERAL (SELECT e.extra+1 next_extra) f ON TRUE JOIN lateral_aggregate_target a ON a.id=d.id")
+                  "create two-step lateral chain"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='lateral_aggregate_chain'")
+                  [ [ Some "YES" ] ] "the second dependent source preserves writable metadata"
+              Expect.equal (run store "UPDATE lateral_aggregate_chain SET n=n+1 WHERE id=1") (Affected 1UL) "the second dependent source reaches the target"
+              Expect.equal (rows store "SELECT n FROM lateral_aggregate_target WHERE id=1") [ [ Some "2" ] ] "the later target changes once"
+
           testCase "checked merged joins keep a physical view target writable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
