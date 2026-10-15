@@ -14716,94 +14716,112 @@ and private compatibleCorrelatedMembershipBound context (column: ColumnDef) doma
     | _, TextMembership _ -> false
     | _ -> equalityMembershipKey domain value |> Option.isSome
 
+and private tryProjectedPhysicalCorrelatedInRowIds store (projection: PhysicalProjection) qualifier whereExpr context =
+    let probeSource = correlatedProbeSource qualifier projection.OutputColumns
+    let table = projection.PhysicalTable
+    let joinHints = indexHintsFor IndexJoin projection.PhysicalTableRef
+    let allowed = indexAllowedBy joinHints
+    let tryIndex names =
+        names
+        |> List.map (tryPhysicalProjectionColumn projection)
+        |> tryAllSome
+        |> Option.bind (fun physicalColumns ->
+            let sourceNames = physicalColumns |> List.map _.Name
+            Storage.equalityIndexesForColumns table sourceNames
+            |> List.tryFind (fun index -> allowed index.Name)
+            |> Option.map (fun index -> sourceNames, index))
+    let indexedColumn expression =
+        tryCorrelatedInnerColumn probeSource expression
+        |> Option.map (fun name -> name, None)
+    let boundValue (name, _) expression =
+        let value =
+            match expression with
+            | LiteralValue value -> Some value
+            | _ -> tryCorrelatedOuterValue probeSource context expression
+
+        value
+        |> Option.bind (fun value ->
+            resolveColumn projection.OutputColumns name
+            |> Result.toOption
+            |> Option.bind (fun index ->
+                let outputColumn = projection.OutputColumns.[index]
+                tryPhysicalProjectionColumn projection name
+                |> Option.bind (equalityMembershipDomain store)
+                |> Option.filter (fun domain ->
+                    compatibleCorrelatedMembershipBound context outputColumn domain expression value)
+                |> Option.map (fun _ -> value)))
+
+    let candidateIds (probe: IndexInProbe) =
+        let names = probe.Columns |> List.map fst
+        tryIndex names
+        |> Option.bind (fun (sourceNames, index) ->
+            probe.Values
+            |> List.filter (List.contains VNull >> not)
+            |> List.distinct
+            |> List.map (fun tuple ->
+                orderedEqualityValues table index sourceNames tuple
+                |> Option.bind (Storage.tryEqualityRowIdsForIndex store table index))
+            |> tryAllSome
+            |> Option.map Set.unionMany)
+
+    inProbesWithEligible indexedColumn (List.map fst >> tryIndex >> Option.isSome) boundValue whereExpr
+    |> List.choose candidateIds
+    |> function
+        | [] -> None
+        | first :: rest -> rest |> List.fold Set.intersect first |> Some
+
 and private tryProjectedPhysicalCorrelatedInLookup store registry dbName source whereExpr outer =
     match FromItem.tryQualifier source, outer with
     | Some qualifier, Some context ->
         tryPhysicalProjection store registry dbName source
         |> Option.filter (fun projection -> storedRowsMatchReadRows store projection.PhysicalTable.Columns)
         |> Option.bind (fun projection ->
-            let probeSource = correlatedProbeSource qualifier projection.OutputColumns
-            let table = projection.PhysicalTable
-            let joinHints = indexHintsFor IndexJoin projection.PhysicalTableRef
-            let allowed = indexAllowedBy joinHints
-            let forced = joinHints |> List.exists (fun hint -> hint.Kind = ForceIndex)
-            let tryIndex names =
-                names
-                |> List.map (tryPhysicalProjectionColumn projection)
-                |> tryAllSome
-                |> Option.bind (fun physicalColumns ->
-                    let sourceNames = physicalColumns |> List.map _.Name
-                    Storage.equalityIndexesForColumns table sourceNames
-                    |> List.tryFind (fun index -> allowed index.Name)
-                    |> Option.map (fun index -> sourceNames, index))
-            let indexedColumn expression =
-                tryCorrelatedInnerColumn probeSource expression
-                |> Option.map (fun name -> name, None)
-            let boundValue (name, _) expression =
-                let value =
-                    match expression with
-                    | LiteralValue value -> Some value
-                    | _ -> tryCorrelatedOuterValue probeSource context expression
+            let forced =
+                indexHintsFor IndexJoin projection.PhysicalTableRef
+                |> List.exists (fun hint -> hint.Kind = ForceIndex)
 
-                value
-                |> Option.bind (fun value ->
-                    resolveColumn projection.OutputColumns name
-                    |> Result.toOption
-                    |> Option.bind (fun index ->
-                        let outputColumn = projection.OutputColumns.[index]
-                        tryPhysicalProjectionColumn projection name
-                        |> Option.bind (equalityMembershipDomain store)
-                        |> Option.filter (fun domain ->
-                            compatibleCorrelatedMembershipBound context outputColumn domain expression value)
-                        |> Option.map (fun _ -> value)))
-
-            let candidateIds (probe: IndexInProbe) =
-                let names = probe.Columns |> List.map fst
-                tryIndex names
-                |> Option.bind (fun (sourceNames, index) ->
-                    probe.Values
-                    |> List.filter (List.contains VNull >> not)
-                    |> List.distinct
-                    |> List.map (fun tuple ->
-                        orderedEqualityValues table index sourceNames tuple
-                        |> Option.bind (Storage.tryEqualityRowIdsForIndex store table index))
-                    |> tryAllSome
-                    |> Option.map Set.unionMany)
-
-            inProbesWithEligible indexedColumn (List.map fst >> tryIndex >> Option.isSome) boundValue whereExpr
-            |> List.choose candidateIds
-            |> function
-                | [] -> None
-                | first :: rest ->
-                    let rowIds = rest |> List.fold Set.intersect first
-                    if forced || isUsefulEqualityCardinality table.RowsArray.Count rowIds.Count then
-                        Storage.rowsForRowIds table rowIds
-                        |> projectPhysicalLookupRows store registry dbName projection
-                    else
-                        None)
+            tryProjectedPhysicalCorrelatedInRowIds store projection qualifier whereExpr context
+            |> Option.bind (fun rowIds ->
+                if forced || isUsefulEqualityCardinality projection.PhysicalTable.RowsArray.Count rowIds.Count then
+                    Storage.rowsForRowIds projection.PhysicalTable rowIds
+                    |> projectPhysicalLookupRows store registry dbName projection
+                else
+                    None))
     | _ -> None
 
 and private tryProjectedPhysicalRangeCandidates
+    policy
     store
     (projection: PhysicalProjection)
     (bounds: RangeLookupBounds<string, Value>)
     =
     tryPhysicalProjectionColumn projection bounds.Column
     |> Option.bind (fun sourceColumn ->
+        let allowed =
+            indexHintsFor IndexJoin projection.PhysicalTableRef
+            |> indexAllowedBy
         let isNullBound = function
             | Some(VNull, _) -> true
+            | _ -> false
+
+        let safeBroadNumericRange =
+            let values = [ bounds.Lower; bounds.Upper ] |> List.choose id |> List.map fst
+            match equalityMembershipDomain store sourceColumn with
+            | Some SignedIntegerMembership -> values |> List.forall (function VInt _ -> true | _ -> false)
+            | Some DecimalMembership -> values |> List.forall (function VDecimal _ -> true | _ -> false)
             | _ -> false
 
         if isNullBound bounds.Lower || isNullBound bounds.Upper then
             Some []
         else
-            Storage.trySecondaryRangeLookupInTable store projection.PhysicalTable sourceColumn.Name bounds.Lower bounds.Upper
+            Storage.trySecondaryRangeLookupInTableWith allowed store projection.PhysicalTable sourceColumn.Name bounds.Lower bounds.Upper
             |> Option.filter (fun lookup ->
-                QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange)
+                (policy = CandidateNarrowing && safeBroadNumericRange)
+                || QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange)
             |> Option.map (fun lookup -> lookup.RangeRows.Value))
 
 and private tryProjectedPhysicalRangeRows store registry dbName projection bounds =
-    tryProjectedPhysicalRangeCandidates store projection bounds
+    tryProjectedPhysicalRangeCandidates CostedRead store projection bounds
     |> Option.bind (projectPhysicalLookupRows store registry dbName projection)
 
 and private tryProjectedPhysicalCorrelatedEqualityLookup
@@ -14842,7 +14860,7 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
 
                 let ranges =
                     correlatedRangeBounds probeSource (Some branch) outer
-                    |> List.choose (tryProjectedPhysicalRangeCandidates store projection)
+                    |> List.choose (tryProjectedPhysicalRangeCandidates CostedRead store projection)
 
                 let functional =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
@@ -14904,9 +14922,20 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
             match equality with
             | Some equalRows when equalRows.Length <= 1 -> None
             | _ ->
+                let membership =
+                    if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
+                        outer
+                        |> Option.bind (fun context ->
+                            tryProjectedPhysicalCorrelatedInRowIds store projection qualifier whereExpr context)
+                        |> Option.map (Storage.rowsForRowIds projection.PhysicalTable)
+                        |> Option.toList
+                    else
+                        []
+
+                let rangePolicy = if membership.IsEmpty then CostedRead else CandidateNarrowing
                 let ranges =
                     correlatedRangeBounds probeSource whereExpr outer
-                    |> List.choose (tryProjectedPhysicalRangeCandidates store projection)
+                    |> List.choose (tryProjectedPhysicalRangeCandidates rangePolicy store projection)
 
                 let functional =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
@@ -14919,7 +14948,7 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
                     else
                         []
 
-                let candidates = (equality |> Option.toList) @ ranges @ functional
+                let candidates = (equality |> Option.toList) @ ranges @ membership @ functional
 
                 match candidates with
                 | _ :: _ :: _ ->
@@ -15173,6 +15202,11 @@ and private tryCorrelatedSourceLookup
             | _ -> false)
         |> List.length > 1
 
+    let hasMembershipPredicate =
+        whereExpr
+        |> optionalConjuncts
+        |> List.exists (function In _ -> true | _ -> false)
+
     let physicalIntersection () =
         if hasRangePredicate || hasFunctionalEqualityPredicate then
             tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
@@ -15203,7 +15237,7 @@ and private tryCorrelatedSourceLookup
     let chooseWithMembership (selected: (ColumnDef list * Value[] list) option) =
         match selected with
         | Some(_, rows) when rows.Length <= 1 -> selected
-        | _ when whereExpr |> optionalConjuncts |> List.exists (function In _ -> true | _ -> false) ->
+        | _ when hasMembershipPredicate ->
             [ selected
               tryProjectedPhysicalCorrelatedInLookup store registry dbName source whereExpr outer ]
             |> fewestRows
@@ -15240,7 +15274,7 @@ and private tryCorrelatedSourceLookup
              (match direct with
               | Some(_, rows) when rows.Length <= 1 -> None
               | Some _ -> physicalIntersection ()
-              | None when hasMultipleConjunctiveRanges -> physicalIntersection ()
+              | None when hasMultipleConjunctiveRanges || (hasMembershipPredicate && hasRangePredicate) -> physicalIntersection ()
               | None -> None)
              |> Option.orElseWith (fun () -> chooseWithRanges true direct)
          else

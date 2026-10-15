@@ -207,6 +207,9 @@ equality and range candidates by stored row identity before projection and
 residual evaluation. Both source shapes can likewise intersect multiple
 correlated range candidates, [mixed ordinary/functional equality candidates](torture/findings/2026-10-14-correlated-physical-range-choice.md),
 and [multiple functional equality or range candidates](torture/findings/2026-10-14-correlated-functional-or-union.md).
+They also intersect [correlated physical `IN` and range candidates](torture/findings/2026-10-15-correlated-physical-in-range-intersection.md)
+by stored row identity before residual evaluation, including broad numeric
+ranges that are useful only in combination with a membership probe.
 The intersection requires physical reads to preserve stored row identity;
 other projected access families still choose one slice. Complete [functional and mixed plain/functional equality and text-range OR branches](torture/findings/2026-10-14-correlated-functional-or-union.md)
 over direct and pass-through physical sources intersect compatible candidates

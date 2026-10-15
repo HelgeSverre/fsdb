@@ -888,6 +888,48 @@ let tests =
               | other -> failtestf "expected MySQL's two indexed matches, got %A" other
               Expect.isLessThan touches 20 "both maintained keys narrow before residual evaluation"
 
+          testCase "physical correlated IN and range probes intersect indexed row identities"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE mixed_bounds(a1 INT,a2 INT,lo INT,hi INT)" |> ignore
+              runDefault store "CREATE TABLE mixed_rows(id INT PRIMARY KEY,a INT,KEY ix_a(a))" |> ignore
+              runDefault store "INSERT INTO mixed_bounds VALUES(1,999,499,1000)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,%d)" id (if id <= 500 then 1 else id + 1000))
+              |> String.concat ","
+              |> sprintf "INSERT INTO mixed_rows VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for prefix, source in
+                  [ "", "mixed_rows d"
+                    "", "(SELECT id,a FROM mixed_rows) d"
+                    "WITH passed AS (SELECT id,a FROM mixed_rows) ", "passed d" ] do
+                  touches <- 0
+                  let sql =
+                      prefix + "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.a IN(o.a1,o.a2)"
+                      + " AND d.id BETWEEN o.lo AND o.hi) FROM mixed_bounds o"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's two mixed indexed matches, got %A" other
+                  Expect.isLessThan touches 20 (sprintf "membership and range intersect before residual evaluation for %s" source)
+
+              touches <- 0
+              let ignored =
+                  "SELECT (SELECT COUNT(*) FROM mixed_rows d IGNORE INDEX (PRIMARY, ix_a)"
+                  + " WHERE TOUCH(d.id)=d.id AND d.a IN(o.a1,o.a2)"
+                  + " AND d.id BETWEEN o.lo AND o.hi) FROM mixed_bounds o"
+              match run store registry ignored with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected the ignored-index query to retain MySQL's count, got %A" other
+              Expect.isGreaterThan touches 1000 "ignored keys do not narrow the mixed correlated probe"
+
           testCase "physical correlated text IN respects effective comparison collation"
           <| fun _ ->
               let mutable touches = 0
