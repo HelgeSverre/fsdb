@@ -93,6 +93,42 @@ let tests =
                   noDatabaseResult
                   "text execution retains the absence of a preparation database"
 
+          testCase "bound parameters keep a joined correlated COUNT decorrelated"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  match result with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | result -> result
+              let outerRows = [ 1 .. 200 ] |> List.map (sprintf "(%d)") |> String.concat ","
+              for sql in
+                  [ "CREATE DATABASE prep_count"
+                    "USE prep_count"
+                    "CREATE TABLE cat (id BIGINT UNSIGNED PRIMARY KEY)"
+                    "CREATE TABLE sys (id BIGINT UNSIGNED PRIMARY KEY, status VARCHAR(10) NOT NULL)"
+                    "CREATE TABLE cat_sys (cat_id BIGINT UNSIGNED NOT NULL, sys_id BIGINT UNSIGNED NOT NULL, KEY (sys_id, cat_id))"
+                    "INSERT INTO cat VALUES " + outerRows
+                    "INSERT INTO sys VALUES (10, 'published'), (11, 'draft'), (12, 'published')"
+                    "INSERT INTO cat_sys VALUES (1, 10), (1, 11), (1, 12), (2, 12)"
+                    "SET GLOBAL log_output='TABLE'"
+                    "SET GLOBAL slow_query_log=ON"
+                    "SET SESSION long_query_time=0"
+                    "PREPARE counted FROM 'SELECT cat.id, (SELECT COUNT(*) FROM sys INNER JOIN cat_sys ON sys.id = cat_sys.sys_id WHERE cat.id = cat_sys.cat_id AND status = ?) AS c FROM cat ORDER BY c DESC, cat.id LIMIT 3'"
+                    "SET @status = 'published'" ] do
+                  run sql |> ignore
+
+              Expect.equal
+                  (run "EXECUTE counted USING @status")
+                  (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]))
+                  "the bound status filters the counted systems"
+
+              match run "SELECT MAX(rows_examined) FROM mysql.slow_log WHERE sql_text LIKE 'EXECUTE counted%'" with
+              | ResultSet(_, [ [ Some examined ] ]) ->
+                  Expect.isLessThan (int examined) 400 "200 outer rows plus one pass over the joined inner side"
+              | other -> failtestf "expected a logged EXECUTE, got %A" other
+
           testCase "preparing an unqualified stored function requires a selected database"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
