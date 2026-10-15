@@ -368,6 +368,10 @@ type internal GeographicPointPolygonPosition =
 
 let internal geographicPointPolygonPosition referenceSystem point polygons =
     let pointLineDistance ring = geographicPointLineDistance referenceSystem point [ ring ]
+    let nearGeodesicBoundary ring distance =
+        distance |> Option.exists (fun value -> value < 0.00001)
+        && geographicPointLinePosition referenceSystem point [ ring ]
+           <> GeographicPointLinePosition.Outside
     let onMeridian ring =
         let latitude, longitude = point
         ring
@@ -389,7 +393,8 @@ let internal geographicPointPolygonPosition referenceSystem point polygons =
                     | [] -> None
                     | distances -> Some(List.min distances)
             match exteriorDistance with
-            | Some distance when distance < 0.00001 || onMeridian exterior -> GeographicPointPolygonPosition.ExteriorBoundary
+            | _ when onMeridian exterior || nearGeodesicBoundary exterior exteriorDistance ->
+                GeographicPointPolygonPosition.ExteriorBoundary
             // A meridian hole edge is an actual geodesic boundary. Coordinate-
             // straight samples on other hole edges may instead lie in the fill.
             | _ when List.exists onMeridian holes ->
@@ -397,10 +402,7 @@ let internal geographicPointPolygonPosition referenceSystem point polygons =
             // Andoyer distance can round to zero beside a hole corner. Use
             // geodesic segment membership before treating it as boundary.
             | _ when holeDistances
-                     |> List.exists (fun (hole, distance) ->
-                         (distance |> Option.exists (fun value -> value < 0.00001))
-                         && geographicPointLinePosition referenceSystem point [ hole ]
-                            <> GeographicPointLinePosition.Outside) ->
+                     |> List.exists (fun (hole, distance) -> nearGeodesicBoundary hole distance) ->
                 GeographicPointPolygonPosition.HoleBoundary
             | _ when geographicRingContains referenceSystem point exterior
                      && not (holes |> List.exists (geographicRingContains referenceSystem point)) ->

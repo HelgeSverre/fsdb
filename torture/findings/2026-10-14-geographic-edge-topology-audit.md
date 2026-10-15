@@ -112,6 +112,29 @@ two near-hole lines in both ring orientations, and the line at longitude
 translations agree at all tested offsets; at +40 degrees, `2.999` agrees but
 `2.99999` differs. All 39 retained point probes still agree. The location of
 the crossing-to-touching transition changes with latitude, so an offset
-threshold would be incorrect. This additional evidence favors deriving the
-line/ring relation from ellipsoidal intersections rather than coordinate
-proximity or sampled point labels.
+threshold would be incorrect. This additional evidence points toward the
+geographic line/ring relation rather than coordinate proximity or sampled
+point labels.
+
+A current-head replay still has the same five mismatches and all 39 point
+probes agree. The maintained oracle now prints MySQL's endpoint membership and
+`ST_Intersection` for each mismatch. In all five, MySQL says the line's start
+point is within the polygon and its end point is outside; the intersection
+contains a positive-length line beginning at the start. Nevertheless MySQL
+reports `ST_Touches=1` and `ST_Crosses=0`. The original `2.999` offset yields
+only a short `LINESTRING`; `2.99999` yields a short line plus a separate point
+in both hole-ring orientations. The +40-degree case likewise yields a short
+line and a point. An endpoint-only or mathematically exact inside/outside
+rule is therefore insufficient for MySQL parity. A safe fix must reproduce
+the geographic relation strategy behind this overlay, or retain the narrow
+divergence; a coordinate threshold would only fit these fixtures.
+
+The same replay exposed a separate, fixable exterior-boundary error. Points
+roughly a micrometer outside the west, east, and south edges of the exterior
+ring were previously classified as touching by fsdb because its Andoyer
+point-to-ring distance fell below `0.00001` meter. MySQL 8.4.11 reports all
+three as disjoint. Exterior-ring boundary classification now also requires
+geodesic segment membership, as the hole-ring path already did. The focused
+point/polygon regression pins the three cases; the Release oracle now reports
+zero mismatches for four near-exterior probes, zero for 39 near-hole probes,
+and the same five open line/polygon mismatches among 372 line cases.

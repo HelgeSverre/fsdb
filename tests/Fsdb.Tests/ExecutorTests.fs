@@ -16752,6 +16752,18 @@ let tests =
                     match runDefault store sql with
                     | ResultSet(_, [ [ Some "0"; Some "0"; Some "0" ] ]) -> ()
                     | result -> failtestf "expected the near-corner point to remain outside the hole polygon, got %A" result
+                    let exterior = "ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326)"
+                    for pointText in
+                        [ "POINT(0 -0.00000000001)"
+                          "POINT(2 4.00000000001)"
+                          "POINT(-0.00000000001 2)" ] do
+                        let point = sprintf "ST_GeomFromText('%s',4326)" pointText
+                        let sql =
+                            sprintf "SELECT ST_Within(%s,%s),ST_Touches(%s,%s),ST_Intersects(%s,%s)"
+                                point exterior point exterior point exterior
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "0"; Some "0"; Some "0" ] ]) -> ()
+                        | result -> failtestf "expected MySQL's near-exterior point to stay disjoint for %s, got %A" pointText result
                     let curved = "ST_GeomFromText('POLYGON((50 0,50 10,52 10,52 0,50 0))',4326)"
                     let apparentInside = "ST_GeomFromText('POINT(50.05 5)',4326)"
                     let antimeridian = "ST_GeomFromText('POLYGON((10 170,10 -170,20 -170,20 170,10 170))',4326)"

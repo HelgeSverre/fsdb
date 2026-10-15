@@ -131,6 +131,16 @@ def main():
         print(f"{count} cases; {len(mismatches)} mismatches")
         for mismatch in mismatches:
             print(mismatch)
+            line, polygon, _, _ = mismatch
+            shape = f"ST_GeomFromText('{line}',4326)"
+            area = f"ST_GeomFromText('{polygon}',4326)"
+            with mysql_connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT ST_Within(ST_StartPoint({shape}),{area}),"
+                    f"ST_Within(ST_EndPoint({shape}),{area}),"
+                    f"ST_AsText(ST_Intersection({shape},{area}))"
+                )
+                print("MySQL intersection", cursor.fetchone())
         hole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,3 1,3 3,1 3,1 1))"
         point_count = 0
         point_mismatches = []
@@ -151,6 +161,28 @@ def main():
         print(f"{point_count} near-hole points; {len(point_mismatches)} point mismatches")
         for mismatch in point_mismatches:
             print("point", mismatch)
+        exterior = "ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326)"
+        edge_probes = [
+            ("0 -0.00000000001", "near west edge"),
+            ("2 4.00000000001", "near east edge"),
+            ("-0.00000000001 2", "near south edge"),
+            ("4.00000000001 2", "near north edge"),
+        ]
+        edge_mismatches = []
+        for coordinates, label in edge_probes:
+            point = f"ST_GeomFromText('POINT({coordinates})',4326)"
+            sql = f"SELECT ST_Within({point},{exterior}),ST_Touches({point},{exterior}),ST_Intersects({point},{exterior})"
+            with mysql_connection.cursor() as cursor:
+                cursor.execute(sql)
+                expected = cursor.fetchone()
+            with fsdb_connection.cursor() as cursor:
+                cursor.execute(sql)
+                actual = cursor.fetchone()
+            if actual != expected:
+                edge_mismatches.append((label, coordinates, expected, actual))
+        print(f"{len(edge_probes)} near-exterior points; {len(edge_mismatches)} point mismatches")
+        for mismatch in edge_mismatches:
+            print("exterior point", mismatch)
     finally:
         if fsdb_connection:
             fsdb_connection.close()
