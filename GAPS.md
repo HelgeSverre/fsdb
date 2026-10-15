@@ -779,7 +779,9 @@ rowset, including volatile projected values, while duplicate join matches
 update the physical target once and retain CHECK OPTION and INSERT rules.
 [Independent CTE bodies with nested read-only derived sources](torture/findings/2026-10-15-derived-cte-joined-view-writes.md)
 also preserve writable target metadata and UPDATE behavior through audited
-simple, grouped, and two-level derived bodies.
+simple, grouped, and two-level derived bodies. Explicitly named CTE columns
+now also expand audited `SELECT *`, qualified-star, and mixed-star projections
+over independent physical or nested-derived read sources and ordinary joins.
 [Audited `STRAIGHT_JOIN` edges](torture/findings/2026-10-15-multiple-derived-straight-view.md)
 between those derived sources or at the physical target retain the same
 writable metadata and target-predicate filtering.

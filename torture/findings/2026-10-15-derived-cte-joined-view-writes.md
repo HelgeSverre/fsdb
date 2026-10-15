@@ -16,5 +16,11 @@ reads; the normalized form is used to resolve the joined write and metadata.
 The [native MySQL oracle](../scripts/derived-cte-view-oracle.py) and focused
 regression cover simple, aggregate, and two-level nested bodies, explicit CTE
 column names, metadata, UPDATE, CHECK OPTION, INSERT refusal, and final base
-rows. Recursive or dependent CTEs, nested query expressions, and starred
-explicit-column CTE projections remain outside this normalization.
+rows. A follow-up expands `SELECT *` and qualified stars against the source's
+resolved columns before applying explicit CTE names. It covers physical,
+nested-derived, and ordinary joined read sources, including a star mixed with
+an expression. MySQL 8.4.11 marks all nine audited views updatable, and each
+UPDATE affects the physical target once. `USING` and `NATURAL` joins retain
+the conservative path because their merged-column ownership needs separate
+resolution; recursive or dependent CTEs and nested query expressions also
+remain outside this normalization.

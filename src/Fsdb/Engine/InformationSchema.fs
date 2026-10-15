@@ -1569,18 +1569,18 @@ let internal tryLeadingReadOnlyWritableTarget (source: FromItem) (joins: Join li
         | _ -> None
     | _ -> None
 
+let private projectionName (projection: Projection) =
+    projection.Alias
+    |> Option.orElse projection.SourceName
+    |> Option.orElseWith (fun () ->
+        match projection.Expression with
+        | Col name | QualifiedCol(_, name) -> Some name
+        | _ -> None)
+
 /// Associate explicit inner joins across a parenthesized right operand when
 /// no USING/NATURAL keys change column ownership. Bind bare inner ON columns
 /// within the group before moving it beside earlier sources.
 let internal flattenInnerJoinedOperands (catalog: Catalog) schema (select: SelectStmt) =
-    let projectionName (projection: Projection) =
-        projection.Alias
-        |> Option.orElse projection.SourceName
-        |> Option.orElseWith (fun () ->
-            match projection.Expression with
-            | Col name | QualifiedCol(_, name) -> Some name
-            | _ -> None)
-
     let sourceColumns = function
         | FromTable table ->
             relationColumns catalog (table.Database |> Option.defaultValue schema) table.Table
@@ -1673,7 +1673,7 @@ let internal flattenInnerJoinedOperands (catalog: Catalog) schema (select: Selec
 /// A referenced, independent CTE reads like a derived table during a joined
 /// view write. Keep other CTEs in their original form until their materialized
 /// or recursive write behavior has its own contract.
-let internal inlineReadOnlyViewCtes (select: SelectStmt) =
+let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStmt) =
     let sources = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
     let cteNames = select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
 
@@ -1683,6 +1683,60 @@ let internal inlineReadOnlyViewCtes (select: SelectStmt) =
             | FromTable table -> table.Database.IsNone && eqI table.Table name
             | _ -> false)
         |> List.length
+
+    let rec expandedProjections (body: SelectStmt) =
+        let hasStar =
+            body.Projections
+            |> List.exists (fun projection -> match projection.Expression with Star _ -> true | _ -> false)
+
+        if not hasStar then
+            Some body.Projections
+        elif body.Joins |> List.exists (fun join ->
+            not join.Using.IsEmpty
+            || join.Kind = NaturalJoin
+            || join.Kind = NaturalLeftJoin
+            || join.Kind = NaturalRightJoin) then
+            None
+        else
+            body.From
+            |> Option.bind (fun first ->
+                let resolved =
+                    first :: (body.Joins |> List.map _.Table)
+                    |> List.map sourceColumns
+
+                if resolved |> List.exists Option.isNone then
+                    None
+                else
+                    let sources = resolved |> List.choose id
+                    let projections (qualifier, names) =
+                        names
+                        |> List.map (fun name -> Projection.create (QualifiedCol(qualifier, name)) None)
+
+                    body.Projections
+                    |> List.fold (fun expanded projection ->
+                        expanded
+                        |> Option.bind (fun previous ->
+                            match projection.Expression with
+                            | Star None ->
+                                Some(previous @ (sources |> List.collect projections))
+                            | Star(Some starQualifier) ->
+                                match sources |> List.filter (fun (qualifier, _) -> eqI starQualifier qualifier) with
+                                | [ source ] -> Some(previous @ projections source)
+                                | _ -> None
+                            | _ -> Some(previous @ [ projection ]))) (Some []))
+
+    and sourceColumns source =
+        match source with
+        | FromTable table ->
+            relationColumns catalog (table.Database |> Option.defaultValue schema) table.Table
+            |> Option.map (fun names -> table.Alias |> Option.defaultValue table.Table, names)
+        | FromSubquery(PlainSelect body, alias) ->
+            expandedProjections body
+            |> Option.bind (fun projections ->
+                let names = projections |> List.map projectionName
+                if names |> List.exists Option.isNone then None
+                else Some(alias, names |> List.choose id))
+        | _ -> None
 
     let tryInlineBody (cte: CommonTableExpr) =
         let rec independent = function
@@ -1704,17 +1758,17 @@ let internal inlineReadOnlyViewCtes (select: SelectStmt) =
                  && (body.Joins |> List.forall (_.Table >> independent)) ->
             if cte.CteColumns.IsEmpty then
                 Some(PlainSelect body)
-            elif
-                cte.CteColumns.Length = body.Projections.Length
-                && (cte.CteColumns |> List.map _.ToLowerInvariant() |> Set.ofList).Count = cte.CteColumns.Length
-                && (body.Projections |> List.forall (fun projection -> match projection.Expression with Star _ -> false | _ -> true))
-            then
-                let projections =
-                    (cte.CteColumns, body.Projections)
-                    ||> List.map2 (fun name projection -> { projection with Alias = Some name })
-                Some(PlainSelect { body with Projections = projections })
             else
-                None
+                expandedProjections body
+                |> Option.bind (fun expanded ->
+                    if cte.CteColumns.Length <> expanded.Length
+                       || (cte.CteColumns |> List.map _.ToLowerInvariant() |> Set.ofList).Count <> cte.CteColumns.Length then
+                        None
+                    else
+                        let projections =
+                            (cte.CteColumns, expanded)
+                            ||> List.map2 (fun name projection -> { projection with Alias = Some name })
+                        Some(PlainSelect { body with Projections = projections }))
         | _ -> None
 
     let inlineBodies =
@@ -1774,7 +1828,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
 
         match Fsdb.Parser.parse definition with
         | Ok(Select parsed) ->
-            let select = parsed |> inlineReadOnlyViewCtes |> flattenInnerJoinedOperands catalog schema
+            let select = parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
             match select.From with
             | Some source ->
                 let sourceAllowsUpdates = function

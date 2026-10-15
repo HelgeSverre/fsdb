@@ -47,19 +47,27 @@ def main():
                         "CREATE DATABASE probe", "USE probe",
                         "CREATE TABLE target(id INT PRIMARY KEY,n INT)",
                         "CREATE TABLE source(id INT,flag INT)",
+                        "CREATE TABLE aux(id INT,marker INT)",
                         "INSERT INTO target VALUES(1,10),(2,20)",
                         "INSERT INTO source VALUES(1,1),(1,2),(2,3)",
+                        "INSERT INTO aux VALUES(1,9),(2,8)",
                     ]:
                         cursor.execute(sql)
 
-                    for name, body in [
-                        ("simple", "SELECT x.id,x.flag FROM (SELECT id,flag FROM source) x"),
-                        ("aggregate", "SELECT x.id,SUM(x.flag) AS flag FROM (SELECT id,flag FROM source) x GROUP BY x.id"),
-                        ("nested", "SELECT x.id,x.flag FROM (SELECT y.id,y.flag FROM (SELECT id,flag FROM source) y) x"),
+                    for name, columns, body in [
+                        ("simple", "k,f", "SELECT x.id,x.flag FROM (SELECT id,flag FROM source) x"),
+                        ("aggregate", "k,f", "SELECT x.id,SUM(x.flag) AS flag FROM (SELECT id,flag FROM source) x GROUP BY x.id"),
+                        ("nested", "k,f", "SELECT x.id,x.flag FROM (SELECT y.id,y.flag FROM (SELECT id,flag FROM source) y) x"),
+                        ("star", "k,f", "SELECT * FROM source"),
+                        ("qualified_star", "k,f", "SELECT s.* FROM source s"),
+                        ("derived_star", "k,f", "SELECT * FROM (SELECT id,flag FROM source) x"),
+                        ("mixed_star", "k,f,extra", "SELECT s.*,s.flag+1 FROM source s"),
+                        ("joined_star", "k,f,aux_id,marker", "SELECT * FROM source s JOIN aux q ON q.id=s.id"),
+                        ("joined_qualified_star", "k,f", "SELECT s.* FROM source s JOIN aux q ON q.id=s.id"),
                     ]:
                         view = f"derived_cte_{name}"
                         cursor.execute(
-                            f"CREATE VIEW {view} AS WITH d(k,f) AS ({body}) "
+                            f"CREATE VIEW {view} AS WITH d({columns}) AS ({body}) "
                             "SELECT a.id,a.n,d.f FROM d JOIN target a ON a.id=d.k "
                             "WHERE a.n>=0 WITH CASCADED CHECK OPTION"
                         )
@@ -83,8 +91,8 @@ def main():
                                 raise AssertionError(f"expected {error_code}: {statement}")
 
                     cursor.execute("SELECT id,n FROM target ORDER BY id")
-                    assert cursor.fetchall() == ((1, 13), (2, 20))
-                print(f"MySQL {version}: nested derived CTE views remain updatable")
+                    assert cursor.fetchall() == ((1, 19), (2, 20))
+                print(f"MySQL {version}: nested and starred derived CTE views remain updatable")
             finally:
                 if connection:
                     connection.close()
