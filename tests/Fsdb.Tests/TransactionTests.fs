@@ -2038,6 +2038,36 @@ let tests =
               Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first transaction commits"
               Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the second transaction commits"
 
+          testCase "distinct unique keys with a legacy stripe collision do not block"
+          <| fun _ ->
+              let stripe key =
+                  (StringComparer.Ordinal.GetHashCode(key) &&& Int32.MaxValue) % 4096
+
+              let firstKey, secondKey =
+                  [ 0 .. 4096 ]
+                  |> Seq.map (sprintf "unique-key-%d")
+                  |> Seq.groupBy stripe
+                  |> Seq.pick (fun (_, keys) ->
+                      match keys |> Seq.truncate 2 |> Seq.toList with
+                      | [ first; second ] -> Some(first, second)
+                      | _ -> None)
+
+              let store = Fsdb.Storage.create ()
+              let first = Fsdb.Storage.beginTransactionContext store
+              let second = Fsdb.Storage.beginTransactionContext store
+
+              try
+                  Fsdb.Storage.acquireTransactionWriteTargets TimeSpan.Zero first "test" "items" [] [ firstKey ]
+                  Fsdb.Storage.acquireTransactionWriteTargets TimeSpan.Zero second "test" "items" [] [ secondKey ]
+
+                  Expect.throwsT<Fsdb.Storage.LockWaitTimeout>
+                      (fun () ->
+                          Fsdb.Storage.acquireTransactionWriteTargets TimeSpan.Zero second "test" "items" [] [ firstKey ])
+                      "an already-owned exact key still blocks another transaction"
+              finally
+                  Fsdb.Storage.releaseTransactionLocks first
+                  Fsdb.Storage.releaseTransactionLocks second
+
           testCase "a disjoint transaction commit maintains indexes incrementally"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

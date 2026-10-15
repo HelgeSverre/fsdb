@@ -459,6 +459,10 @@ let private createRowLockStripe () =
       ExclusiveOwner = None
       SharedOwners = HashSet() }
 
+type KeyLockCache =
+    { Entries: ConcurrentDictionary<string, WeakReference<RowLockStripe>>
+      mutable Insertions: int64 }
+
 type ExecutionSettings =
     { SqlModeText: string
       SqlMode: SqlMode.Settings
@@ -550,8 +554,9 @@ type Store =
       /// Logical ownership may span transaction statements without depending
       /// on managed thread affinity.
       RowLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
-      /// A separate namespace prevents key hashes from aliasing held rows.
-      KeyLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
+      /// Exact keys prevent unrelated unique values from sharing a lock.
+      /// Weak entries let idle keys be reclaimed after their owners and waiters leave.
+      KeyLocks: ConcurrentDictionary<string, KeyLockCache>
       /// Transaction snapshots share identity reservation state so concurrent
       /// inserts cannot assign the same value from an older table root.
       AutoIncrementCounters: ConcurrentDictionary<string, AutoIncrementCounter>
@@ -4102,9 +4107,6 @@ let private withWriteLocksFor
     let stripeIndex rowId =
         int64 (RowId.value rowId) % int64 rowLockStripeCount |> int
 
-    let keyStripeIndex key =
-        (StringComparer.Ordinal.GetHashCode key &&& Int32.MaxValue) % rowLockStripeCount
-
     let stripesFor
         (namespaces: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>)
         (indexOf: 'value -> int)
@@ -4121,7 +4123,69 @@ let private withWriteLocksFor
             | _ -> values |> List.map indexOf |> Set.ofList |> Seq.map stripe |> List.ofSeq
 
     let rowStripes = stripesFor store.RowLocks stripeIndex rowIds
-    let keyStripes = stripesFor store.KeyLocks keyStripeIndex keys
+    let keyStripes =
+        match keys with
+        | [] -> []
+        | _ ->
+            let cache =
+                store.KeyLocks.GetOrAdd(
+                    tableKey,
+                    (fun _ ->
+                        { Entries = ConcurrentDictionary<string, WeakReference<RowLockStripe>>(StringComparer.Ordinal)
+                          Insertions = 0L })
+                )
+            let locks = cache.Entries
+            let mutable sweep = false
+
+            let rec stripe key =
+                let mutable existing = Unchecked.defaultof<WeakReference<RowLockStripe>>
+
+                if locks.TryGetValue(key, &existing) then
+                    let mutable target = Unchecked.defaultof<RowLockStripe>
+
+                    if existing.TryGetTarget(&target) then
+                        target
+                    else
+                        let target = createRowLockStripe ()
+
+                        if locks.TryUpdate(key, WeakReference<RowLockStripe>(target), existing) then
+                            target
+                        else
+                            stripe key
+                else
+                    let target = createRowLockStripe ()
+
+                    if locks.TryAdd(key, WeakReference<RowLockStripe>(target)) then
+                        if Threading.Interlocked.Increment(&cache.Insertions) % 8192L = 0L then
+                            sweep <- true
+
+                        target
+                    else
+                        stripe key
+
+            // Claim multiple keys in one stable order, as the old sorted stripe
+            // set did, so opposite input orders cannot create an avoidable cycle.
+            let result =
+                match keys with
+                | [ key ] -> [ stripe key ]
+                | _ ->
+                    keys
+                    |> List.distinct
+                    |> List.sortWith (fun left right -> StringComparer.Ordinal.Compare(left, right))
+                    |> List.map stripe
+
+            // Removing only the observed dead weak reference cannot discard a
+            // replacement installed by a concurrent claimant.
+            if sweep then
+                let entries = locks :> ICollection<KeyValuePair<string, WeakReference<RowLockStripe>>>
+
+                for entry in locks do
+                    let mutable target = Unchecked.defaultof<RowLockStripe>
+
+                    if not (entry.Value.TryGetTarget(&target)) then
+                        entries.Remove(entry) |> ignore
+
+            result
 
     let stripes = rowStripes @ keyStripes
     let context, releaseAfter =
