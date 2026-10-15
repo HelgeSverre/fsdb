@@ -3322,6 +3322,19 @@ let private storedRowsMatchReadRows (store: Store) (columns: ColumnDef seq) =
         | _, TTimestamp _ -> false
         | _ -> true)
 
+/// Index lookups and hash buckets compare stored key values, so only the
+/// equality keys need stored and read forms to agree. Every other column is
+/// still converted when an expression reads it from the joined row.
+let private joinKeysMatchReadRows
+    (store: Store)
+    (leftColumns: ColumnDef list)
+    (rightColumns: ColumnDef list)
+    (equiKeys: (int * int) list)
+    =
+    equiKeys
+    |> Seq.collect (fun (leftIndex, rightIndex) -> [ leftColumns.[leftIndex]; rightColumns.[rightIndex] ])
+    |> storedRowsMatchReadRows store
+
 /// Resolves a bare column against `ctx`, falling back to
 /// `ctx.Outer`/its own outer/... on a miss — see `EvalContext.Outer`. Two or
 /// more matches (a `JOIN` of tables that share a column name) is error 1052,
@@ -4937,6 +4950,7 @@ let private valueMatchesKeyClass (isNumeric: bool) (v: Value) : bool =
     match v with
     | VNull -> true
     | VInt _
+    | VUInt _
     | VDouble _
     | VDecimal _ -> isNumeric
     | VString _
@@ -10287,7 +10301,7 @@ and private tryIndexedJoinProbe
     : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
     | (InnerJoin | StraightJoin | NaturalJoin | LeftJoin | NaturalLeftJoin | RightJoin | NaturalRightJoin), _, Some table, _ :: _
-        when storedRowsMatchReadRows store (Seq.append leftColumns rightColumns)
+        when joinKeysMatchReadRows store leftColumns rightColumns equiKeys
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
         let allowed = indexAllowedForJoinSource (Some join.Table)
         equiKeys |> List.map (fun (leftIndex, rightIndex) -> rightIndex, leftIndex) |> tryIndexProbe allowed table rightColumns
@@ -10448,7 +10462,7 @@ and private tryIndexedPreservedRightProbe
     : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
     | (RightJoin | NaturalRightJoin), _, Some table, _ :: _
-        when storedRowsMatchReadRows store (Seq.append leftColumns rightColumns)
+        when joinKeysMatchReadRows store leftColumns rightColumns equiKeys
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
         let allowed = indexAllowedForJoinSource leftOperand
         equiKeys |> tryIndexProbe allowed table leftColumns
@@ -11321,7 +11335,7 @@ and private applyPreparedJoin
         let hashKeyDomain =
             lazy
                 (not equiKeys.IsEmpty
-                 && storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
+                 && joinKeysMatchReadRows store combinedColumnsSoFar joinColumns equiKeys
                  && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys)
 
         let hashCompatible =
@@ -11828,7 +11842,7 @@ and private applyPreparedMutationJoin
         let hashEligible =
             match keyClasses with
             | Some classes ->
-                storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
+                joinKeysMatchReadRows store combinedColumnsSoFar joinColumns equiKeys
                 && not equiKeys.IsEmpty
                 && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
                 && rowsMatchKeyClasses classes (equiKeys |> List.map fst) leftFlatRows
