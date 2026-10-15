@@ -704,6 +704,7 @@ type private StatementMemo =
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
       MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
+      MaterializedCorrelatedNulls: Dictionary<FromItem, Dictionary<string, Value[] list>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
@@ -719,6 +720,8 @@ let private freshStatementMemo () =
         Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedRanges =
         Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>(HashIdentity.Reference)
+      MaterializedCorrelatedNulls =
+        Dictionary<FromItem, Dictionary<string, Value[] list>>(HashIdentity.Reference)
       PhysicalProjections = Dictionary<FromItem, PhysicalProjection>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
@@ -15106,6 +15109,31 @@ and private tryMaterializedCorrelatedLookup
                     equalityLookup names
                     |> Option.bind (fun lookup -> lookup values)
 
+            let nullCandidates predicate =
+                let names =
+                    predicate
+                    |> optionalConjuncts
+                    |> List.choose (function
+                        | IsNull expression -> tryCorrelatedInnerColumn probeSource expression
+                        | _ -> None)
+                    |> List.distinctBy _.ToLowerInvariant()
+
+                match names with
+                | [] -> None
+                | _ ->
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedNulls source (fun () ->
+                            Dictionary<string, Value[] list>(System.StringComparer.OrdinalIgnoreCase))
+
+                    names
+                    |> List.choose (fun name ->
+                        resolveColumn columns name
+                        |> Result.toOption
+                        |> Option.map (fun index ->
+                            getMemoized lookups name (fun () ->
+                                rows |> List.filter (fun row -> row.[index] = VNull))))
+                    |> intersectSharedRows
+
             let membershipCandidates predicate =
                 let indexedColumn expression =
                     tryCorrelatedInnerColumn probeSource expression
@@ -15198,6 +15226,7 @@ and private tryMaterializedCorrelatedLookup
             let unionCandidates () =
                 let branchCandidates branch =
                     [ equalityCandidates (Some branch)
+                      nullCandidates (Some branch)
                       membershipCandidates (Some branch)
                       rangeCandidates (Some branch) ]
                     |> List.choose id
@@ -15210,6 +15239,7 @@ and private tryMaterializedCorrelatedLookup
                 tryCompleteOrCandidates whereExpr branchCandidates merge List.length
 
             [ equalityCandidates whereExpr
+              nullCandidates whereExpr
               membershipCandidates whereExpr
               unionCandidates ()
               rangeCandidates whereExpr ]
