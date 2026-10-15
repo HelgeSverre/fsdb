@@ -16,3 +16,14 @@ in complete OR-branch unions. The focused regression keeps residual calls
 below 30 for the conjunction and below 50 for the OR query, while checking
 the MySQL counts for both source forms. Unsupported expressions retain the
 general evaluation path.
+
+The complementary `IS NOT NULL` case has 990 NULL values and ten non-NULL
+values. MySQL 8.4.11 returns the same `(5, 5, 0)` counts for a correlated
+conjunction and `(11, 11, 11)` for an OR with outer-bound `id`, across physical,
+pass-through, and materialized sources. FSDB returned the right counts but
+evaluated the residual 1,004 times on the first materialized query. The
+statement-local cache now builds only the NULL or non-NULL bucket requested by
+the query and reuses it for later outer rows. The focused derived and CTE
+regressions keep residual calls below 30 for the conjunction and
+below 50 for the OR case. Physical `IS NOT NULL` access remains outside this
+materialized-source change.

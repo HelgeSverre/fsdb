@@ -104,7 +104,30 @@ def main():
                         assert cursor.fetchall() == ((1, 5), (2, 5), (3, 0))
                     cursor.execute("SELECT COUNT(*) FROM later_null_inner WHERE a=1 AND k IS NULL")
                     assert cursor.fetchone() == (5,)
-                print(f"MySQL {version}: physical, materialized, unique, and composite NULL counts (5, 5, 0); OR counts (11, 11, 11)")
+                    cursor.execute("CREATE TABLE sparse_nonnull_inner(id INT PRIMARY KEY,a INT,k INT)")
+                    sparse_values = ",".join(
+                        f"({id},{1 if id <= 500 else 2},{id if id % 100 == 0 else 'NULL'})"
+                        for id in range(1, 1001)
+                    )
+                    cursor.execute("INSERT INTO sparse_nonnull_inner VALUES " + sparse_values)
+                    for prefix, source in [
+                        ("", "sparse_nonnull_inner d"),
+                        ("", "(SELECT id,a,k FROM sparse_nonnull_inner) d"),
+                        ("WITH passed AS (SELECT id,a,k FROM sparse_nonnull_inner) ", "passed d"),
+                        ("", "(SELECT id+0 AS id,a+0 AS a,k+0 AS k FROM sparse_nonnull_inner LIMIT 1000) d"),
+                        ("WITH materialized AS (SELECT id+0 AS id,a+0 AS a,k+0 AS k FROM sparse_nonnull_inner LIMIT 1000) ", "materialized d"),
+                    ]:
+                        cursor.execute(
+                            prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                            + " WHERE d.k IS NOT NULL AND d.a=o.a) FROM outer_rows o ORDER BY o.id"
+                        )
+                        assert cursor.fetchall() == ((1, 5), (2, 5), (3, 0))
+                        cursor.execute(
+                            prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                            + " WHERE d.k IS NOT NULL OR d.id=o.id) FROM outer_rows o ORDER BY o.id"
+                        )
+                        assert cursor.fetchall() == ((1, 11), (2, 11), (3, 11))
+                print(f"MySQL {version}: physical and materialized NULL/non-NULL counts (5, 5, 0); OR counts (11, 11, 11)")
             finally:
                 if connection:
                     connection.close()

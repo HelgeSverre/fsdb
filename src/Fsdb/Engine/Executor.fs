@@ -696,6 +696,10 @@ type private MemoizedRegex =
       CollationName: string
       Result: Result<Regex, Regexp.RegexError> }
 
+type private NullTestKind =
+    | MatchesNull
+    | MatchesNonNull
+
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
@@ -704,7 +708,7 @@ type private StatementMemo =
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
       MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
-      MaterializedCorrelatedNulls: Dictionary<FromItem, Dictionary<string, Value[] list>>
+      MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
@@ -720,8 +724,8 @@ let private freshStatementMemo () =
         Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedRanges =
         Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>(HashIdentity.Reference)
-      MaterializedCorrelatedNulls =
-        Dictionary<FromItem, Dictionary<string, Value[] list>>(HashIdentity.Reference)
+      MaterializedCorrelatedNullBuckets =
+        Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>(HashIdentity.Reference)
       PhysicalProjections = Dictionary<FromItem, PhysicalProjection>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
@@ -15161,28 +15165,37 @@ and private tryMaterializedCorrelatedLookup
                     |> Option.bind (fun lookup -> lookup values)
 
             let nullCandidates predicate =
-                let names =
+                let tests =
                     predicate
                     |> optionalConjuncts
                     |> List.choose (function
-                        | IsNull expression -> tryCorrelatedInnerColumn probeSource expression
+                        | IsNull expression ->
+                            tryCorrelatedInnerColumn probeSource expression
+                            |> Option.map (fun name -> name, MatchesNull)
+                        | IsNotNull expression ->
+                            tryCorrelatedInnerColumn probeSource expression
+                            |> Option.map (fun name -> name, MatchesNonNull)
                         | _ -> None)
-                    |> List.distinctBy _.ToLowerInvariant()
+                    |> List.distinctBy (fun (name, kind) -> name.ToLowerInvariant(), kind)
 
-                match names with
+                match tests with
                 | [] -> None
                 | _ ->
                     let lookups =
-                        getMemoized memo.MaterializedCorrelatedNulls source (fun () ->
-                            Dictionary<string, Value[] list>(System.StringComparer.OrdinalIgnoreCase))
+                        getMemoized memo.MaterializedCorrelatedNullBuckets source (fun () ->
+                            Dictionary<string * NullTestKind, Value[] list>())
 
-                    names
-                    |> List.choose (fun name ->
+                    tests
+                    |> List.choose (fun (name, kind) ->
                         resolveColumn columns name
                         |> Result.toOption
                         |> Option.map (fun index ->
-                            getMemoized lookups name (fun () ->
-                                rows |> List.filter (fun row -> row.[index] = VNull))))
+                            getMemoized lookups (name.ToLowerInvariant(), kind) (fun () ->
+                                rows
+                                |> List.filter (fun row ->
+                                    match kind with
+                                    | MatchesNull -> row.[index] = VNull
+                                    | MatchesNonNull -> row.[index] <> VNull))))
                     |> intersectSharedRows
 
             let membershipCandidates predicate =

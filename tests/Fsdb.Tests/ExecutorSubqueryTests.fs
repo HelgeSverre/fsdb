@@ -734,6 +734,48 @@ let tests =
                   | other -> failtestf "expected MySQL's NULL-or-equality counts, got %A" other
                   Expect.isLessThan touches 50 "both OR branches narrow before residual evaluation"
 
+          testCase "materialized correlated IS NOT NULL probes avoid NULL rows"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE nonnull_outer(id INT PRIMARY KEY,a INT)" |> ignore
+              runDefault store "CREATE TABLE nonnull_inner(id INT PRIMARY KEY,a INT,k INT)" |> ignore
+              runDefault store "INSERT INTO nonnull_outer VALUES(1,1),(2,2),(3,3)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id ->
+                  sprintf "(%d,%d,%s)" id (if id <= 500 then 1 else 2) (if id % 100 = 0 then string id else "NULL"))
+              |> String.concat ","
+              |> sprintf "INSERT INTO nonnull_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for prefix, source in
+                  [ "", "(SELECT id+0 AS id,a+0 AS a,k+0 AS k FROM nonnull_inner LIMIT 1000) d"
+                    "WITH materialized AS (SELECT id+0 AS id,a+0 AS a,k+0 AS k FROM nonnull_inner LIMIT 1000) ", "materialized d" ] do
+                  touches <- 0
+                  let sql =
+                      prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.k IS NOT NULL AND d.a=o.a)"
+                      + " FROM nonnull_outer o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "1"; Some "5" ]; [ Some "2"; Some "5" ]; [ Some "3"; Some "0" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's non-NULL correlated counts, got %A" other
+                  Expect.isLessThan touches 30 "the residual sees only non-NULL candidates"
+
+                  touches <- 0
+                  let withOr =
+                      prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND (d.k IS NOT NULL OR d.id=o.id))"
+                      + " FROM nonnull_outer o ORDER BY o.id"
+                  match run store registry withOr with
+                  | ResultSet(_, [ [ Some "1"; Some "11" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "11" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's non-NULL-or-equality counts, got %A" other
+                  Expect.isLessThan touches 50 "both OR branches narrow before residual evaluation"
+
           testCase "physical IS NULL probes use secondary candidates"
           <| fun _ ->
               let mutable touches = 0
