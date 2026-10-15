@@ -159,7 +159,10 @@ let private foldCjkPunctuationForms modern (value: string) =
     if modern then
         comma.Replace('\uFE10', '\uFF0C').Replace('\uFE11', '\u3001')
     else
-        comma
+        // ICU folds FE11 to the ordinary ideographic comma; MySQL's older
+        // UCA 4.0 table gives it an implicit weight instead. Escape the
+        // marker so literal private-use text stays distinct from FE11.
+        comma.Replace("\uE011", "\uE011\uE011").Replace("\uFE11", "\uE011\uE012")
 
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale

@@ -1448,7 +1448,11 @@ let tests =
                       "utf8mb4_unicode_ci", "，", "︐", false
                       "utf8mb4_0900_ai_ci", "，", "﹐", true
                       "utf8mb4_unicode_ci", "，", "﹐", true
-                      "utf8mb4_0900_ai_ci", "、", "︑", true ]
+                      "utf8mb4_0900_ai_ci", "、", "︑", true
+                      "utf8mb4_unicode_520_ci", "、", "︑", true
+                      "utf8mb4_unicode_ci", "、", "︑", false
+                      "utf8mb4_unicode_ci", "、", "﹑", true
+                      "utf8mb4_unicode_ci", "︑", "\uE011\uE012", false ]
                     <| fun (name, left, right, expected) ->
                         let col = Fsdb.Collation.tryFind name |> Option.get
                         Expect.equal (col.Equals left right) expected name

@@ -334,6 +334,17 @@ let tests =
                   let sql = $"SELECT id FROM comma_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
                   Expect.equal (ids (run store sql)) [ "4"; "5" ] sql
 
+          testCase "legacy Unicode ngrams distinguish vertical ideographic commas"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE legacy_commas(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO legacy_commas VALUES(1,'中、文'),(2,'中︑文'),(3,'中﹑文')" |> ignore
+              let search term =
+                  let sql = $"SELECT id FROM legacy_commas WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (search "中、") [ "1"; "3" ] "the small form retains the ordinary comma's weight"
+              Expect.equal (search "中︑") [ "2" ] "the vertical form has a distinct UCA 4.0 weight"
+
           testCase "single-character ngram scores count repeated query tokens"
           <| fun _ ->
               let store = create ()

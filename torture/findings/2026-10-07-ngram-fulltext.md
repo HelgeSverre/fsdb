@@ -129,10 +129,10 @@ counterparts fold it. Collation keys now follow those audited distinctions,
 and focused equality and ngram regressions pin them. The expanded oracle
 compares 387 queries at each startup size 1–10, with zero mismatches across
 all 3,870 queries. This remains a bounded corpus, not general Unicode or
-MeCab parity. The host ICU still equates `、` and `︑` under
-`utf8mb4_unicode_ci`, while MySQL's older weight table distinguishes them;
-that separate legacy-collation gap is not covered by the default-collation
-ngram corpus.
+MeCab parity. A separate [legacy-collation audit](2026-10-15-legacy-ngram-punctuation.md)
+now covers `、` versus `︑` equality and ngram membership under
+`utf8mb4_unicode_ci`; the default-collation corpus does not cover exact
+legacy `WEIGHT_STRING` bytes or general UCA 4.0 parity.
 
 The `ngram-fulltext` differential contract covers natural, boolean, and
 query-expansion searches through text and prepared protocols, Unicode and
