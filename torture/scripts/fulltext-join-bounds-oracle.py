@@ -53,6 +53,18 @@ def verify(client, second_client):
 
     client.query("INSERT INTO owners VALUES(43),(97)")
     for bound, selected in [
+        ("o.id BETWEEN 42 AND 43", "42,43"),
+        ("o.id IN (42,97,NULL)", "42,97"),
+    ]:
+        joined = ("SELECT d.id," + cjk_score + " FROM cjk_docs d JOIN owners o ON o.id=d.owner_id "
+                  "WHERE " + bound + " AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id")
+        direct = ("SELECT d.id,ROUND(MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE),6) "
+                  "FROM cjk_docs d WHERE d.owner_id IN (" + selected + ") "
+                  "AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id")
+        actual = client.query(joined)
+        native["expect"]("ngram " + bound, actual, client.query(direct))
+        native["expect"]("ngram " + bound + " count", len(actual.splitlines()), 20)
+    for bound, selected in [
         ("o.id BETWEEN 42 AND 43", [42, 43]),
         ("o.id>=42 AND o.id<44", [42, 43]),
         ("44>o.id AND 42<=o.id", [42, 43]),

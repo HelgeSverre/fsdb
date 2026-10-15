@@ -49,6 +49,13 @@ source-local bound. The focused regression checks those MySQL values and
 requires fewer than 30 prepared candidate rows. This audits one CJK join
 shape; other mixed MATCH/join plans remain open.
 
+The same corpus now checks `o.id BETWEEN 42 AND 43` and
+`o.id IN (42,97,NULL)` through the two-column ngram inner join. MySQL and
+fsdb return the same 20 IDs and rounded relevance as a source-local
+`owner_id IN` control. The focused fsdb regression prepares fewer than 50
+candidate rows for either bound. Outer and broader multi-source CJK plans
+remain open.
+
 ## Targeted performance evidence
 
 These timings measure the qualified-bound implementation at `7b4da9ff`.

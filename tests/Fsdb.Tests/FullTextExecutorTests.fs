@@ -112,6 +112,22 @@ let tests =
 
               execute "INSERT INTO owners VALUES(43),(97)" |> ignore
               for bound, selected in
+                  [ "o.id BETWEEN 42 AND 43", "42,43"
+                    "o.id IN (42,97,NULL)", "42,97" ] do
+                  let joined =
+                      "SELECT d.id," + cjkScore + " FROM cjk_docs d JOIN owners o ON o.id=d.owner_id"
+                      + " WHERE " + bound + " AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+                  let direct =
+                      "SELECT d.id," + cjkScore + " FROM cjk_docs d WHERE d.owner_id IN (" + selected + ")"
+                      + " AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+                  let control = execute direct
+                  calls <- 0
+                  let actual = execute joined
+                  Expect.equal actual control (sprintf "ngram %s preserves complete-corpus relevance" bound)
+                  Expect.equal (ids actual).Length 20 (sprintf "ngram %s selects two owner groups" bound)
+                  Expect.isLessThan calls 50 (sprintf "ngram %s prepares only selected candidates" bound)
+
+              for bound, selected in
                   [ "o.id BETWEEN 42 AND 43", [ 42; 43 ]
                     "o.id>=42 AND o.id<44", [ 42; 43 ]
                     "44>o.id AND 42<=o.id", [ 42; 43 ]
