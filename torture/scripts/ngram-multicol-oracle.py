@@ -160,11 +160,12 @@ def scores_agree(expected, actual):
 
 
 def verify(size, legacy_punctuation=False):
-    documents = ([('中' + char + '文', '') for char in LEGACY_PUNCTUATION]
+    prefix = '中' * (size - 1)
+    documents = ([(prefix + char + '文', '') for char in LEGACY_PUNCTUATION]
                  if legacy_punctuation else DOCUMENTS)
-    terms = (['中' + char for char in LEGACY_PUNCTUATION]
+    terms = ([prefix + char for char in LEGACY_PUNCTUATION]
              if legacy_punctuation else TERMS)
-    modes = ["IN NATURAL LANGUAGE MODE"] if legacy_punctuation else MODES
+    modes = MODES
     collation = "utf8mb4_unicode_ci" if legacy_punctuation else None
     with tempfile.TemporaryDirectory(prefix=f"fsdb-ngram-{size}-") as directory:
         root = pathlib.Path(directory)
@@ -200,6 +201,14 @@ def verify(size, legacy_punctuation=False):
                 fsdb_connection = connect(host="127.0.0.1", port=port)
                 for connection in (mysql_connection, fsdb_connection):
                     setup(connection, size, documents, collation)
+
+                if legacy_punctuation:
+                    representative = {
+                        index for index, char in enumerate(LEGACY_PUNCTUATION, 1)
+                        if char in ("︵", "﹙", "（")
+                    }
+                    matched = result(mysql_connection, prefix + "︵", "IN NATURAL LANGUAGE MODE")
+                    assert representative.issubset(set(matched)), (size, matched)
 
                 mismatches = []
                 for mode in modes:

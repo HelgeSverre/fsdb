@@ -86,7 +86,10 @@ The legacy collation now applies compatibility width folding to these
 presentation ranges when forming comparison and posting keys. It leaves the
 original characters for ngram token boundaries, so the ASCII comma behavior
 above is unchanged. The combined oracle now reports zero differences across
-191 searches, including relevance; the existing default-collation 387-query
-size-two corpus also remains at zero. Focused equality/key/hash and indexed
-ngram regressions pin representative cross-block matches. This does not
-establish exact legacy weight bytes or MeCab behavior.
+573 searches per token size, covering natural, Boolean, and query-expansion
+modes at each startup size from 1 through 10. Its representative parenthesis
+search asserts that cross-block matches actually occur at every size. The
+existing default-collation 387-query size-two corpus also remains at zero.
+Focused equality/key/hash and indexed ngram regressions pin representative
+cross-block matches. This does not establish exact legacy weight bytes or
+MeCab behavior.
