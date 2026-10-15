@@ -49,3 +49,22 @@ MySQL 8.4.11 agrees with the focused signed, NULL, reversed-equality,
 arithmetic, OR, and DECIMAL-bound result corpus. This does not claim a general
 functional key for text, decimal, floating, volatile, or outer-dependent
 expressions.
+
+## Statement-local text expression lookup
+
+Stable, row-local text expressions over a materialized source now get a
+statement-local equality key under the effective comparison collation. The
+lookup keys evaluated string results once per materialized row and retains the
+original SQL predicate as a residual check. NULL results are omitted; an
+evaluation error or a non-string result falls back to the scan. The comparison
+collation, including an explicit `COLLATE` on either operand, is part of the
+memo key. Volatile functions, outer-dependent inner expressions, and nested
+subqueries are excluded. Complete OR branches can union these candidates.
+
+On 1,000 materialized rows, the
+[text profile](../scripts/correlated-materialized-text-profile.fsx) shows
+`LOWER(d.k)=o.x` reduced `TOUCH(d.id)` residual
+calls from **4,004 to 6** while returning the same rows. MySQL 8.4.11 and
+FSDB agree on binary and explicit case-insensitive collation, reversed
+equality, `UPPER`, NULL bounds, and OR branches. Decimal and floating
+expression keys remain open.

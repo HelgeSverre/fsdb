@@ -12959,6 +12959,49 @@ let tests =
                     | other -> failtestf "expected coerced decimal equality, got %A" other
                     Expect.isGreaterThan calls 1000 "a decimal bound retains the compatible scan path"
 
+                testCase "materialized correlated text expression keys use comparison collation"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE text_bounds(id INT PRIMARY KEY,x VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "CREATE TABLE text_rows(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO text_bounds VALUES(1,'alpha'),(2,'zeta'),(3,NULL),(4,'ALPHA')" |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id ->
+                        let value =
+                            if id = 10 then "ALPHA"
+                            elif id = 11 then "alpha"
+                            elif id = 12 then "Beta"
+                            else sprintf "word%d" id
+                        sprintf "(%d,'%s')" id value)
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO text_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO text_rows VALUES(1000,NULL)" |> ignore
+
+                    for predicate, expected in
+                        [ "LOWER(d.k)=o.x", [ 2; 0; 0; 0 ]
+                          "o.x=LOWER(d.k)", [ 2; 0; 0; 0 ]
+                          "LOWER(d.k)=o.x COLLATE utf8mb4_0900_ai_ci", [ 2; 0; 0; 2 ]
+                          "UPPER(d.k)=UPPER(o.x)", [ 2; 0; 0; 2 ]
+                          "LOWER(d.k)=o.x OR d.id=12", [ 3; 1; 1; 1 ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM text_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                            + "FROM text_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual (expected |> List.map Some) predicate
+                        | other -> failtestf "expected materialized text matches for %s, got %A" predicate other
+                        Expect.isLessThan calls 80 (predicate + " must bound residual work")
+
                 testCase "physical correlated ABS equality probes indexed signed keys"
                 <| fun _ ->
                     let mutable calls = 0
