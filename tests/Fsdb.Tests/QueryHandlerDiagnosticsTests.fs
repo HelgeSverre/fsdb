@@ -1140,6 +1140,33 @@ let tests =
                     warning 1292 "Truncated incorrect time value: 'abc'" ]
                   "one MySQL truncation warning per unparseable argument"
 
+          testCase "TIME_TO_SEC converts through TIME and truncates fractional seconds"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result =
+                  handle
+                      session
+                      "SELECT TIME_TO_SEC('22:23:00'), TIME_TO_SEC('-01:00:00'), TIME_TO_SEC('00:00:01.5'), TIME_TO_SEC('-00:00:01.5'), TIME_TO_SEC('00:00:59.9999999'), TIME_TO_SEC('2020-01-01 10:00:00'), TIME_TO_SEC(DATE '2020-01-01'), TIME_TO_SEC(3600), TIME_TO_SEC(-3600), TIME_TO_SEC(1.5), TIME_TO_SEC('1 02:00:00'), TIME_TO_SEC(SEC_TO_TIME(4000)), TIME_TO_SEC(NULL)"
+              match result with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal
+                      row
+                      [ Some "80580"; Some "-3600"; Some "1"; Some "-1"; Some "60"; Some "36000"; Some "0"; Some "2160"; Some "-2160"; Some "1"; Some "93600"; Some "4000"; None ]
+                      "MySQL 8.4 TIME_TO_SEC results"
+              | other -> failtestf "unexpected TIME_TO_SEC row: %A" other
+              Expect.equal (conditionTriples session) [] "in-range inputs do not warn"
+
+              let session, result = handle session "SELECT TIME_TO_SEC('abc'), TIME_TO_SEC('900:00:00')"
+              Expect.equal result (ResultSet([ "TIME_TO_SEC('abc')"; "TIME_TO_SEC('900:00:00')" ], [ [ None; Some "3020399" ] ])) "invalid and clamped inputs"
+              Expect.equal
+                  (conditionTriples session)
+                  [ warning 1292 "Truncated incorrect time value: 'abc'"
+                    warning 1292 "Truncated incorrect time value: '900:00:00'" ]
+                  "invalid and out-of-range TIME warnings"
+
+              let _, wrongArity = handle session "SELECT TIME_TO_SEC(1, 2)"
+              Expect.equal wrongArity (Err(1582, "Incorrect parameter count in the call to native function 'TIME_TO_SEC'")) "native arity"
+
           testCase "overflowing SEC_TO_TIME and MAKETIME retain MySQL warning values"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

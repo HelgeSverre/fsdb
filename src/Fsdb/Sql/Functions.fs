@@ -2730,6 +2730,16 @@ let private timeFn: Scalar =
             | None -> invalidTimeResult v
     | _ -> VNull
 
+/// MySQL converts the argument exactly as `TIME(x)` does, then truncates the
+/// fractional seconds toward zero.
+let private timeToSecFn: Scalar =
+    function
+    | [ value ] ->
+        match timeFn [ value ] with
+        | VTime time -> VInt(timeTicks time / TimeSpan.TicksPerSecond)
+        | _ -> VNull
+    | _ -> VNull
+
 let private datePartFn (f: DateTime -> int) : Scalar =
     function
     | [ v ] when not (anyNull [ v ]) -> tryDateTimeValue v |> Option.map (f >> int64 >> VInt) |> Option.defaultValue VNull
@@ -6968,6 +6978,7 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "SUBTIME" (exactArity "SUBTIME" 2 (addTimeFn -1L))
     |> registerScalar "TIMEDIFF" (exactArity "TIMEDIFF" 2 timeDiffFn)
     |> registerScalar "SEC_TO_TIME" (exactArity "SEC_TO_TIME" 1 secToTimeFn)
+    |> registerScalar "TIME_TO_SEC" (exactArity "TIME_TO_SEC" 1 timeToSecFn)
     |> registerScalar "MAKETIME" (exactArity "MAKETIME" 3 makeTimeFn)
     |> registerScalar "TIME_FORMAT" (exactArity "TIME_FORMAT" 2 timeFormatFn)
     |> registerScalar "GET_FORMAT" (exactArity "GET_FORMAT" 2 getFormatFn)
