@@ -1920,6 +1920,49 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected one binary comparison match, got %A" other
 
+          testCase "correlated NULL-safe equality narrows non-NULL and NULL probes"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE nullsafe_inner(id INT PRIMARY KEY,k INT,KEY ix_k(k))" |> ignore
+              runDefault store "CREATE TABLE nullsafe_outer(id INT PRIMARY KEY,k INT)" |> ignore
+              runDefault store "INSERT INTO nullsafe_outer VALUES(1,2),(2,NULL)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id ->
+                  let key = if id <= 20 then "NULL" elif id <= 970 then "1" else string (id - 969)
+                  sprintf "(%d,%s)" id key)
+              |> String.concat ","
+              |> sprintf "INSERT INTO nullsafe_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for source in
+                  [ "nullsafe_inner d"
+                    "(SELECT id,k FROM nullsafe_inner) d"
+                    "(SELECT id+0 AS id,k+0 AS k FROM nullsafe_inner LIMIT 1000) d" ] do
+                  for outerId, expected, expectedOr in [ 1, "1", "2"; 2, "20", "21" ] do
+                      for predicate, count in [ "d.k <=> o.k", expected; "(d.k <=> o.k OR d.id=500)", expectedOr ] do
+                          touches <- 0
+                          let sql =
+                              sprintf
+                                  "SELECT (SELECT COUNT(*) FROM %s WHERE TOUCH(d.id)=d.id AND %s) FROM nullsafe_outer o WHERE o.id=%d"
+                                  source predicate outerId
+                          match run store registry sql with
+                          | ResultSet(_, [ [ Some actual ] ]) when actual = count -> ()
+                          | other -> failtestf "expected MySQL count %s for %s, got %A" count sql other
+                          Expect.isLessThan touches 80 (sprintf "NULL-safe probe narrows %s" sql)
+
+              touches <- 0
+              match run store registry
+                        "SELECT (SELECT COUNT(*) FROM nullsafe_inner d IGNORE INDEX (ix_k) WHERE TOUCH(d.id)=d.id AND d.k <=> o.k) FROM nullsafe_outer o WHERE o.id=1" with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected ignored-index NULL-safe count, got %A" other
+              Expect.isGreaterThan touches 900 "ignoring the key restores the scan"
+
           testCase "materialized correlated decimal IN probes preserve exact keys"
           <| fun _ ->
               let mutable touches = 0

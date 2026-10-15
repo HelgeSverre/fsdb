@@ -14342,7 +14342,7 @@ and private canSplitCorrelatedExactNumericInequality source (columns: ColumnDef 
     compatible left right || compatible right left
 
 and private tryEqualityPredicate columnName boundValue = function
-    | BinOp(Eq, left, right) ->
+    | BinOp((Eq | NullSafeEq as comparison), left, right) ->
         Option.map2
             (fun column value -> column, value)
             (columnName left)
@@ -14352,6 +14352,7 @@ and private tryEqualityPredicate columnName boundValue = function
                 (fun column value -> column, value)
                 (columnName right)
                 (boundValue left))
+        |> Option.filter (fun (_, value) -> comparison = Eq || value <> VNull)
     | _ -> None
 
 and private tryCorrelatedEqualityPredicate source context =
@@ -14367,6 +14368,22 @@ and private tryLiteralEqualityPredicate source =
 and private tryCorrelatedProbeEqualityPredicate source context expression =
     tryCorrelatedEqualityPredicate source context expression
     |> Option.orElseWith (fun () -> tryLiteralEqualityPredicate source expression)
+
+and private tryCorrelatedNullTestPredicate source outer expression =
+    let bind indexed bound =
+        match tryCorrelatedInnerColumn source indexed,
+              outer |> Option.bind (fun context -> tryCorrelatedProbeValue source context bound) with
+        | Some name, Some VNull -> Some(name, MatchesNull)
+        | _ -> None
+
+    match expression with
+    | IsNull indexed ->
+        tryCorrelatedInnerColumn source indexed |> Option.map (fun name -> name, MatchesNull)
+    | IsNotNull indexed ->
+        tryCorrelatedInnerColumn source indexed |> Option.map (fun name -> name, MatchesNonNull)
+    | BinOp(NullSafeEq, left, right) ->
+        bind left right |> Option.orElseWith (fun () -> bind right left)
+    | _ -> None
 
 and private correlatedProbeEqualities source (whereExpr: Expr option) (outer: EvalContext option) =
     outer
@@ -14962,14 +14979,7 @@ and private tryProjectedPhysicalNullTestCandidates store (projection: PhysicalPr
     let tests =
         whereExpr
         |> optionalConjuncts
-        |> List.choose (function
-            | IsNull expression ->
-                tryCorrelatedInnerColumn probeSource expression
-                |> Option.map (fun name -> name, MatchesNull)
-            | IsNotNull expression ->
-                tryCorrelatedInnerColumn probeSource expression
-                |> Option.map (fun name -> name, MatchesNonNull)
-            | _ -> None)
+        |> List.choose (tryCorrelatedNullTestPredicate probeSource outer)
 
     if tests.IsEmpty || not (storedRowsMatchReadRows store projection.PhysicalTable.Columns) then
         None
@@ -15271,14 +15281,7 @@ and private tryMaterializedCorrelatedLookup
                 let tests =
                     predicate
                     |> optionalConjuncts
-                    |> List.choose (function
-                        | IsNull expression ->
-                            tryCorrelatedInnerColumn probeSource expression
-                            |> Option.map (fun name -> name, MatchesNull)
-                        | IsNotNull expression ->
-                            tryCorrelatedInnerColumn probeSource expression
-                            |> Option.map (fun name -> name, MatchesNonNull)
-                        | _ -> None)
+                    |> List.choose (tryCorrelatedNullTestPredicate probeSource (Some context))
                     |> List.distinctBy (fun (name, kind) -> name.ToLowerInvariant(), kind)
 
                 match tests with
@@ -15524,7 +15527,9 @@ and private tryCorrelatedSourceLookup
 
     let hasNullTestPredicate =
         whereExpr
-        |> Option.exists (Expression.exists (function IsNull _ | IsNotNull _ -> true | _ -> false))
+        |> Option.exists (Expression.exists (function
+            | IsNull _ | IsNotNull _ | BinOp(NullSafeEq, _, _) -> true
+            | _ -> false))
 
     let physicalIntersection () =
         if hasRangePredicate || hasFunctionalEqualityPredicate || hasNullTestPredicate then

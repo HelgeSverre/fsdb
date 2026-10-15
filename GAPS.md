@@ -199,6 +199,11 @@ matching-collation text `IN` lists bound to direct outer columns or literals
 reuse statement-local equality keys. [Multiple compatible materialized `IN`
 predicates](torture/findings/2026-10-15-correlated-materialized-in-intersection.md)
 intersect their candidate rows before residual evaluation.
+[Correlated NULL-safe equality](torture/findings/2026-10-15-correlated-null-safe-equality.md)
+uses the same equality keys for stable non-NULL bounds and indexed NULL
+buckets for NULL bounds on direct, pass-through, and stable materialized
+sources, including complete OR branches. The original `<=>` predicate still
+decides row membership.
 Binary-collated [correlated `LIKE` prefixes over stable materialized derived
 sources and CTEs](torture/findings/2026-10-15-correlated-materialized-like-prefix.md)
 now use statement-local ordered ranges for matching
