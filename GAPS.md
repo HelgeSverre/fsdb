@@ -715,7 +715,9 @@ now report 1356 for revoked source grants before a physical target join-key
 denial; a revoked target read alone still reports 1143. An audited
 parenthesized inner-join operand containing a derived and physical source is
 also writable and preserves their distinct 1356/1143 grant diagnostics. Other
-derived, lateral, and grouped grant paths remain unaudited.
+The target-first correlated `LATERAL` source under two definers also remains
+writable and reports 1356 for either revoked source read. Other derived,
+lateral, and grouped grant paths remain unaudited.
 Joined UPDATE also reaches a mergeable component view with a distinct definer.
 The outer definer must retain access to the component view, while that view's
 definer must retain SELECT on its base tables and UPDATE on the written target;

@@ -98,6 +98,24 @@ def exercise(connection):
     results.append(("grouped revoked flags and aux", outcome(connection, grouped_update)))
     run(connection, "GRANT SELECT ON probe.flags TO inner_owner")
     run(connection, "GRANT SELECT ON probe.aux TO inner_owner")
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_inner AS "
+        "SELECT t.id,t.n,d.aux FROM target t JOIN LATERAL "
+        "(SELECT aux FROM aux WHERE aux.id=t.id) d ON d.aux>0",
+        "GRANT SELECT,UPDATE ON probe.lateral_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_outer "
+        "AS SELECT id,n AS metric FROM lateral_inner",
+    ]:
+        run(connection, sql)
+    lateral_update = "UPDATE lateral_outer SET metric=metric+1 WHERE id=1"
+    results.append(("lateral metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_outer'")))
+    results.append(("lateral initial", outcome(connection, lateral_update)))
+    for table in ("aux", "target"):
+        run(connection, f"REVOKE SELECT ON probe.{table} FROM inner_owner")
+        results.append((f"lateral revoked {table}", outcome(connection, lateral_update)))
+        run(connection, f"GRANT SELECT ON probe.{table} TO inner_owner")
     run(connection, "CREATE TABLE aux_n(id INT PRIMARY KEY,n INT)")
     run(connection, "INSERT INTO aux_n VALUES(1,7)")
     run(connection, "GRANT SELECT ON probe.aux_n TO inner_owner")
