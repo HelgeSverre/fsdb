@@ -609,6 +609,10 @@ A [table-lock admission profile](benchmarks/results/2026-10-15-table-lock-admiss
 measured roughly 6–9 µs of admission and release per write at eight writers;
 it does not explain the hundreds of microseconds observed in the handler and
 WAL path. Its temporary probe was removed.
+A [post-preview.11 durability-matched checkpoint](benchmarks/results/2026-10-15-preview-11-write-checkpoint.md)
+again measures about 0.43× MySQL throughput at one writer and 0.27× at eight;
+the recent correctness and planning merges did not change the wire-write
+scaling gap.
 
 ## 8. Persistence and durability
 
