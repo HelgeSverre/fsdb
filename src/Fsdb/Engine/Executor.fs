@@ -15573,6 +15573,49 @@ and private tryMaterializedCorrelatedLookup
                     equalityLookup names
                     |> Option.bind (fun lookup -> lookup values)
 
+            let absoluteCandidates predicate =
+                let signedColumn expression =
+                    match expression with
+                    | FuncCall(name, [ indexed ]) when equalsIgnoreCase name "ABS" ->
+                        tryCorrelatedInnerColumn probeSource indexed
+                        |> Option.bind (resolveColumn columns >> Result.toOption)
+                        |> Option.bind (fun index ->
+                            match columns.[index].Type with
+                            | TTinyInt false | TSmallInt false | TMediumInt false | TInt false ->
+                                Some columns.[index].Name
+                            | _ -> None)
+                    | _ -> None
+
+                let inverseKeys indexed bound =
+                    signedColumn indexed
+                    |> Option.bind (fun name ->
+                        tryCorrelatedProbeValue probeSource context bound
+                        |> Option.bind (function
+                            | VNull -> Some(name, [])
+                            | VInt value when value < 0L -> Some(name, [])
+                            | VInt value ->
+                                Some(name, [ VInt value; VInt(-value) ] |> List.distinct)
+                            | _ -> None))
+
+                predicate
+                |> optionalConjuncts
+                |> List.choose (function
+                    | BinOp(Eq, left, right) ->
+                        inverseKeys left right |> Option.orElseWith (fun () -> inverseKeys right left)
+                    | _ -> None)
+                |> List.choose (function
+                    | _, [] -> Some []
+                    | name, keys ->
+                        equalityLookup [ name.ToLowerInvariant() ]
+                        |> Option.bind (fun lookup ->
+                            keys
+                            |> List.map (fun key -> lookup [ key ])
+                            |> tryAllSome
+                            |> Option.map (fun matches ->
+                                let seen = HashSet<Value[]>(HashIdentity.Reference)
+                                matches |> List.collect id |> List.filter seen.Add)))
+                |> intersectSharedRows
+
             let nullCandidates predicate =
                 let tests =
                     predicate
@@ -15716,6 +15759,7 @@ and private tryMaterializedCorrelatedLookup
             let unionCandidates () =
                 let branchCandidates branch =
                     [ equalityCandidates (Some branch)
+                      absoluteCandidates (Some branch)
                       nullCandidates (Some branch)
                       membershipCandidates (Some branch)
                       rangeCandidates (Some branch) ]
@@ -15734,6 +15778,7 @@ and private tryMaterializedCorrelatedLookup
                     List.length
 
             [ equalityCandidates whereExpr
+              absoluteCandidates whereExpr
               nullCandidates whereExpr
               membershipCandidates whereExpr
               unionCandidates ()

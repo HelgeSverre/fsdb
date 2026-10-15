@@ -12889,6 +12889,46 @@ let tests =
                     | other -> failtestf "expected 0900 binary materialized LIKE counts, got %A" other
                     Expect.isLessThan calls 60 "the 0900 binary prefix restricts residual evaluation"
 
+                testCase "materialized correlated ABS equality probes both signed keys"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE abs_bounds(id INT PRIMARY KEY,x BIGINT)" |> ignore
+                    runDefault store "CREATE TABLE abs_rows(id INT PRIMARY KEY,k INT)" |> ignore
+                    runDefault store "INSERT INTO abs_bounds VALUES(1,10),(2,999),(3,NULL),(4,-10),(5,2147483648)" |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (id - 500))
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO abs_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO abs_rows VALUES(1000,-2147483648)" |> ignore
+
+                    for prefix, source in
+                        [ "", "(SELECT DISTINCT id,k FROM abs_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM abs_rows) ", "materialized d" ] do
+                        calls <- 0
+                        match run store registry
+                            (prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                             + " WHERE TOUCH(d.id)=d.id AND ABS(d.k)=o.x) "
+                             + "FROM abs_bounds o ORDER BY o.id") with
+                        | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ]; [ Some "4"; Some "0" ]; [ Some "5"; Some "1" ] ]) -> ()
+                        | other -> failtestf "expected signed ABS matches, got %A" other
+                        Expect.isLessThan calls 60 "the two signed keys bound residual work"
+
+                        calls <- 0
+                        match run store registry
+                            (prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                             + " WHERE TOUCH(d.id)=d.id AND (ABS(d.k)=o.x OR d.id=1)) "
+                             + "FROM abs_bounds o ORDER BY o.id") with
+                        | ResultSet(_, [ [ Some "1"; Some "3" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ]; [ Some "4"; Some "1" ]; [ Some "5"; Some "2" ] ]) -> ()
+                        | other -> failtestf "expected signed ABS OR matches, got %A" other
+                        Expect.isLessThan calls 80 "complete ABS OR branches bound residual work"
+
                 testCase "correlated byte LIKE prefixes bound physical and materialized candidates"
                 <| fun _ ->
                     let mutable calls = 0
