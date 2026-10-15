@@ -377,7 +377,7 @@ type private LockingReadSource =
 let private insertSelectSourceAliasPrefix = "\u0000fsdb_odku_source_"
 
 type private EqualityMembershipDomain =
-    | SignedIntegerMembership
+    | IntegerMembership
     | DecimalMembership
     | TextMembership of Collation.Collation
 
@@ -475,9 +475,16 @@ let private nullableJoinQualifiers (select: SelectStmt) =
             Set.union left right, Set.unionMany [ nullable; rightNullable; optional ]) (sourceScope source)
     select.From |> Option.map (fun source -> joinScope source select.Joins |> snd) |> Option.defaultValue Set.empty
 
+/// Signed and unsigned integers share one key when equal: an unsigned value
+/// within the signed range is keyed as its signed twin.
+let private canonicalIntegerKey value =
+    match value with
+    | VUInt unsigned when unsigned <= uint64 System.Int64.MaxValue -> VInt(int64 unsigned)
+    | _ -> value
+
 let private equalityMembershipKey domain value =
     match domain, value with
-    | SignedIntegerMembership, VInt _
+    | IntegerMembership, (VInt _ | VUInt _) -> Some(canonicalIntegerKey value)
     | DecimalMembership, VDecimal _ -> Some value
     | TextMembership collation, VString text -> Some(VString(collation.KeyOf text))
     | _ -> None
@@ -489,7 +496,7 @@ let private equalityMembershipDomain (store: Store) (column: ColumnDef) =
     | TSmallInt _
     | TMediumInt _
     | TInt _
-    | TBigInt false -> Some SignedIntegerMembership
+    | TBigInt _ -> Some IntegerMembership
     | TDecimal _ -> Some DecimalMembership
     | TChar _
     | TVarchar _
@@ -706,6 +713,12 @@ type private NullTestKind =
 
 type private CteGroup = string * string * string
 
+/// Inner-key row counts for a correlated subquery whose only outer reference
+/// is one integer equality, computed once per statement.
+type private DecorrelatedKeyCounts =
+    { OuterKey: Expr
+      Counts: Dictionary<decimal, int64> }
+
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
       SharedDerivedGroups: Dictionary<string, CteGroup * SelectOrUnion>
@@ -718,6 +731,7 @@ type private StatementMemo =
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
+      DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
 type private SharedViewCteScope =
@@ -742,6 +756,7 @@ let private freshStatementMemo () =
       MaterializedCorrelatedNullBuckets =
         Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>(HashIdentity.Reference)
       PhysicalProjections = Dictionary<FromItem, PhysicalProjection>(HashIdentity.Reference)
+      DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
@@ -3322,6 +3337,19 @@ let private storedRowsMatchReadRows (store: Store) (columns: ColumnDef seq) =
         | _, TTimestamp _ -> false
         | _ -> true)
 
+/// Index lookups and hash buckets compare stored key values, so only the
+/// equality keys need stored and read forms to agree. Every other column is
+/// still converted when an expression reads it from the joined row.
+let private joinKeysMatchReadRows
+    (store: Store)
+    (leftColumns: ColumnDef list)
+    (rightColumns: ColumnDef list)
+    (equiKeys: (int * int) list)
+    =
+    equiKeys
+    |> Seq.collect (fun (leftIndex, rightIndex) -> [ leftColumns.[leftIndex]; rightColumns.[rightIndex] ])
+    |> storedRowsMatchReadRows store
+
 /// Resolves a bare column against `ctx`, falling back to
 /// `ctx.Outer`/its own outer/... on a miss — see `EvalContext.Outer`. Two or
 /// more matches (a `JOIN` of tables that share a column name) is error 1052,
@@ -4937,6 +4965,7 @@ let private valueMatchesKeyClass (isNumeric: bool) (v: Value) : bool =
     match v with
     | VNull -> true
     | VInt _
+    | VUInt _
     | VDouble _
     | VDecimal _ -> isNumeric
     | VString _
@@ -6815,16 +6844,19 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 coerce castMode v
                 |> Result.mapError Storage.toMySqlError)
     | Exists select ->
-        match (runExpressionSubquery ctx select (existsEarlyExitSelect select)).Result with
-        | ResultSet(_, rows) -> Ok(boolToValue (not (List.isEmpty rows)))
-        | Err(code, message) -> Error(code, message)
-        // A `SELECT` under `EXISTS (...)` is never an `INSERT`/`UPDATE`/
-        // `DELETE` (the parser's `selectStmtRecord` only builds `SelectStmt`
-        // records, nothing else reaches here), so `Affected` can't occur.
-        | Affected _ -> Ok VNull
-        | MultipleResults _ -> Error nestedSubqueryResultsError
+        match tryDecorrelatedExists ctx select with
+        | Some result -> result
+        | None ->
+            match (runExpressionSubquery ctx select (existsEarlyExitSelect select)).Result with
+            | ResultSet(_, rows) -> Ok(boolToValue (not (List.isEmpty rows)))
+            | Err(code, message) -> Error(code, message)
+            // A `SELECT` under `EXISTS (...)` is never an `INSERT`/`UPDATE`/
+            // `DELETE` (the parser's `selectStmtRecord` only builds `SelectStmt`
+            // records, nothing else reaches here), so `Affected` can't occur.
+            | Affected _ -> Ok VNull
+            | MultipleResults _ -> Error nestedSubqueryResultsError
     | Subquery select ->
-        match tryCorrelatedCount ctx select with
+        match tryCorrelatedCount ctx select |> Option.orElseWith (fun () -> tryDecorrelatedCount ctx select) with
         | Some result -> result
         | None ->
             // Reads the subquery's own typed `Value`, not a `VString` re-wrap
@@ -8512,6 +8544,154 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
                         (Ok 0L)
                     |> Result.map VInt))
     | _ -> None
+
+/// Integer keys compare exactly under SQL `=`, so they can index a
+/// dictionary without consulting collations or numeric coercion.
+and private exactIntegerKey (value: Value) : decimal option =
+    match value with
+    | VInt value -> Some(decimal value)
+    | VUInt value -> Some(decimal value)
+    | _ -> None
+
+/// Predicates that evaluate without warnings or side effects, so running
+/// them once per inner row instead of once per outer row is unobservable.
+and private isPlainRowPredicate (expression: Expr) : bool =
+    match expression with
+    | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _
+    | Col _ | QualifiedCol _ -> true
+    | BinOp((And | Or | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
+        isPlainRowPredicate left && isPlainRowPredicate right
+    | RuntimeExpression value
+    | Not value
+    | IsNull value
+    | IsNotNull value -> isPlainRowPredicate value
+    | In(value, candidates) -> isPlainRowPredicate value && List.forall isPlainRowPredicate candidates
+    | Between(value, lower, upper) -> List.forall isPlainRowPredicate [ value; lower; upper ]
+    | _ -> false
+
+/// Splits a subquery into one top-level `outer.column = inner.column`
+/// conjunct and a remainder that references only its own sources. The
+/// remainder grouped by the inner key yields every outer row's match count.
+and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : (Expr * SelectStmt) option =
+    let isPlainBlock =
+        select.GroupBy.IsEmpty
+        && select.Having.IsNone
+        && select.Limit.IsNone
+        && select.Offset.IsNone
+        && select.OrderBy.IsEmpty
+        && select.Windows.IsEmpty
+        && select.Ctes.IsEmpty
+        && select.Locking.IsEmpty
+        && not select.Rollup
+        && not select.CalculateFoundRows
+        && not (SelectStmt.hasDestination select)
+        && select.From.IsSome
+        && (select.Joins |> List.forall (fun join -> join.Using.IsEmpty && isPlainRowPredicate join.On))
+
+    match selectSubqueryScope outer.Store outer.DbName select, select.Where with
+    | Some scope, Some where when isPlainBlock ->
+        let isInner (qualifier: string) = scope.Qualifiers.Contains(qualifier.ToLowerInvariant())
+
+        let correlation =
+            function
+            | BinOp(Eq, (QualifiedCol(left, _) as leftColumn), (QualifiedCol(right, _) as rightColumn)) ->
+                match isInner left, isInner right with
+                | true, false -> Some(rightColumn, leftColumn)
+                | false, true -> Some(leftColumn, rightColumn)
+                | _ -> None
+            | _ -> None
+
+        let correlated, remainder =
+            conjuncts where |> List.partition (correlation >> Option.isSome)
+
+        match correlated with
+        | [ conjunct ] when remainder |> List.forall isPlainRowPredicate ->
+            let outerKey, innerKey = (correlation conjunct).Value
+            let keyProjection =
+                { Expression = innerKey
+                  Alias = None
+                  SourceName = None
+                  BindingOrigin = None }
+            let countProjection = { keyProjection with Expression = FuncCall("COUNT", [ Star None ]) }
+
+            let grouped =
+                { select with
+                    Projections = [ keyProjection; countProjection ]
+                    Distinct = false
+                    Where = combineConjuncts remainder
+                    GroupBy = [ innerKey ]
+                    OrderBy = [] }
+
+            if isStatementStableSelect outer.Store outer.Registry outer.DbName emptySubqueryScope grouped then
+                Some(outerKey, grouped)
+            else
+                None
+        | _ -> None
+    | _ -> None
+
+and private decorrelatedKeyCounts (outer: EvalContext) (select: SelectStmt) : DecorrelatedKeyCounts option =
+    let memo = (currentStatementMemo ()).DecorrelatedKeyCounts
+
+    match memo.TryGetValue select with
+    | true, counts -> counts
+    | false, _ ->
+        let counts =
+            tryDecorrelatedKeyShape outer select
+            |> Option.bind (fun (outerKey, grouped) ->
+                match runSelectStmt outer.Store outer.Registry outer.DbName grouped None with
+                | ResultSet _, _, rows ->
+                    let counts = Dictionary<decimal, int64>()
+
+                    let collected =
+                        rows
+                        |> List.forall (fun row ->
+                            match row with
+                            | [| VNull; _ |] -> true
+                            | [| key; VInt count |] ->
+                                match exactIntegerKey key with
+                                | Some key ->
+                                    counts.[key] <- count
+                                    true
+                                | None -> false
+                            | _ -> false)
+
+                    if collected then Some { OuterKey = outerKey; Counts = counts } else None
+                | _ -> None)
+
+        memo.[select] <- counts
+        counts
+
+/// The outer row's match count, or `None` when its key is not an integer and
+/// must take the ordinary per-row path to keep SQL's coercion rules.
+and private tryDecorrelatedMatchCount (outer: EvalContext) (select: SelectStmt) : Result<int64, EvalError> option =
+    decorrelatedKeyCounts outer select
+    |> Option.bind (fun counts ->
+        match evalExpr outer counts.OuterKey with
+        | Error error -> Some(Error error)
+        | Ok VNull -> Some(Ok 0L)
+        | Ok key ->
+            exactIntegerKey key
+            |> Option.map (fun key ->
+                match counts.Counts.TryGetValue key with
+                | true, count -> Ok count
+                | false, _ -> Ok 0L))
+
+and private tryDecorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
+    if isPlainCountStarSelect outer.Registry select && not select.Distinct then
+        tryDecorrelatedMatchCount outer select |> Option.map (Result.map VInt)
+    else
+        None
+
+and private tryDecorrelatedExists (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
+    let plainProjection (projection: Projection) =
+        match projection.Expression with
+        | Star None | Lit _ -> true
+        | _ -> false
+
+    if select.Projections |> List.forall plainProjection then
+        tryDecorrelatedMatchCount outer select |> Option.map (Result.map (fun count -> boolToValue (count > 0L)))
+    else
+        None
 
 and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value * Collation.Collation option, EvalError> =
     let orderCtx = { ctx with Clause = OrderClause }
@@ -10288,7 +10468,7 @@ and private tryIndexedJoinProbe
     : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
     | (InnerJoin | StraightJoin | NaturalJoin | LeftJoin | NaturalLeftJoin | RightJoin | NaturalRightJoin), _, Some table, _ :: _
-        when storedRowsMatchReadRows store (Seq.append leftColumns rightColumns)
+        when joinKeysMatchReadRows store leftColumns rightColumns equiKeys
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
         let allowed = indexAllowedForJoinSource (Some join.Table)
         equiKeys |> List.map (fun (leftIndex, rightIndex) -> rightIndex, leftIndex) |> tryIndexProbe allowed table rightColumns
@@ -10449,7 +10629,7 @@ and private tryIndexedPreservedRightProbe
     : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
     | (RightJoin | NaturalRightJoin), _, Some table, _ :: _
-        when storedRowsMatchReadRows store (Seq.append leftColumns rightColumns)
+        when joinKeysMatchReadRows store leftColumns rightColumns equiKeys
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
         let allowed = indexAllowedForJoinSource leftOperand
         equiKeys |> tryIndexProbe allowed table leftColumns
@@ -11322,7 +11502,7 @@ and private applyPreparedJoin
         let hashKeyDomain =
             lazy
                 (not equiKeys.IsEmpty
-                 && storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
+                 && joinKeysMatchReadRows store combinedColumnsSoFar joinColumns equiKeys
                  && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys)
 
         let hashCompatible =
@@ -11829,7 +12009,7 @@ and private applyPreparedMutationJoin
         let hashEligible =
             match keyClasses with
             | Some classes ->
-                storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
+                joinKeysMatchReadRows store combinedColumnsSoFar joinColumns equiKeys
                 && not equiKeys.IsEmpty
                 && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
                 && rowsMatchKeyClasses classes (equiKeys |> List.map fst) leftFlatRows
@@ -15007,7 +15187,8 @@ and private tryProjectedPhysicalRangeCandidates
         let safeBroadNumericRange =
             let values = [ bounds.Lower; bounds.Upper ] |> List.choose id |> List.map fst
             match equalityMembershipDomain store sourceColumn with
-            | Some SignedIntegerMembership -> values |> List.forall (function VInt _ -> true | _ -> false)
+            | Some IntegerMembership when sourceColumn.Type <> TBigInt true ->
+                values |> List.forall (function VInt _ -> true | _ -> false)
             | Some DecimalMembership -> values |> List.forall (function VDecimal _ -> true | _ -> false)
             | _ -> false
 

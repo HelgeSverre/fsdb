@@ -14,7 +14,86 @@ let private newStore () = create ()
 let tests =
     testList
         "correlated subqueries"
-        [ testCase "numeric aggregate metadata retains binary numeric coercibility"
+        [ testList
+              "joined correlated COUNT and EXISTS"
+              [ let joinedStore () =
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE cat (id BIGINT UNSIGNED PRIMARY KEY, name VARCHAR(10), parent_id BIGINT UNSIGNED NULL)" |> ignore
+                    runDefault store "CREATE TABLE sys (id BIGINT UNSIGNED PRIMARY KEY, status VARCHAR(10) NOT NULL, created_at TIMESTAMP NULL)" |> ignore
+                    runDefault store "CREATE TABLE cat_sys (id BIGINT UNSIGNED PRIMARY KEY, cat_id BIGINT UNSIGNED NULL, sys_id BIGINT UNSIGNED NOT NULL, KEY (sys_id, cat_id))" |> ignore
+                    runDefault store "INSERT INTO cat VALUES (1, 'crm', NULL), (2, 'erp', NULL), (3, 'empty', NULL), (4, 'child', 1)" |> ignore
+                    runDefault store "INSERT INTO sys VALUES (10, 'published', NULL), (11, 'published', NULL), (12, 'draft', NULL), (13, 'published', NULL)" |> ignore
+                    runDefault store "INSERT INTO cat_sys VALUES (1, 1, 10), (2, 1, 11), (3, 1, 12), (4, 2, 12), (5, 2, 13), (6, NULL, 10), (7, 4, 13)" |> ignore
+                    store
+
+                let countSql =
+                    "SELECT cat.name, (SELECT COUNT(*) FROM sys INNER JOIN cat_sys ON sys.id = cat_sys.sys_id WHERE cat.id = cat_sys.cat_id AND status = 'published') AS systems_count FROM cat"
+
+                testCase "per-row counts cover matches, misses, NULL inner keys, and residual filters"
+                <| fun _ ->
+                    match runDefault (joinedStore ()) (countSql + " ORDER BY systems_count DESC, cat.id") with
+                    | ResultSet([ "name"; "systems_count" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "crm"; Some "2" ]; [ Some "erp"; Some "1" ]; [ Some "child"; Some "1" ]; [ Some "empty"; Some "0" ] ]
+                            "draft systems and NULL category keys are excluded; empty categories count zero"
+                    | other -> failtestf "expected joined correlated counts, got %A" other
+
+                testCase "a NULL outer key counts zero"
+                <| fun _ ->
+                    match runDefault (joinedStore ()) "SELECT cat.id, (SELECT COUNT(*) FROM sys INNER JOIN cat_sys ON sys.id = cat_sys.sys_id WHERE cat.parent_id = cat_sys.cat_id) AS c FROM cat ORDER BY cat.id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ]; [ Some "4"; Some "3" ] ] "NULL never equals a category key"
+                    | other -> failtestf "expected parent counts, got %A" other
+
+                testCase "the joined inner side is read once per statement rather than once per outer row"
+                <| fun _ ->
+                    let store = joinedStore ()
+                    let values = [ 100 .. 299 ] |> List.map (sprintf "(%d, 'bulk', NULL)") |> String.concat ","
+                    runDefault store ("INSERT INTO cat VALUES " + values) |> ignore
+                    let _, examined = withExaminedRows (fun () -> runDefault store countSql)
+                    Expect.isLessThan examined 400L "204 outer rows plus one pass over 4 systems and 7 links"
+
+                testCase "EXISTS and NOT EXISTS over a join follow the same keys"
+                <| fun _ ->
+                    let existsSql negate =
+                        sprintf
+                            "SELECT name FROM cat WHERE %sEXISTS (SELECT * FROM sys INNER JOIN cat_sys ON sys.id = cat_sys.sys_id WHERE cat.id = cat_sys.cat_id AND status = 'published') ORDER BY id"
+                            negate
+
+                    match runDefault (joinedStore ()) (existsSql "") with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "crm" ]; [ Some "erp" ]; [ Some "child" ] ] "categories with a published system"
+                    | other -> failtestf "expected EXISTS rows, got %A" other
+
+                    match runDefault (joinedStore ()) (existsSql "NOT ") with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "empty" ] ] "categories without a published system"
+                    | other -> failtestf "expected NOT EXISTS rows, got %A" other
+
+                testCase "decorrelated EXISTS still validates its projected columns"
+                <| fun _ ->
+                    let store = joinedStore ()
+                    for invalidSql in
+                        [ "SELECT EXISTS (SELECT missing_column FROM sys INNER JOIN cat_sys ON sys.id = cat_sys.sys_id WHERE cat.id = cat_sys.cat_id) FROM cat"
+                          "SELECT EXISTS (SELECT 1 FROM sys INNER JOIN cat_sys ON sys.id = cat_sys.sys_id WHERE cat.id = cat_sys.cat_id ORDER BY missing_column) FROM cat" ] do
+                        match runDefault store invalidSql with
+                        | Err(1054, _) -> ()
+                        | other -> failtestf "an invalid EXISTS column must retain MySQL error 1054, got %A" other
+
+                testCase "non-integer outer keys keep exact per-row equality"
+                <| fun _ ->
+                    let store = joinedStore ()
+                    runDefault store "CREATE TABLE probe (k DECIMAL(5,1), s VARCHAR(5))" |> ignore
+                    runDefault store "INSERT INTO probe VALUES (1.0, '1'), (1.5, '2'), (NULL, 'x')" |> ignore
+
+                    match runDefault store "SELECT k, (SELECT COUNT(*) FROM sys INNER JOIN cat_sys ON sys.id = cat_sys.sys_id WHERE probe.k = cat_sys.cat_id) AS by_decimal, (SELECT COUNT(*) FROM sys INNER JOIN cat_sys ON sys.id = cat_sys.sys_id WHERE probe.s = cat_sys.cat_id) AS by_text FROM probe ORDER BY k IS NULL, k" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1.0"; Some "3"; Some "3" ]; [ Some "1.5"; Some "0"; Some "2" ]; [ None; Some "0"; Some "0" ] ]
+                            "decimal and string outer keys compare numerically, row by row"
+                    | other -> failtestf "expected coerced correlated counts, got %A" other ]
+
+          testCase "numeric aggregate metadata retains binary numeric coercibility"
           <| fun _ ->
               Expect.equal
                   (runDefault (newStore ()) "SELECT COERCIBILITY(SUM('1')) AS s,COERCIBILITY(AVG('1')) AS a,COERCIBILITY(COUNT(*)) AS c,COLLATION(SUM('1')) AS col,CHARSET(AVG('1')) AS ch")
@@ -326,6 +405,25 @@ let tests =
               match runDefault store sql with
               | ResultSet([ "name" ], [ [ Some "bob" ] ]) -> ()
               | other -> failtestf "expected only bob (who has no post), got %A" other
+
+          testCase "IN and NOT IN over BIGINT UNSIGNED candidates match across signedness"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE u_candidates (id BIGINT UNSIGNED)" |> ignore
+              runDefault store "CREATE TABLE u_probes (label VARCHAR(5), u BIGINT UNSIGNED, s BIGINT)" |> ignore
+              runDefault store "INSERT INTO u_candidates VALUES (1), (9223372036854775808), (18446744073709551615)" |> ignore
+              runDefault store "INSERT INTO u_probes VALUES ('one', 1, 1), ('big', 9223372036854775808, -1), ('max', 18446744073709551615, NULL), ('miss', 2, 2)" |> ignore
+
+              match runDefault store "SELECT label, u IN (SELECT id FROM u_candidates) AS by_u, s IN (SELECT id FROM u_candidates) AS by_s, s NOT IN (SELECT id FROM u_candidates) AS not_s FROM u_probes ORDER BY label" with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "big"; Some "1"; Some "0"; Some "1" ]
+                        [ Some "max"; Some "1"; None; None ]
+                        [ Some "miss"; Some "0"; Some "0"; Some "1" ]
+                        [ Some "one"; Some "1"; Some "1"; Some "0" ] ]
+                      "signed 1 matches unsigned 1, -1 never matches the unsigned maximum, and NULL stays unknown"
+              | other -> failtestf "expected unsigned IN results, got %A" other
 
           testCase "IN (SELECT ...): a non-correlated subquery's first column is the candidate set"
           <| fun _ ->

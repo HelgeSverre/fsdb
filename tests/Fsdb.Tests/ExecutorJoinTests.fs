@@ -26,6 +26,62 @@ let tests =
                   Expect.equal rows [ [ Some "widget"; Some "5" ]; [ Some "gadget"; Some "9" ] ] "each row joined to itself"
               | other -> failtestf "expected a joined resultset, got %A" other
 
+          testCase "TIMESTAMP payload columns keep equality joins off the nested-loop path"
+          <| fun _ ->
+              for indexed in [ false; true ] do
+                  let store = newStore ()
+                  runDefault store "CREATE TABLE ts_owner (id BIGINT UNSIGNED PRIMARY KEY, created_at TIMESTAMP NULL)" |> ignore
+                  let ownerIndex = if indexed then ", KEY (owner_id)" else ""
+                  runDefault store (sprintf "CREATE TABLE ts_item (id BIGINT UNSIGNED PRIMARY KEY, owner_id BIGINT UNSIGNED NOT NULL, created_at TIMESTAMP NULL%s)" ownerIndex) |> ignore
+                  let owners = [ 1 .. 100 ] |> List.map (sprintf "(%d, '2026-01-02 03:04:05')") |> String.concat ","
+                  let items = [ 1 .. 200 ] |> List.map (fun id -> sprintf "(%d, %d, '2026-02-03 04:05:06')" id ((id % 100) + 1)) |> String.concat ","
+                  runDefault store ("INSERT INTO ts_owner VALUES " + owners) |> ignore
+                  runDefault store ("INSERT INTO ts_item VALUES " + items) |> ignore
+
+                  let mutable evaluated = 0
+                  let countCandidate _ =
+                      evaluated <- evaluated + 1
+                      VInt 1L
+                  let registry = builtins |> registerScalar "COUNT_CANDIDATE" countCandidate
+
+                  let sql =
+                      "SELECT COUNT(*), MIN(o.created_at), MAX(i.created_at) FROM ts_owner o JOIN ts_item i ON COUNT_CANDIDATE(i.id) = 1 AND o.id = i.owner_id"
+
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "200"; Some "2026-01-02 03:04:05"; Some "2026-02-03 04:05:06" ] ]) -> ()
+                  | other -> failtestf "expected 200 joined rows with readable timestamps (indexed=%b), got %A" indexed other
+
+                  Expect.equal evaluated 200 (sprintf "only key-matched pairs reach the residual (indexed=%b)" indexed)
+
+          testCase "unsigned hash-join keys match exactly across the full BIGINT UNSIGNED range"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE u_left (k BIGINT UNSIGNED, label VARCHAR(5))" |> ignore
+              runDefault store "CREATE TABLE u_right (k BIGINT UNSIGNED, s BIGINT)" |> ignore
+              runDefault store "INSERT INTO u_left VALUES (18446744073709551615, 'max'), (18446744073709551614, 'max-1'), (9223372036854775808, 'mid'), (1, 'one'), (NULL, 'null')" |> ignore
+              runDefault store "INSERT INTO u_right VALUES (18446744073709551615, -1), (9223372036854775808, 0), (1, 1), (NULL, NULL)" |> ignore
+
+              match runDefault store "SELECT l.label FROM u_left l JOIN u_right r ON l.k = r.k ORDER BY l.label" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "max" ]; [ Some "mid" ]; [ Some "one" ] ] "neighbouring large keys share a double bucket but stay distinct"
+              | other -> failtestf "expected an unsigned-key resultset, got %A" other
+
+              match runDefault store "SELECT l.label FROM u_left l JOIN u_right r ON l.k = r.s ORDER BY l.label" with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "one" ] ] "a signed -1 never equals an unsigned maximum"
+              | other -> failtestf "expected a mixed-sign resultset, got %A" other
+
+          testCase "TIMESTAMP join keys still compare their stored instants"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE ts_left (at TIMESTAMP NULL, label VARCHAR(5))" |> ignore
+              runDefault store "CREATE TABLE ts_right (at TIMESTAMP NULL, KEY (at))" |> ignore
+              runDefault store "INSERT INTO ts_left VALUES ('2026-01-01 00:00:00', 'a'), ('2026-01-02 00:00:00', 'b'), (NULL, 'n')" |> ignore
+              runDefault store "INSERT INTO ts_right VALUES ('2026-01-02 00:00:00'), (NULL)" |> ignore
+
+              match runDefault store "SELECT l.label, r.at FROM ts_left l JOIN ts_right r ON l.at = r.at" with
+              | ResultSet(_, [ [ Some "b"; Some "2026-01-02 00:00:00" ] ]) -> ()
+              | other -> failtestf "expected only the equal instant to match, got %A" other
+
           testCase "joins may inspect over a million rejected candidate pairs"
           <| fun _ ->
               let store = newStore ()
