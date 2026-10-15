@@ -901,6 +901,82 @@ let tests =
               | other -> failtestf "expected five direct composite-prefix NULL rows, got %A" other
               Expect.isLessThan touches 10 "direct reads use the bound composite NULL slice"
 
+          testCase "physical IS NOT NULL probes use ordered index candidates"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE nonnull_outer(id INT PRIMARY KEY,a INT)" |> ignore
+              runDefault store "CREATE TABLE physical_nonnull(id INT PRIMARY KEY,a INT,k INT,KEY ix_a(a),KEY ix_k(k DESC))" |> ignore
+              runDefault store "INSERT INTO nonnull_outer VALUES(1,1),(2,2),(3,3)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id ->
+                  sprintf "(%d,%d,%s)" id (if id <= 500 then 1 else 2) (if id % 100 = 0 then string id else "NULL"))
+              |> String.concat ","
+              |> sprintf "INSERT INTO physical_nonnull VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for prefix, source in
+                  [ "", "physical_nonnull d"
+                    "", "(SELECT id,a,k FROM physical_nonnull) d"
+                    "WITH passed AS (SELECT id,a,k FROM physical_nonnull) ", "passed d" ] do
+                  touches <- 0
+                  let sql =
+                      prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.k IS NOT NULL AND d.a=o.a)"
+                      + " FROM nonnull_outer o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "1"; Some "5" ]; [ Some "2"; Some "5" ]; [ Some "3"; Some "0" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's non-NULL counts, got %A" other
+                  Expect.isLessThan touches 30 "the non-NULL index narrows before the residual"
+
+                  touches <- 0
+                  let withOr =
+                      prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND (d.k IS NOT NULL OR d.id=o.id))"
+                      + " FROM nonnull_outer o ORDER BY o.id"
+                  match run store registry withOr with
+                  | ResultSet(_, [ [ Some "1"; Some "11" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "11" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's non-NULL OR counts, got %A" other
+                  Expect.isLessThan touches 50 "both OR branches narrow before the residual"
+
+              touches <- 0
+              let ignored =
+                  "SELECT o.id,(SELECT COUNT(*) FROM physical_nonnull d IGNORE INDEX (ix_k)"
+                  + " WHERE TOUCH(d.id)=d.id AND d.k IS NOT NULL AND d.a=o.a)"
+                  + " FROM nonnull_outer o ORDER BY o.id"
+              match run store registry ignored with
+              | ResultSet(_, [ [ Some "1"; Some "5" ]; [ Some "2"; Some "5" ]; [ Some "3"; Some "0" ] ]) -> ()
+              | other -> failtestf "expected ignored-index non-NULL counts, got %A" other
+              Expect.isGreaterThan touches 1000 "ignoring the non-NULL key restores the scan"
+
+              runDefault store "CREATE TABLE composite_nonnull(id INT PRIMARY KEY,a INT,k INT,KEY ix_ak(a,k DESC))" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id ->
+                  sprintf "(%d,%d,%s)" id (if id <= 500 then 1 else 2) (if id % 100 = 0 then string id else "NULL"))
+              |> String.concat ","
+              |> sprintf "INSERT INTO composite_nonnull VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for hint in [ ""; "IGNORE INDEX (ix_ak)" ] do
+                  touches <- 0
+                  let sql =
+                      "SELECT o.id,(SELECT COUNT(*) FROM composite_nonnull d " + hint
+                      + " WHERE TOUCH(d.id)=d.id AND d.a=o.a AND d.k IS NOT NULL)"
+                      + " FROM nonnull_outer o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "1"; Some "5" ]; [ Some "2"; Some "5" ]; [ Some "3"; Some "0" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's composite non-NULL counts, got %A" other
+                  if hint = "" then
+                      Expect.isLessThan touches 30 "the bound composite prefix narrows to its non-NULL slice"
+                  else
+                      Expect.isGreaterThan touches 1000 "ignoring the composite key restores the scan"
+
           testCase "materialized correlated IN probes avoid unrelated rows"
           <| fun _ ->
               let mutable touches = 0

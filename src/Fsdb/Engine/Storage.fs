@@ -5647,30 +5647,19 @@ let private orderedPrefixBounds (entries: ImmutableSortedSet<SecondaryOrderEntry
 
         insertionIndex FirstEqual, insertionIndex AfterEqual
 
-/// Equality probes use SQL's `NULL <> NULL` rule. `IS NULL` instead reads a
-/// visible key's NULL bucket after any exact bound leading key parts.
-let internal tryNullRowIdsForColumn
+/// Read either side of an indexed NULL test after any exact bound leading key
+/// parts. The NULL slice is contiguous in both ascending and descending keys.
+type private IndexedNullTest = NullRows | NonNullRows
+
+let private tryOrderedNullTestRowIdsForColumn
     (store: Store)
     (table: Table)
     (columnName: string)
     (equalities: (string * Value) list)
     allowed
+    test
     : Set<RowId> option =
-    let singleColumnBucket =
-        equalityIndexesForColumns table [ columnName ]
-        |> List.tryFind (fun index -> not index.Unique && allowed index.Name)
-        |> Option.bind (fun index ->
-            let key =
-                makeProbeRow table [ index.ColumnIndices.Head, VNull ]
-                |> encodeIndexKey table.Columns (equalityKeyGroup index)
-
-            table.SecondaryIndex
-            |> Map.tryFind index.Name
-            |> Option.map (Map.tryFind key >> Option.defaultValue Set.empty))
-
-    singleColumnBucket
-    |> Option.orElseWith (fun () ->
-        resolveColumn table.Columns columnName
+    resolveColumn table.Columns columnName
         |> Result.toOption
         |> Option.bind (fun columnIndex ->
             let boundValues =
@@ -5709,9 +5698,37 @@ let internal tryNullRowIdsForColumn
             |> List.sortByDescending (fun (position, _, _) -> position)
             |> List.tryHead
             |> Option.map (fun (_, prefix, entries) ->
-                let first, afterLast = orderedPrefixBounds entries (prefix @ [ VNull ])
-                Seq.init (afterLast - first) (fun offset -> entries.[first + offset].RowId)
-                |> Set.ofSeq)))
+                let first, afterLast = orderedPrefixBounds entries prefix
+                let nullFirst, nullAfterLast = orderedPrefixBounds entries (prefix @ [ VNull ])
+                let rowIds lower upper =
+                    Seq.init (upper - lower) (fun offset -> entries.[lower + offset].RowId)
+                match test with
+                | NullRows -> rowIds nullFirst nullAfterLast |> Set.ofSeq
+                | NonNullRows ->
+                    Seq.append (rowIds first nullFirst) (rowIds nullAfterLast afterLast)
+                    |> Set.ofSeq))
+
+/// Equality probes use SQL's `NULL <> NULL` rule. `IS NULL` can also read a
+/// non-unique single-column key's direct NULL bucket.
+let internal tryNullRowIdsForColumn store table columnName equalities allowed : Set<RowId> option =
+    let singleColumnBucket =
+        equalityIndexesForColumns table [ columnName ]
+        |> List.tryFind (fun index -> not index.Unique && allowed index.Name)
+        |> Option.bind (fun index ->
+            let key =
+                makeProbeRow table [ index.ColumnIndices.Head, VNull ]
+                |> encodeIndexKey table.Columns (equalityKeyGroup index)
+
+            table.SecondaryIndex
+            |> Map.tryFind index.Name
+            |> Option.map (Map.tryFind key >> Option.defaultValue Set.empty))
+
+    singleColumnBucket
+    |> Option.orElseWith (fun () ->
+        tryOrderedNullTestRowIdsForColumn store table columnName equalities allowed NullRows)
+
+let internal tryNonNullRowIdsForColumn store table columnName equalities allowed : Set<RowId> option =
+    tryOrderedNullTestRowIdsForColumn store table columnName equalities allowed NonNullRows
 
 type EqualityIndexMatchLookup =
     { CandidateCount: int

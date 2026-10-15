@@ -14879,15 +14879,20 @@ and private tryProjectedPhysicalRangeRows store registry dbName projection bound
     tryProjectedPhysicalRangeCandidates CostedRead store projection bounds
     |> Option.bind (projectPhysicalLookupRows store registry dbName projection)
 
-and private tryProjectedPhysicalNullCandidates store (projection: PhysicalProjection) probeSource whereExpr outer =
-    let names =
+and private tryProjectedPhysicalNullTestCandidates store (projection: PhysicalProjection) probeSource whereExpr outer =
+    let tests =
         whereExpr
         |> optionalConjuncts
         |> List.choose (function
-            | IsNull expression -> tryCorrelatedInnerColumn probeSource expression
+            | IsNull expression ->
+                tryCorrelatedInnerColumn probeSource expression
+                |> Option.map (fun name -> name, MatchesNull)
+            | IsNotNull expression ->
+                tryCorrelatedInnerColumn probeSource expression
+                |> Option.map (fun name -> name, MatchesNonNull)
             | _ -> None)
 
-    if names.IsEmpty || not (storedRowsMatchReadRows store projection.PhysicalTable.Columns) then
+    if tests.IsEmpty || not (storedRowsMatchReadRows store projection.PhysicalTable.Columns) then
         None
     else
         let allowed = indexHintsFor IndexJoin projection.PhysicalTableRef |> indexAllowedBy
@@ -14903,12 +14908,17 @@ and private tryProjectedPhysicalNullCandidates store (projection: PhysicalProjec
             |> List.filter (fun (name, value) ->
                 equalityPinsOneStoredKey projection.PhysicalTable name value)
 
-        names
-        |> List.choose (fun name ->
+        tests
+        |> List.choose (fun (name, kind) ->
             tryPhysicalProjectionColumn projection name
             |> Option.bind (fun column ->
-                Storage.tryNullRowIdsForColumn
-                    store projection.PhysicalTable column.Name boundEqualities allowed))
+                match kind with
+                | MatchesNull ->
+                    Storage.tryNullRowIdsForColumn
+                        store projection.PhysicalTable column.Name boundEqualities allowed
+                | MatchesNonNull ->
+                    Storage.tryNonNullRowIdsForColumn
+                        store projection.PhysicalTable column.Name boundEqualities allowed))
         |> function
             | [] -> None
             | first :: rest ->
@@ -14922,7 +14932,7 @@ and private tryProjectedPhysicalCorrelatedNullLookup store registry dbName sourc
     |> Option.bind (fun qualifier ->
         tryPhysicalProjection store registry dbName source
         |> Option.bind (fun projection ->
-            tryProjectedPhysicalNullCandidates
+            tryProjectedPhysicalNullTestCandidates
                 store projection (correlatedProbeSource qualifier projection.OutputColumns) whereExpr outer
             |> Option.bind (projectPhysicalLookupRows store registry dbName projection)))
 
@@ -14960,7 +14970,7 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     correlatedProbeEqualities probeSource (Some branch) outer
                     |> Option.bind (tryProjectedPhysicalEqualitiesCandidates CandidateNarrowing store projection)
 
-                let nulls = tryProjectedPhysicalNullCandidates store projection probeSource (Some branch) outer
+                let nulls = tryProjectedPhysicalNullTestCandidates store projection probeSource (Some branch) outer
 
                 let membership =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
@@ -15036,7 +15046,7 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
             match equality with
             | Some equalRows when equalRows.Length <= 1 -> None
             | _ ->
-                let nulls = tryProjectedPhysicalNullCandidates store projection probeSource whereExpr outer
+                let nulls = tryProjectedPhysicalNullTestCandidates store projection probeSource whereExpr outer
                 let membership =
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
                         outer
@@ -15357,18 +15367,18 @@ and private tryCorrelatedSourceLookup
         |> optionalConjuncts
         |> List.exists (function In _ -> true | _ -> false)
 
-    let hasNullPredicate =
+    let hasNullTestPredicate =
         whereExpr
-        |> Option.exists (Expression.exists (function IsNull _ -> true | _ -> false))
+        |> Option.exists (Expression.exists (function IsNull _ | IsNotNull _ -> true | _ -> false))
 
     let physicalIntersection () =
-        if hasRangePredicate || hasFunctionalEqualityPredicate || hasNullPredicate then
+        if hasRangePredicate || hasFunctionalEqualityPredicate || hasNullTestPredicate then
             tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
         else
             None
 
     let nullLookup () =
-        if hasNullPredicate then
+        if hasNullTestPredicate then
             tryProjectedPhysicalCorrelatedNullLookup store registry dbName source whereExpr outer
         else
             None
@@ -15467,7 +15477,7 @@ and private tryCorrelatedSourceLookup
              (match direct with
               | Some(_, rows) when rows.Length <= 1 -> None
               | Some _ -> physicalIntersection ()
-              | None when hasMultipleConjunctiveRanges || (hasMembershipPredicate && hasRangePredicate) || hasNullPredicate -> physicalIntersection ()
+              | None when hasMultipleConjunctiveRanges || (hasMembershipPredicate && hasRangePredicate) || hasNullTestPredicate -> physicalIntersection ()
               | None -> None)
              |> Option.orElseWith (fun () -> chooseWithRanges true direct)
          else

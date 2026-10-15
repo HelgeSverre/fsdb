@@ -32,3 +32,16 @@ predicates remain the final result check. Direct reads can also use a later
 NULL part when its preceding key parts have exact literal equality bounds.
 Expression keys and later NULL parts without exact bounds for all preceding
 parts remain outside this path.
+
+The complementary `IS NOT NULL` path now reads the non-NULL portions of a
+visible ordered key, including descending keys and a later part after an exact
+correlated equality prefix. It intersects those row IDs with other safe
+candidates and unions complete OR branches before evaluating the residual.
+The native oracle checks physical, pass-through derived, and CTE forms against
+the `(5, 5, 0)` and `(11, 11, 11)` counts on a source with only ten non-NULL
+values. The focused regression keeps `TOUCH` calls below 30 for conjunctions
+and below 50 for OR, while `IGNORE INDEX` restores more than 1,000 calls.
+The composite `(a, k DESC)` key narrows each outer equality to five rows;
+ignoring it restores the scan. The original predicate remains the final
+result check. This does not add an index path for expression keys or unbound
+later key parts.
