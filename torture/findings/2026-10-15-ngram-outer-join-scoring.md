@@ -20,5 +20,12 @@ nullable join side now turn a null-extended synthetic score into zero.
 The [native oracle](../scripts/fulltext-join-bounds-oracle.py) checks both
 orientations, the filtered query, relevance, and the unmatched row. The focused
 Expecto regression checks the same results and requires fewer than 30 virtual
-preparations for the filtered left join. Broader CJK join graphs and MeCab
-remain open.
+preparations for the filtered left join. A symmetric right-join probe initially
+prepared 800 rows despite returning the same ten matches. The full-text
+pre-pass now takes source-local `ON` bounds from the preceding nullable side
+of a right join too; the focused regression requires fewer than 30
+preparations while the preserved owner and complete-corpus scores remain
+unchanged. A second oracle and residual probe place the scored document source
+after an earlier inner join on the nullable side of a right join; it also
+retains those ten scores with fewer than 30 preparations. Broader CJK join
+graphs and MeCab remain open.

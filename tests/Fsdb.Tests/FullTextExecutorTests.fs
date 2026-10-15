@@ -137,6 +137,20 @@ let tests =
                   + " ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43)"
                   + " ORDER BY o.id,d.id"
               Expect.equal (execute cjkRightPreserved) (execute cjkPreserved) "nullable CJK scores match across join orientation"
+              let cjkRightJoined =
+                  "SELECT d.id," + cjkScore + " FROM cjk_docs d RIGHT JOIN owners o"
+                  + " ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43)"
+                  + " AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+              calls <- 0
+              Expect.equal (execute cjkRightJoined) cjkControl "MySQL 8.4 ngram right-join ON bound preserves results and scores"
+              Expect.isLessThan calls 30 "the left-side ON bound restricts CJK candidate preparation"
+              let cjkChainedRightJoined =
+                  "SELECT d.id," + cjkScore + " FROM owners p JOIN cjk_docs d ON d.owner_id=p.id"
+                  + " RIGHT JOIN owners o ON d.owner_id=o.id AND d.owner_id=42 WHERE o.id IN(42,43)"
+                  + " AND MATCH(d.body,d.title) AGAINST('生日' IN BOOLEAN MODE) ORDER BY d.id"
+              calls <- 0
+              Expect.equal (execute cjkChainedRightJoined) cjkControl "MySQL 8.4 chained right-join scores"
+              Expect.isLessThan calls 30 "a preceding scored source receives its local right-join ON bound"
 
               for bound, selected in
                   [ "o.id BETWEEN 42 AND 43", "42,43"

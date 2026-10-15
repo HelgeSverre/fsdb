@@ -20271,21 +20271,38 @@ and private runFullTextSelect
                 sourcePredicatesForInnerJoins fromItem select.Joins joinConsumption select.Where
 
             let select = { select with Where = remainingWhere }
-            // A LEFT JOIN's right-side ON terms can exclude right rows before
-            // scoring, but they cannot filter the preserved left source.
-            let nullableRightOnPredicates =
-                select.Joins
-                |> List.choose (fun join ->
-                    match join.Kind, join.Table with
-                    | LeftJoin, FromTable tableRef ->
-                        let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+            // Outer-join ON terms can narrow scoring only on the nullable side.
+            let sourceQualifiers item =
+                FromItem.leaves item |> List.choose FromItem.tryQualifier
 
-                        join.On
-                        |> conjuncts
-                        |> List.filter (canPushIntoSource qualifier)
-                        |> combineConjuncts
-                        |> Option.map (fun predicate -> qualifier.ToLowerInvariant(), predicate)
-                    | _ -> None)
+            let _, nullableOnBounds =
+                select.Joins
+                |> List.fold (fun (preceding, bounds) join ->
+                    let joined = sourceQualifiers join.Table
+                    let nullable =
+                        match join.Kind with
+                        | LeftJoin | NaturalLeftJoin -> joined
+                        | RightJoin | NaturalRightJoin -> preceding
+                        | _ -> []
+                    let local =
+                        nullable
+                        |> List.choose (fun qualifier ->
+                            join.On
+                            |> conjuncts
+                            |> List.filter (canPushIntoSource qualifier)
+                            |> combineConjuncts
+                            |> Option.map (fun predicate -> qualifier.ToLowerInvariant(), predicate))
+                    preceding @ joined, bounds @ local)
+                    (sourceQualifiers fromItem, [])
+
+            let nullableOnPredicates =
+                nullableOnBounds
+                |> List.groupBy fst
+                |> List.choose (fun (qualifier, bounds) ->
+                    bounds
+                    |> List.map snd
+                    |> combineConjuncts
+                    |> Option.map (fun predicate -> qualifier, predicate))
                 |> Map.ofList
 
             let prepared =
@@ -20308,7 +20325,7 @@ and private runFullTextSelect
                                 |> fun predicate ->
                                     optionalConjuncts predicate
                                     @ optionalConjuncts (Map.tryFind (source.Qualifier.ToLowerInvariant()) inferredBounds)
-                                    @ optionalConjuncts (Map.tryFind (source.Qualifier.ToLowerInvariant()) nullableRightOnPredicates)
+                                    @ optionalConjuncts (Map.tryFind (source.Qualifier.ToLowerInvariant()) nullableOnPredicates)
                                     |> List.distinct
                                     |> combineConjuncts
 
