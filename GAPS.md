@@ -344,8 +344,11 @@ The [matched in-memory timing](benchmarks/results/2026-10-15-materialized-intege
 confirms a repeated-query speedup for this shape. [Text expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-text-expression-lookup)
 use the effective comparison collation and reduce the audited `LOWER(d.k)=o.x`
 profile from 4,004 to six residual calls. [Exact decimal expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-lookup)
-reduce `d.k+0.00=o.x` from 5,005 to seven calls. Floating-point and other
-coerced-domain functional keys remain open.
+reduce `d.k+0.00=o.x` from 5,005 to seven calls. [Finite DOUBLE-domain keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-lookup)
+now reduce `d.k+0e0=o.x` from 5,005 to seven calls too. DECIMAL and integer
+bounds use the same approximate comparison key, while string and non-finite
+floating lookups remain open. The audited BIGINT/DOUBLE expression-provenance
+comparison at 2⁵³ now matches MySQL.
 
 ## 3. Built-in functions
 
