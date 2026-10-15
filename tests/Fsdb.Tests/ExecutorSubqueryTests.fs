@@ -1455,6 +1455,81 @@ let tests =
               | other -> failtestf "expected ignored-index inequality count, got %A" other
               Expect.isGreaterThan touches 900 "ignoring the indexed key restores the scan"
 
+          testCase "correlated decimal inequality unions selective indexed ranges"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE decimal_bounds(id INT PRIMARY KEY,k DECIMAL(10,2))" |> ignore
+              runDefault store "CREATE TABLE decimal_selective(k DECIMAL(10,2))" |> ignore
+              runDefault store "CREATE TABLE decimal_rows(id INT PRIMARY KEY,k DECIMAL(10,2),KEY ix_k(k))" |> ignore
+              runDefault store "INSERT INTO decimal_bounds VALUES(1,1.25),(2,NULL),(3,51.25)" |> ignore
+              runDefault store "INSERT INTO decimal_selective VALUES(1.25)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,%d.25)" id (if id <= 950 then 1 else id - 949))
+              |> String.concat ","
+              |> sprintf "INSERT INTO decimal_rows VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for source in
+                  [ "decimal_rows d"
+                    "(SELECT id,k FROM decimal_rows) d"
+                    "(SELECT id+0 AS id,k+0 AS k FROM decimal_rows LIMIT 1000) d" ] do
+                  touches <- 0
+                  let sql =
+                      "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.k <> o.k)"
+                      + " FROM decimal_selective o"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "50" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's selective decimal count, got %A" other
+                  Expect.isLessThan touches 80 (sprintf "decimal range union narrows %s" source)
+
+                  touches <- 0
+                  let withOr =
+                      "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND (d.k <> o.k OR d.id=500))"
+                      + " FROM decimal_selective o"
+                  match run store registry withOr with
+                  | ResultSet(_, [ [ Some "51" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's decimal OR count, got %A" other
+                  Expect.isLessThan touches 80 (sprintf "decimal OR branch stays indexed for %s" source)
+
+              for predicate, expected in
+                  [ "d.k <> o.k", [ [ Some "50" ]; [ Some "0" ]; [ Some "999" ] ]
+                    "NOT (d.k = o.k)", [ [ Some "50" ]; [ Some "0" ]; [ Some "999" ] ]
+                    "d.k <> o.k OR d.id=500", [ [ Some "51" ]; [ Some "1" ]; [ Some "999" ] ] ] do
+                  let sql =
+                      "SELECT (SELECT COUNT(*) FROM decimal_rows d WHERE " + predicate
+                      + ") FROM decimal_bounds o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, rows) when rows = expected -> ()
+                  | other -> failtestf "expected MySQL's NULL-aware decimal counts for %s, got %A" predicate other
+
+              touches <- 0
+              let nullBound =
+                  "SELECT (SELECT COUNT(*) FROM decimal_rows d"
+                  + " WHERE TOUCH(d.id)=d.id AND d.k <> o.k)"
+                  + " FROM decimal_bounds o WHERE o.id=2"
+              match run store registry nullBound with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected MySQL's NULL decimal-bound count, got %A" other
+              Expect.isLessThan touches 80 "a NULL decimal bound has no indexed candidates"
+
+              touches <- 0
+              let ignored =
+                  "SELECT (SELECT COUNT(*) FROM decimal_rows d IGNORE INDEX (ix_k)"
+                  + " WHERE TOUCH(d.id)=d.id AND d.k <> o.k)"
+                  + " FROM decimal_selective o"
+              match run store registry ignored with
+              | ResultSet(_, [ [ Some "50" ] ]) -> ()
+              | other -> failtestf "expected ignored-index decimal count, got %A" other
+              Expect.isGreaterThan touches 900 "ignoring the decimal key restores the scan"
+
           testCase "correlated OR branches intersect broad IN and range candidates"
           <| fun _ ->
               let mutable touches = 0

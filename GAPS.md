@@ -229,7 +229,9 @@ materialized sources while retaining the original row filter and MySQL's
 NULL-bound results.
 [Correlated integer inequality predicates](torture/findings/2026-10-15-correlated-integer-inequality.md)
 likewise union strict ranges for a stable integer bound, including complete OR
-branches; other comparison domains remain on their prior paths.
+branches. [Exact DECIMAL inequalities](torture/findings/2026-10-15-correlated-decimal-inequality.md)
+now use the same union for a stable decimal bound; mixed numeric, text, and
+functional-expression domains remain on their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,

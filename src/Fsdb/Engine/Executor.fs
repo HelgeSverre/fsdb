@@ -14266,23 +14266,25 @@ and private tryCorrelatedOuterValue source context expression =
     |> Option.filter (fun scope -> isStatementStableExpr context.Store context.Registry context.DbName scope expression)
     |> Option.bind (fun _ -> evalExpr context expression |> Result.toOption)
 
-and private canSplitCorrelatedIntegerInequality source (columns: ColumnDef list) outer left right =
+and private canSplitCorrelatedExactNumericInequality source (columns: ColumnDef list) outer left right =
     let innerColumn expression =
         tryCorrelatedInnerColumn source expression
         |> Option.bind (resolveColumn columns >> Result.toOption)
-        |> Option.exists (fun index -> isExactIntegerIndexType columns.[index].Type)
+        |> Option.map (fun index -> columns.[index].Type)
 
-    let integerBound expression =
-        let value =
-            match expression with
-            | LiteralValue value -> Some value
-            | _ -> outer |> Option.bind (fun context -> tryCorrelatedOuterValue source context expression)
+    let boundValue expression =
+        match expression with
+        | LiteralValue value -> Some value
+        | _ -> outer |> Option.bind (fun context -> tryCorrelatedOuterValue source context expression)
 
-        value
-        |> Option.exists (function VNull | VInt _ | VUInt _ | VBit _ -> true | _ -> false)
+    let compatible indexed bound =
+        match innerColumn indexed, boundValue bound with
+        | Some indexedType, Some(VNull | VInt _ | VUInt _ | VBit _)
+            when isExactIntegerIndexType indexedType -> true
+        | Some(TDecimal _), Some(VNull | VDecimal _) -> true
+        | _ -> false
 
-    (innerColumn left && integerBound right)
-    || (innerColumn right && integerBound left)
+    compatible left right || compatible right left
 
 and private tryEqualityPredicate columnName boundValue = function
     | BinOp(Eq, left, right) ->
@@ -15041,7 +15043,7 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
 
             tryCompleteOrCandidates
                 whereExpr
-                (canSplitCorrelatedIntegerInequality probeSource projection.OutputColumns outer)
+                (canSplitCorrelatedExactNumericInequality probeSource projection.OutputColumns outer)
                 branchCandidates
                 merge
                 (snd >> List.length)))
@@ -15348,7 +15350,7 @@ and private tryMaterializedCorrelatedLookup
 
                 tryCompleteOrCandidates
                     whereExpr
-                    (canSplitCorrelatedIntegerInequality probeSource columns (Some context))
+                    (canSplitCorrelatedExactNumericInequality probeSource columns (Some context))
                     branchCandidates
                     merge
                     List.length

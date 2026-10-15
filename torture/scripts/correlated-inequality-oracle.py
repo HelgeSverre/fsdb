@@ -69,7 +69,28 @@ def main():
                             )
                             actual = tuple(row[0] for row in cursor.fetchall())
                             assert actual == expected, (source, predicate, expected, actual)
-                print(f"MySQL {version}: correlated inequality counts 50/0/999 and OR counts 51/1/999")
+                    for sql in [
+                        "CREATE TABLE decimal_bounds(id INT PRIMARY KEY,k DECIMAL(10,2))",
+                        "CREATE TABLE decimals(id INT PRIMARY KEY,k DECIMAL(10,2),KEY ix_k(k))",
+                        "INSERT INTO decimal_bounds VALUES(1,1.25),(2,NULL),(3,51.25)",
+                    ]:
+                        cursor.execute(sql)
+                    values = ",".join(
+                        f"({id},{1 if id <= 950 else id - 949}.25)" for id in range(1, 1001)
+                    )
+                    cursor.execute("INSERT INTO decimals VALUES " + values)
+                    for source in [
+                        "decimals d", "(SELECT id,k FROM decimals) d",
+                        "(SELECT id+0 AS id,k+0 AS k FROM decimals LIMIT 1000) d",
+                    ]:
+                        for predicate, expected in cases:
+                            cursor.execute(
+                                "SELECT (SELECT COUNT(*) FROM " + source + " WHERE " + predicate
+                                + ") FROM decimal_bounds o ORDER BY o.id"
+                            )
+                            actual = tuple(row[0] for row in cursor.fetchall())
+                            assert actual == expected, (source, predicate, expected, actual)
+                print(f"MySQL {version}: integer and DECIMAL inequality counts 50/0/999 and OR counts 51/1/999")
             finally:
                 if connection:
                     connection.close()
