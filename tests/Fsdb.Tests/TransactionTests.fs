@@ -35,7 +35,64 @@ let private runConcurrentInserts store writerCount insertSql =
 let tests =
     testList
         "Transactions"
-        [ testCase "fulltext transaction reads exclude pending document replacements"
+        [ testCase "foreign_key_checks=0 transactions keep inserting rows whose parents do not exist yet"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "CREATE DATABASE fk_off"
+                    "USE fk_off"
+                    "SET foreign_key_checks = 0"
+                    "CREATE TABLE parent (id BIGINT UNSIGNED PRIMARY KEY)"
+                    "CREATE TABLE child (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, parent_id BIGINT UNSIGNED NOT NULL, CONSTRAINT child_parent FOREIGN KEY (parent_id) REFERENCES parent (id))"
+                    "BEGIN"
+                    "INSERT INTO child VALUES (1, 10)"
+                    "INSERT INTO child VALUES (2, 20)"
+                    "INSERT INTO child (parent_id) VALUES (30)"
+                    "COMMIT" ] do
+                  match run sql with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+
+              Expect.equal (run "SELECT id, parent_id FROM child ORDER BY id")
+                  (ResultSet([ "id"; "parent_id" ], [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]))
+                  "MySQL accepts orphaned children while checks are off"
+
+          testCase "a parent deleted by another session still conflicts with a pending child insert"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable writer = create 1 store
+              let runWriter sql =
+                  let next, result = handle writer sql
+                  writer <- next
+                  result
+              for sql in
+                  [ "CREATE DATABASE fk_race"
+                    "USE fk_race"
+                    "CREATE TABLE parent (id BIGINT UNSIGNED PRIMARY KEY)"
+                    "CREATE TABLE child (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, parent_id BIGINT UNSIGNED NOT NULL, CONSTRAINT child_parent FOREIGN KEY (parent_id) REFERENCES parent (id))"
+                    "INSERT INTO parent VALUES (1), (2)"
+                    "BEGIN"
+                    "INSERT INTO child (parent_id) VALUES (1)" ] do
+                  match runWriter sql with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+
+              let deleter = create 2 store
+              let deleter, _ = handle deleter "USE fk_race"
+              match handle deleter "DELETE FROM parent WHERE id = 1" |> snd with
+              | Err(code, message) -> failtestf "the parent delete failed: %d %s" code message
+              | _ -> ()
+
+              let outcomes = [ runWriter "INSERT INTO child (parent_id) VALUES (2)"; runWriter "COMMIT" ]
+              Expect.isTrue
+                  (outcomes |> List.exists (function Err(1205, _) -> true | _ -> false))
+                  (sprintf "the orphaning merge is refused, got %A" outcomes)
+
+          testCase "fulltext transaction reads exclude pending document replacements"
           <| fun _ ->
               for parser, oldTerm, newTerm in [ "", "orchard", "cobalt"; " WITH PARSER ngram", "生日", "中文" ] do
                   for mutation in [ $"INSERT INTO docs VALUES(4,'{oldTerm}')"; $"UPDATE docs SET body='{newTerm}' WHERE id=1"; $"UPDATE docs SET body='{oldTerm} changed' WHERE id=1" ] do

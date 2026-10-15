@@ -3817,31 +3817,86 @@ let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parent
         |> VString
     | _ -> parentValue
 
-let private validateMergedForeignKeys (dbName: string) (db: Database) : unit =
-    let conflict () = raise (LockWaitTimeout dbName)
+let private isIntegerKeyType =
+    function
+    | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
+    | _ -> false
 
-    for KeyValue(_, table) in db do
-        for foreignKey in table.ForeignKeys do
-            match foreignKey.RefDatabase with
-            | Some _ -> ()
-            | None ->
-                match Map.tryFind (normalizeTableName foreignKey.RefTable) db with
-                | None -> conflict ()
-                | Some parent ->
-                    match foreignKey.Columns |> traverse (resolveColumn table.Columns), foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
-                    | Ok childIndices, Ok parentIndices ->
-                        let columnPairs = List.zip childIndices parentIndices
-                        for row in table.RowsArray do
-                            let childKey = childIndices |> List.map (fun index -> row.[index])
+/// Equal integer values share one key whichever representation stored them.
+let private canonicalIntegerKey value =
+    match value with
+    | VUInt unsigned when unsigned <= uint64 Int64.MaxValue -> VInt(int64 unsigned)
+    | _ -> value
 
-                            if childKey |> List.forall ((<>) VNull) then
-                                let parentExists =
-                                    parent.RowsArray
-                                    |> Seq.exists (foreignKeyRowsMatch table.Columns parent.Columns columnPairs row)
+/// Whether a child row's parent exists. Same-typed integer keys compare by
+/// exact value, so they probe a hashed key set; other key types keep the
+/// type-aware row comparison.
+let private foreignKeyParentProbe (child: Table) (parent: Table) (columnPairs: (int * int) list) : Value[] -> bool =
+    let integerKeyed =
+        columnPairs
+        |> List.forall (fun (childIndex, parentIndex) ->
+            let childType = child.Columns.[childIndex].Type
+            childType = parent.Columns.[parentIndex].Type && isIntegerKeyType childType)
 
-                                if not parentExists then
-                                    conflict ()
-                    | _ -> conflict ()
+    if integerKeyed then
+        let keyOf (indices: int list) (row: Value[]) = indices |> List.map (fun index -> canonicalIntegerKey row.[index])
+        let childIndices = columnPairs |> List.map fst
+        let parentIndices = columnPairs |> List.map snd
+        let parentKeys = HashSet<Value list>(HashIdentity.Structural)
+
+        for row in parent.RowsArray do
+            parentKeys.Add(keyOf parentIndices row) |> ignore
+
+        fun row -> parentKeys.Contains(keyOf childIndices row)
+    else
+        fun row -> parent.RowsArray |> Seq.exists (foreignKeyRowsMatch child.Columns parent.Columns columnPairs row)
+
+/// A child row that a foreign key cannot resolve, named by its table,
+/// constraint and child key values.
+type private ForeignKeyOrphan =
+    | MissingParentTable of table: string * constraintName: string
+    | UnresolvedColumns of table: string * constraintName: string
+    | OrphanRow of table: string * constraintName: string * childKey: Value list
+
+let private foreignKeyOrphans (db: Database) : ForeignKeyOrphan seq =
+    seq {
+        for KeyValue(tableKey, table) in db do
+            for foreignKey in table.ForeignKeys do
+                match foreignKey.RefDatabase with
+                | Some _ -> ()
+                | None ->
+                    match Map.tryFind (normalizeTableName foreignKey.RefTable) db with
+                    | None -> yield MissingParentTable(tableKey, foreignKey.Name)
+                    | Some parent ->
+                        match foreignKey.Columns |> traverse (resolveColumn table.Columns), foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
+                        | Ok childIndices, Ok parentIndices ->
+                            let columnPairs = List.zip childIndices parentIndices
+                            let parentExists = foreignKeyParentProbe table parent columnPairs
+
+                            for row in table.RowsArray do
+                                let childKey = childIndices |> List.map (fun index -> row.[index])
+
+                                if childKey |> List.forall ((<>) VNull) && not (parentExists row) then
+                                    yield OrphanRow(tableKey, foreignKey.Name, childKey)
+                        | _ -> yield UnresolvedColumns(tableKey, foreignKey.Name)
+    }
+
+/// A merge conflicts when it creates an orphan neither side had. Orphans
+/// already present in the transaction's view or the committed database were
+/// written with foreign_key_checks off, which MySQL accepts, so they are not
+/// evidence of a concurrent parent change.
+let private validateMergedForeignKeys (dbName: string) (sources: Database list) (merged: Database) : unit =
+    let mergedOrphans = foreignKeyOrphans merged |> Seq.toList
+
+    if not mergedOrphans.IsEmpty then
+        let existing = HashSet<ForeignKeyOrphan>(HashIdentity.Structural)
+
+        for source in sources do
+            for orphan in foreignKeyOrphans source do
+                existing.Add orphan |> ignore
+
+        if mergedOrphans |> List.exists (existing.Contains >> not) then
+            raise (LockWaitTimeout dbName)
 
 type private StripeLockMode =
     | SharedStripe
@@ -10811,7 +10866,7 @@ let private mergeDatabase dbName (baseDb: Database) (batchDb: Database) (liveDb:
                         | _ -> raise (LockWaitTimeout dbName))
                     liveDb
 
-            validateMergedForeignKeys dbName merged
+            validateMergedForeignKeys dbName [ batchDb; liveDb ] merged
             merged
 
 let private mergeDatabaseSlotPublishing
