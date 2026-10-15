@@ -203,6 +203,10 @@ intersect their candidate rows before residual evaluation.
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete
 OR branches and exact `INT` minimum magnitude, while other operand types retain
 residual evaluation.
+[Correlated affine equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-affine.md)
+uses one inverse equality key for bounded signed integer additions and
+subtractions in either operand order, including complete OR branches; other
+arithmetic forms retain residual evaluation.
 [Correlated NULL-safe equality](torture/findings/2026-10-15-correlated-null-safe-equality.md)
 uses the same equality keys for stable non-NULL bounds and indexed NULL
 buckets for NULL bounds on direct, pass-through, and stable materialized

@@ -15573,17 +15573,20 @@ and private tryMaterializedCorrelatedLookup
                     equalityLookup names
                     |> Option.bind (fun lookup -> lookup values)
 
+            let signedIntegerColumn expression =
+                tryCorrelatedInnerColumn probeSource expression
+                |> Option.bind (resolveColumn columns >> Result.toOption)
+                |> Option.bind (fun index ->
+                    match columns.[index].Type with
+                    | TTinyInt false | TSmallInt false | TMediumInt false | TInt false ->
+                        Some columns.[index].Name
+                    | _ -> None)
+
             let absoluteCandidates predicate =
                 let signedColumn expression =
                     match expression with
                     | FuncCall(name, [ indexed ]) when equalsIgnoreCase name "ABS" ->
-                        tryCorrelatedInnerColumn probeSource indexed
-                        |> Option.bind (resolveColumn columns >> Result.toOption)
-                        |> Option.bind (fun index ->
-                            match columns.[index].Type with
-                            | TTinyInt false | TSmallInt false | TMediumInt false | TInt false ->
-                                Some columns.[index].Name
-                            | _ -> None)
+                        signedIntegerColumn indexed
                     | _ -> None
 
                 let inverseKeys indexed bound =
@@ -15614,6 +15617,57 @@ and private tryMaterializedCorrelatedLookup
                             |> Option.map (fun matches ->
                                 let seen = HashSet<Value[]>(HashIdentity.Reference)
                                 matches |> List.collect id |> List.filter seen.Add)))
+                |> intersectSharedRows
+
+            let affineCandidates predicate =
+                let literalOffset = function
+                    | LiteralValue(VInt value) when value >= -2147483647L && value <= 2147483647L ->
+                        Some value
+                    | Neg(LiteralValue(VInt value)) when value >= 0L && value <= 2147483647L ->
+                        Some(-value)
+                    | _ -> None
+
+                let inverse indexed bound =
+                    let inverseForm column offset transform =
+                        Option.map2 (fun name value -> name, transform (decimal value))
+                            (signedIntegerColumn column) (literalOffset offset)
+
+                    let form =
+                        match indexed with
+                        | BinOp(Add, column, offset) ->
+                            inverseForm column offset (fun value bound -> bound - value)
+                            |> Option.orElseWith (fun () ->
+                                inverseForm offset column (fun value bound -> bound - value))
+                        | BinOp(Sub, column, offset) ->
+                            inverseForm column offset (fun value bound -> bound + value)
+                            |> Option.orElseWith (fun () ->
+                                inverseForm offset column (fun value bound -> value - bound))
+                        | _ -> None
+
+                    form
+                    |> Option.bind (fun (name, transform) ->
+                        tryCorrelatedProbeValue probeSource context bound
+                        |> Option.bind (function
+                            | VNull -> Some(name, None)
+                            | VInt value ->
+                                let key = transform (decimal value)
+                                if key < decimal System.Int64.MinValue || key > decimal System.Int64.MaxValue then
+                                    Some(name, None)
+                                else
+                                    Some(name, Some(VInt(int64 key)))
+                            | _ -> None))
+
+                predicate
+                |> optionalConjuncts
+                |> List.choose (function
+                    | BinOp(Eq, left, right) ->
+                        inverse left right |> Option.orElseWith (fun () -> inverse right left)
+                    | _ -> None)
+                |> List.choose (function
+                    | _, None -> Some []
+                    | name, Some key ->
+                        equalityLookup [ name.ToLowerInvariant() ]
+                        |> Option.bind (fun lookup -> lookup [ key ]))
                 |> intersectSharedRows
 
             let nullCandidates predicate =
@@ -15760,6 +15814,7 @@ and private tryMaterializedCorrelatedLookup
                 let branchCandidates branch =
                     [ equalityCandidates (Some branch)
                       absoluteCandidates (Some branch)
+                      affineCandidates (Some branch)
                       nullCandidates (Some branch)
                       membershipCandidates (Some branch)
                       rangeCandidates (Some branch) ]
@@ -15779,6 +15834,7 @@ and private tryMaterializedCorrelatedLookup
 
             [ equalityCandidates whereExpr
               absoluteCandidates whereExpr
+              affineCandidates whereExpr
               nullCandidates whereExpr
               membershipCandidates whereExpr
               unionCandidates ()
