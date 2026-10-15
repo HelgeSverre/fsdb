@@ -81,7 +81,7 @@ MODES = ["IN NATURAL LANGUAGE MODE", "IN BOOLEAN MODE", "WITH QUERY EXPANSION"]
 
 LEGACY_PUNCTUATION = [
     chr(code)
-    for start, end in ((0xFE30, 0xFE70), (0xFF01, 0xFF66))
+    for start, end in ((0x3000, 0x3040), (0xFE30, 0xFE70), (0xFF01, 0xFFA0))
     for code in range(start, end)
     if chr(code).isprintable()
 ] + list(string.punctuation)

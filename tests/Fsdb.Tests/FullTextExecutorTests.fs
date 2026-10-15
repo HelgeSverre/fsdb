@@ -412,6 +412,26 @@ let tests =
                   ids (run store sql)
               Expect.equal (search "中︵") [ "1"; "2"; "3" ] "vertical, small, and fullwidth parentheses share a key"
               Expect.equal (search "中＊") [ "4"; "5" ] "small and fullwidth stars share a key"
+              let booleanSearch term =
+                  let sql = $"SELECT id FROM width_forms WHERE MATCH(body) AGAINST('{term}' IN BOOLEAN MODE) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (booleanSearch "中(") [] "an unclosed Boolean group rejects the query"
+              Expect.equal (booleanSearch "中)") [] "a stray Boolean close rejects the query"
+
+          testCase "legacy Unicode ngrams fold small kana and separate quote forms"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE kana_quote_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO kana_quote_docs VALUES(1,'中＂文'),(2,'中〝文'),(3,'中〞文'),(4,'中〟文'),(5,'中ｧ文'),(6,'中ｱ文'),(7,'中ァ文'),(8,'中ア文')" |> ignore
+              let search term =
+                  let sql = $"SELECT id FROM kana_quote_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (search "中＂") [ "1" ] "the fullwidth quote stays separate from three CJK quotes"
+              Expect.equal (search "中〝") [ "2" ] "the opening CJK quote keeps its own posting"
+              Expect.equal (search "中〞") [ "3" ] "the closing CJK quote keeps its own posting"
+              Expect.equal (search "中〟") [ "4" ] "the low CJK quote keeps its own posting"
+              Expect.equal (search "中ｧ") [ "5"; "6"; "7"; "8" ] "small and regular kana share a posting"
+              Expect.equal (search "中ア") [ "5"; "6"; "7"; "8" ] "fullwidth kana finds the same corpus"
 
           testCase "single-character ngram scores count repeated query tokens"
           <| fun _ ->

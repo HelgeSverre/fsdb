@@ -782,6 +782,23 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
     let mutable i = 0
     let len = query.Length
 
+    let balancedGroups () =
+        let mutable depth = 0
+        let mutable inPhrase = false
+        let mutable valid = true
+
+        for c in query do
+            if c = '"' then
+                inPhrase <- not inPhrase
+            elif not inPhrase then
+                match c with
+                | '(' -> depth <- depth + 1
+                | ')' when depth = 0 -> valid <- false
+                | ')' -> depth <- depth - 1
+                | _ -> ()
+
+        valid && depth = 0
+
     let rec skipSpace () =
         if i < len && Char.IsWhiteSpace query.[i] then
             i <- i + 1
@@ -816,7 +833,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
     // Past the cap, an open paren is treated as ignorable punctuation.
     let maxDepth = 64
 
-    let rec nodes (depth: int) (stopAtParen: bool) : (BoolOp * BoolTerm) list =
+    let rec nodes (depth: int) : (BoolOp * BoolTerm) list =
         let acc = ResizeArray()
         let mutable go = true
 
@@ -825,8 +842,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
 
             if i >= len then go <- false
             elif query.[i] = ')' then
-                if stopAtParen then i <- i + 1
-                else i <- i + 1 // stray close: skip, like MySQL's lenient parser
+                i <- i + 1 // Ngrams reject stray closes before parsing; word queries retain their existing path.
                 go <- false
             else
                 let op =
@@ -843,7 +859,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                 if i >= len then go <- false
                 elif query.[i] = '(' then
                     i <- i + 1
-                    if depth < maxDepth then acc.Add(op, BGroup(nodes (depth + 1) true))
+                    if depth < maxDepth then acc.Add(op, BGroup(nodes (depth + 1)))
                 elif query.[i] = '"' then
                     i <- i + 1
                     let start = i
@@ -895,7 +911,9 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
 
         List.ofSeq acc
 
-    nodes 0 false
+    match tokenizer with
+    | Ngrams _ when not (balancedGroups ()) -> []
+    | _ -> nodes 0
 
 let private proximityMatches (doc: Token[]) (words: Token[]) distance =
     let required = words |> Array.map _.Key |> Set.ofArray

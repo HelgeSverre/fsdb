@@ -153,6 +153,45 @@ let private foldKanaVariants (value: string) =
 
         result.ToString()
 
+let private foldSmallKana (value: string) =
+    let regular = function
+        | 'ァ' -> 'ア' | 'ィ' -> 'イ' | 'ゥ' -> 'ウ' | 'ェ' -> 'エ' | 'ォ' -> 'オ'
+        | 'ッ' -> 'ツ' | 'ャ' -> 'ヤ' | 'ュ' -> 'ユ' | 'ョ' -> 'ヨ' | 'ヮ' -> 'ワ'
+        | 'ヵ' -> 'カ' | 'ヶ' -> 'ケ'
+        | c -> c
+
+    let mutable first = 0
+    while first < value.Length && regular value.[first] = value.[first] do
+        first <- first + 1
+
+    if first = value.Length then value
+    else
+        let result = StringBuilder(value.Length)
+        result.Append(value, 0, first) |> ignore
+        for index in first .. value.Length - 1 do
+            result.Append(regular value.[index]) |> ignore
+        result.ToString()
+
+// ICU folds the three CJK double-quote marks into the ordinary quote. MySQL
+// keeps them at distinct primary weights in its Unicode collations.
+let private foldCjkQuoteForms (value: string) =
+    let mutable first = 0
+    while first < value.Length && value.[first] <> '\uE020' && (value.[first] < '\u301D' || value.[first] > '\u301F') do
+        first <- first + 1
+
+    if first = value.Length then value
+    else
+        let result = StringBuilder(value.Length)
+        result.Append(value, 0, first) |> ignore
+        for index in first .. value.Length - 1 do
+            match value.[index] with
+            | '\uE020' -> result.Append("\uE020\uE020") |> ignore
+            | '\u301D' -> result.Append("\uE020\uE021") |> ignore
+            | '\u301E' -> result.Append("\uE020\uE022") |> ignore
+            | '\u301F' -> result.Append("\uE020\uE023") |> ignore
+            | c -> result.Append(c) |> ignore
+        result.ToString()
+
 // UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
 // newer MySQL weights fold its presentation forms.
 let private foldCjkPunctuationForms modern (value: string) =
@@ -221,8 +260,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_general_ci" -> value.Replace("ß", "s").Replace("ẞ", "s")
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
-        | "utf8mb4_unicode_520_ci" -> value |> foldCjkPunctuationForms true |> foldKanaVariants
-        | "utf8mb4_unicode_ci" -> value |> foldCjkPunctuationForms false |> foldKanaVariants
+        | "utf8mb4_unicode_520_ci" -> value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
+        | "utf8mb4_unicode_ci" -> value |> foldCjkPunctuationForms false |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
         | _ -> value
 
     let primaryText (s: string) = trim s |> foldText
