@@ -49,9 +49,9 @@ a disposable database, default token size 2, and enabled default stopwords.
 It asserts ordered results, parser DDL errors, variable scope and labels,
 mutation behavior, and field boundaries for both parsers.
 
-The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 144
+The [multi-column oracle](../scripts/ngram-multicol-oracle.py) compares 150
 natural-language, boolean, and query-expansion searches at each startup size
-from 1 through 10. All 1,440 query results agree with native MySQL 8.4.11
+from 1 through 10. All 1,500 query results agree with native MySQL 8.4.11
 on the audited mixed Chinese, Japanese, Korean, ASCII, punctuation, emoji,
 supplementary-character, combining-mark, zero-width-joiner, variation-selector,
 nonbreaking-space, newline, Hangul-jamo, and NULL corpus. It checks matching row IDs, query
@@ -75,6 +75,16 @@ search terms. It compares row membership and relevance in all three modes at
 all ten startup sizes, with zero differences. These cases probe how non-ASCII
 formatting characters participate in windows; they do not establish arbitrary
 Unicode parity or MeCab behavior.
+
+A later width-variant check adds fullwidth and halfwidth katakana documents and
+queries. MySQL's default `utf8mb4_0900_ai_ci` gives them equal ngram keys and
+relevance. The host ICU did not, so FSDB now folds halfwidth kana runs before
+building equality keys for the verified width-insensitive collations. A focused
+regression checks matching rows and MySQL's score; the expanded multi-column
+oracle has zero differences at token sizes 1–10. A separate exploratory voiced
+halfwidth corpus still has one Boolean relevance difference at size 2 for
+`ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ` (MySQL 14.7452945709, FSDB 21.4573151303); row membership
+agrees. That case is outside the maintained passing corpus and remains open.
 
 The `ngram-fulltext` differential contract covers natural, boolean, and
 query-expansion searches through text and prepared protocols, Unicode and

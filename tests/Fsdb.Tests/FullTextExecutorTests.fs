@@ -204,6 +204,22 @@ let tests =
                   Expect.isTrue (abs (float score - 2.1516475677490234) < 0.000001) "ngram relevance"
               | other -> failtestf "expected ngram relevance, got %A" other
 
+          testCase "ngram searches fold halfwidth katakana under the default collation"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE kana_docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO kana_docs VALUES(1,'カタカナ'),(2,'ｶﾀｶﾅ'),(3,'日本語カタカナ'),(4,'生日快乐'),(5,'abc')" |> ignore
+              for term in [ "カタカナ"; "ｶﾀｶﾅ" ] do
+                  for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
+                      let sql = $"SELECT id FROM kana_docs WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                      Expect.equal (ids (run store sql)) [ "1"; "2"; "3" ] sql
+                  match run store ($"SELECT id,MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) FROM kana_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id") with
+                  | ResultSet(_, rows) ->
+                      for row in rows do
+                          let score = row.[1] |> Option.defaultWith (fun () -> failtest "missing relevance")
+                          Expect.isLessThan (abs (float score - 0.1476505994796753)) 0.000001 "MySQL 8.4 relevance"
+                  | other -> failtestf "expected ngram results, got %A" other
+
           testCase "single-character ngram scores count repeated query tokens"
           <| fun _ ->
               let store = create ()

@@ -121,6 +121,34 @@ let private substringExpansions =
       "ĳ", "ij"
       "Ĳ", "IJ" ]
 
+let private foldHalfwidthKana (value: string) =
+    let isHalfwidthKana (c: char) = c >= '\uFF61' && c <= '\uFF9F'
+    let mutable first = 0
+
+    while first < value.Length && not (isHalfwidthKana value.[first]) do
+        first <- first + 1
+
+    if first = value.Length then
+        value
+    else
+        let result = StringBuilder(value.Length)
+        result.Append(value, 0, first) |> ignore
+        let mutable index = first
+
+        while index < value.Length do
+            if isHalfwidthKana value.[index] then
+                let start = index
+
+                while index < value.Length && isHalfwidthKana value.[index] do
+                    index <- index + 1
+
+                result.Append(value.Substring(start, index - start).Normalize(NormalizationForm.FormKC)) |> ignore
+            else
+                result.Append(value.[index]) |> ignore
+                index <- index + 1
+
+        result.ToString()
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) = if spec.PadSpace then s.TrimEnd(' ') else s
@@ -149,10 +177,13 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | _ -> value.StartsWith(prefix, StringComparison.Ordinal)
 
     let foldText (value: string) =
-        if name = "utf8mb4_general_ci" then
-            value.Replace("ß", "s").Replace("ẞ", "s")
-        else
-            value
+        match name with
+        | "utf8mb4_general_ci" -> value.Replace("ß", "s").Replace("ẞ", "s")
+        | "utf8mb4_0900_ai_ci"
+        | "utf8mb4_0900_as_ci"
+        | "utf8mb4_unicode_ci"
+        | "utf8mb4_unicode_520_ci" -> foldHalfwidthKana value
+        | _ -> value
 
     let primaryText (s: string) = trim s |> foldText
     let substringFold =

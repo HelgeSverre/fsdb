@@ -1415,6 +1415,22 @@ let tests =
                         Expect.equal (col.Equals "a" "a ") expectedEqual (sprintf "%s: 'a' = 'a '" name)
 
                 testTheory
+                    "MySQL 8.4 kana width equality follows the selected collation"
+                    [ "utf8mb4_0900_ai_ci", true
+                      "utf8mb4_0900_as_ci", true
+                      "utf8mb4_unicode_ci", true
+                      "utf8mb4_unicode_520_ci", true
+                      "utf8mb4_0900_as_cs", false
+                      "utf8mb4_general_ci", false
+                      "utf8mb4_bin", false ]
+                    <| fun (name, equal) ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.equal (col.Equals "カタカナ" "ｶﾀｶﾅ") equal name
+                        if equal then
+                            Expect.equal (col.KeyOf "カタカナ") (col.KeyOf "ｶﾀｶﾅ") (name + " index key")
+                            Expect.equal (col.HashOf "カタカナ") (col.HashOf "ｶﾀｶﾅ") (name + " hash")
+
+                testTheory
                     "collations identify when equality fixes one full-order position"
                     [ "utf8mb4_0900_bin", true
                       "utf8mb4_0900_as_cs", true
