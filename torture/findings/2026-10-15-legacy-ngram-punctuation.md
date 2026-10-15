@@ -69,3 +69,24 @@ finds the latter two rows. The focused FSDB regression pins this distinction
 as well as the collation equality, canonical keys, and hashes. Snapshot
 recovery rebuilds full-text postings from saved documents under the current
 collation rules; the preview format does not persist canonical posting keys.
+
+## Combined width-form corpus
+
+Isolated presentation-form blocks masked cross-block ngram equivalences. The
+maintained multi-column oracle now has a `--legacy-punctuation` lane that puts
+printable U+FE30–U+FE6F and U+FF01–U+FF65 forms, plus ASCII punctuation, in one
+`utf8mb4_unicode_ci` table and searches every two-character `中` prefix at
+ngram size two. On native MySQL 8.4.11, `中︵`, `中﹙`, and `中（` find the
+same three rows; `中﹡` and `中＊` find the same two. Before the change, fsdb
+separated these keys and the combined corpus had 108 membership or relevance
+differences among 159 searches. Earlier isolated sweeps of each block had
+found none because they could not expose matches across blocks.
+
+The legacy collation now applies compatibility width folding to these
+presentation ranges when forming comparison and posting keys. It leaves the
+original characters for ngram token boundaries, so the ASCII comma behavior
+above is unchanged. The combined oracle now reports zero differences across
+191 searches, including relevance; the existing default-collation 387-query
+size-two corpus also remains at zero. Focused equality/key/hash and indexed
+ngram regressions pin representative cross-block matches. This does not
+establish exact legacy weight bytes or MeCab behavior.

@@ -4,11 +4,12 @@ Build Fsdb.Cli in Release first. Requires native mysqld/mysqladmin and PyMySQL.
 Each token size uses disposable servers and data directories.
 """
 
+import argparse
 import math
 import pathlib
 import socket
+import string
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -78,6 +79,13 @@ TERMS = [
 
 MODES = ["IN NATURAL LANGUAGE MODE", "IN BOOLEAN MODE", "WITH QUERY EXPANSION"]
 
+LEGACY_PUNCTUATION = [
+    chr(code)
+    for start, end in ((0xFE30, 0xFE70), (0xFF01, 0xFF66))
+    for code in range(start, end)
+    if chr(code).isprintable()
+] + list(string.punctuation)
+
 
 def connect(**options):
     for _ in range(100):
@@ -94,16 +102,19 @@ def query(connection, sql, args=None):
         return cursor.fetchall()
 
 
-def setup(connection, size):
+def setup(connection, size, documents=DOCUMENTS, collation=None):
     reported = query(connection, "SELECT @@ngram_token_size")[0][0]
     assert reported == size, (reported, size)
+    column_collation = f" COLLATE {collation}" if collation else ""
     for sql in [
         "CREATE DATABASE probe", "USE probe",
-        "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,title TEXT,"
+        "CREATE TABLE docs(id INT PRIMARY KEY,"
+        f"body TEXT{column_collation},"
+        f"title TEXT{column_collation},"
         "FULLTEXT KEY ft(body,title) WITH PARSER ngram)",
     ]:
         query(connection, sql)
-    for index, (body, title) in enumerate(DOCUMENTS, 1):
+    for index, (body, title) in enumerate(documents, 1):
         query(connection, "INSERT INTO docs VALUES(%s,%s,%s)", (index, body, title))
 
 
@@ -148,7 +159,13 @@ def scores_agree(expected, actual):
     )
 
 
-def verify(size):
+def verify(size, legacy_punctuation=False):
+    documents = ([('中' + char + '文', '') for char in LEGACY_PUNCTUATION]
+                 if legacy_punctuation else DOCUMENTS)
+    terms = (['中' + char for char in LEGACY_PUNCTUATION]
+             if legacy_punctuation else TERMS)
+    modes = ["IN NATURAL LANGUAGE MODE"] if legacy_punctuation else MODES
+    collation = "utf8mb4_unicode_ci" if legacy_punctuation else None
     with tempfile.TemporaryDirectory(prefix=f"fsdb-ngram-{size}-") as directory:
         root = pathlib.Path(directory)
         data = root / "mysql"
@@ -182,11 +199,11 @@ def verify(size):
                 )
                 fsdb_connection = connect(host="127.0.0.1", port=port)
                 for connection in (mysql_connection, fsdb_connection):
-                    setup(connection, size)
+                    setup(connection, size, documents, collation)
 
                 mismatches = []
-                for mode in MODES:
-                    for term in TERMS:
+                for mode in modes:
+                    for term in terms:
                         expected = result(mysql_connection, term, mode)
                         actual = result(fsdb_connection, term, mode)
                         if actual != expected:
@@ -195,7 +212,7 @@ def verify(size):
                         actual_scores = scored_result(fsdb_connection, term, mode)
                         if not scores_agree(expected_scores, actual_scores):
                             mismatches.append((mode, term, "relevance", expected_scores, actual_scores))
-                print(f"size {size}: {len(MODES) * len(TERMS)} queries; {len(mismatches)} mismatches")
+                print(f"size {size}: {len(modes) * len(terms)} queries; {len(mismatches)} mismatches")
                 for mismatch in mismatches:
                     print(mismatch)
                 return len(mismatches)
@@ -218,5 +235,9 @@ def verify(size):
 if __name__ == "__main__":
     if not FSDB.exists():
         raise RuntimeError(f"Build the Release CLI first: {FSDB}")
-    sizes = [int(value) for value in sys.argv[1:]] or list(range(1, 11))
-    sys.exit(1 if sum(verify(size) for size in sizes) else 0)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("sizes", nargs="*", type=int)
+    parser.add_argument("--legacy-punctuation", action="store_true")
+    args = parser.parse_args()
+    sizes = args.sizes or list(range(1, 11))
+    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation) for size in sizes) else 0)

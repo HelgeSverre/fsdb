@@ -898,6 +898,10 @@ their relative MySQL order, while exact weight bytes remain out of scope.
 [ASCII, fullwidth, and small comma equality](torture/findings/2026-10-15-legacy-ngram-punctuation.md#ascii-fullwidth-and-small-comma-equality)
 now agrees across the audited insensitive collations while ngram tokenization
 retains MySQL's ASCII punctuation boundary.
+The [combined legacy width-form corpus](torture/findings/2026-10-15-legacy-ngram-punctuation.md#combined-width-form-corpus)
+now matches MySQL's cross-block ngram membership and relevance at token size
+two for the audited presentation ranges; exact legacy weights and other token
+sizes remain open.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

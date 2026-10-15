@@ -156,6 +156,20 @@ let private foldKanaVariants (value: string) =
 // UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
 // newer MySQL weights fold its presentation forms.
 let private foldCjkPunctuationForms modern (value: string) =
+    let value =
+        let isWidthForm c =
+            (c >= '\uFE30' && c <= '\uFE6F') || (c >= '\uFF01' && c <= '\uFF5E')
+        if modern || not (value |> Seq.exists isWidthForm) then value
+        else
+            // Legacy MySQL folds these presentation widths for equality and
+            // ngram keys while the tokenizer retains the original characters.
+            let result = StringBuilder(value.Length)
+            for c in value do
+                if isWidthForm c then
+                    result.Append((string c).Normalize(NormalizationForm.FormKC)) |> ignore
+                else
+                    result.Append(c) |> ignore
+            result.ToString()
     let comma = value.Replace('\uFE50', ',').Replace('\uFF0C', ',')
     if modern then
         comma.Replace('\uFE10', ',').Replace('\uFE11', '\u3001')

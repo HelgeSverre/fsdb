@@ -359,6 +359,17 @@ let tests =
               Expect.equal (search "中，") [ "2"; "3" ] "fullwidth and small comma tokens share a key"
               Expect.equal (search "中﹐") [ "2"; "3" ] "small comma finds both token forms"
 
+          testCase "legacy Unicode ngrams share width-folded punctuation keys"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE width_forms(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO width_forms VALUES(1,'中︵文'),(2,'中﹙文'),(3,'中（文'),(4,'中﹡文'),(5,'中＊文')" |> ignore
+              let search term =
+                  let sql = $"SELECT id FROM width_forms WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (search "中︵") [ "1"; "2"; "3" ] "vertical, small, and fullwidth parentheses share a key"
+              Expect.equal (search "中＊") [ "4"; "5" ] "small and fullwidth stars share a key"
+
           testCase "single-character ngram scores count repeated query tokens"
           <| fun _ ->
               let store = create ()
