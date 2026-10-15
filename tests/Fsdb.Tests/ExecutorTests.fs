@@ -12771,6 +12771,48 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "an OR branch can match beside a NULL pattern, got %A" other
 
+                    calls <- 0
+                    match run store registry
+                        ("SELECT p.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,code FROM like_codes) c "
+                         + "WHERE c.code LIKE p.p AND TOUCH(c.id)=c.id) "
+                         + "FROM like_patterns p ORDER BY p.id") with
+                    | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected materialized correlated LIKE counts, got %A" other
+                    Expect.isLessThan calls 60 "the materialized prefix restricts residual evaluation"
+
+                    match run store registry
+                        ("SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,code FROM like_codes) c "
+                         + "WHERE c.code LIKE p.p OR c.id=1) FROM like_patterns p WHERE p.id=3") with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "a materialized OR branch can match beside a NULL pattern, got %A" other
+
+                    match run store registry
+                        ("SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,code FROM like_codes) c "
+                         + "WHERE c.code LIKE p.p AND c.missing=1) FROM like_patterns p WHERE p.id=3") with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "an invalid materialized column must still be rejected, got %A" other
+
+                    calls <- 0
+                    match run store registry
+                        ("WITH codes AS (SELECT DISTINCT id,code FROM like_codes) "
+                         + "SELECT p.id,(SELECT COUNT(*) FROM codes c "
+                         + "WHERE c.code LIKE p.p AND TOUCH(c.id)=c.id) "
+                         + "FROM like_patterns p ORDER BY p.id") with
+                    | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected materialized CTE correlated LIKE counts, got %A" other
+                    Expect.isLessThan calls 60 "the materialized CTE prefix restricts residual evaluation"
+
+                    runDefault store "ALTER TABLE like_patterns MODIFY p VARCHAR(8) COLLATE utf8mb4_0900_bin" |> ignore
+                    runDefault store "ALTER TABLE like_codes MODIFY code VARCHAR(8) COLLATE utf8mb4_0900_bin" |> ignore
+                    calls <- 0
+                    match run store registry
+                        ("SELECT p.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,code FROM like_codes) c "
+                         + "WHERE c.code LIKE p.p AND TOUCH(c.id)=c.id) "
+                         + "FROM like_patterns p ORDER BY p.id") with
+                    | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected 0900 binary materialized LIKE counts, got %A" other
+                    Expect.isLessThan calls 60 "the 0900 binary prefix restricts residual evaluation"
+
                 testCase "correlated text range OR probes bounded candidates"
                 <| fun _ ->
                     let mutable calls = 0

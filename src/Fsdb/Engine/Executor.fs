@@ -15298,6 +15298,52 @@ and private tryMaterializedCorrelatedLookup
                         (tryCorrelatedProbeValue probeSource context)
                         predicate
 
+                let binaryLikePrefixes =
+                    predicate
+                    |> optionalConjuncts
+                    |> List.choose (function
+                        | Like(indexed, patternExpr, _, escape) ->
+                            tryCorrelatedInnerColumn probeSource indexed
+                            |> Option.bind (fun name ->
+                                resolveColumn columns name
+                                |> Result.toOption
+                                |> Option.bind (fun index ->
+                                    let column = columns.[index]
+                                    match equalityMembershipDomain store column,
+                                          tryCorrelatedProbeValue probeSource context patternExpr with
+                                    | Some(TextMembership stored), Some(VString pattern)
+                                        when (equalsIgnoreCase stored.Name "utf8mb4_0900_bin"
+                                              || equalsIgnoreCase stored.Name "utf8mb4_bin")
+                                             && (comparisonCollation
+                                                     context "<" indexed (Some column)
+                                                     patternExpr (tryColumnDefForExpr context patternExpr)
+                                                 |> Result.toOption
+                                                 |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)) ->
+                                        let prefix = likeLiteralPrefix (escape |> Option.defaultValue '\\') pattern
+                                        if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
+                                        else
+                                            let lower =
+                                                if equalsIgnoreCase stored.Name "utf8mb4_bin" then
+                                                    likePadSpaceLowerBound prefix
+                                                else Some prefix
+                                            Some(
+                                                name,
+                                                lower |> Option.map (fun value -> VString value, true),
+                                                likePrefixUpperBound prefix |> Option.map (fun upper -> VString upper, false))
+                                    | _ -> None))
+                        | _ -> None)
+
+                let nullLikeRejects =
+                    predicate
+                    |> optionalConjuncts
+                    |> List.exists (function
+                        | Like(indexed, patternExpr, _, _) ->
+                            tryCorrelatedInnerColumn probeSource indexed
+                            |> Option.bind (resolveColumn columns >> Result.toOption)
+                            |> Option.isSome
+                            && tryCorrelatedProbeValue probeSource context patternExpr = Some VNull
+                        | _ -> false)
+
                 let usesStoredCollation (bound: RangeLookupBounds<string, Expr * Value>) =
                     match resolveColumn columns bound.Column with
                     | Ok index ->
@@ -15324,22 +15370,32 @@ and private tryMaterializedCorrelatedLookup
                         | _ -> true
                     | Error _ -> false
 
-                if bounds.IsEmpty then
+                if nullLikeRejects then
+                    Some []
+                elif bounds.IsEmpty && binaryLikePrefixes.IsEmpty then
                     None
                 else
                     let lookups =
                         getMemoized memo.MaterializedCorrelatedRanges source (fun () ->
                             Dictionary<string, MaterializedRangeLookup option>(System.StringComparer.OrdinalIgnoreCase))
 
-                    bounds
-                    |> List.choose (fun bound ->
-                        if not (usesStoredCollation bound) then
-                            None
-                        else
-                            let values = functionalRangeValues bound
+                    let ordinaryCandidates =
+                        bounds
+                        |> List.choose (fun bound ->
+                            if not (usesStoredCollation bound) then
+                                None
+                            else
+                                let values = functionalRangeValues bound
+                                getMemoized lookups bound.Column (fun () -> materializedRangeLookup store columns rows bound.Column)
+                                |> Option.bind (fun lookup -> lookup values.Lower values.Upper))
 
-                            getMemoized lookups bound.Column (fun () -> materializedRangeLookup store columns rows bound.Column)
-                            |> Option.bind (fun lookup -> lookup values.Lower values.Upper))
+                    let prefixCandidates =
+                        binaryLikePrefixes
+                        |> List.choose (fun (name, lower, upper) ->
+                            getMemoized lookups name (fun () -> materializedRangeLookup store columns rows name)
+                            |> Option.bind (fun lookup -> lookup lower upper))
+
+                    ordinaryCandidates @ prefixCandidates
                     |> function
                         | [] -> None
                         | candidates -> intersectSharedRows candidates
@@ -15389,7 +15445,8 @@ and private tryCorrelatedSourceLookup
             | [] -> None
             | candidates -> Some(List.minBy (snd >> List.length) candidates)
 
-    let materializedLookup () = tryMaterializedCorrelatedLookup store registry dbName source whereExpr outer
+    let materializedCandidate = lazy (tryMaterializedCorrelatedLookup store registry dbName source whereExpr outer)
+    let materializedLookup () = materializedCandidate.Value
 
     let hasRangePredicate =
         whereExpr
@@ -15543,14 +15600,16 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith materializedLookup
         |> chooseWithMembership
     | None, FromSubquery _ ->
-        physicalIntersection ()
+        (if likeConjuncts.IsEmpty then None else materializedLookup ())
         |> Option.orElseWith (fun () ->
-            [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
-              tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
-              nullLookup ()
-              tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
-            |> fewestRows
-            |> chooseWithRanges false)
+            physicalIntersection ()
+            |> Option.orElseWith (fun () ->
+                [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
+                  tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
+                  nullLookup ()
+                  tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
+                |> fewestRows
+                |> chooseWithRanges false))
         |> Option.orElseWith materializedLookup
         |> chooseWithMembership
     | None, _ -> materializedLookup () |> chooseWithMembership
