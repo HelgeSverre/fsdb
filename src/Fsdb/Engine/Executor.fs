@@ -1346,7 +1346,10 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
             expression
 
     let rec classify seen (view: StoredView) (select: SelectStmt) =
-        let select = InformationSchema.flattenInnerJoinedOperands store.Catalog view.Schema select
+        let select =
+            select
+            |> InformationSchema.inlineReadOnlyViewCtes
+            |> InformationSchema.flattenInnerJoinedOperands store.Catalog view.Schema
         let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
         if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then

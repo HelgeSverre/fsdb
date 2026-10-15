@@ -1829,6 +1829,59 @@ let tests =
               | Err(1288, _) -> ()
               | other -> failtestf "expected non-updatable view error, got %A" other
 
+          testCase "joined views update a physical target after a read-only CTE"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE cte_target(id INT PRIMARY KEY,n INT)") "create target"
+              expectOk (run store "CREATE TABLE cte_source(id INT,flag INT)") "create source"
+              expectOk (run store "INSERT INTO cte_target VALUES(1,0),(2,0)") "seed target"
+              expectOk (run store "INSERT INTO cte_source VALUES(1,7),(1,8),(2,9)") "seed source"
+
+              for name, body in
+                  [ "aggregate", "SELECT id,SUM(flag) flag FROM cte_source GROUP BY id"
+                    "simple", "SELECT id,flag FROM cte_source"
+                    "limited", "SELECT id,flag FROM cte_source LIMIT 100" ] do
+                  let view = "cte_" + name
+                  let sql = $"CREATE VIEW {view} AS WITH d AS ({body}) SELECT a.id,a.n,d.flag FROM d JOIN cte_target a ON a.id=d.id"
+                  expectOk (run store sql) ("create " + view)
+                  Expect.equal
+                      (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{view}'"))
+                      [ [ Some "YES" ] ]
+                      (view + " is updatable in MySQL 8.4")
+                  expectOk (run store ($"UPDATE {view} SET n=n+1 WHERE id=1")) ("update " + view)
+
+                  let checkedView = view + "_checked"
+                  let checkedSql =
+                      $"CREATE VIEW {checkedView} AS WITH d AS ({body}) SELECT a.id,a.n,d.flag FROM d JOIN cte_target a ON a.id=d.id WHERE a.n>=0 WITH CASCADED CHECK OPTION"
+                  expectOk (run store checkedSql) ("create " + checkedView)
+                  match run store ($"UPDATE {checkedView} SET n=-1 WHERE id=1") with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected MySQL CHECK OPTION rejection for %s, got %A" checkedView other
+                  match run store ($"INSERT INTO {checkedView}(id,n) VALUES(3,0)") with
+                  | Err(1471, _) -> ()
+                  | other -> failtestf "expected MySQL non-insertable join view for %s, got %A" checkedView other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM cte_target ORDER BY id")
+                  [ [ Some "1"; Some "3" ]; [ Some "2"; Some "0" ] ]
+                  "each CTE-backed view updates the target once"
+
+              expectOk (run store "CREATE TABLE cte_aux(id INT,aux INT)") "create second source"
+              expectOk (run store "INSERT INTO cte_aux VALUES(1,9)") "seed second source"
+              expectOk
+                  (run store
+                      "CREATE VIEW cte_pair AS WITH d1 AS (SELECT id,SUM(flag) flag FROM cte_source GROUP BY id), d2 AS (SELECT id,SUM(aux) aux FROM cte_aux GROUP BY id) SELECT a.id,a.n,d1.flag,d2.aux FROM d1 JOIN d2 ON d2.id=d1.id JOIN cte_target a ON a.id=d1.id")
+                  "create two-source CTE view"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='cte_pair'")
+                  [ [ Some "YES" ] ]
+                  "two read-only CTE sources leave the target writable"
+              expectOk (run store "UPDATE cte_pair SET n=n+1 WHERE id=1") "update through both CTE sources"
+              Expect.equal
+                  (rows store "SELECT id,n FROM cte_target ORDER BY id")
+                  [ [ Some "1"; Some "4" ]; [ Some "2"; Some "0" ] ]
+                  "the physical target is updated once after both CTE joins"
+
           testCase "a direct view predicate limits UPDATE and DELETE but not INSERT"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -715,6 +715,9 @@ columns and allow an outer joined view to update its physical component
 [Multiple leading read-only derived sources](torture/findings/2026-10-15-multiple-derived-join-view.md)
 now also precede a writable physical target in audited inner-join views;
 the moved target predicate is applied after all its source aliases are bound.
+[Single-use independent CTE sources](torture/findings/2026-10-15-cte-joined-view-writes.md)
+now follow that path for audited aggregate, pass-through, and limited bodies,
+including two leading CTEs, while retaining CHECK OPTION and INSERT rules.
 [Audited `STRAIGHT_JOIN` edges](torture/findings/2026-10-15-multiple-derived-straight-view.md)
 between those derived sources or at the physical target retain the same
 writable metadata and target-predicate filtering.
@@ -778,7 +781,7 @@ trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; `INSERT ... SET`, `IGNORE`, ODKU, and audited component CHECK OPTION cases work; audited three-layer outer views and renamed column grants work; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, outer view layers, and aggregate/UNION/`JSON_TABLE` read-only join components compose writable targets; broader layered joins and remaining expression shapes stay open | medium | subset |
+| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; `INSERT ... SET`, `IGNORE`, ODKU, and audited component CHECK OPTION cases work; audited three-layer outer views and renamed column grants work; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, outer view layers, and aggregate/UNION/`JSON_TABLE` read-only join components compose writable targets; audited single-use independent CTE sources also precede a joined UPDATE target; broader layered joins, dependent or recursive CTEs, and remaining expression shapes stay open | medium | subset |
 | View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 
 ## 10. Stored routines, events, schedulers

@@ -1668,6 +1668,57 @@ let internal flattenInnerJoinedOperands (catalog: Catalog) schema (select: Selec
 
     { select with Joins = select.Joins |> List.collect flatten }
 
+/// A single-use, independent CTE reads like a derived table during a joined
+/// view write. Keep other CTEs in their original form until their materialized
+/// or recursive write behavior has its own contract.
+let internal inlineReadOnlyViewCtes (select: SelectStmt) =
+    let sources = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+    let cteNames = select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
+
+    let referenceCount name =
+        sources
+        |> List.filter (function
+            | FromTable table -> table.Database.IsNone && eqI table.Table name
+            | _ -> false)
+        |> List.length
+
+    let inlineable (cte: CommonTableExpr) =
+        not cte.Recursive
+        && cte.CteColumns.IsEmpty
+        && referenceCount cte.CteName = 1
+        && (match cte.Body with
+            | PlainSelect body when body.Ctes.IsEmpty && body.Joins.IsEmpty ->
+                match body.From with
+                | Some(FromTable table) ->
+                    table.Database.IsSome || not (Set.contains (table.Table.ToLowerInvariant()) cteNames)
+                | _ -> false
+            | _ -> false)
+
+    if select.Ctes.IsEmpty
+       || cteNames.Count <> select.Ctes.Length
+       || (sources |> List.exists (function FromTable _ -> false | _ -> true))
+       || Expression.statementExists
+           (function
+            | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _ -> true
+            | _ -> false)
+           (Select select)
+       || not (select.Ctes |> List.forall inlineable) then
+        select
+    else
+        let ctes = select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant(), cte.Body) |> Map.ofList
+        let expand = function
+            | FromTable table as source when table.Database.IsNone ->
+                ctes
+                |> Map.tryFind (table.Table.ToLowerInvariant())
+                |> Option.map (fun body -> FromSubquery(body, table.Alias |> Option.defaultValue table.Table))
+                |> Option.defaultValue source
+            | source -> source
+
+        { select with
+            From = select.From |> Option.map expand
+            Joins = select.Joins |> List.map (fun join -> { join with Table = expand join.Table })
+            Ctes = [] }
+
 let private isUpdatableView (catalog: Catalog) (schema: string) (definition: string) =
     let views = viewCatalogEntries catalog
 
@@ -1695,7 +1746,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
 
         match Fsdb.Parser.parse definition with
         | Ok(Select parsed) ->
-            let select = flattenInnerJoinedOperands catalog schema parsed
+            let select = parsed |> inlineReadOnlyViewCtes |> flattenInnerJoinedOperands catalog schema
             match select.From with
             | Some source ->
                 let sourceAllowsUpdates = function
