@@ -1532,15 +1532,17 @@ let private viewsColumns =
       strCol "CHARACTER_SET_CLIENT"
       strCol "COLLATION_CONNECTION" ]
 
-/// Number of leading derived sources before a table that can anchor a joined write.
-let internal tryLeadingDerivedWritableTarget (source: FromItem) (joins: Join list) =
+/// Number of leading read-only sources before a table that can anchor a joined write.
+let internal tryLeadingReadOnlyWritableTarget (source: FromItem) (joins: Join list) =
     match source with
-    | FromSubquery _ ->
+    | FromSubquery _
+    | FromJsonTable _ ->
         let leadingJoins =
             joins
             |> List.takeWhile (fun join ->
                 match join.Table with
-                | FromSubquery _ -> true
+                | FromSubquery _
+                | FromJsonTable _ -> true
                 | _ -> false)
         let count = leadingJoins.Length
 
@@ -1600,8 +1602,8 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                 let sourceOrderAllowsUpdates =
                     match source, select.Joins with
                     | FromTable _, _ -> true
-                    | FromSubquery _, _ :: _ ->
-                        tryLeadingDerivedWritableTarget source select.Joins |> Option.isSome
+                    | (FromSubquery _ | FromJsonTable _), _ :: _ ->
+                        tryLeadingReadOnlyWritableTarget source select.Joins |> Option.isSome
                     | _ -> false
                 let joinsSupported =
                     select.Joins
@@ -1610,7 +1612,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                          || join.Kind = StraightJoin
                          || join.Kind = CrossJoin
                          || join.Kind = NaturalJoin)
-                        && (match join.Table with FromTable _ | FromSubquery _ | FromLateral _ -> true | _ -> false))
+                        && (match join.Table with FromTable _ | FromSubquery _ | FromLateral _ | FromJsonTable _ -> true | _ -> false))
                 let shapeAllowsUpdates =
                     ((select.Joins.IsEmpty && match source with FromTable _ -> true | _ -> false)
                      || (sourceOrderAllowsUpdates && joinsSupported && not select.Joins.IsEmpty))

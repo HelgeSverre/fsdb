@@ -1258,6 +1258,40 @@ let tests =
                   (rows store "SELECT id,n FROM lateral_later_target ORDER BY id")
                   [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ] "only the chain's matched target row changes"
 
+          testCase "join views update a physical target beside JSON_TABLE"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE json_view_target(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO json_view_target VALUES(1,0),(2,0)"
+                    "CREATE VIEW json_view_forward AS SELECT a.id,a.n,j.x FROM json_view_target a JOIN JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id"
+                    "CREATE VIEW json_view_reverse AS SELECT a.id,a.n,j.x FROM JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j JOIN json_view_target a ON j.x=a.id"
+                    "CREATE VIEW json_view_dependent AS SELECT a.id,a.n,j.x FROM json_view_target a JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id"
+                    "CREATE VIEW json_view_chain AS SELECT a.id,a.n,j.x,k.y FROM JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j JOIN JSON_TABLE(JSON_ARRAY(j.x),'$[*]' COLUMNS(y INT PATH '$')) k ON k.y=j.x JOIN json_view_target a ON a.id=k.y" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT table_name,is_updatable FROM information_schema.views WHERE table_name LIKE 'json_view_%' ORDER BY table_name")
+                  [ [ Some "json_view_chain"; Some "YES" ]
+                    [ Some "json_view_dependent"; Some "YES" ]
+                    [ Some "json_view_forward"; Some "YES" ]
+                    [ Some "json_view_reverse"; Some "YES" ] ]
+                  "MySQL 8.4 marks each physical target writable"
+              Expect.equal (run store "UPDATE json_view_forward SET n=n+1 WHERE id=1") (Affected 1UL) "forward join updates a matched row"
+              Expect.equal (run store "UPDATE json_view_reverse SET n=n+1 WHERE id=2") (Affected 0UL) "reverse join filters an unmatched row"
+              Expect.equal (run store "UPDATE json_view_reverse SET n=n+1 WHERE id=1") (Affected 1UL) "reverse join retains target identity"
+              Expect.equal (run store "UPDATE json_view_dependent SET n=n+1 WHERE id=2") (Affected 1UL) "dependent JSON_TABLE follows the target row"
+              Expect.equal (run store "UPDATE json_view_chain SET n=n+1 WHERE id=1") (Affected 1UL) "dependent sources before the target retain its identity"
+              match run store "UPDATE json_view_forward SET x=2 WHERE id=1" with
+              | Err(1288, _) -> ()
+              | other -> failtestf "expected the JSON_TABLE column to refuse UPDATE, got %A" other
+              match run store "INSERT INTO json_view_forward(id,n) VALUES(3,0)" with
+              | Err(1471, _) -> ()
+              | other -> failtestf "expected the join view to refuse INSERT, got %A" other
+              Expect.equal
+                  (rows store "SELECT id,n FROM json_view_target ORDER BY id")
+                  [ [ Some "1"; Some "3" ]; [ Some "2"; Some "1" ] ]
+                  "only matched physical rows change"
+
           testCase "join views update mergeable components beside union views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

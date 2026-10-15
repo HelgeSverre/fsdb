@@ -1617,7 +1617,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                              || join.Kind = CrossJoin
                              || join.Kind = NaturalJoin))
                      && (source :: (select.Joins |> List.map _.Table)
-                         |> List.forall (function FromTable _ | FromSubquery _ | FromLateral _ -> true | _ -> false))
+                         |> List.forall (function FromTable _ | FromSubquery _ | FromLateral _ | FromJsonTable _ -> true | _ -> false))
                      && hasWritableShape select ->
                 let sourceItems =
                     source
@@ -1635,6 +1635,14 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             | Star _ -> None
                             | _ -> Some(InformationSchema.exprToSql expression)))
 
+                let rec jsonTableColumnNames columns =
+                    columns
+                    |> List.collect (function
+                        | ForOrdinality name
+                        | PathColumn(name, _, _, _, _)
+                        | ExistsColumn(name, _, _) -> [ name ]
+                        | NestedColumns(_, nested) -> jsonTableColumnNames nested)
+
                 let rec derivedColumnNames body =
                     let definition =
                         match body with
@@ -1646,7 +1654,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     let qualifierOf = function
                         | FromTable table -> Some(table.Alias |> Option.defaultValue table.Table)
-                        | FromSubquery(_, qualifier) -> Some qualifier
+                        | FromSubquery(_, qualifier)
+                        | FromJsonTable(_, _, _, qualifier) -> Some qualifier
                         | _ -> None
 
                     let columnsByQualifier =
@@ -1689,6 +1698,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             (table.Database |> Option.defaultValue view.Schema)
                             table.Table
                     | FromSubquery(body, _) -> derivedColumnNames body
+                    | FromJsonTable(_, _, columns, _) -> Some(jsonTableColumnNames columns)
                     | _ -> None
 
                 let resolveSource (tableRef: TableRef) : WritableViewSource option =
@@ -1823,26 +1833,32 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               ReadAccessPaths = []
                               Mergeable = true })
 
+                let readOnlySource reference qualifier columns : WritableViewSource =
+                    { Reference = reference
+                      Qualifier = qualifier
+                      Columns = columns
+                      Expressions =
+                        columns
+                        |> List.map (fun column -> column.ToLowerInvariant(), QualifiedCol(qualifier, column))
+                        |> Map.ofList
+                      Targets = Map.empty
+                      Predicate = None
+                      CheckPredicates = Map.empty
+                      InsertableTargets = Set.empty
+                      AccessPath = []
+                      ReadAccessPaths = []
+                      Mergeable = false }
+
                 let resolveSourceItem = function
                     | FromTable tableRef -> resolveSource tableRef
                     | (FromSubquery(body, qualifier) | FromLateral(body, qualifier)) as reference ->
                         derivedColumnNames body
                         |> Option.filter (fun columns -> tryDuplicateIgnoreCase id columns |> Option.isNone)
-                        |> Option.map (fun columns ->
-                            { Reference = reference
-                              Qualifier = qualifier
-                              Columns = columns
-                              Expressions =
-                                columns
-                                |> List.map (fun column -> column.ToLowerInvariant(), QualifiedCol(qualifier, column))
-                                |> Map.ofList
-                              Targets = Map.empty
-                              Predicate = None
-                              CheckPredicates = Map.empty
-                              InsertableTargets = Set.empty
-                              AccessPath = []
-                              ReadAccessPaths = []
-                              Mergeable = false })
+                        |> Option.map (readOnlySource reference qualifier)
+                    | (FromJsonTable(_, _, columns, qualifier) as reference) ->
+                        let columns = jsonTableColumnNames columns
+                        if tryDuplicateIgnoreCase id columns |> Option.isSome then None
+                        else Some(readOnlySource reference qualifier columns)
                     | _ -> None
 
                 let sources = sourceItems |> List.choose resolveSourceItem
@@ -1970,7 +1986,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             match source, sources, select.Joins with
                             | FromTable original, { Reference = FromTable physical } :: _, _ ->
                                 Some(physical, rewrittenJoins, original, select.Joins)
-                            | FromSubquery _, derived :: { Reference = FromTable physical } :: _, join :: trailing
+                            | (FromSubquery _ | FromJsonTable _), derived :: { Reference = FromTable physical } :: _, join :: trailing
                                 when (join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin || join.Kind = NaturalJoin) ->
                                 let reordered =
                                     { join with
@@ -1978,8 +1994,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                         On = rewriteSources join.On }
                                 let authorizationJoin = { join with Table = derived.Reference }
                                 Some(physical, reordered :: List.tail rewrittenJoins, physical, authorizationJoin :: trailing)
-                            | FromSubquery _, _, _ ->
-                                match InformationSchema.tryLeadingDerivedWritableTarget source select.Joins with
+                            | (FromSubquery _ | FromJsonTable _), _, _ ->
+                                match InformationSchema.tryLeadingReadOnlyWritableTarget source select.Joins with
                                 | Some leadingCount when leadingCount >= 2 && leadingCount < sources.Length ->
                                     match sources.[leadingCount].Reference with
                                     | FromTable physical ->
@@ -27296,7 +27312,11 @@ let rec executeAs
                     | None when view.OrderedColumns |> List.exists (fun name -> name.Equals(assignment.Column, System.StringComparison.OrdinalIgnoreCase)) ->
                         let derivedQualifiers =
                             view.UpdateJoins
-                            |> List.choose (fun join -> match join.Table with FromSubquery(_, qualifier) -> Some qualifier | _ -> None)
+                            |> List.choose (fun join ->
+                                match join.Table with
+                                | FromSubquery(_, qualifier)
+                                | FromJsonTable(_, _, _, qualifier) -> Some qualifier
+                                | _ -> None)
                         let belongsToDerived =
                             match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Expressions with
                             | Some(QualifiedCol(qualifier, _)) ->
