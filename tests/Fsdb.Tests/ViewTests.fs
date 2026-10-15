@@ -1215,6 +1215,49 @@ let tests =
               Expect.equal (update ()) (Affected 1UL) "the granted lateral source permits the write"
               Expect.equal (rows store "SELECT n FROM lateral_target WHERE id=1") [ [ Some "2" ] ] "authorized write reaches the target"
 
+          testCase "join view updates a physical target after a dependent lateral source"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE lateral_anchor(id INT PRIMARY KEY)"
+                    "CREATE TABLE lateral_filter(id INT PRIMARY KEY,flag INT)"
+                    "CREATE TABLE lateral_later_target(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO lateral_anchor VALUES(1),(2)"
+                    "INSERT INTO lateral_filter VALUES(1,7)"
+                    "INSERT INTO lateral_later_target VALUES(1,0),(2,0)"
+                    "CREATE VIEW lateral_before_target AS SELECT t.id,t.n,d.flag FROM lateral_anchor a JOIN LATERAL (SELECT b.id,b.flag FROM lateral_filter b WHERE b.id=a.id LIMIT 1) d ON TRUE JOIN lateral_later_target t ON t.id=d.id" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='lateral_before_target'")
+                  [ [ Some "YES" ] ] "MySQL 8.4 marks the later physical target writable"
+              Expect.equal
+                  (run store "UPDATE lateral_before_target SET n=n+1 WHERE id=1")
+                  (Affected 1UL) "the matched dependent row permits the target write"
+              Expect.equal
+                  (run store "UPDATE lateral_before_target SET n=n+1 WHERE id=2")
+                  (Affected 0UL) "the missing dependent row filters the target write"
+              Expect.equal
+                  (rows store "SELECT id,n FROM lateral_later_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ] "only the joined target row changes"
+
+              for sql in
+                  [ "CREATE TABLE lateral_filter2(id INT PRIMARY KEY,flag INT)"
+                    "INSERT INTO lateral_filter2 VALUES(1,8)"
+                    "CREATE VIEW lateral_chain_target AS SELECT t.id,t.n,d.flag,e.flag AS second_flag FROM lateral_anchor a JOIN LATERAL (SELECT b.id,b.flag FROM lateral_filter b WHERE b.id=a.id LIMIT 1) d ON TRUE JOIN LATERAL (SELECT c.id,c.flag FROM lateral_filter2 c WHERE c.id=d.id LIMIT 1) e ON TRUE JOIN lateral_later_target t ON t.id=e.id" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='lateral_chain_target'")
+                  [ [ Some "YES" ] ] "MySQL 8.4 also marks the dependent chain writable"
+              Expect.equal
+                  (run store "UPDATE lateral_chain_target SET n=n+1 WHERE id=1")
+                  (Affected 1UL) "the second dependent source preserves target identity"
+              Expect.equal
+                  (run store "UPDATE lateral_chain_target SET n=n+1 WHERE id=2")
+                  (Affected 0UL) "the dependent chain still filters unmatched rows"
+              Expect.equal
+                  (rows store "SELECT id,n FROM lateral_later_target ORDER BY id")
+                  [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ] "only the chain's matched target row changes"
+
           testCase "join views update mergeable components beside union views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -669,8 +669,10 @@ also update a physical target; moved joins retain the original shared-column
 ownership even when the target has another same-named column.
 [Target-first joins with a dependent lateral source](torture/findings/2026-10-15-lateral-join-view.md)
 also update the physical component and enforce invoker read grants on the
-lateral source. Broader join-source reorderings, lateral dependencies that
-precede the write target, and outer-join writes remain open.
+lateral source. [Audited lateral sources before the physical target](torture/findings/2026-10-15-lateral-before-target-view.md)
+also preserve writable metadata and target identity through a two-source
+dependency chain. Broader join-source reorderings, layered authorization for
+those chains, and outer-join writes remain open.
 
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
 refused with MySQL-compatible errors.
