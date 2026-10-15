@@ -226,10 +226,10 @@ the events have no durable acknowledgement contract. `registerTable` deliberatel
 uses store-wide registration for newly opened sessions; changing it to a pure
 builder would change existing API behavior and needs a separate design.
 
-The latest [same-host durability-matched checkpoint](../benchmarks/results/2026-10-15-current-head-wire-embedded-write-check.md)
-measured 11,401 WAL-backed wire inserts/sec versus 41,615 durable MySQL
+The latest [same-host durability-matched checkpoint](../benchmarks/results/2026-10-15-current-head-write-follow-up.md)
+measured 12,346 WAL-backed wire inserts/sec versus 45,640 durable MySQL
 inserts/sec at eight writers (0.27×). An embedded WAL-backed control averaged
-29,404 inserts/sec, but sequential runs cannot isolate protocol or scheduling
+32,672 inserts/sec, but sequential runs cannot isolate protocol or scheduling
 cost. Keep the matched performance gate and require a measured causal change
 before retaining another scheduling optimization. `Executor.fs` still needs
 small, cohesive extractions at real edit boundaries; file size alone is not a
