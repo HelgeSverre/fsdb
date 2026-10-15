@@ -71,6 +71,23 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "negative probes match no unsigned key, got %A" other
 
+                testCase "TIMESTAMP payload columns keep primary, secondary, and IN lookups indexed"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE stamped (id INT PRIMARY KEY, owner INT, created_at TIMESTAMP NULL, KEY (owner))" |> ignore
+                    let rows = [ 1 .. 300 ] |> List.map (fun id -> sprintf "(%d, %d, '2026-01-02 03:04:05')" id (id % 30)) |> String.concat ","
+                    runDefault store ("INSERT INTO stamped VALUES " + rows) |> ignore
+
+                    let byId, idExamined = withExaminedRows (fun () -> runDefault store "SELECT created_at FROM stamped WHERE id = 5")
+                    Expect.equal byId (ResultSet([ "created_at" ], [ [ Some "2026-01-02 03:04:05" ] ])) "primary-key lookup reads the session-time value"
+                    Expect.equal idExamined 1L "the primary key reads one row"
+
+                    let _, ownerExamined = withExaminedRows (fun () -> runDefault store "SELECT id FROM stamped WHERE owner = 7")
+                    Expect.equal ownerExamined 10L "the secondary key reads its candidates"
+
+                    let _, inExamined = withExaminedRows (fun () -> runDefault store "SELECT id FROM stamped WHERE id IN (4, 5, 6)")
+                    Expect.equal inExamined 3L "IN probes the primary key"
+
                 testCase "SELECT * expands every column"
                 <| fun _ ->
                     let store = newStore ()

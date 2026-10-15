@@ -13841,6 +13841,19 @@ and private plannerIndexedConstantValue store registry table column expression =
     else
         None
 
+/// Index probes compare stored key values. A key column whose stored form
+/// differs from what a read returns (a TIMESTAMP, or CHAR under
+/// PAD_CHAR_TO_FULL_LENGTH) cannot take a read-side constant; other columns
+/// are converted when the remaining predicate reads them.
+and private keyColumnStoredAsRead (store: Store) (table: Table) (columnName: string) =
+    table.Columns
+    |> List.tryFind (fun column -> equalsIgnoreCase column.Name columnName)
+    |> Option.exists (fun column -> storedRowsMatchReadRows store [ column ])
+
+and private storedAsReadIndexedColumnFor (store: Store) (registry: Registry) (table: Table) (tref: TableRef) expression =
+    storedIndexedColumnFor registry tref expression
+    |> Option.filter (fst >> keyColumnStoredAsRead store table)
+
 and private pointLookupEqualities
     (store: Store)
     (registry: Registry)
@@ -13854,7 +13867,7 @@ and private pointLookupEqualities
         | _ -> plannerIndexedConstantValue store registry table column expression
 
     let tryIndexedColumn expression =
-        storedIndexedColumnFor registry tref expression
+        storedAsReadIndexedColumnFor store registry table tref expression
         |> Option.filter (fun column ->
             isDirectNumericIndexColumn table column
             || isNumericResultIndexColumn column
@@ -13875,7 +13888,9 @@ and private pointLookupEqualities
             |> Option.orElseWith (fun () -> tryPair right left)
         | _ -> None
 
-    let literals = literalPointLookupEqualities registry tref whereExpr
+    let literals =
+        literalPointLookupEqualities registry tref whereExpr
+        |> List.filter (fun equality -> keyColumnStoredAsRead store table equality.Column)
 
     whereExpr
     |> optionalConjuncts
@@ -13963,7 +13978,7 @@ and private plannerInProbes
         | LiteralValue value -> Some value
         | expression -> plannerIndexedConstantValue store registry table column expression
 
-    inProbesWith (storedIndexedColumnFor registry tref) plannerValue whereExpr
+    inProbesWith (storedAsReadIndexedColumnFor store registry table tref) plannerValue whereExpr
 
 and private tryComparisonRangePredicate columnName boundValue expression =
     let lower name value inclusive =
@@ -14303,8 +14318,7 @@ and private tryEqualityAccessInTableWith
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
     // Do not evaluate a warning-producing lookup bound for a table that must scan.
-    if not (storedRowsMatchReadRows store table.Columns)
-       || not (table.Indexes |> List.exists (fun index -> index.Visible && index.Kind = BTree)) then
+    if not (table.Indexes |> List.exists (fun index -> index.Visible && index.Kind = BTree)) then
         None
     else
         let allowed = indexHintsFor IndexJoin tref |> indexAllowedBy
@@ -14361,7 +14375,7 @@ and private tryInAccessInTableWith
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    if not (storedRowsMatchReadRows store table.Columns) then
+    if not (table.Indexes |> List.exists (fun index -> index.Visible && index.Kind = BTree)) then
         None
     else
         let allowed = indexHintsFor IndexJoin tref |> indexAllowedBy
