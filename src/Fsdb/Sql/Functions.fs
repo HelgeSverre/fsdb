@@ -2696,6 +2696,12 @@ let private dateFn: Scalar =
 let private warnTruncatedTime value =
     Diagnostics.warning 1292 (sprintf "Truncated incorrect time value: '%s'" value)
 
+/// Input that is neither a TIME nor a DATETIME reads as NULL with MySQL's
+/// truncation warning.
+let private invalidTimeResult value =
+    warnTruncatedTime (toText value |> Option.defaultValue "")
+    VNull
+
 let private parsedTimeValue value =
     value
     |> toText
@@ -2718,7 +2724,10 @@ let private timeFn: Scalar =
     | [ v ] when not (anyNull [ v ]) ->
         match parsedTimeValue v with
         | Some time -> VTime time
-        | None -> tryDateTimeValue v |> Option.map (fun value -> VTime(timeValueOrClamp value.TimeOfDay.Ticks)) |> Option.defaultValue VNull
+        | None ->
+            match tryDateTimeValue v with
+            | Some value -> VTime(timeValueOrClamp value.TimeOfDay.Ticks)
+            | None -> invalidTimeResult v
     | _ -> VNull
 
 let private datePartFn (f: DateTime -> int) : Scalar =
@@ -2766,7 +2775,10 @@ let private zeroAwareTimePart (fromZero: ZeroDateTime -> int) (fromTime: TimeVal
     | [ value ] when not (anyNull [ value ]) ->
         match parsedTimeValue value with
         | Some time -> VInt(int64 (fromTime time))
-        | None -> tryDateTimeValue value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
+        | None ->
+            match tryDateTimeValue value with
+            | Some dateTime -> VInt(int64 (fromDateTime dateTime))
+            | None -> invalidTimeResult value
     | _ -> VNull
 
 let internal dayNameFn (locale: TemporalLocale.Names) : Scalar =

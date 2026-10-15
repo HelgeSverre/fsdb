@@ -1123,6 +1123,23 @@ let tests =
               Expect.equal result (ResultSet([ "HOUR('838:59:59.0000004')" ], [ [ Some "838" ] ])) "rounded maximum"
               Expect.equal (conditionTriples session) [] "rounding into range does not warn"
 
+          testCase "unparseable TIME input warns in TIME and its part functions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "SELECT TIME('abc'), TIME(''), HOUR('abc'), MINUTE('abc'), SECOND(''), MICROSECOND('abc')"
+              match result with
+              | ResultSet(_, [ row ]) -> Expect.equal row [ None; None; None; None; None; None ] "unparseable input reads as NULL"
+              | other -> failtestf "unexpected TIME part row: %A" other
+              Expect.equal
+                  (conditionTriples session)
+                  [ warning 1292 "Truncated incorrect time value: 'abc'"
+                    warning 1292 "Truncated incorrect time value: ''"
+                    warning 1292 "Truncated incorrect time value: 'abc'"
+                    warning 1292 "Truncated incorrect time value: 'abc'"
+                    warning 1292 "Truncated incorrect time value: ''"
+                    warning 1292 "Truncated incorrect time value: 'abc'" ]
+                  "one MySQL truncation warning per unparseable argument"
+
           testCase "overflowing SEC_TO_TIME and MAKETIME retain MySQL warning values"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
