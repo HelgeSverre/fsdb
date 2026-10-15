@@ -1524,6 +1524,10 @@ implementation effort:
    showed only a 1–3% eight-writer throughput difference and no material
    improvement in the FSDB/MySQL ratio; the added scheduler complexity was
    reverted.
+   A [later current-head durable checkpoint](benchmarks/results/3aa41906-durable-keyless.md)
+   again measured about 0.45× MySQL throughput with one writer and 0.28×
+   with eight. The write-scaling gap remains open; that matched run does not
+   justify changing queue ownership or WAL policy.
 
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition
