@@ -672,6 +672,49 @@ let tests =
               | other -> failtestf "expected the direct inner view's missing UPDATE to return 1356, got %A" other
               Expect.equal (rows store "SELECT n FROM layered_target") [ [ Some "1" ] ] "denied writes leave the base row unchanged"
 
+          testCase "layered derived join grants invalidate the view before physical join denials"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE derived_grant_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE derived_grant_flags(id INT PRIMARY KEY,flag INT)"
+                    "CREATE TABLE derived_grant_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO derived_grant_target VALUES(1,0),(2,0)"
+                    "INSERT INTO derived_grant_flags VALUES(1,7)"
+                    "INSERT INTO derived_grant_aux VALUES(1,9)"
+                    "CREATE USER derived_grant_inner_owner"
+                    "CREATE USER derived_grant_outer_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.derived_grant_target TO derived_grant_inner_owner"
+                    "GRANT SELECT ON fsdb.derived_grant_flags TO derived_grant_inner_owner"
+                    "GRANT SELECT ON fsdb.derived_grant_aux TO derived_grant_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO derived_grant_inner_owner,derived_grant_outer_owner"
+                    "CREATE DEFINER='derived_grant_inner_owner'@'%' SQL SECURITY DEFINER VIEW derived_grant_inner AS SELECT t.id,t.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) flag FROM derived_grant_flags GROUP BY id) d1 JOIN (SELECT id,SUM(aux) aux FROM derived_grant_aux GROUP BY id) d2 ON d2.id=d1.id JOIN derived_grant_target t ON t.id=d1.id AND t.n<d2.aux"
+                    "GRANT SELECT,UPDATE ON fsdb.derived_grant_inner TO derived_grant_outer_owner"
+                    "CREATE DEFINER='derived_grant_outer_owner'@'%' SQL SECURITY DEFINER VIEW derived_grant_outer AS SELECT id,n AS metric FROM derived_grant_inner" ] do
+                  expectOk (run store sql) sql
+
+              let update () = run store "UPDATE derived_grant_outer SET metric=metric+1 WHERE id=1"
+              Expect.equal (update ()) (Affected 1UL) "complete grant chain permits the update"
+              for table in [ "derived_grant_flags"; "derived_grant_aux" ] do
+                  expectOk (run store $"REVOKE SELECT ON fsdb.{table} FROM derived_grant_inner_owner") "revoke derived read grant"
+                  match update () with
+                  | Err(1356, _) -> ()
+                  | other -> failtestf "expected revoked derived source %s to invalidate the view, got %A" table other
+                  expectOk (run store $"GRANT SELECT ON fsdb.{table} TO derived_grant_inner_owner") "restore derived read grant"
+
+              expectOk (run store "REVOKE SELECT ON fsdb.derived_grant_target FROM derived_grant_inner_owner") "revoke target read grant"
+              match update () with
+              | Err(1143, _) -> ()
+              | other -> failtestf "expected the physical join-key denial, got %A" other
+              expectOk (run store "REVOKE SELECT ON fsdb.derived_grant_flags FROM derived_grant_inner_owner") "revoke derived read grant again"
+              match update () with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected the derived failure to precede the target denial, got %A" other
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_grant_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
+                  "denied updates leave the physical rows unchanged"
+
           testCase "layered JSON_TABLE view checks join columns before view projection grants"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -700,6 +743,21 @@ let tests =
               expectOk (run store "GRANT SELECT(n) ON fsdb.json_layer_target TO json_layer_inner_owner") "grant the projected column"
               Expect.equal (update ()) (Affected 0UL) "the two column grants permit the update"
               Expect.equal (rows store "SELECT n FROM json_layer_target") [ [ Some "0" ] ] "denied writes leave the base row unchanged"
+
+              for sql in
+                  [ "CREATE DEFINER='json_layer_inner_owner'@'%' SQL SECURITY DEFINER VIEW dependent_json_inner AS SELECT a.id,a.n,j.x FROM json_layer_target a JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id"
+                    "GRANT SELECT,UPDATE ON fsdb.dependent_json_inner TO json_layer_outer_owner"
+                    "CREATE DEFINER='json_layer_outer_owner'@'%' SQL SECURITY DEFINER VIEW dependent_json_outer AS SELECT id,n AS metric,x FROM dependent_json_inner" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (run store "UPDATE dependent_json_outer SET metric=metric WHERE id=1")
+                  (Affected 0UL)
+                  "the dependent table function permits the update"
+              expectOk (run store "REVOKE SELECT(id,n) ON fsdb.json_layer_target FROM json_layer_inner_owner") "revoke dependent source reads"
+              match run store "UPDATE dependent_json_outer SET metric=metric WHERE id=1" with
+              | Err(1143, message) -> Expect.stringContains message "column 'id'" "dependent table-function read is a direct join denial"
+              | other -> failtestf "expected a dependent table-function read denial, got %A" other
+              expectOk (run store "GRANT SELECT(id,n) ON fsdb.json_layer_target TO json_layer_inner_owner") "restore dependent source reads"
 
               for sql in
                   [ "CREATE TABLE json_layer_companion(id INT PRIMARY KEY)"

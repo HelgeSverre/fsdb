@@ -25792,14 +25792,18 @@ let rec executeAs
                                 |> Result.bind (fun next -> check next access.Database access.Table rest)
                             | _ -> invalid ()
                         | [ access ] when access.Mode = OriginalWrite ->
-                            let joinRequirements =
+                            let derivedRequirements, joinRequirements =
                                 match physicalUpdate with
-                                | Update update -> Auth.requiredUpdateJoinColumnsInStore store access.Database update
-                                | _ -> []
+                                | Update update -> Auth.requiredUpdateJoinReadsInStore store access.Database update
+                                | _ -> [], []
 
                             registryForViewRequirements
-                                store current access.SecurityType access.Definer joinRequirements
-                            |> Result.mapError JoinColumnDenied
+                                store current access.SecurityType access.Definer derivedRequirements
+                            |> Result.mapError ViewGrantDenied
+                            |> Result.bind (fun _ ->
+                                registryForViewRequirements
+                                    store current access.SecurityType access.Definer joinRequirements
+                                |> Result.mapError JoinColumnDenied)
                             |> Result.bind (fun _ ->
                                 registryForViewSecurity
                                     store current access.SecurityType access.Definer access.Database physicalUpdate

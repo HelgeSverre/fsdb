@@ -645,6 +645,10 @@ audited joined views return 1143 for the first denied join column and 1356
 when only a projected column remains denied; an inner INVOKER view under an
 outer DEFINER layer uses the outer definer's base grants. Broader grant
 ordering across multi-source layers remains open.
+[Aggregate-derived read sources in a layered writable join](torture/findings/2026-10-15-layered-derived-view-grants.md)
+now report 1356 for revoked source grants before a physical target join-key
+denial; a revoked target read alone still reports 1143. Other derived and
+lateral grant paths remain unaudited.
 Joined UPDATE also reaches a mergeable component view with a distinct definer.
 The outer definer must retain access to the component view, while that view's
 definer must retain SELECT on its base tables and UPDATE on the written target;

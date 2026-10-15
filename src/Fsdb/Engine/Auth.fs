@@ -2788,21 +2788,38 @@ and private expressionColumnRequirements store defaultDb localSources outerSourc
     @ (Expression.collectSubqueries expression
        |> List.collect (selectColumnRequirements store defaultDb (localSources @ outerSources) ctes))
 
+type private MutationJoinScope =
+    { Sources: PrivilegeSource list
+      Requirements: (string * PrivTarget) list
+      DerivedRequirements: (string * PrivTarget) list
+      DirectRequirements: (string * PrivTarget) list }
+
 let private mutationJoinScope store defaultDb ctes (initial: PrivilegeSource) (joins: Join list) =
     joins
     |> List.fold
-        (fun (leftSources, requirements) (join: Join) ->
+        (fun scope (join: Join) ->
             let right = sourcesForItem store defaultDb ctes join.Table
-            let sources = leftSources @ right
+            let sources = scope.Sources @ right
             let preceding =
                 match join.Kind with
                 | RightJoin | NaturalRightJoin -> []
-                | _ -> leftSources
+                | _ -> scope.Sources
             let nested = fromItemColumnRequirements store defaultDb [] ctes preceding join.Table
             let predicate = expressionColumnRequirements store defaultDb sources [] ctes Set.empty join.On
-            let keys = joinKeyRequirements [] leftSources right join
-            sources, requirements @ nested @ predicate @ keys)
-        ([ initial ], [])
+            let keys = joinKeyRequirements [] scope.Sources right join
+            let derived, sourceReads =
+                match join.Table with
+                | FromSubquery _ | FromLateral _ -> nested, []
+                | _ -> [], nested
+            let direct = sourceReads @ predicate @ keys
+            { Sources = sources
+              Requirements = scope.Requirements @ nested @ predicate @ keys
+              DerivedRequirements = scope.DerivedRequirements @ derived
+              DirectRequirements = scope.DirectRequirements @ direct })
+        { Sources = [ initial ]
+          Requirements = []
+          DerivedRequirements = []
+          DirectRequirements = [] }
 
 let private targetColumns defaultDb (table: string) (columns: string list) privilege =
     let database, table = splitQualified defaultDb table
@@ -2835,8 +2852,9 @@ let private mutationCteNames ctes =
 let private updateColumnRequirements store defaultDb (update: UpdateStmt) =
     let cteNames = mutationCteNames update.Ctes
 
-    let sources, joinRequirements =
+    let scope =
         mutationJoinScope store defaultDb cteNames (physicalSource store defaultDb update.From) update.Joins
+    let sources, joinRequirements = scope.Sources, scope.Requirements
 
     let targetOf (assignment: Assignment) =
         match assignment.Table with
@@ -2868,19 +2886,25 @@ let private updateColumnRequirements store defaultDb (update: UpdateStmt) =
     @ (update.Ctes
        |> List.collect (fun cte -> selectOrUnionColumnRequirements store defaultDb [] Map.empty cte.Body))
 
-/// Column reads needed to form an UPDATE join, before the update expression or
-/// view projection is checked. A layered view may expose these denials directly.
-let internal requiredUpdateJoinColumnsInStore store defaultDb (update: UpdateStmt) =
-    mutationJoinScope store defaultDb (mutationCteNames update.Ctes) (physicalSource store defaultDb update.From) update.Joins
-    |> snd
+let private selectColumnRequirementsOnly requirements =
+    requirements
     |> List.filter (function "SELECT", OnColumn _ -> true | _ -> false)
     |> List.distinct
+
+/// Derived-source reads invalidate a layered view; direct join reads expose
+/// their own column denial before update expressions and view projections.
+let internal requiredUpdateJoinReadsInStore store defaultDb (update: UpdateStmt) =
+    let scope =
+        mutationJoinScope store defaultDb (mutationCteNames update.Ctes) (physicalSource store defaultDb update.From) update.Joins
+    selectColumnRequirementsOnly scope.DerivedRequirements,
+    selectColumnRequirementsOnly scope.DirectRequirements
 
 let private deleteColumnRequirements store defaultDb (delete: DeleteStmt) =
     let cteNames = mutationCteNames delete.Ctes
 
-    let sources, joinRequirements =
+    let scope =
         mutationJoinScope store defaultDb cteNames (physicalSource store defaultDb delete.From) delete.Joins
+    let sources, joinRequirements = scope.Sources, scope.Requirements
 
     let expressions =
         (delete.Where |> Option.toList)
