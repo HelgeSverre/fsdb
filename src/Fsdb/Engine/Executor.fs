@@ -14347,6 +14347,7 @@ and private correlatedBinaryLikePrefixes store source context columns predicate 
                             |> Option.orElseWith (fun () ->
                                 match pattern with
                                 | VEncodedString(_, bytes) -> Some bytes
+                                | VString text -> Some(Charset.encode (sourceCharset context patternExpr) text)
                                 | _ -> None)
                         bytes
                         |> Option.bind (byteLikePrefixBounds (escape |> Option.defaultValue '\\'))

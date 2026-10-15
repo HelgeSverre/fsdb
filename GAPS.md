@@ -212,6 +212,8 @@ from short-circuit filtering.
 [Stable byte-valued correlated `LIKE` patterns](torture/findings/2026-10-15-correlated-physical-like-prefix.md#byte-valued-correlated-patterns)
 also use maintained ordered ranges on physical sources and statement-local
 byte-ordered ranges on materialized sources, including complete OR branches.
+[Stable text patterns against byte-valued keys](torture/findings/2026-10-15-correlated-physical-like-prefix.md#text-patterns-against-byte-keys)
+use the pattern expression's charset before the same correlated range lookup.
 Binary-collated [correlated `LIKE` prefixes over stable materialized derived
 sources and CTEs](torture/findings/2026-10-15-correlated-materialized-like-prefix.md)
 now use statement-local ordered ranges for matching

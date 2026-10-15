@@ -38,3 +38,19 @@ residual filter. The focused regression bounds leading-residual calls for all
 three source shapes, and the existing direct VARBINARY and correlated binary
 text-prefix tests still pass. Patterns without a fixed byte prefix or with an
 explicit collation retain general evaluation.
+
+## Text patterns against byte keys
+
+Native MySQL 8.4.11 returns `(2, 1, 0)` when an outer `VARCHAR` pattern
+`('a01%', 'a99%', NULL)` is compared with a five-row `VARBINARY` key. With
+`OR c.id=1`, it returns `(2, 2, 1)`; physical, pass-through, and `DISTINCT`
+materialized sources agree. The reproducible native probe is
+[`correlated-byte-text-like-oracle.py`](../scripts/correlated-byte-text-like-oracle.py).
+
+FSDB already matched row membership, but a 1,000-row regression evaluated
+2,004 leading residuals because the correlated candidate path accepted only
+raw-byte patterns. It now encodes stable text patterns with their expression
+charset, just as direct byte-key `LIKE` ranges do, before extracting the byte
+prefix. The original `LIKE` still filters candidates. The regression bounds
+leading-residual work for conjunctions and complete OR branches across all
+three source shapes.
