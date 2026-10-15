@@ -788,6 +788,15 @@ and SelectStmt =
       /// list targets every physical source not named by another clause.
       Locking: LockingRead list }
 
+module internal JsonTableColumn =
+    let rec names columns =
+        columns
+        |> List.collect (function
+            | ForOrdinality name
+            | PathColumn(name, _, _, _, _)
+            | ExistsColumn(name, _, _) -> [ name ]
+            | NestedColumns(_, nested) -> names nested)
+
 module Projection =
     /// MySQL removes leading ASCII whitespace and controls from literal names.
     let literalName (text: string) =

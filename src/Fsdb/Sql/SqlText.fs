@@ -353,16 +353,6 @@ and private renderJsonColumns (_options: ViewRenderOptions) (_context: ViewConte
 
     columns |> List.map renderColumn |> String.concat ","
 
-and private jsonColumnNames (columns: JsonTableColumn list) : string list =
-    let rec names =
-        function
-        | ForOrdinality name
-        | PathColumn(name, _, _, _, _)
-        | ExistsColumn(name, _, _) -> [ name ]
-        | NestedColumns(_, nested) -> nested |> List.collect names
-
-    columns |> List.collect names
-
 and private renderFromItem (options: ViewRenderOptions) (context: ViewContext) (item: FromItem) : string * Source list =
     match item with
     | FromJoinGroup(source, joins) -> renderJoinChain options { context with Sources = [] } source joins
@@ -432,7 +422,7 @@ and private renderFromItem (options: ViewRenderOptions) (context: ViewContext) (
         sql,
         [ { Qualifier = alias
             Reference = quoteIdentifier alias
-            Columns = jsonColumnNames columns } ]
+            Columns = JsonTableColumn.names columns } ]
 
 and private renderJoinChain options context source sourceJoins =
     let sourceSql, firstSources = renderFromItem options context source

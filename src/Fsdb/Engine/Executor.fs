@@ -1696,14 +1696,6 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             | Star _ -> None
                             | _ -> Some(InformationSchema.exprToSql expression)))
 
-                let rec jsonTableColumnNames columns =
-                    columns
-                    |> List.collect (function
-                        | ForOrdinality name
-                        | PathColumn(name, _, _, _, _)
-                        | ExistsColumn(name, _, _) -> [ name ]
-                        | NestedColumns(_, nested) -> jsonTableColumnNames nested)
-
                 let rec derivedColumnNames body =
                     let definition =
                         match body with
@@ -1759,7 +1751,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             (table.Database |> Option.defaultValue view.Schema)
                             table.Table
                     | FromSubquery(body, _) -> derivedColumnNames body
-                    | FromJsonTable(_, _, columns, _) -> Some(jsonTableColumnNames columns)
+                    | FromJsonTable(_, _, columns, _) -> Some(JsonTableColumn.names columns)
                     | _ -> None
 
                 let resolveSource (tableRef: TableRef) : WritableViewSource option =
@@ -1917,7 +1909,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                         |> Option.filter (fun columns -> tryDuplicateIgnoreCase id columns |> Option.isNone)
                         |> Option.map (readOnlySource reference qualifier)
                     | (FromJsonTable(_, _, columns, qualifier) as reference) ->
-                        let columns = jsonTableColumnNames columns
+                        let columns = JsonTableColumn.names columns
                         if tryDuplicateIgnoreCase id columns |> Option.isSome then None
                         else Some(readOnlySource reference qualifier columns)
                     | _ -> None
@@ -28938,13 +28930,17 @@ let transactionWriteTargets
                 |> fun joined -> FromTable update.From :: joined
                 |> traverse (fun source ->
                     match source with
-                    | FromSubquery(body, _) ->
+                    | FromSubquery(body, _)
+                    | FromLateral(body, _) ->
                         let columns = selectSourceColumns store dbName source
                         let names =
                             if columns.IsEmpty || (columns |> List.exists Option.isNone) then
                                 projectedNames body
                             else
                                 columns |> List.choose id |> List.map _.Name
+                        if names.IsEmpty then Error() else Ok(None, names)
+                    | FromJsonTable(_, _, columns, _) ->
+                        let names = JsonTableColumn.names columns
                         if names.IsEmpty then Error() else Ok(None, names)
                     | FromTable tableRef ->
                         let cte =

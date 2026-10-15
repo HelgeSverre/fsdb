@@ -2516,16 +2516,6 @@ let private selectOrUnionProjectionNames =
     | PlainSelect select -> projectionNames select
     | UnionSelect(first, _, _, _, _) -> projectionNames first
 
-let private jsonTableColumnNames columns =
-    let rec collect =
-        function
-        | ForOrdinality name
-        | PathColumn(name, _, _, _, _)
-        | ExistsColumn(name, _, _) -> [ name ]
-        | NestedColumns(_, nested) -> nested |> List.collect collect
-
-    columns |> List.collect collect
-
 let private physicalSource store defaultDb (reference: TableRef) =
     let database = reference.Database |> Option.defaultValue defaultDb
 
@@ -2556,7 +2546,7 @@ let rec private sourcesForItem store defaultDb ctes =
     | FromTable reference -> [ physicalSource store defaultDb reference ]
     | FromSubquery(body, alias)
     | FromLateral(body, alias) -> [ virtualSource alias (selectOrUnionProjectionNames body) ]
-    | FromJsonTable(_, _, columns, alias) -> [ virtualSource alias (jsonTableColumnNames columns) ]
+    | FromJsonTable(_, _, columns, alias) -> [ virtualSource alias (JsonTableColumn.names columns) ]
 
 let private columnReferences aliases expression =
     Expression.collect

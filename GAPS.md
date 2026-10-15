@@ -1549,10 +1549,11 @@ implementation effort:
    plus audited joined UPDATE and DELETE statements with named physical targets,
    [audited single-table updatable-view UPDATE and DELETE statements and joined-view
    UPDATE statements with one writable physical target](torture/findings/2026-10-15-view-write-rebase.md),
-   and joined UPDATE assignments whose unqualified column has one physical
-   owner, including [CTE-joined physical targets and uniquely owned bare assignments](torture/findings/2026-10-14-cte-joined-write-rebase.md)
+   and joined UPDATEs with uniquely owned bare assignments, including
+   [CTE-joined physical targets](torture/findings/2026-10-14-cte-joined-write-rebase.md),
    [targets inside join groups](torture/findings/2026-10-14-grouped-joined-write-rebase.md),
-   and [bare assignments beside derived sources](torture/findings/2026-10-14-derived-joined-write-rebase.md),
+   [bare assignments beside derived sources](torture/findings/2026-10-14-derived-joined-write-rebase.md),
+   and [bare assignments beside `LATERAL` or `JSON_TABLE` read sources](torture/findings/2026-10-14-unqualified-joined-update-rebase.md#lateral-and-json_table-read-sources),
    wait and rebase across all target tables. Other write shapes still
    rely on optimistic catalog merge
    ([joined UPDATE](torture/findings/2026-10-14-joined-update-rebase.md),

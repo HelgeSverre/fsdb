@@ -1788,6 +1788,37 @@ let tests =
               | ResultSet(_, [ [ Some "3" ] ]) -> ()
               | result -> failtestf "expected both joined-table increments, got %A" result
 
+          testCase "unqualified joined updates with lateral and JSON read sources rebase"
+          <| fun _ ->
+              for source in
+                  [ "LATERAL (SELECT 1 x) e ON e.x=t.id"
+                    "JSON_TABLE('[1]','$[*]' COLUMNS(x INT PATH '$')) j ON j.x=t.id" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_source_target(id INT PRIMARY KEY,n INT)" |> ignore
+                  handle setup "INSERT INTO tx_source_target VALUES(1,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, changed = handle owner "UPDATE tx_source_target SET n=n+1 WHERE id=1"
+                  Expect.equal changed (Affected 1UL) "the owner changes the target"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  let sql = "UPDATE tx_source_target t JOIN " + source + " SET n=n+1 WHERE t.id=1"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter sql)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "joined writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "joined writer resumes"
+                  let waiter, updated = waiting.Result
+                  Expect.isTrue blocked "the joined writer waits for the target owner"
+                  Expect.equal updated (Affected 1UL) "the joined writer updates the rebased row"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the joined writer commits"
+                  match handle setup "SELECT n FROM tx_source_target" |> snd with
+                  | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                  | result -> failtestf "expected both increments after the %s join, got %A" source result
+
           testCase "an autocommit full-scan update waits for a transaction changing the same row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
