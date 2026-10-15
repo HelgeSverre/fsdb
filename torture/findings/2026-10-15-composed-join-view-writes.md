@@ -39,5 +39,22 @@ unchanged. Explicit-column `INSERT` returned 1471 and `DELETE` returned 1395.
 The focused `ViewTests` regression pins the metadata, successful and rejected
 updates, error codes, and final rows. No engine change was needed.
 
+A further native 8.4.11 case groups an aggregate-derived source with its
+dependent `JSON_TABLE` before joining the physical target:
+
+```sql
+FROM ((SELECT id,SUM(flag) flag FROM b GROUP BY id) d
+      JOIN JSON_TABLE(JSON_ARRAY(d.id),'$[*]' COLUMNS(x INT PATH '$')) j
+        ON j.x=d.id)
+JOIN a ON a.id=j.x
+```
+
+The view remains updatable and changes only the matched target row. A checked
+variant rejects an invalid update with 1369; joined-view INSERT and DELETE
+still return 1471 and 1395. The focused FSDB regression pins those outcomes
+and the unchanged target after rejected writes. The maintained oracle now
+covers twelve composed arrangements, but not arbitrary grouped dependency
+graphs or layered authorization through this grouped source.
+
 This audit covers the stated inner-join shapes, not arbitrary join graphs,
 distinct security identities, or authorization through layered views.

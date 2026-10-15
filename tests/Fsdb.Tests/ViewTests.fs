@@ -1577,6 +1577,34 @@ let tests =
               | Err(1395, _) -> ()
               | other -> failtestf "expected joined-view DELETE to fail, got %A" other
 
+              expectOk
+                  (run store "CREATE VIEW grouped_dependent_json_write AS SELECT a.id,a.n,d.flag,j.x FROM ((SELECT id,SUM(flag) flag FROM derived_json_source GROUP BY id) d JOIN JSON_TABLE(JSON_ARRAY(d.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d.id) JOIN derived_json_target a ON a.id=j.x")
+                  "create grouped dependent source view"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='grouped_dependent_json_write'")
+                  [ [ Some "YES" ] ] "the grouped dependency chain leaves the physical target writable"
+              Expect.equal
+                  (run store "UPDATE grouped_dependent_json_write SET n=n+1 WHERE id=1")
+                  (Affected 1UL) "the grouped dependency chain reaches the matched target"
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_json_target ORDER BY id")
+                  [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ] "the unmatched target remains unchanged"
+              expectOk
+                  (run store "CREATE VIEW grouped_dependent_json_checked AS SELECT a.id,a.n,d.flag,j.x FROM ((SELECT id,SUM(flag) flag FROM derived_json_source GROUP BY id) d JOIN JSON_TABLE(JSON_ARRAY(d.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d.id) JOIN derived_json_target a ON a.id=j.x WHERE a.n >= 0 WITH CASCADED CHECK OPTION")
+                  "create checked grouped dependency view"
+              match run store "UPDATE grouped_dependent_json_checked SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected grouped dependency check option to reject the write, got %A" other
+              match run store "INSERT INTO grouped_dependent_json_write(id,n) VALUES(3,0)" with
+              | Err(1471, _) -> ()
+              | other -> failtestf "expected grouped joined-view INSERT refusal, got %A" other
+              match run store "DELETE FROM grouped_dependent_json_write WHERE id=1" with
+              | Err(1395, _) -> ()
+              | other -> failtestf "expected grouped joined-view DELETE refusal, got %A" other
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_json_target ORDER BY id")
+                  [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ] "rejected grouped writes leave the target unchanged"
+
           testCase "checked merged joins keep a physical view target writable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
