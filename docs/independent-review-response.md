@@ -1,65 +1,19 @@
 # Response to the October 14 independent review
 
-The review inspected `ffb9e71d`. This response checks its actionable findings
-against the current implementation and distinguishes completed work from remaining limits. Its
-scores are the reviewer's judgment, not a current measured rating.
+The review inspected `ffb9e71d` on October 14. Its scores and benchmark
+figures describe that revision; the reviewer could not run the project. This
+response checks the actionable findings against the current implementation.
 
-The October 15 review at `f73a5806` finds no new P0 code fix in the pasted
-assessment: PR/main CI, exception-safe write acknowledgement, and bounded
-commit subscriptions are already implemented. The reviewer could not execute
-the project, so its test count and performance figures describe older revisions.
-The remaining architectural, performance, and operational concerns below are
-real preview limits. They should be handled as measured, scoped work rather
-than treated as defects already cured by the completed API and CI changes.
-At this recheck, `just check` built without warnings and passed all 3,603
-tests; `just package-check` built both NuGet artifacts and passed the package
-consumer example.
-
-The October 15 recheck at `95d83d9a` confirms that the concrete findings
-still have their intended fixes: CI builds, runs regressions, verifies the
-package consumer, and enforces branch coverage; failing commit observers do
-not change write acknowledgements; commit subscriptions are bounded; and the
-OS variable is selected at runtime. The [main CI run](https://github.com/HelgeSverre/fsdb/actions/runs/38672976364)
-passed its build/package, regression, and branch-coverage jobs. Locally,
-`just package-check` passed, and `just check`
-built without warnings and passed all 3,600 tests. The review's
-historical performance numbers and production-readiness score have not been
-replaced by these checks. The open limits in the table below still apply.
-
-At `3515f38e`, the review's immediate P0 items are already addressed in code:
-PR/main CI runs the ordinary gates, and observer exceptions no longer change
-write acknowledgement. A new WAL-backed regression checks the latter across
-recovery as well as the earlier in-memory test. The P2 subscription and OS
-findings are also resolved. The large executor, durable-write throughput gap,
-and preview operational limits remain open; none of these fixes establishes a
-new production-readiness score. `just check` built without warnings and passed
-all 3,595 tests after this recheck; the focused durable observer test also passed
-after its final cleanup edit.
-
-The October 15 recheck at `d3935531` confirmed that the review's concrete P0
-and P2 fixes remain in place: PR/main CI, the observer-exception regression,
-bounded subscriptions, runtime OS selection, and the package-consumer example.
-`just check` passed with 3,558 tests, no warnings, and no failures;
-`just package-check` built the package and passed the example consumer. The
-remaining concerns are architectural and operational limits, so the review's
-4/10 production-readiness score should not be read as having been fixed by
-those narrower changes.
-
-A further check at `4bbf3ed2` found the same disposition. `just check` passed
-with 3,559 tests, no warnings, and no failures; `just package-check` built the
-package and passed the example consumer. The corresponding [GitHub CI
-build/package job](https://github.com/HelgeSverre/fsdb/actions/runs/38652246865/job/116153572702)
-also passed. The review's scores remain historical judgments,
-and the outstanding preview limits below remain open.
-
-At `612439cd`, the same gates passed locally: `just check` built without
-warnings and ran 3,570 passing tests, and `just package-check` packed the
-preview library and exercised the standalone package consumer. The [main-branch
-CI run](https://github.com/HelgeSverre/fsdb/actions/runs/38662092779) has
-passed its build/package and regression jobs; branch coverage was still running
-at this checkpoint. These checks confirm the reviewed fixes remain present,
-but do not establish production readiness or resolve the performance and
-maintenance limits below.
+The immediate CI and commit-notification hazards have been addressed: PR/main
+CI runs the normal gates, observer exceptions cannot change a committed write's
+acknowledgement, and queued subscriptions have a bounded capacity and visible
+drop count. The OS variable is selected at runtime. These fixes do not resolve
+the review's broader maintainability, durable-write performance, or recovery
+concerns, and they do not establish a new production-readiness score.
+At the October 15 recheck, both focused observer regressions and the package
+consumer check passed. The [latest completed main CI run](https://github.com/HelgeSverre/fsdb/actions/runs/38679710462)
+also passed; the run for the current head was still in progress at this
+checkpoint.
 
 | Review finding | Current state | Evidence and next action |
 |---|---|---|
