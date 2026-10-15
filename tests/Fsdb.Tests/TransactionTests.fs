@@ -381,19 +381,36 @@ let tests =
               let writer, inserted = handle writer "INSERT INTO tx_rc_auto(note) VALUES ('private')"
               Expect.equal inserted (Affected 1UL) "the private row is inserted"
 
+              let keyStripe id =
+                  let targets =
+                      Fsdb.Storage.tryInsertLockTargets
+                          store
+                          Fsdb.Storage.defaultDatabase
+                          "tx_rc_auto"
+                          (Some [ "id" ])
+                          [ [ Some(VInt id) ] ]
+                      |> Option.get
+
+                  (StringComparer.Ordinal.GetHashCode(List.head targets.Keys) &&& Int32.MaxValue) % 4096
+
+              // This case verifies a refresh over a disjoint write, while the
+              // lock tests deliberately cover waits on a shared key stripe.
+              let privateStripe = keyStripe 1L
+              let externalId = [ 100L .. 200L ] |> List.find (fun id -> keyStripe id <> privateStripe)
+
               let other = create 2 store
-              let other, external = handle other "INSERT INTO tx_rc_auto(id, note) VALUES (100, 'external')"
+              let other, external = handle other $"INSERT INTO tx_rc_auto(id, note) VALUES ({externalId}, 'external')"
               Expect.equal external (Affected 1UL) "the explicit concurrent row commits"
 
               match handle writer "SELECT id, note FROM tx_rc_auto ORDER BY id" |> snd with
-              | ResultSet(_, [ [ Some "1"; Some "private" ]; [ Some "100"; Some "external" ] ]) -> ()
+              | ResultSet(_, [ [ Some "1"; Some "private" ]; [ Some id; Some "external" ] ]) when id = string externalId -> ()
               | result -> failtestf "expected the original private identity and external row, got %A" result
 
               let writer, committed = handle writer "COMMIT"
               Expect.equal committed (Affected 0UL) "the transaction commits"
 
               match handle other "SELECT id, note FROM tx_rc_auto ORDER BY id" |> snd with
-              | ResultSet(_, [ [ Some "1"; Some "private" ]; [ Some "100"; Some "external" ] ]) -> ()
+              | ResultSet(_, [ [ Some "1"; Some "private" ]; [ Some id; Some "external" ] ]) when id = string externalId -> ()
               | result -> failtestf "expected the original private identity after commit, got %A" result
 
           testCase "READ COMMITTED reserves auto-increment identities across connections"

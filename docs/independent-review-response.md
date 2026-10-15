@@ -130,6 +130,12 @@ uses 4,096 key stripes, so unrelated keys can contend if their hashes collide;
 the failed log alone does not establish that collision as the cause. Keep this
 failure visible and investigate it with a deterministic reproduction before
 changing lock semantics or weakening the regression.
+The refresh regression now selects an explicit key on a different lock stripe
+from the transaction's generated key. It still exercises a same-table
+concurrent commit and checks that the private identity survives refresh;
+separate lock tests retain deliberate contention coverage. This removes one
+source of accidental 50-second waits from that identity test, but does not
+prove that stripe aliasing caused the recorded CI failure.
 
 The remaining review priorities are architectural and operational. The latest
 [durability-matched checkpoint](../benchmarks/results/2026-10-15-durable-keyless-write-check.md)
