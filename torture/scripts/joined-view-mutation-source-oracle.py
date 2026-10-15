@@ -109,6 +109,13 @@ def main():
                     cursor.execute("SELECT n FROM t WHERE id=1")
                     assert cursor.fetchone() == (3,)
 
+                    cursor.execute(
+                        "UPDATE v JOIN l ON l.id=v.id SET n=n+1 WHERE v.id=1"
+                    )
+                    assert cursor.rowcount == 1
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (4,)
+
                     cursor.execute("ALTER TABLE l ADD COLUMN n INT DEFAULT 0")
                     try:
                         cursor.execute(
@@ -120,7 +127,7 @@ def main():
                     else:
                         raise AssertionError("ambiguous bare n should fail")
                     cursor.execute("SELECT n FROM t WHERE id=1")
-                    assert cursor.fetchone() == (3,)
+                    assert cursor.fetchone() == (4,)
 
                     cursor.execute(
                         "CREATE VIEW checked AS SELECT id,n FROM t WHERE n>=0 "
@@ -136,11 +143,12 @@ def main():
                     else:
                         raise AssertionError("joined view CHECK OPTION should reject n=-1")
                     cursor.execute("SELECT n FROM t WHERE id=1")
-                    assert cursor.fetchone() == (3,)
+                    assert cursor.fetchone() == (4,)
 
                 print(
                     f"MySQL {version}: joined view UPDATE waited and rebased; "
-                    "renamed columns updated; CHECK OPTION rejected n=-1; bare n was ambiguous"
+                    "renamed columns updated; CHECK OPTION rejected n=-1; "
+                    "unique bare n updated and shared bare n was ambiguous"
                 )
             finally:
                 for connection in connections:

@@ -22371,6 +22371,18 @@ let private rewriteViewExpression (view: UpdatableView) (expression: Expr) =
             | None -> Some(QualifiedCol("__fsdb_view", name))
         | _ -> None) expression
 
+let private targetsFirstJoinedView (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
+    let database = update.From.Database |> Option.defaultValue defaultDatabase
+    let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
+
+    tryUpdatableView store database update.From.Table
+    |> Option.exists (fun view ->
+        update.Assignments
+        |> List.exists (fun assignment ->
+            match assignment.Table with
+            | Some owner -> equalsIgnoreCase owner qualifier
+            | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets))
+
 let private resolveViewColumn (view: UpdatableView) (column: string) =
     match Map.tryFind (column.ToLowerInvariant()) view.Columns with
     | Some baseColumn -> Ok baseColumn
@@ -28355,17 +28367,11 @@ let rec executeAs
 
     | Update updateStmt
         when not updateStmt.Joins.IsEmpty
-             && tryUpdatableView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome
-             && (updateStmt.Assignments
-                 |> List.exists (fun assignment ->
-                     assignment.Table
-                     |> Option.exists (fun qualifier ->
-                         equalsIgnoreCase qualifier (updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table)))) ->
+             && targetsFirstJoinedView store dbName updateStmt ->
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
 
         match tryUpdatableView store viewDb updateStmt.From.Table with
         | None -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
-        | Some view when not view.UpdateJoins.IsEmpty -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
         | Some view ->
             let viewQualifier = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
             let baseQualifier = view.UpdateFrom.Alias |> Option.defaultValue view.UpdateFrom.Table
@@ -28420,7 +28426,7 @@ let rec executeAs
                     let rewritten =
                         { updateStmt with
                             From = view.UpdateFrom
-                            Joins = updateStmt.Joins |> List.map (Join.mapConditions rewrite)
+                            Joins = view.UpdateJoins @ (updateStmt.Joins |> List.map (Join.mapConditions rewrite))
                             Assignments =
                                 assignments
                                 |> List.map (fun (assignment, target) ->
@@ -28839,6 +28845,16 @@ let rec executeAs
                                         let afterTriggers = triggersFor snapshot tdb tname "AFTER" "UPDATE"
                                         let changedRows = ResizeArray<Value[] option * Value[] option>()
                                         let predicate _ row = Ok(pending.[i].ContainsKey row)
+                                        let candidates =
+                                            tableSnapshot snapshot tdb tname
+                                            |> Result.toOption
+                                            |> Option.bind (fun table ->
+                                                let rows =
+                                                    table.RowsArray.Indexed
+                                                    |> Seq.filter (fun (_, row) -> pending.[i].ContainsKey row)
+                                                    |> Seq.toList
+
+                                                if rows.Length = pending.[i].Count then Some rows else None)
 
                                         let updater row =
                                             let updated =
@@ -28896,7 +28912,7 @@ let rec executeAs
                                                         changedRows.Add(Some(Array.copy row), Some candidate)
                                                         Ok candidate)
 
-                                        applyUpdateRows updateStmt snapshot tdb tname None predicate coercedAssignmentsByGroup.[i] updater changedRows beforeTriggers afterTriggers)
+                                        applyUpdateRows updateStmt snapshot tdb tname candidates predicate coercedAssignmentsByGroup.[i] updater changedRows beforeTriggers afterTriggers)
                                 |> Array.toList
                                 |> traverse id)
 
@@ -29532,20 +29548,43 @@ let transactionWriteTargets
         let viewTargets =
             tryUpdatableView store viewDatabase update.From.Table
             |> Option.bind (fun view ->
-                if not view.UpdateJoins.IsEmpty then None
-                else
-                    update.Assignments
-                    |> traverse (fun assignment ->
-                        Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
-                        |> function Some target -> Ok target | None -> Error())
-                    |> Result.toOption
-                    |> Option.bind (function
-                        | [] -> None
-                        | first :: rest when rest |> List.forall (fun target -> viewTargetKey target = viewTargetKey first) ->
-                            // An outer join can select any row in the view's base table.
-                            // Claim all its rows before taking the execution snapshot.
-                            targets view.UpdateFrom None
-                        | _ -> None))
+                update.Assignments
+                |> traverse (fun assignment ->
+                    Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
+                    |> function Some target -> Ok target | None -> Error())
+                |> Result.toOption
+                |> Option.bind (function
+                    | [] -> None
+                    | first :: rest when rest |> List.forall (fun target -> viewTargetKey target = viewTargetKey first) ->
+                        let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
+                        let physicalEquality (qualifier: string) (name: string) (literal: Expr) =
+                            Map.tryFind (name.ToLowerInvariant()) view.Targets
+                            |> Option.filter (fun column ->
+                                equalsIgnoreCase qualifier viewQualifier
+                                && viewTargetKey column = viewTargetKey first)
+                            |> Option.map (fun column ->
+                                BinOp(Eq, QualifiedCol(first.Qualifier, column.Column), literal))
+
+                        let physicalPredicate =
+                            update.Where
+                            |> optionalConjuncts
+                            |> List.tryPick (function
+                                | BinOp(Eq, QualifiedCol(qualifier, name), (LiteralValue _ as literal)) ->
+                                    physicalEquality qualifier name literal
+                                | BinOp(Eq, (LiteralValue _ as literal), QualifiedCol(qualifier, name)) ->
+                                    physicalEquality qualifier name literal
+                                | _ -> None)
+
+                        // A matching physical equality narrows the row claim.
+                        // Without one, claim the table before taking the snapshot.
+                        targets
+                            { Database = Some first.Database
+                              Table = first.Table
+                              Alias = Some first.Qualifier
+                              Partitions = []
+                              IndexHints = [] }
+                            physicalPredicate
+                    | _ -> None))
 
         match viewTargets with
         | Some target -> [ target ]

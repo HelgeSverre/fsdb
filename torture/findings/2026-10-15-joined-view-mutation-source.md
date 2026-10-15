@@ -36,6 +36,7 @@ columns before the joined mutation, retains the view write authorization and
 check scope, and claims the physical base rows before execution. The Fsdb
 regression covers the blocked writer, the rebased value, renamed columns, and
 CHECK OPTION, ambiguous bare columns, and caller permissions on the external
-join. The rewrite currently applies to assignments explicitly qualified with
-the first-source view name or alias. Joined views used as a source of another
-joined mutation and bare view-target assignments remain outside this fix.
+join. It also accepts a bare assignment when the view uniquely owns that
+exposed column among the outer sources; a collision returns MySQL's 1052
+ambiguity error. [Audited joined-view sources](2026-10-15-nested-joined-view-mutation-source.md)
+are covered separately. Multi-target and broader source shapes remain open.
