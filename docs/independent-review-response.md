@@ -1,5 +1,40 @@
 # Response to the October 14 independent review
 
+## October 15 recheck at `314b6770`
+
+The supplied review assesses `ffb9e71d`, not current main. Its two P0
+recommendations are already implemented: the PR/main [validation workflow](../.github/workflows/ci.yml)
+builds, tests, verifies a package consumer, and enforces branch coverage;
+`Storage.preparePublishedEvents` catches each observer exception so it cannot
+turn a committed write into a reported failure or prevent later observers from
+running. The two focused observer regressions pass on this checkout. The
+[`314b6770` CI run](https://github.com/HelgeSverre/fsdb/actions/runs/38727791333)
+passed its build/package, regression, and branch-coverage jobs.
+
+The P2 observations are also accounted for: commit subscriptions are bounded
+and expose `DroppedCount`; `version_compile_os` is selected for the host OS;
+and the README identifies embedded async calls as `Task.Run` offloading. The
+store-wide behavior of `registerTable` is documented and covered by a test.
+Changing it to a pure builder would change which newly opened sessions see a
+registration, so it needs an additive API design rather than a silent rewrite.
+
+The review's open findings remain material. The latest
+[durability-matched checkpoint](../benchmarks/results/2026-10-15-current-head-write-follow-up.md)
+measures 12,346 WAL-backed FSDB wire inserts/sec against 45,640 durable MySQL
+inserts/sec with eight writers (0.27×). `Executor.fs` is still about 1.43 MB;
+the existing small extractions have not made its main execution path a small
+module. The [operations guide](operations.md) documents stopped-directory
+backup and staging restore, but online backup and general cross-version
+migration remain unsupported.
+
+Before treating those open items as resolved, require a same-host durable
+write comparison with a repeatable improvement, a cohesive executor extraction
+with unchanged behavior and normal gate results, or an end-to-end backup/upgrade
+contract with recovery tests, respectively. Synchronous `Db.onCommit` still
+runs host callbacks inside `CommitLock`; use the bounded subscription for
+application consumers, and do not claim its in-process queue is a durable
+change stream. No score is recalculated from this recheck.
+
 The review inspected `ffb9e71d` on October 14. Its scores and benchmark
 figures describe that revision; the reviewer could not run the project. This
 response checks the actionable findings against the current implementation.
