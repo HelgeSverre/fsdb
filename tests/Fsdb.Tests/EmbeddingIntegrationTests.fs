@@ -199,6 +199,32 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "committed row remains readable, got %A" other
 
+          testCase "failing commit observer does not prevent durable recovery"
+          <| fun _ ->
+              let directory = IO.Path.Combine(IO.Path.GetTempPath(), "fsdb-observer-" + Guid.NewGuid().ToString("N"))
+
+              try
+                  do
+                      let db =
+                          Fsdb.Db.create ()
+                          |> Fsdb.Db.withDataDir directory
+                          |> Fsdb.Db.onCommit (fun _ -> failwith "observer failed")
+
+                      use writer = Fsdb.Db.connect db
+                      writer.Query "CREATE TABLE durable_observed (n INT)" |> ignore
+
+                      match writer.Query "INSERT INTO durable_observed VALUES (7)" with
+                      | Affected 1UL -> ()
+                      | other -> failtestf "durable insert should succeed despite observer failure, got %A" other
+
+                  use reopened = Fsdb.Db.create () |> Fsdb.Db.withDataDir directory |> Fsdb.Db.connect
+
+                  match reopened.Query "SELECT n FROM durable_observed" with
+                  | ResultSet(_, [ [ Some "7" ] ]) -> ()
+                  | other -> failtestf "acknowledged row should survive WAL recovery, got %A" other
+              finally
+                  if IO.Directory.Exists directory then IO.Directory.Delete(directory, true)
+
           testCase "bounded commit subscription reports dropped events"
           <| fun _ ->
               let db = Fsdb.Db.create ()

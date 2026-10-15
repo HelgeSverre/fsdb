@@ -4,6 +4,16 @@ The review inspected `ffb9e71d`. This response checks its actionable findings
 against the current implementation and distinguishes completed work from remaining limits. Its
 scores are the reviewer's judgment, not a current measured rating.
 
+At `3515f38e`, the review's immediate P0 items are already addressed in code:
+PR/main CI runs the ordinary gates, and observer exceptions no longer change
+write acknowledgement. A new WAL-backed regression checks the latter across
+recovery as well as the earlier in-memory test. The P2 subscription and OS
+findings are also resolved. The large executor, durable-write throughput gap,
+and preview operational limits remain open; none of these fixes establishes a
+new production-readiness score. `just check` built without warnings and passed
+all 3,595 tests after this recheck; the focused durable observer test also passed
+after its final cleanup edit.
+
 The October 15 recheck at `d3935531` confirmed that the review's concrete P0
 and P2 fixes remain in place: PR/main CI, the observer-exception regression,
 bounded subscriptions, runtime OS selection, and the package-consumer example.
@@ -32,7 +42,7 @@ maintenance limits below.
 | Review finding | Current state | Evidence and next action |
 |---|---|---|
 | No PR or main CI | Resolved for the current workflow | `.github/workflows/ci.yml` runs a Release build, a separate ordinary regression suite, package verification, and a Coverlet job enforcing 65% branch coverage on pushes to main and pull requests. [The `f11a278c` run](https://github.com/HelgeSverre/fsdb/actions/runs/38636418469) passed all three jobs. Earlier parallel coverage runs exhausted a 16 GB runner; a resource trace showed the instrumented process exceeding 15 GB RSS. The CI test jobs now use a 4 GiB .NET GC heap limit and run sequentially. The MySQL differential suite remains a separate gate. |
-| Observer exceptions can turn committed writes into reported failures | Exception handling resolved; synchronous callback limitations remain | `Storage.preparePublishedEvents` catches and logs each observer exception and continues to later observers. `EmbeddingIntegrationTests` checks successful write acknowledgement and continued delivery. Observers run after catalog publication but before WAL fsync; they can delay acknowledgement or deadlock by writing back to the store. Use the queued subscription for application work, and do not treat either callback delivery or queued delivery as durable acknowledgement. |
+| Observer exceptions can turn committed writes into reported failures | Exception handling resolved; synchronous callback limitations remain | `Storage.preparePublishedEvents` catches and logs each observer exception and continues to later observers. `EmbeddingIntegrationTests` checks successful write acknowledgement, continued delivery, and WAL recovery after a failing observer. Observers run after catalog publication but before WAL fsync; they can delay acknowledgement or deadlock by writing back to the store. Use the queued subscription for application work, and do not treat either callback delivery or queued delivery as durable acknowledgement. |
 | Unbounded commit subscriptions | Resolved after the reviewed revision | `Db.subscribeCommits` defaults to 1024 events; `subscribeCommitsWithCapacity` accepts a positive limit. Overflow drops new events and increments `DroppedCount`, which requires the consumer to resynchronize. The queue is in-process and is not a durable change stream. |
 | Hardcoded `version_compile_os` | Resolved after the reviewed revision | `Session.fs` selects Windows, macOS, or Linux at runtime. |
 | Async API looks like nonblocking database I/O | Documented limitation | `Db.fs` uses `Task.Run` for embedded async calls; the README now says so and describes cancellation and host concurrency implications. A truly asynchronous executor would need separate design and workload evidence. |
