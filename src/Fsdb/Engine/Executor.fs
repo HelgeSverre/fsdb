@@ -4671,21 +4671,24 @@ let private disjuncts (expr: Expr) : Expr list =
 
 let private optionalConjuncts = Option.map conjuncts >> Option.defaultValue []
 
-/// `NOT BETWEEN` is the union of two strict ranges under SQL's three-valued
-/// comparison rules. The original expression remains the residual filter.
-let private candidateDisjuncts expression =
+/// Inequality and `NOT BETWEEN` are unions of strict ranges under SQL's
+/// three-valued comparison rules. The original expression remains the filter.
+let private candidateDisjuncts canSplitInequality expression =
     disjuncts expression
     |> List.collect (function
         | Not(Between(value, lower, upper)) ->
             [ BinOp(Lt, value, lower); BinOp(Gt, value, upper) ]
+        | BinOp(Neq, left, right)
+        | Not(BinOp(Eq, left, right)) when canSplitInequality left right ->
+            [ BinOp(Lt, left, right); BinOp(Gt, left, right) ]
         | branch -> [ branch ])
 
 /// An OR narrows candidates only when every branch has a safe lookup.
-let private tryCompleteOrCandidates whereExpr branchCandidates merge candidateCount =
+let private tryCompleteOrCandidates whereExpr canSplitInequality branchCandidates merge candidateCount =
     whereExpr
     |> optionalConjuncts
     |> List.choose (fun expression ->
-        match candidateDisjuncts expression with
+        match candidateDisjuncts canSplitInequality expression with
         | [ _ ] -> None
         | branches -> branches |> List.map branchCandidates |> tryAllSome |> Option.bind merge)
     |> function
@@ -13539,15 +13542,15 @@ and private isDirectNumericIndexColumn (table: Table) (column: string, transform
         |> List.tryFind (fun candidate -> equalsIgnoreCase candidate.Name column)
         |> Option.exists (fun candidate -> isNumericIndexType candidate.Type))
 
+and private isExactIntegerIndexType = function
+    | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
+    | _ -> false
+
 /// For exact integer keys, inequality is the union of the two strict ranges.
 /// Keep the source expression for filtering; this form only chooses candidates.
 and private normalizeIndexedInequality registry (table: Table) tref expression =
     let integerLiteral = function
         | LiteralValue(VInt _ | VUInt _ | VBit _) -> true
-        | _ -> false
-
-    let integerType = function
-        | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
         | _ -> false
 
     let integerKey indexed =
@@ -13556,7 +13559,7 @@ and private normalizeIndexedInequality registry (table: Table) tref expression =
             transform.IsNone
             && (table.Columns
                 |> List.exists (fun column ->
-                    equalsIgnoreCase column.Name name && integerType column.Type)))
+                    equalsIgnoreCase column.Name name && isExactIntegerIndexType column.Type)))
 
     let ranges indexed literal =
         BinOp(Or, BinOp(Lt, indexed, literal), BinOp(Gt, indexed, literal))
@@ -14263,6 +14266,24 @@ and private tryCorrelatedOuterValue source context expression =
     |> Option.filter (fun scope -> isStatementStableExpr context.Store context.Registry context.DbName scope expression)
     |> Option.bind (fun _ -> evalExpr context expression |> Result.toOption)
 
+and private canSplitCorrelatedIntegerInequality source (columns: ColumnDef list) outer left right =
+    let innerColumn expression =
+        tryCorrelatedInnerColumn source expression
+        |> Option.bind (resolveColumn columns >> Result.toOption)
+        |> Option.exists (fun index -> isExactIntegerIndexType columns.[index].Type)
+
+    let integerBound expression =
+        let value =
+            match expression with
+            | LiteralValue value -> Some value
+            | _ -> outer |> Option.bind (fun context -> tryCorrelatedOuterValue source context expression)
+
+        value
+        |> Option.exists (function VInt _ | VUInt _ | VBit _ -> true | _ -> false)
+
+    (innerColumn left && integerBound right)
+    || (innerColumn right && integerBound left)
+
 and private tryEqualityPredicate columnName boundValue = function
     | BinOp(Eq, left, right) ->
         Option.map2
@@ -14370,6 +14391,7 @@ and private tryCorrelatedEqualityUnionLookup
 
     tryCompleteOrCandidates
         whereExpr
+        (fun _ _ -> false)
         (fun branch -> tryCorrelatedEqualityLookup store dbName tref (Some branch) outer)
         merge
         (snd >> List.length)
@@ -15017,7 +15039,12 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                 |> Storage.rowsForRowIds projection.PhysicalTable
                 |> projectPhysicalLookupRows store registry dbName projection
 
-            tryCompleteOrCandidates whereExpr branchCandidates merge (snd >> List.length)))
+            tryCompleteOrCandidates
+                whereExpr
+                (canSplitCorrelatedIntegerInequality probeSource projection.OutputColumns outer)
+                branchCandidates
+                merge
+                (snd >> List.length)))
 
 and private tryProjectedPhysicalCorrelatedRangeLookup
     (store: Store)
@@ -15319,7 +15346,12 @@ and private tryMaterializedCorrelatedLookup
                     let seen = HashSet<Value[]>(HashIdentity.Reference)
                     candidates |> List.collect id |> List.filter seen.Add |> Some
 
-                tryCompleteOrCandidates whereExpr branchCandidates merge List.length
+                tryCompleteOrCandidates
+                    whereExpr
+                    (canSplitCorrelatedIntegerInequality probeSource columns (Some context))
+                    branchCandidates
+                    merge
+                    List.length
 
             [ equalityCandidates whereExpr
               nullCandidates whereExpr
@@ -15351,7 +15383,7 @@ and private tryCorrelatedSourceLookup
     let hasRangePredicate =
         whereExpr
         |> Option.exists (Expression.exists (function
-            | BinOp((Gt | Gte | Lt | Lte), _, _)
+            | BinOp((Gt | Gte | Lt | Lte | Neq), _, _)
             | Between _ -> true
             | _ -> false))
 

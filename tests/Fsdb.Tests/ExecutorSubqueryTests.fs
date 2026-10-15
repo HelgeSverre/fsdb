@@ -1388,6 +1388,73 @@ let tests =
               | other -> failtestf "expected ignored-index counts to match MySQL, got %A" other
               Expect.isGreaterThan touches 1000 "ignored primary key keeps the scan path"
 
+          testCase "correlated numeric inequality unions selective indexed ranges"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE inequality_bounds(id INT PRIMARY KEY,k INT)" |> ignore
+              runDefault store "CREATE TABLE inequality_selective(k INT)" |> ignore
+              runDefault store "CREATE TABLE inequality_rows(id INT PRIMARY KEY,k INT,KEY ix_k(k))" |> ignore
+              runDefault store "INSERT INTO inequality_bounds VALUES(1,1),(2,NULL),(3,51)" |> ignore
+              runDefault store "INSERT INTO inequality_selective VALUES(1)" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,%d)" id (if id <= 950 then 1 else id - 949))
+              |> String.concat ","
+              |> sprintf "INSERT INTO inequality_rows VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for prefix, source in
+                  [ "", "inequality_rows d"
+                    "", "(SELECT id,k FROM inequality_rows) d"
+                    "WITH passed AS (SELECT id,k FROM inequality_rows) ", "passed d"
+                    "", "(SELECT id+0 AS id,k+0 AS k FROM inequality_rows LIMIT 1000) d"
+                    "WITH materialized AS (SELECT id+0 AS id,k+0 AS k FROM inequality_rows LIMIT 1000) ", "materialized d" ] do
+                  touches <- 0
+                  let sql =
+                      prefix + "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.k <> o.k)"
+                      + " FROM inequality_selective o"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "50" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's selective inequality count, got %A" other
+                  Expect.isLessThan touches 1100 (sprintf "strict range union narrows %s after preparation" source)
+
+                  touches <- 0
+                  let withOr =
+                      prefix + "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND (d.k <> o.k OR d.id=500))"
+                      + " FROM inequality_selective o"
+                  match run store registry withOr with
+                  | ResultSet(_, [ [ Some "51" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's inequality OR count, got %A" other
+                  Expect.isLessThan touches 1100 (sprintf "the extra OR branch stays indexed for %s" source)
+
+              for predicate, expected in
+                  [ "d.k <> o.k", [ [ Some "50" ]; [ Some "0" ]; [ Some "999" ] ]
+                    "NOT (d.k = o.k)", [ [ Some "50" ]; [ Some "0" ]; [ Some "999" ] ]
+                    "d.k <> o.k OR d.id=500", [ [ Some "51" ]; [ Some "1" ]; [ Some "999" ] ] ] do
+                  let sql =
+                      "SELECT (SELECT COUNT(*) FROM inequality_rows d WHERE " + predicate
+                      + ") FROM inequality_bounds o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, rows) when rows = expected -> ()
+                  | other -> failtestf "expected MySQL's NULL-aware inequality counts for %s, got %A" predicate other
+
+              touches <- 0
+              let ignored =
+                  "SELECT (SELECT COUNT(*) FROM inequality_rows d IGNORE INDEX (ix_k)"
+                  + " WHERE TOUCH(d.id)=d.id AND d.k <> o.k)"
+                  + " FROM inequality_selective o"
+              match run store registry ignored with
+              | ResultSet(_, [ [ Some "50" ] ]) -> ()
+              | other -> failtestf "expected ignored-index inequality count, got %A" other
+              Expect.isGreaterThan touches 1800 "ignoring the indexed key restores the scan"
+
           testCase "correlated OR branches intersect broad IN and range candidates"
           <| fun _ ->
               let mutable touches = 0
