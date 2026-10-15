@@ -241,6 +241,10 @@ boundary; [the MySQL oracle and residual probe](torture/findings/2026-10-15-corr
 cover direct, pass-through, and materialized sources. [BIGINT/DOUBLE bounds](torture/findings/2026-10-15-correlated-decimal-inequality.md#bigint-and-double-bound-provenance)
 also use exact index ordering and residual filtering so a DOUBLE outer column
 and the same DOUBLE literal retain their different results above `2^53`.
+[DECIMAL/DOUBLE bounds](torture/findings/2026-10-15-correlated-decimal-inequality.md#double-bounds-against-decimal-keys)
+now use a conservative ordered candidate range on direct, pass-through, and
+materialized sources. MySQL's plan-dependent `DECIMAL(20,2)` comparisons
+near `2^53` remain a narrow row-membership divergence.
 Other approximate numeric combinations, text, and functional-expression
 bounds retain their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.

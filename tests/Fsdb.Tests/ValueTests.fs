@@ -1211,6 +1211,16 @@ let tests =
                     Expect.isLessThan (compareIntegerToDouble 1I 1.5) 0 "fractional positive bound"
                     Expect.isGreaterThan (compareIntegerToDouble -1I -1.5) 0 "fractional negative bound"
 
+                testCase "decimal index boundaries retain exact DOUBLE ordering"
+                <| fun _ ->
+                    let boundary = 9007199254740992.0
+                    Expect.isLessThan (compareDecimalToDouble 9007199254740991.99M boundary) 0 "decimal below binary boundary"
+                    Expect.equal (compareDecimalToDouble 9007199254740992.00M boundary) 0 "decimal on binary boundary"
+                    Expect.isGreaterThan (compareDecimalToDouble 9007199254740992.01M boundary) 0 "decimal above binary boundary"
+                    Expect.isLessThan (compareDecimalToDouble -1.51M -1.5) 0 "negative decimal below bound"
+                    Expect.isGreaterThan (compareDecimalToDouble -1.49M -1.5) 0 "negative decimal above bound"
+                    Expect.isGreaterThan (compareDecimalToDouble 0.0000000000000000000000000001M 0.0) 0 "small positive decimal"
+
                 testCase "numeric-string coercion beats lexical string ordering"
                 <| fun _ ->
                     // '9' < '10' lexically but 9 > 10 is false numerically.

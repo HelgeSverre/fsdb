@@ -91,6 +91,26 @@ def main():
                             actual = tuple(row[0] for row in cursor.fetchall())
                             assert actual == expected, (source, predicate, expected, actual)
                     for sql in [
+                        "CREATE TABLE precise_decimals(id INT PRIMARY KEY,k DECIMAL(20,2),KEY ix_k(k))",
+                        "CREATE TABLE precise_double_bound(k DOUBLE)",
+                        "INSERT INTO precise_decimals VALUES(1,9007199254740991.99),(2,9007199254740992.00),(3,9007199254740992.01),(4,9007199254740993.00),(5,9007199254740994.00)",
+                        "INSERT INTO precise_double_bound VALUES(9007199254740992e0)",
+                    ]:
+                        cursor.execute(sql)
+                    for predicate, indexed, scanned in [
+                        ("d.k > o.k", (5,), (5,)),
+                        ("d.k >= o.k", (2, 3, 4, 5), (1, 2, 3, 4, 5)),
+                        ("d.k < o.k", (), ()),
+                        ("d.k <= o.k", (1, 2), (1, 2, 3, 4)),
+                    ]:
+                        for hint, expected in [("", indexed), (" IGNORE INDEX (ix_k)", scanned)]:
+                            cursor.execute(
+                                "SELECT d.id FROM precise_decimals d" + hint
+                                + " JOIN precise_double_bound o ON " + predicate + " ORDER BY d.id"
+                            )
+                            actual = tuple(row[0] for row in cursor.fetchall())
+                            assert actual == expected, (predicate, hint, expected, actual)
+                    for sql in [
                         "CREATE TABLE integer_bounds(id INT PRIMARY KEY,k INT)",
                         "CREATE TABLE decimal_integer_rows(id INT PRIMARY KEY,k DECIMAL(10,2),KEY ix_k(k))",
                         "CREATE TABLE decimal_integer_bounds(id INT PRIMARY KEY,k DECIMAL(10,2))",
@@ -121,6 +141,21 @@ def main():
                     cursor.execute("INSERT INTO fractional_bounds VALUES(1,1.50),(2,NULL),(3,51.50)")
                     cursor.execute("CREATE TABLE double_bounds(id INT PRIMARY KEY,k DOUBLE)")
                     cursor.execute("INSERT INTO double_bounds VALUES(1,1.50),(2,NULL),(3,51.50)")
+                    for source in [
+                        "decimals d", "(SELECT id,k FROM decimals) d",
+                        "(SELECT id+0 AS id,k+0 AS k FROM decimals LIMIT 1000) d",
+                    ]:
+                        for predicate, expected in [
+                            ("d.k > o.k", (50, 0, 0)),
+                            ("d.k < o.k", (950, 0, 1000)),
+                            ("d.k > o.k OR d.id=500", (51, 1, 1)),
+                        ]:
+                            cursor.execute(
+                                "SELECT (SELECT COUNT(*) FROM " + source + " WHERE " + predicate
+                                + ") FROM double_bounds o ORDER BY o.id"
+                            )
+                            actual = tuple(row[0] for row in cursor.fetchall())
+                            assert actual == expected, (source, predicate, expected, actual)
                     fractional_cases = [
                         ("d.k > o.k", (50, 0, 0)),
                         ("d.k >= o.k", (50, 0, 0)),

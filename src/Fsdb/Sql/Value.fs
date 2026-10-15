@@ -1878,6 +1878,37 @@ let compareIntegerToDouble (integer: bigint) (floating: float) =
     else
         Operators.compare (float integer) floating
 
+/// Orders an exact DECIMAL key against a finite DOUBLE search boundary.
+/// This is an index cut; SQL still evaluates the original comparison.
+let compareDecimalToDouble (number: decimal) (floating: float) =
+    if not (Double.IsFinite floating) then
+        Operators.compare (float number) floating
+    else
+        let decimalBits = Decimal.GetBits number
+        let coefficient =
+            bigint (uint32 decimalBits.[0])
+            + (bigint (uint32 decimalBits.[1]) <<< 32)
+            + (bigint (uint32 decimalBits.[2]) <<< 64)
+        let scale = (decimalBits.[3] >>> 16) &&& 0xff
+        let signedCoefficient =
+            if decimalBits.[3] < 0 then -coefficient else coefficient
+
+        let doubleBits = uint64 (BitConverter.DoubleToInt64Bits floating)
+        let exponentBits = int ((doubleBits >>> 52) &&& 0x7ffUL)
+        let fraction = bigint (doubleBits &&& 0x000f_ffff_ffff_ffffUL)
+        let significand, exponent =
+            if exponentBits = 0 then fraction, -1074
+            else fraction + (1I <<< 52), exponentBits - 1075
+        let signedSignificand =
+            if (doubleBits &&& 0x8000_0000_0000_0000UL) <> 0UL then -significand
+            else significand
+        let decimalFactor = pown 10I scale
+
+        if exponent >= 0 then
+            Operators.compare signedCoefficient ((signedSignificand <<< exponent) * decimalFactor)
+        else
+            Operators.compare (signedCoefficient <<< -exponent) (signedSignificand * decimalFactor)
+
 /// Total order over values for ORDER BY: NULL sorts first, numbers compare
 /// numerically (a number vs. a string coerces the string to a number, so
 /// `'10' < '9'` numerically even though it's false as a string compare),

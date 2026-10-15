@@ -93,3 +93,23 @@ The native oracle checks both counts, the nine-row signed-limit corpus, and
 an unsigned BIGINT corpus through `UINT64_MAX`. The unsigned adjacent row
 likewise appears for a DOUBLE literal and is excluded for a DOUBLE outer
 column.
+
+## DOUBLE bounds against DECIMAL keys
+
+MySQL 8.4.11 returns `(50, 0, 0)` for `DECIMAL(10,2) > DOUBLE` outer
+bounds `(1.5, NULL, 51.5)` on the indexed 1,000-row corpus. The direct,
+pass-through, and materialized source forms also agree for `<` and a complete
+OR branch. Before the index change, the selective direct probe evaluated its
+residual 1,002 times. It now keeps direct, pass-through, and materialized
+probes below 80 calls; `IGNORE INDEX` restores more than 900.
+
+The index compares stored DECIMAL values to finite DOUBLE boundaries exactly,
+then expands the candidate cut by one neighboring DOUBLE value on the outside.
+This retains decimal values that round to the boundary in SQL comparisons.
+The original predicate still decides membership. The [native oracle](../scripts/correlated-inequality-oracle.py)
+also exposes a separate high-precision compatibility gap: for five
+`DECIMAL(20,2)` values around `2^53` and a DOUBLE-column bound of `2^53`,
+MySQL's `>=` result is `(2,3,4,5)` with the index and `(1,2,3,4,5)` with
+`IGNORE INDEX`; its `<=` result is `(1,2)` versus `(1,2,3,4)`. FSDB keeps
+its indexed and scanned results consistent on that corpus, but does not yet
+reproduce MySQL's plan-dependent row membership. This edge remains open.

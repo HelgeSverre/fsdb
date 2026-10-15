@@ -1530,6 +1530,73 @@ let tests =
               | other -> failtestf "expected ignored-index decimal count, got %A" other
               Expect.isGreaterThan touches 900 "ignoring the decimal key restores the scan"
 
+          testCase "correlated double bounds narrow indexed decimal ranges"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE decimal_double_rows(id INT PRIMARY KEY,k DECIMAL(10,2),KEY ix_k(k))"
+                    "CREATE TABLE decimal_double_bounds(k DOUBLE)"
+                    "INSERT INTO decimal_double_bounds VALUES(1.5)" ] do
+                  runDefault store sql |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,%d.25)" id (if id <= 950 then 1 else id - 949))
+              |> String.concat ","
+              |> sprintf "INSERT INTO decimal_double_rows VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              for source in
+                  [ "decimal_double_rows d"
+                    "(SELECT id,k FROM decimal_double_rows) d"
+                    "(SELECT id+0 AS id,k+0 AS k FROM decimal_double_rows LIMIT 1000) d" ] do
+                  touches <- 0
+                  let sql =
+                      "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.k > o.k) FROM decimal_double_bounds o"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "50" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's DECIMAL/DOUBLE count, got %A" other
+                  Expect.isLessThan touches 80 (sprintf "DOUBLE bound narrows %s" source)
+
+                  touches <- 0
+                  let withOr =
+                      "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND (d.k > o.k OR d.id=500)) FROM decimal_double_bounds o"
+                  match run store registry withOr with
+                  | ResultSet(_, [ [ Some "51" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's DECIMAL/DOUBLE OR count, got %A" other
+                  Expect.isLessThan touches 80 (sprintf "DOUBLE bound OR narrows %s" source)
+
+              touches <- 0
+              let ignored =
+                  "SELECT (SELECT COUNT(*) FROM decimal_double_rows d IGNORE INDEX (ix_k)"
+                  + " WHERE TOUCH(d.id)=d.id AND d.k > o.k) FROM decimal_double_bounds o"
+              match run store registry ignored with
+              | ResultSet(_, [ [ Some "50" ] ]) -> ()
+              | other -> failtestf "expected MySQL's ignored-index DECIMAL/DOUBLE count, got %A" other
+              Expect.isGreaterThan touches 900 "ignoring the decimal key restores the scan"
+
+              for sql in
+                  [ "CREATE TABLE precise_decimal_rows(id INT PRIMARY KEY,k DECIMAL(20,2),KEY ix_k(k))"
+                    "CREATE TABLE precise_double_bound(k DOUBLE)"
+                    "INSERT INTO precise_decimal_rows VALUES(1,9007199254740991.99),(2,9007199254740992.00),(3,9007199254740992.01),(4,9007199254740993.00),(5,9007199254740994.00)"
+                    "INSERT INTO precise_double_bound VALUES(9007199254740992e0)" ] do
+                  runDefault store sql |> ignore
+              for predicate in [ "d.k > o.k"; "d.k >= o.k"; "d.k < o.k"; "d.k <= o.k" ] do
+                  let query hint =
+                      "SELECT d.id FROM precise_decimal_rows d" + hint
+                      + " JOIN precise_double_bound o ON " + predicate + " ORDER BY d.id"
+                  match run store registry (query ""), run store registry (query " IGNORE INDEX (ix_k)") with
+                  | ResultSet(_, indexed), ResultSet(_, scanned) ->
+                      Expect.equal indexed scanned (sprintf "precise DECIMAL/DOUBLE index candidates preserve %s" predicate)
+                  | indexed, scanned ->
+                      failtestf "expected precise DECIMAL/DOUBLE rows for %s, got %A and %A" predicate indexed scanned
+
           testCase "correlated mixed numeric bounds use indexed ranges"
           <| fun _ ->
               let mutable touches = 0

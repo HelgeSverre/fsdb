@@ -175,6 +175,8 @@ let private compareIndexedValues (collationName: string option) (left: Value) (r
     | VUInt left, VDouble right -> Value.compareIntegerToDouble (bigint left) right
     | VDouble left, VInt right -> -(Value.compareIntegerToDouble (bigint right) left)
     | VDouble left, VUInt right -> -(Value.compareIntegerToDouble (bigint right) left)
+    | VDecimal left, VDouble right -> Value.compareDecimalToDouble left right
+    | VDouble left, VDecimal right -> -(Value.compareDecimalToDouble right left)
     | _ -> compareTotal left right
 
 let private compareIndexedKeys
@@ -5315,6 +5317,10 @@ let private exactRangeProbeValue (store: Store) (table: Table) (index: int) (val
         // exactly. SQL may compare a DOUBLE outer column approximately, so
         // the original predicate still filters the candidate superset.
         Some value
+    | TDecimal _, VDouble number when Double.IsFinite number ->
+        // Keep the exact boundary for the ordered key; SQL rechecks every
+        // candidate with its own DECIMAL/DOUBLE comparison semantics.
+        Some value
     | TDecimal _, (VInt _ | VUInt _) ->
         // A decimal range may use an integral bound when coercion preserves
         // its numeric value; rounded or out-of-range bounds retain the scan.
@@ -5903,14 +5909,26 @@ let private trySecondaryOrderSliceInTable
                     value
             | ProjectedValues -> None
 
-        let normalizeBound = function
+        let normalizeBound isLower = function
             | None -> Some None
             | Some(VNull, _) -> None
             | Some(value, inclusive) ->
+                let value =
+                    match probeValues, requireBound, table.Columns.[index].Type, value with
+                    | StoredValues, true, TDecimal _, VDouble number when Double.IsFinite number ->
+                        // SQL can round a DECIMAL to the DOUBLE boundary even
+                        // when its exact value lies just across that boundary.
+                        // Include the adjacent binary interval and let the
+                        // predicate decide strictness and equality.
+                        let outside =
+                            if isLower then Math.BitDecrement number
+                            else Math.BitIncrement number
+                        if Double.IsFinite outside then VDouble outside else value
+                    | _ -> value
                 normalizeBoundValue value
                 |> Option.map (fun value -> Some(value, inclusive))
 
-        match normalizeBound lower, normalizeBound upper with
+        match normalizeBound true lower, normalizeBound false upper with
         | Some lower, Some upper when not requireBound || lower.IsSome || upper.IsSome ->
             table.SecondaryOrder
             |> Map.tryFind group.Group.Name
