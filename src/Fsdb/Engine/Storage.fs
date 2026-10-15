@@ -3817,31 +3817,55 @@ let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parent
         |> VString
     | _ -> parentValue
 
-let private validateMergedForeignKeys (dbName: string) (db: Database) : unit =
-    let conflict () = raise (LockWaitTimeout dbName)
+/// A child row that a foreign key cannot resolve, named by its table,
+/// constraint and child key values.
+type private ForeignKeyOrphan =
+    | MissingParentTable of table: string * constraintName: string
+    | UnresolvedColumns of table: string * constraintName: string
+    | OrphanRow of table: string * constraintName: string * childKey: Value list
 
-    for KeyValue(_, table) in db do
-        for foreignKey in table.ForeignKeys do
-            match foreignKey.RefDatabase with
-            | Some _ -> ()
-            | None ->
-                match Map.tryFind (normalizeTableName foreignKey.RefTable) db with
-                | None -> conflict ()
-                | Some parent ->
-                    match foreignKey.Columns |> traverse (resolveColumn table.Columns), foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
-                    | Ok childIndices, Ok parentIndices ->
-                        let columnPairs = List.zip childIndices parentIndices
-                        for row in table.RowsArray do
-                            let childKey = childIndices |> List.map (fun index -> row.[index])
+let private foreignKeyOrphans (db: Database) : ForeignKeyOrphan seq =
+    seq {
+        for KeyValue(tableKey, table) in db do
+            for foreignKey in table.ForeignKeys do
+                match foreignKey.RefDatabase with
+                | Some _ -> ()
+                | None ->
+                    match Map.tryFind (normalizeTableName foreignKey.RefTable) db with
+                    | None -> yield MissingParentTable(tableKey, foreignKey.Name)
+                    | Some parent ->
+                        match foreignKey.Columns |> traverse (resolveColumn table.Columns), foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
+                        | Ok childIndices, Ok parentIndices ->
+                            let columnPairs = List.zip childIndices parentIndices
+                            for row in table.RowsArray do
+                                let childKey = childIndices |> List.map (fun index -> row.[index])
 
-                            if childKey |> List.forall ((<>) VNull) then
-                                let parentExists =
-                                    parent.RowsArray
-                                    |> Seq.exists (foreignKeyRowsMatch table.Columns parent.Columns columnPairs row)
+                                if childKey |> List.forall ((<>) VNull) then
+                                    let parentExists =
+                                        parent.RowsArray
+                                        |> Seq.exists (foreignKeyRowsMatch table.Columns parent.Columns columnPairs row)
 
-                                if not parentExists then
-                                    conflict ()
-                    | _ -> conflict ()
+                                    if not parentExists then
+                                        yield OrphanRow(tableKey, foreignKey.Name, childKey)
+                        | _ -> yield UnresolvedColumns(tableKey, foreignKey.Name)
+    }
+
+/// A merge conflicts when it creates an orphan neither side had. Orphans
+/// already present in the transaction's view or the committed database were
+/// written with foreign_key_checks off, which MySQL accepts, so they are not
+/// evidence of a concurrent parent change.
+let private validateMergedForeignKeys (dbName: string) (sources: Database list) (merged: Database) : unit =
+    let mergedOrphans = foreignKeyOrphans merged |> Seq.toList
+
+    if not mergedOrphans.IsEmpty then
+        let existing = HashSet<ForeignKeyOrphan>(HashIdentity.Structural)
+
+        for source in sources do
+            for orphan in foreignKeyOrphans source do
+                existing.Add orphan |> ignore
+
+        if mergedOrphans |> List.exists (existing.Contains >> not) then
+            raise (LockWaitTimeout dbName)
 
 type private StripeLockMode =
     | SharedStripe
@@ -10811,7 +10835,7 @@ let private mergeDatabase dbName (baseDb: Database) (batchDb: Database) (liveDb:
                         | _ -> raise (LockWaitTimeout dbName))
                     liveDb
 
-            validateMergedForeignKeys dbName merged
+            validateMergedForeignKeys dbName [ batchDb; liveDb ] merged
             merged
 
 let private mergeDatabaseSlotPublishing
