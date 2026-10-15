@@ -700,8 +700,12 @@ type private NullTestKind =
     | MatchesNull
     | MatchesNonNull
 
+type private CteGroup = string * string * string
+
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
+      SharedDerivedGroups: Dictionary<string, CteGroup * SelectOrUnion>
+      SharedDerivedRows: Dictionary<CteGroup, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
       LiteralMemberships: Dictionary<Expr, EqualityMembership option>
       Regexes: Dictionary<Expr, MemoizedRegex>
@@ -712,10 +716,17 @@ type private StatementMemo =
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
+type private SharedViewCteScope =
+    { Aliases: Map<string, CteGroup * SelectOrUnion>
+      mutable Pending: bool }
+
 let private statementMemo = System.Threading.AsyncLocal<StatementMemo>()
+let private sharedViewCteScope = System.Threading.AsyncLocal<SharedViewCteScope option>()
 
 let private freshStatementMemo () =
     { FromSubqueries = Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
+      SharedDerivedGroups = Dictionary<string, CteGroup * SelectOrUnion>(System.StringComparer.OrdinalIgnoreCase)
+      SharedDerivedRows = Dictionary<CteGroup, Result<ColumnDef list * Value[] list, QueryResult>>()
       ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
       LiteralMemberships = Dictionary<Expr, EqualityMembership option>(HashIdentity.Reference)
       Regexes = Dictionary<Expr, MemoizedRegex>(HashIdentity.Reference)
@@ -1033,6 +1044,7 @@ type private UpdatableView =
       InsertableTargets: Set<string * string * string>
       UpdateFrom: TableRef
       UpdateJoins: Join list
+      SharedCteAliases: Map<string, CteGroup * SelectOrUnion>
       AuthorizationSources: (TableRef * Join list) option
       AccessPath: ViewAccess list
       ComponentAccessPaths: Map<ViewTargetKey, ViewAccess list>
@@ -1346,6 +1358,23 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
             expression
 
     let rec classify seen (view: StoredView) (select: SelectStmt) =
+        let sharedCteAliases =
+            let sources = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+            select.Ctes
+            |> List.collect (fun cte ->
+                let aliases =
+                    sources
+                    |> List.choose (function
+                        | FromTable table when table.Database.IsNone && equalsIgnoreCase table.Table cte.CteName ->
+                            Some(table.Alias |> Option.defaultValue table.Table)
+                        | _ -> None)
+                if aliases.Length > 1 then
+                    let group =
+                        view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant(), cte.CteName.ToLowerInvariant()
+                    aliases |> List.map (fun alias -> alias.ToLowerInvariant(), group)
+                else
+                    [])
+            |> Map.ofList
         let select =
             select
             |> InformationSchema.inlineReadOnlyViewCtes
@@ -1621,6 +1650,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               InsertableTargets = insertableTargets
                               UpdateFrom = updateFrom
                               UpdateJoins = underlying |> Option.map _.UpdateJoins |> Option.defaultValue []
+                              SharedCteAliases = underlying |> Option.map _.SharedCteAliases |> Option.defaultValue Map.empty
                               AuthorizationSources = underlying |> Option.bind _.AuthorizationSources
                               AccessPath =
                                 { SecurityType = view.SecurityType
@@ -2159,6 +2189,16 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               InsertableTargets = insertableTargets
                               UpdateFrom = updateFrom
                               UpdateJoins = updateJoins
+                              SharedCteAliases =
+                                updateJoins
+                                |> List.choose (fun join ->
+                                    match join.Table with
+                                    | FromSubquery(body, alias) ->
+                                        sharedCteAliases
+                                        |> Map.tryFind (alias.ToLowerInvariant())
+                                        |> Option.map (fun group -> alias.ToLowerInvariant(), (group, body))
+                                    | _ -> None)
+                                |> Map.ofList
                               AuthorizationSources = Some(authorizationFrom, authorizationJoins)
                               AccessPath =
                                 [ { SecurityType = view.SecurityType
@@ -9747,9 +9787,13 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
                 match evalExpr literalCtx source with
                 | Error(code, message) -> Error(Err(code, message))
                 | Ok doc -> jsonTableRows doc path columns |> Result.map (fun rows -> definitions, rows))
-    | FromSubquery _ ->
-        let memo = (currentStatementMemo ()).FromSubqueries
-        getMemoized memo item (fun () -> resolveFromSubquery store registry dbName item None)
+    | FromSubquery(body, alias) ->
+        let statement = currentStatementMemo ()
+        match statement.SharedDerivedGroups.TryGetValue alias with
+        | true, (group, expectedBody) when expectedBody = body ->
+            getMemoized statement.SharedDerivedRows group (fun () -> resolveFromSubquery store registry dbName item None)
+        | _ ->
+            getMemoized statement.FromSubqueries item (fun () -> resolveFromSubquery store registry dbName item None)
 
 and private resolveFromItemWithOuter store registry dbName outer item =
     let rec visibleColumns (context: EvalContext) =
@@ -11691,7 +11735,9 @@ and private prepareMutationJoinSource
         resolveFromSubquery store registry dbName source scope.LateralOuter
         |> Result.map (mutationDerivedSource qualifier)
     | FromSubquery(_, qualifier) ->
-        resolveFromSubquery store registry dbName source scope.QueryOuter
+        (match scope.QueryOuter with
+         | None -> resolveFromItem store registry dbName source
+         | Some outer -> resolveFromSubquery store registry dbName source (Some outer))
         |> Result.map (mutationDerivedSource qualifier)
 
 and private applyPreparedMutationJoin
@@ -24519,6 +24565,12 @@ let rec executeAs
     : (int64 * int64) * QueryResult =
     // Query results are stable only for the statement that produced them.
     resetStatementMemo ()
+    match sharedViewCteScope.Value with
+    | Some scope when scope.Pending ->
+        scope.Pending <- false
+        for KeyValue(alias, groupAndBody) in scope.Aliases do
+            (currentStatementMemo ()).SharedDerivedGroups.[alias] <- groupAndBody
+    | _ -> ()
     Deprecation.reportStatement stmt
     emitJoinHintDiagnostics store registry dbName stmt
 
@@ -26074,7 +26126,9 @@ let rec executeAs
         match authorizedRegistry with
         | Error(code, message) -> ids, Err(code, message)
         | Ok authorized ->
-            let execute () = executeAs store authorized dbName ids foundRows currentAccount statement
+            let execute () =
+                DynamicScope.withValue sharedViewCteScope (Some { Aliases = view.SharedCteAliases; Pending = true }) (fun () ->
+                    executeAs store authorized dbName ids foundRows currentAccount statement)
 
             let checkPredicate = Map.tryFind targetKey view.CheckPredicates
 

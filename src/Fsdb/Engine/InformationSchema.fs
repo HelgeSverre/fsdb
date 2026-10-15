@@ -1668,7 +1668,7 @@ let internal flattenInnerJoinedOperands (catalog: Catalog) schema (select: Selec
 
     { select with Joins = select.Joins |> List.collect flatten }
 
-/// A single-use, independent CTE reads like a derived table during a joined
+/// A referenced, independent CTE reads like a derived table during a joined
 /// view write. Keep other CTEs in their original form until their materialized
 /// or recursive write behavior has its own contract.
 let internal inlineReadOnlyViewCtes (select: SelectStmt) =
@@ -1691,7 +1691,7 @@ let internal inlineReadOnlyViewCtes (select: SelectStmt) =
         match cte.Body with
         | PlainSelect body
             when not cte.Recursive
-                 && referenceCount cte.CteName = 1
+                 && referenceCount cte.CteName > 0
                  && body.Ctes.IsEmpty
                  && (body.From |> Option.exists independent)
                  && (body.Joins |> List.forall (_.Table >> independent)) ->

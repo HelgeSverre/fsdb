@@ -25,9 +25,16 @@ simple pass-through projection.
 FSDB previously reported `NO` and rejected all three UPDATE shapes with
 error 1288 because the writable-view resolver rejected every `WITH` clause.
 Metadata and execution now share a bounded normalization: a nonrecursive,
-single-use independent CTE is treated as a read-only derived source while
+independent CTE is treated as a read-only derived source while
 resolving the joined write. Explicit CTE column names become projection
 aliases in that derived source; CTE bodies may join physical read sources.
+When the same CTE appears twice, both aliases share one materialized rowset
+for the write. MySQL 8.4.11 marks the joined view updatable for both a
+pass-through CTE and an aggregate CTE with renamed columns. Duplicate join
+matches still update the physical target once, and `WITH CASCADED CHECK OPTION`
+rejects an invalid target value with error 1369. A repeated CTE projecting
+`RAND()` also uses one materialization: equality between the two aliases'
+random values matches, and the target row is updated.
 The original view definition continues to serve reads. Recursive or dependent
 CTEs, nested subqueries, starred explicit-column projections, and CTE bodies
 using derived sources retain the conservative non-updatable path until their
@@ -35,5 +42,5 @@ write semantics are audited.
 
 The native oracle was run against MySQL 8.4.11. The focused Expecto case
 checks three basic one-CTE shapes, a two-CTE composition, renamed columns,
-joined CTE bodies, metadata, affected rows, base state, CHECK OPTION, and
-INSERT errors.
+joined CTE bodies, repeated references (including a volatile projection),
+metadata, affected rows, base state, CHECK OPTION, and INSERT errors.

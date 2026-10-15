@@ -1902,6 +1902,57 @@ let tests =
                   [ [ Some "1"; Some "7" ]; [ Some "2"; Some "0" ] ]
                   "renamed and joined CTE bodies update the target once"
 
+          testCase "joined views update a target after two references to one read-only CTE"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE repeated_target(id INT PRIMARY KEY,n INT)") "create target"
+              expectOk (run store "CREATE TABLE repeated_source(id INT,flag INT)") "create source"
+              expectOk (run store "INSERT INTO repeated_target VALUES(1,10),(2,20)") "seed target"
+              expectOk (run store "INSERT INTO repeated_source VALUES(1,1),(1,2),(2,3)") "seed source"
+              expectOk
+                  (run store
+                      "CREATE VIEW repeated_cte_view AS WITH d AS (SELECT id,flag FROM repeated_source) SELECT a.id,a.n,d1.flag AS f1,d2.flag AS f2 FROM d d1 JOIN d d2 ON d1.id=d2.id JOIN repeated_target a ON a.id=d1.id WHERE a.n>=0 WITH CASCADED CHECK OPTION")
+                  "create repeated CTE view"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='repeated_cte_view'")
+                  [ [ Some "YES" ] ]
+                  "MySQL 8.4 marks the physical component updatable"
+              expectOk (run store "UPDATE repeated_cte_view SET n=n+1 WHERE id=1") "update repeated CTE view"
+              Expect.equal
+                  (rows store "SELECT id,n FROM repeated_target ORDER BY id")
+                  [ [ Some "1"; Some "11" ]; [ Some "2"; Some "20" ] ]
+                  "duplicate joined matches update the target once"
+              match run store "UPDATE repeated_cte_view SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+
+              expectOk
+                  (run store
+                      "CREATE VIEW repeated_aggregate_cte_view AS WITH d(k,f) AS (SELECT id,SUM(flag) FROM repeated_source GROUP BY id) SELECT a.id,a.n,d1.f AS f1,d2.f AS f2 FROM d d1 JOIN d d2 ON d1.k=d2.k JOIN repeated_target a ON a.id=d1.k WHERE a.n>=0 WITH CASCADED CHECK OPTION")
+                  "create repeated aggregate CTE view"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='repeated_aggregate_cte_view'")
+                  [ [ Some "YES" ] ]
+                  "the repeated aggregate CTE leaves the physical target writable"
+              expectOk (run store "UPDATE repeated_aggregate_cte_view SET n=n+1 WHERE id=1") "update aggregate CTE view"
+              Expect.equal
+                  (rows store "SELECT id,n FROM repeated_target ORDER BY id")
+                  [ [ Some "1"; Some "12" ]; [ Some "2"; Some "20" ] ]
+                  "each repeated source updates the target once"
+              match run store "UPDATE repeated_aggregate_cte_view SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected aggregate CTE CHECK OPTION rejection, got %A" other
+
+              expectOk
+                  (run store
+                      "CREATE VIEW repeated_random_cte_view AS WITH d AS (SELECT id,RAND() AS r FROM repeated_source) SELECT a.id,a.n,d1.r AS r1,d2.r AS r2 FROM d d1 JOIN d d2 ON d1.id=d2.id AND d1.r=d2.r JOIN repeated_target a ON a.id=d1.id")
+                  "create repeated volatile CTE view"
+              expectOk (run store "UPDATE repeated_random_cte_view SET n=n+1 WHERE id=2") "update volatile CTE view"
+              Expect.equal
+                  (rows store "SELECT id,n FROM repeated_target ORDER BY id")
+                  [ [ Some "1"; Some "12" ]; [ Some "2"; Some "21" ] ]
+                  "reused CTE values come from one materialization"
+
           testCase "a direct view predicate limits UPDATE and DELETE but not INSERT"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -724,10 +724,12 @@ columns and allow an outer joined view to update its physical component
 [Multiple leading read-only derived sources](torture/findings/2026-10-15-multiple-derived-join-view.md)
 now also precede a writable physical target in audited inner-join views;
 the moved target predicate is applied after all its source aliases are bound.
-[Single-use independent CTE sources](torture/findings/2026-10-15-cte-joined-view-writes.md)
+[Independent CTE sources](torture/findings/2026-10-15-cte-joined-view-writes.md)
 now follow that path for audited aggregate, pass-through, and limited bodies,
 including two leading CTEs, explicit CTE column names, and a CTE body joining
-physical read sources, while retaining CHECK OPTION and INSERT rules.
+physical read sources. Repeated references to one CTE share a statement-local
+rowset, including volatile projected values, while duplicate join matches
+update the physical target once and retain CHECK OPTION and INSERT rules.
 [Audited `STRAIGHT_JOIN` edges](torture/findings/2026-10-15-multiple-derived-straight-view.md)
 between those derived sources or at the physical target retain the same
 writable metadata and target-predicate filtering.
