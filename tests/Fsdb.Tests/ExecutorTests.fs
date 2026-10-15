@@ -12989,6 +12989,7 @@ let tests =
                           "o.x=LOWER(d.k)", [ 2; 0; 0; 0 ]
                           "LOWER(d.k)=o.x COLLATE utf8mb4_0900_ai_ci", [ 2; 0; 0; 2 ]
                           "UPPER(d.k)=UPPER(o.x)", [ 2; 0; 0; 2 ]
+                          "CONCAT(LOWER(d.k),'!')=CONCAT(o.x,'!')", [ 2; 0; 0; 0 ]
                           "LOWER(d.k)=o.x OR d.id=12", [ 3; 1; 1; 1 ] ] do
                         calls <- 0
                         let sql =
