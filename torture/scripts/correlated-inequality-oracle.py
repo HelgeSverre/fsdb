@@ -117,7 +117,27 @@ def main():
                             )
                             actual = tuple(row[0] for row in cursor.fetchall())
                             assert actual == expected, (source, bounds, predicate, expected, actual)
-                print(f"MySQL {version}: integer, DECIMAL, and mixed exact-numeric inequality counts 50/0/999 and OR counts 51/1/999")
+                    cursor.execute("CREATE TABLE fractional_bounds(id INT PRIMARY KEY,k DECIMAL(10,2))")
+                    cursor.execute("INSERT INTO fractional_bounds VALUES(1,1.50),(2,NULL),(3,51.50)")
+                    fractional_cases = [
+                        ("d.k > o.k", (50, 0, 0)),
+                        ("d.k >= o.k", (50, 0, 0)),
+                        ("d.k < o.k", (950, 0, 1000)),
+                        ("d.k <= o.k", (950, 0, 1000)),
+                        ("d.k > o.k OR d.id=500", (51, 1, 1)),
+                    ]
+                    for source in [
+                        "nums d", "(SELECT id,k FROM nums) d",
+                        "(SELECT id+0 AS id,k+0 AS k FROM nums LIMIT 1000) d",
+                    ]:
+                        for predicate, expected in fractional_cases:
+                            cursor.execute(
+                                "SELECT (SELECT COUNT(*) FROM " + source + " WHERE " + predicate
+                                + ") FROM fractional_bounds o ORDER BY o.id"
+                            )
+                            actual = tuple(row[0] for row in cursor.fetchall())
+                            assert actual == expected, (source, predicate, expected, actual)
+                print(f"MySQL {version}: integer, DECIMAL, mixed exact-numeric, and fractional-bound range cases passed")
             finally:
                 if connection:
                     connection.close()

@@ -231,9 +231,11 @@ NULL-bound results.
 likewise union strict ranges for a stable integer bound, including complete OR
 branches. [Exact DECIMAL inequalities](torture/findings/2026-10-15-correlated-decimal-inequality.md)
 now use the same union for a stable decimal bound, including exact
-integer/decimal pairs in either key direction. Fractional decimal bounds
-against integer keys, approximate numeric, text, and functional-expression
-domains remain on their prior paths.
+integer/decimal pairs in either key direction. [Fractional DECIMAL bounds
+against integer keys](torture/findings/2026-10-15-correlated-decimal-inequality.md#fractional-bounds-against-integer-keys)
+now use exact ordered range probes when selective, including complete OR
+branches. Approximate numeric, text, and functional-expression domains remain
+on their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,

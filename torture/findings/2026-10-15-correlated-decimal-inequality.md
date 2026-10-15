@@ -30,6 +30,22 @@ normalizes an integer bound to the DECIMAL key only when coercion preserves
 the bound's numeric value; rounded or out-of-range conversions fall back to
 the prior scan path. The focused regression keeps residual calls below 80
 for both directions, including OR and NULL bounds, while `IGNORE INDEX`
-restores over 900 calls. Fractional DECIMAL bounds against integer keys,
-approximate numeric values, text, and functional index expressions remain
-on their prior scan paths.
+restores over 900 calls. Approximate numeric values, text, and functional
+index expressions need separate range evidence.
+
+## Fractional bounds against integer keys
+
+MySQL 8.4.11 returns `(50, 0, 0)` for `d.k > o.k` with outer bounds
+`(1.50, NULL, 51.50)` against the indexed integer corpus. The `<`, `<=`,
+`>=`, and selective `> OR d.id=500` results also agree with the
+[native oracle](../scripts/correlated-inequality-oracle.py) for direct,
+pass-through, and stable materialized sources.
+
+FSDB already returned those rows, but the selective `>` query evaluated
+its residual 1,002 times. An ordered integer index can compare a DECIMAL
+boundary exactly, including its fractional part, without converting it to
+an integer stored key. Range lookup now retains that boundary for integer
+columns. The focused regression keeps residual calls below 80 for direct,
+pass-through, and materialized sources, including a complete OR branch.
+The original predicate remains the final filter. Approximate numeric,
+text, and functional index expressions remain outside this audited rule.

@@ -1530,7 +1530,7 @@ let tests =
               | other -> failtestf "expected ignored-index decimal count, got %A" other
               Expect.isGreaterThan touches 900 "ignoring the decimal key restores the scan"
 
-          testCase "correlated mixed exact-numeric inequality uses indexed ranges"
+          testCase "correlated mixed numeric bounds use indexed ranges"
           <| fun _ ->
               let mutable touches = 0
               let registry =
@@ -1541,14 +1541,18 @@ let tests =
               for sql in
                   [ "CREATE TABLE mixed_integer_bounds(id INT PRIMARY KEY,k INT)"
                     "CREATE TABLE mixed_decimal_bounds(id INT PRIMARY KEY,k DECIMAL(10,2))"
+                    "CREATE TABLE mixed_fractional_bounds(id INT PRIMARY KEY,k DECIMAL(10,2))"
                     "CREATE TABLE mixed_integer_selective(k INT)"
                     "CREATE TABLE mixed_decimal_selective(k DECIMAL(10,2))"
+                    "CREATE TABLE mixed_fractional_selective(k DECIMAL(10,2))"
                     "CREATE TABLE mixed_integer_rows(id INT PRIMARY KEY,k INT,KEY ix_k(k))"
                     "CREATE TABLE mixed_decimal_rows(id INT PRIMARY KEY,k DECIMAL(10,2),KEY ix_k(k))"
                     "INSERT INTO mixed_integer_bounds VALUES(1,1),(2,NULL),(3,51)"
                     "INSERT INTO mixed_decimal_bounds VALUES(1,1.00),(2,NULL),(3,51.00)"
+                    "INSERT INTO mixed_fractional_bounds VALUES(1,1.50),(2,NULL),(3,51.50)"
                     "INSERT INTO mixed_integer_selective VALUES(1)"
-                    "INSERT INTO mixed_decimal_selective VALUES(1.00)" ] do
+                    "INSERT INTO mixed_decimal_selective VALUES(1.00)"
+                    "INSERT INTO mixed_fractional_selective VALUES(1.50)" ] do
                   runDefault store sql |> ignore
               let values =
                   [ 1..1000 ]
@@ -1616,6 +1620,53 @@ let tests =
                   | ResultSet(_, [ [ Some "50" ] ]) -> ()
                   | other -> failtestf "expected ignored-index mixed count, got %A" other
                   Expect.isGreaterThan touches 900 "ignoring the mixed numeric key restores the scan"
+
+              for source in
+                  [ "mixed_integer_rows d"
+                    "(SELECT id,k FROM mixed_integer_rows) d"
+                    "(SELECT id+0 AS id,k+0 AS k FROM mixed_integer_rows LIMIT 1000) d" ] do
+                  touches <- 0
+                  let sql =
+                      "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND d.k > o.k)"
+                      + " FROM mixed_fractional_selective o"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "50" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's selective fractional-bound count, got %A" other
+                  Expect.isLessThan touches 80 (sprintf "fractional decimal bound narrows %s" source)
+
+                  touches <- 0
+                  let withOr =
+                      "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE TOUCH(d.id)=d.id AND (d.k > o.k OR d.id=500))"
+                      + " FROM mixed_fractional_selective o"
+                  match run store registry withOr with
+                  | ResultSet(_, [ [ Some "51" ] ]) -> ()
+                  | other -> failtestf "expected MySQL's fractional-bound OR count, got %A" other
+                  Expect.isLessThan touches 80 (sprintf "fractional OR branch narrows %s" source)
+
+              touches <- 0
+              let ignoredFractional =
+                  "SELECT (SELECT COUNT(*) FROM mixed_integer_rows d IGNORE INDEX (ix_k)"
+                  + " WHERE TOUCH(d.id)=d.id AND d.k > o.k)"
+                  + " FROM mixed_fractional_selective o"
+              match run store registry ignoredFractional with
+              | ResultSet(_, [ [ Some "50" ] ]) -> ()
+              | other -> failtestf "expected ignored-index fractional count, got %A" other
+              Expect.isGreaterThan touches 900 "ignoring the integer key restores the fractional-bound scan"
+
+              for predicate, expected in
+                  [ "d.k > o.k", [ [ Some "50" ]; [ Some "0" ]; [ Some "0" ] ]
+                    "d.k >= o.k", [ [ Some "50" ]; [ Some "0" ]; [ Some "0" ] ]
+                    "d.k < o.k", [ [ Some "950" ]; [ Some "0" ]; [ Some "1000" ] ]
+                    "d.k <= o.k", [ [ Some "950" ]; [ Some "0" ]; [ Some "1000" ] ]
+                    "d.k > o.k OR d.id=500", [ [ Some "51" ]; [ Some "1" ]; [ Some "1" ] ] ] do
+                  let sql =
+                      "SELECT (SELECT COUNT(*) FROM mixed_integer_rows d WHERE " + predicate
+                      + ") FROM mixed_fractional_bounds o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, rows) when rows = expected -> ()
+                  | other -> failtestf "expected MySQL's fractional-bound counts for %s, got %A" predicate other
 
           testCase "correlated OR branches intersect broad IN and range candidates"
           <| fun _ ->
