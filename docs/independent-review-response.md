@@ -107,6 +107,39 @@ data, bind safely, retain stopped-directory backups, and verify restores before
 upgrades. The review's production-readiness concern is therefore still valid
 even though several cited code-level hazards have since been addressed.
 
+## October 15 current-head recheck
+
+The independent reviewer inspected `ffb9e71d`; the current main commit is
+`50847710`. The intervening fixes make its two P0 recommendations stale:
+`.github/workflows/ci.yml` now runs on pushes and pull requests, and commit
+observer exceptions are isolated from the write result. The subscription is
+bounded, but `onCommit` handlers still run synchronously inside the commit
+lock. A slow handler can delay acknowledgement, and a handler that writes back
+to the same store can deadlock. The documented queued subscription is the
+safer application-facing choice; it is not a durable change stream.
+
+The [CI run for `38574aa6`](https://github.com/HelgeSverre/fsdb/actions/runs/38695765967)
+failed in the instrumented coverage suite when the explicit second insert in
+`READ COMMITTED preserves an auto-increment identity across a refresh` hit a
+50-second lock wait. The same test passed on current HEAD locally, and the
+[next main CI run](https://github.com/HelgeSverre/fsdb/actions/runs/38696257661)
+passed all jobs. This is evidence of an intermittent concurrency failure, not
+evidence that the coverage threshold was missed: the failed run measured
+77.62% branch coverage against a 65% gate. The transaction lock implementation
+uses 4,096 key stripes, so unrelated keys can contend if their hashes collide;
+the failed log alone does not establish that collision as the cause. Keep this
+failure visible and investigate it with a deterministic reproduction before
+changing lock semantics or weakening the regression.
+
+The remaining review priorities are architectural and operational. The latest
+[durability-matched checkpoint](../benchmarks/results/2026-10-15-durable-keyless-write-check.md)
+still measures materially lower throughput than MySQL under eight writers.
+The executor remains large despite the extracted mutation-target and explain
+rendering boundaries. The stopped-directory backup procedure and one legacy
+snapshot upgrade regression do not establish online backup or general
+cross-version compatibility. None of those should be marked resolved from
+the review's original numerical scores.
+
 ## Disposition before further gap work
 
 The review's immediate regression and embedded-notification hazards have
