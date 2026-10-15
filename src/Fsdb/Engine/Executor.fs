@@ -14886,9 +14886,12 @@ and private tryProjectedPhysicalNullCandidates store (projection: PhysicalProjec
         None
     else
         let allowed = indexHintsFor IndexJoin projection.PhysicalTableRef |> indexAllowedBy
+        let probeEqualities =
+            match outer with
+            | Some _ -> correlatedProbeEqualities probeSource whereExpr outer |> Option.defaultValue []
+            | None -> whereExpr |> optionalConjuncts |> List.choose (tryLiteralEqualityPredicate probeSource)
         let boundEqualities =
-            correlatedProbeEqualities probeSource whereExpr outer
-            |> Option.defaultValue []
+            probeEqualities
             |> List.choose (fun (name, value) ->
                 tryPhysicalProjectionColumn projection name
                 |> Option.map (fun column -> column.Name, value))

@@ -734,7 +734,7 @@ let tests =
                   | other -> failtestf "expected MySQL's NULL-or-equality counts, got %A" other
                   Expect.isLessThan touches 50 "both OR branches narrow before residual evaluation"
 
-          testCase "physical correlated IS NULL probes use secondary candidates"
+          testCase "physical IS NULL probes use secondary candidates"
           <| fun _ ->
               let mutable touches = 0
               let registry =
@@ -839,6 +839,25 @@ let tests =
                       Expect.isLessThan touches 30 "the bound prefix narrows to its NULL slice"
                   else
                       Expect.isGreaterThan touches 1000 "ignoring the composite key restores the scan"
+
+              for hint in [ "IGNORE INDEX (ix_ka)"; "IGNORE INDEX (uq_k)"; "IGNORE INDEX (uq_k,ix_ka)" ] do
+                  touches <- 0
+                  let sql =
+                      "SELECT COUNT(*) FROM leading_null_inner d " + hint
+                      + " WHERE TOUCH(d.id)=d.id AND d.k IS NULL"
+                  match run store registry sql with
+                  | ResultSet(_, [ [ Some "10" ] ]) -> ()
+                  | other -> failtestf "expected ten direct NULL rows, got %A" other
+                  if hint = "IGNORE INDEX (uq_k,ix_ka)" then
+                      Expect.isGreaterThan touches 900 "ignoring both keys restores the direct scan"
+                  else
+                      Expect.isLessThan touches 20 "a direct NULL read uses its remaining key"
+
+              touches <- 0
+              match run store registry "SELECT COUNT(*) FROM later_null_inner d WHERE TOUCH(d.id)=d.id AND d.a=1 AND d.k IS NULL" with
+              | ResultSet(_, [ [ Some "5" ] ]) -> ()
+              | other -> failtestf "expected five direct composite-prefix NULL rows, got %A" other
+              Expect.isLessThan touches 10 "direct reads use the bound composite NULL slice"
 
           testCase "materialized correlated IN probes avoid unrelated rows"
           <| fun _ ->
