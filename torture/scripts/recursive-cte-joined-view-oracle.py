@@ -84,6 +84,10 @@ def main():
                         ("recursive_lateral_after_seq",
                          f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
                          "(SELECT s.k AS lookup_key) l ON TRUE JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_nested_after_seq",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(SELECT s.k AS lookup_key FROM (SELECT 1 AS marker) d) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
                         ("recursive_json_after_seq",
                          f"{recursive} SELECT t.id,t.n FROM seq s JOIN "
                          "JSON_TABLE(JSON_ARRAY(s.k),'$[*]' COLUMNS(k INT PATH '$')) j ON j.k=s.k "

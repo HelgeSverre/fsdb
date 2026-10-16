@@ -1849,20 +1849,39 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             Ctes = [] }
 
     // Wrapping a referenced recursive CTE moves its binding into the derived
-    // source. Dependent table functions and FROM-less lateral projections can
-    // still read that source's columns, provided they do not need the CTE name
-    // in their own nested query scope.
+    // source. A lateral companion may still read the wrapper's exposed columns,
+    // but must not name the moved CTE in its own nested query scope.
+    let rec needsCteScope = function
+        | FromTable table ->
+            table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) cteNames
+        | FromJoinGroup(first, joins) ->
+            needsCteScope first || (joins |> List.exists (_.Table >> needsCteScope))
+        | FromSubquery(body, _) | FromLateral(body, _) -> queryNeedsCteScope body
+        | FromJsonTable(source, _, _, _) -> not (Expression.collectSubqueries source).IsEmpty
+
+    and queryNeedsCteScope = function
+        | PlainSelect body -> selectNeedsCteScope body
+        | UnionSelect(first, rest, orderBy, limit, offset) ->
+            let hasSubquery expression = not (Expression.collectSubqueries expression).IsEmpty
+            selectNeedsCteScope first
+            || (rest |> List.exists (snd >> selectNeedsCteScope))
+            || (orderBy |> List.exists (fst >> hasSubquery))
+            || (limit |> Option.exists hasSubquery)
+            || (offset |> Option.exists hasSubquery)
+
+    and selectNeedsCteScope (body: SelectStmt) =
+        not body.Ctes.IsEmpty
+        || (body.From |> Option.exists needsCteScope)
+        || (body.Joins |> List.exists (_.Table >> needsCteScope))
+        || Expression.statementExists
+            (function
+             | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _ -> true
+             | _ -> false)
+            (Select body)
+
     let recursiveCompanionSource = function
         | FromTable _ -> true
-        | FromLateral(PlainSelect body, _) ->
-            body.From.IsNone
-            && body.Joins.IsEmpty
-            && body.Ctes.IsEmpty
-            && not (Expression.statementExists
-                (function
-                 | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _ -> true
-                 | _ -> false)
-                (Select body))
+        | FromLateral(body, _) -> not (queryNeedsCteScope body)
         | FromJsonTable(source, _, _, _) -> Expression.collectSubqueries source |> List.isEmpty
         | _ -> false
 
