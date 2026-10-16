@@ -1818,10 +1818,10 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             |> Option.map (fun names -> cte.CteName.ToLowerInvariant(), names))
 
     let wrapRecursiveSources namesByCte =
-        let rec expand rewriteExpressions = function
+        let rec expand activeNames rewriteExpressions = function
             | FromTable table as source
-                when table.Database.IsNone && Map.containsKey (table.Table.ToLowerInvariant()) namesByCte ->
-                let names = namesByCte.[table.Table.ToLowerInvariant()]
+                when table.Database.IsNone && Map.containsKey (table.Table.ToLowerInvariant()) activeNames ->
+                let names = activeNames.[table.Table.ToLowerInvariant()]
                 let wrapper =
                     { Projections = names |> List.map (fun column -> Projection.create (Col column) (Some column))
                       IntoVariables = []
@@ -1843,49 +1843,52 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                       Locking = [] }
                 FromSubquery(PlainSelect wrapper, table.Alias |> Option.defaultValue table.Table)
             | FromSubquery(PlainSelect body, alias) when body.Ctes.IsEmpty ->
-                FromSubquery(PlainSelect(expandSelect rewriteExpressions body), alias)
+                FromSubquery(PlainSelect(expandSelect activeNames rewriteExpressions body), alias)
             | FromLateral(PlainSelect body, alias) ->
-                FromLateral(PlainSelect(expandSelect rewriteExpressions body), alias)
+                FromLateral(PlainSelect(expandSelect activeNames rewriteExpressions body), alias)
             | FromJoinGroup(first, joins) ->
                 FromJoinGroup(
-                    expand rewriteExpressions first,
-                    joins |> List.map (fun join -> { join with Table = expand rewriteExpressions join.Table })
+                    expand activeNames rewriteExpressions first,
+                    joins |> List.map (fun join -> { join with Table = expand activeNames rewriteExpressions join.Table })
                 )
             | source -> source
 
-        and replaceExpression = function
-            | Subquery body -> Some(Subquery(expandSelect true body))
-            | Exists body -> Some(Exists(expandSelect true body))
+        and replaceExpression activeNames = function
+            | Subquery body -> Some(Subquery(expandSelect activeNames true body))
+            | Exists body -> Some(Exists(expandSelect activeNames true body))
             | InSubquery(value, body) ->
-                Some(InSubquery(expandExpression value, expandSelect true body))
+                Some(InSubquery(expandExpression activeNames value, expandSelect activeNames true body))
             | QuantifiedComparison(value, operator, quantifier, body) ->
-                Some(QuantifiedComparison(expandExpression value, operator, quantifier, expandSelect true body))
+                Some(QuantifiedComparison(expandExpression activeNames value, operator, quantifier, expandSelect activeNames true body))
             | _ -> None
 
-        and expandExpression expression = Expression.rewriteTree replaceExpression expression
+        and expandExpression activeNames expression = Expression.rewriteTree (replaceExpression activeNames) expression
 
-        and expandSelect rewriteExpressions body =
+        and expandSelect activeNames rewriteExpressions body =
+            let localNames =
+                body.Ctes
+                |> List.fold (fun names cte -> Map.remove (cte.CteName.ToLowerInvariant()) names) activeNames
             let body =
-                if rewriteExpressions then Expression.rewriteSelectExpressions replaceExpression body
+                if rewriteExpressions then Expression.rewriteSelectExpressions (replaceExpression localNames) body
                 else body
             { body with
-                From = body.From |> Option.map (expand false)
-                Joins = body.Joins |> List.map (fun join -> { join with Table = expand false join.Table })
+                From = body.From |> Option.map (expand localNames false)
+                Joins = body.Joins |> List.map (fun join -> { join with Table = expand localNames false join.Table })
                 Ctes =
                     body.Ctes
                     |> List.map (fun cte ->
                         match cte.Body with
-                        | PlainSelect nested -> { cte with Body = PlainSelect(expandSelect false nested) }
+                        | PlainSelect nested -> { cte with Body = PlainSelect(expandSelect localNames false nested) }
                         | _ -> cte) }
 
         { select with
-            From = select.From |> Option.map (expand true)
-            Joins = select.Joins |> List.map (fun join -> { join with Table = expand true join.Table })
+            From = select.From |> Option.map (expand namesByCte true)
+            Joins = select.Joins |> List.map (fun join -> { join with Table = expand namesByCte true join.Table })
             Ctes = [] }
 
     // Wrapping a recursive CTE moves its binding into each derived source.
     // Companion queries may read the exposed columns or re-read an inferable
-    // recursive binding, including through non-shadowing local CTEs.
+    // recursive binding, including through local CTEs with scoped names.
     let rec needsCteScope = function
         | FromTable table ->
             table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) cteNames
@@ -1934,7 +1937,10 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         (body.Ctes
          |> List.forall (fun cte ->
              not cte.Recursive
-             && not (Set.contains (cte.CteName.ToLowerInvariant()) cteNames)
+             && (not (Set.contains (cte.CteName.ToLowerInvariant()) cteNames)
+                 || (match cte.Body with
+                     | PlainSelect nested -> nested.From.IsNone && nested.Joins.IsEmpty && nested.Ctes.IsEmpty
+                     | _ -> false))
              && (match cte.Body with
                  | PlainSelect nested -> canWrapNestedSelect nested
                  | _ -> false)))
