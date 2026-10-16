@@ -74,6 +74,20 @@ def main():
                         ("recursive_nested_star",
                          f"{recursive}, copied AS (SELECT k FROM seq), again AS (SELECT * FROM copied) "
                          "SELECT t.id,t.n FROM again a JOIN target t ON t.id=a.k"),
+                        ("recursive_nested_derived",
+                         f"{recursive}, copied AS (SELECT d.k FROM (SELECT k FROM seq) d) "
+                         "SELECT t.id,t.n FROM copied c JOIN target t ON t.id=c.k"),
+                        ("recursive_nested_join",
+                         f"{recursive}, copied AS (SELECT s.k FROM seq s JOIN "
+                         "(SELECT 2 AS anchor) d ON d.anchor=s.k) "
+                         "SELECT t.id,t.n FROM copied c JOIN target t ON t.id=c.k"),
+                        ("recursive_lateral_after_seq",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(SELECT s.k AS lookup_key) l ON TRUE JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_json_after_seq",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN "
+                         "JSON_TABLE(JSON_ARRAY(s.k),'$[*]' COLUMNS(k INT PATH '$')) j ON j.k=s.k "
+                         "JOIN target t ON t.id=j.k"),
                         ("recursive_shared_volatile",
                          "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
                          "SELECT k+1,r FROM seq WHERE k<3) "
