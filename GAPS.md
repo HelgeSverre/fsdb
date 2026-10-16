@@ -1741,11 +1741,12 @@ implementation effort:
    Geographic [`ST_IsValid` for points, linework, and simple single-ring polygons](torture/findings/2026-10-16-geographic-validity.md)
    now accepts the audited geographic shapes, including collections of them;
    polygons with holes and multipolygons still need geodesic validity rules.
-   An [antipodal containment counterexample](torture/findings/2026-10-16-geographic-global-containment.md)
-   is fixed when the sampled ring fits inside an open hemisphere; the same
-   finding still shows `ST_Within` and `ST_Intersects` disagreeing with MySQL
-   for large global geographic rings, so broader validity must not rely on
-   the current winding predicate alone.
+   [Global and antipodal containment counterexamples](torture/findings/2026-10-16-geographic-global-containment.md)
+   now use Boost-shaped geographic winding and ring orientation; 3,600 random
+   global point probes and 1,200 random, vertex, and antipodal probes matched
+   MySQL 8.4.11. Two global `ST_IsValid` disagreements in the larger corpus
+   remain open, so broader geographic polygon validity still needs separate
+   validation.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)
    are covered for audited cases. [Point-to-polygon distance](torture/findings/2026-10-11-geographic-point-polygon-distance.md)

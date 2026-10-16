@@ -961,6 +961,37 @@ let tests =
                         Expect.equal (call "ST_Within" [ antipode; polygon ]) (VInt 0L) "antipodal exterior"
                         Expect.equal (call "ST_Intersects" [ antipode; polygon ]) (VInt 0L) "antipodal disjointness"
 
+                testCase "global geographic rings use MySQL geodesic winding"
+                <| fun _ ->
+                    let geography text = call "ST_GeomFromText" [ VString text; VInt 4326L ]
+                    let first =
+                        geography
+                            "POLYGON((55.095784 43.215101,-1.549061 -106.976186,25.691447 176.152400,-77.605773 8.784222,55.095784 43.215101))"
+                    let second =
+                        geography
+                            "POLYGON((-49.39793223 39.25611065,18.32056422 148.75405757,-69.02455409 -117.92274540,55.83993074 -88.64082883,-49.39793223 39.25611065))"
+                    let firstReversed =
+                        geography
+                            "POLYGON((55.095784 43.215101,-77.605773 8.784222,25.691447 176.152400,-1.549061 -106.976186,55.095784 43.215101))"
+                    let triangle =
+                        geography
+                            "POLYGON((21.909158 172.938139,28.962876 174.095155,26.699045 174.007825,21.909158 172.938139))"
+                    for polygon, pointText, expected in
+                        [ first, "POINT(0 0)", 1L
+                          first, "POINT(-20 0)", 1L
+                          first, "POINT(80 0)", 0L
+                          first, "POINT(21.909158 172.938139)", 0L
+                          second, "POINT(47.61723855 -61.46703001)", 1L ] do
+                        let point = geography pointText
+                        Expect.equal
+                            (call "ST_Within" [ point; polygon ])
+                            (VInt expected)
+                            (sprintf "MySQL global containment for %s" pointText)
+                    for polygon in [ first; firstReversed ] do
+                        Expect.equal (call "ST_Within" [ geography "POINT(0 0)"; polygon ]) (VInt 1L) "ring direction"
+                        Expect.equal (call "ST_Intersects" [ polygon; triangle ]) (VInt 0L) "separate global components"
+                        Expect.equal (call "ST_Within" [ triangle; polygon ]) (VInt 0L) "triangle outside global polygon"
+
                 testCase "envelopes and MBR predicates preserve planar bounds"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]

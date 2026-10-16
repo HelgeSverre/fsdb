@@ -95,6 +95,36 @@ global corpus and local edge/antimeridian/polar regressions. The probe alone
 does not establish parity for all polygons, and no production containment
 change was made in this investigation.
 
+## Geographic winding follow-up
+
+The F# containment path now follows Boost's geographic winding crossings and
+ring orientation. For WGS 84, coordinate conversion uses the exact angular
+unit declared by MySQL's SRID 4326 definition (`0.017453292519943278` radians
+per degree); substituting `Math.PI / 180` produced near-antipodal differences.
+An independent seed-9173 differential script in
+`torture/scripts/geographic-winding-oracle.py` compared MySQL 8.4.11 with fsdb.
+It found no containment differences in 3,600 random point queries over 300
+global quadrilaterals. A separate 60-ring run with random, vertex, and
+antipodal probes found no containment differences in 1,200 queries. The
+recorded global polygon pair and reversed-ring regressions also pass.
+
+A near-hole-edge regression showed that the hole exclusion must count a
+winding boundary touch as covered by the hole, even though ordinary
+`ST_Within(point, simple_polygon)` is strict about that boundary. The
+existing near-hole-edge topology test passes after distinguishing those uses.
+
+The 300-ring run still found two `ST_IsValid` disagreements, independent of
+point containment. In case 76 MySQL returns invalid and fsdb valid; in case
+92 MySQL returns valid and fsdb invalid:
+
+```text
+76 POLYGON((13.81883866 96.65582728,-16.27065705 -81.50116582,-5.47457294 82.28363800,57.65336721 169.58817054,13.81883866 96.65582728))
+92 POLYGON((76.07820371 172.37962882,-17.23251258 -93.57657163,-1.62166186 119.40335360,-27.07466083 -119.20350262,76.07820371 172.37962882))
+```
+
+These remain open geographic validity findings; the 1,000-case validation
+sample described in the adjacent validity report did not include them.
+
 Source trail: MySQL [`wkb.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/wkb.cc)
 and [`ring_flip_visitor.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/ring_flip_visitor.cc)
 perform correction; [`within.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/within.cc)
