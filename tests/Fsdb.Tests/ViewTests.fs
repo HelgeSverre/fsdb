@@ -2036,6 +2036,52 @@ let tests =
                   [ [ Some "1"; Some "7" ]; [ Some "2"; Some "0" ] ]
                   "renamed and joined CTE bodies update the target once"
 
+          testCase "recursive CTE join views update only their physical target"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE recursive_target(id INT PRIMARY KEY,n INT)") "create target"
+              expectOk (run store "INSERT INTO recursive_target VALUES(1,10),(2,20),(3,30),(4,40)") "seed target"
+
+              for name, cte, source in
+                  [ "first", "seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3)",
+                    "seq JOIN recursive_target t ON t.id=seq.k"
+                    "last", "seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3)",
+                    "recursive_target t JOIN seq ON t.id=seq.k"
+                    "group", "seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3)",
+                    "(seq JOIN recursive_target t ON t.id=seq.k)"
+                    "inferred", "seq AS (SELECT 1 AS k UNION ALL SELECT k+1 FROM seq WHERE k<3)",
+                    "seq JOIN recursive_target t ON t.id=seq.k" ] do
+                  let view = "recursive_" + name
+                  expectOk
+                      (run store ($"CREATE VIEW {view} AS WITH RECURSIVE {cte} SELECT t.id,t.n FROM {source}"))
+                      ("create " + view)
+                  Expect.equal
+                      (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{view}'"))
+                      [ [ Some "YES" ] ]
+                      (view + " metadata")
+                  expectOk (run store ($"UPDATE {view} SET n=n+1 WHERE id=2")) ("update " + view)
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM recursive_target ORDER BY id")
+                  [ [ Some "1"; Some "10" ]; [ Some "2"; Some "24" ]; [ Some "3"; Some "30" ]; [ Some "4"; Some "40" ] ]
+                  "each recursive read source leaves one physical row update"
+
+              expectOk
+                  (run store
+                      "CREATE VIEW recursive_checked AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) SELECT t.id,t.n FROM seq JOIN recursive_target t ON t.id=seq.k WHERE t.n>=0 WITH CASCADED CHECK OPTION")
+                  "create checked recursive view"
+              match run store "UPDATE recursive_checked SET n=-1 WHERE id=2" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected recursive view CHECK OPTION rejection, got %A" other
+
+              expectOk
+                  (run store
+                      "CREATE VIEW recursive_only AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) SELECT k FROM seq")
+                  "create recursive-only view"
+              match run store "UPDATE recursive_only SET k=4" with
+              | Err(1288, _) -> ()
+              | other -> failtestf "expected recursive-only UPDATE rejection, got %A" other
+
           testCase "joined views update a target after read-only CTE derived sources"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
