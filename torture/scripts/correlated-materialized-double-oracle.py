@@ -80,13 +80,31 @@ def main():
                         cursor.execute(query)
                         actual = tuple(count for _, count in cursor.fetchall())
                         assert actual == expected, (predicate, actual, expected)
+                    range_cases = [
+                        ("d.k+0e0<o.x", (513, 1001, 0, 488, 500, 1001)),
+                        ("o.x>d.k+0e0", (513, 1001, 0, 488, 500, 1001)),
+                        ("d.k+0e0<=o.x", (514, 1001, 0, 489, 501, 1002)),
+                        ("d.k+0e0>o.d", (489, 2, 0, 514, 502, 1)),
+                        ("d.k+0e0>=o.i", (490, 2, 0, 514, 503, 2)),
+                        ("d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0", (3, 0, 0, 3, 2, 1)),
+                        ("d.k+0e0<o.s", (513, 1001, 0, 488, 500, 1001)),
+                        ("d.k+0e0<o.x OR d.id=999", (514, 1001, 1, 489, 501, 1001)),
+                    ]
+                    for predicate, expected in range_cases:
+                        cursor.execute(
+                            "SELECT o.id,(SELECT COUNT(*) FROM "
+                            "(SELECT DISTINCT id,k FROM inner_rows) d "
+                            f"WHERE {predicate}) FROM outer_bounds o ORDER BY o.id"
+                        )
+                        actual = tuple(count for _, count in cursor.fetchall())
+                        assert actual == expected, (predicate, actual, expected)
                     cursor.execute(
                         "SELECT x=i,x+0e0=i,9007199254740992e0=i,"
                         "9007199254740992e0+0e0=i "
                         "FROM outer_bounds WHERE id=6"
                     )
                     assert cursor.fetchone() == (1, 1, 0, 0)
-                    print(f"MySQL {version}: {len(cases)} DOUBLE comparison cases match")
+                    print(f"MySQL {version}: {len(cases)} DOUBLE equalities and {len(range_cases)} ranges match")
             finally:
                 if connection:
                     connection.close()

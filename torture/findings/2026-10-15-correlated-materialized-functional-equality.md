@@ -110,3 +110,24 @@ row-derived DOUBLE values from constant DOUBLE expressions when compared to
 a BIGINT column: the former use approximate comparison, while the latter
 keep the integer exact. FSDB's residual comparison now follows that audited
 provenance rule. String and non-finite floating keys remain open.
+
+## Statement-local finite DOUBLE expression ranges
+
+The same stable materialized expressions now get an ordered statement-local
+lookup for `<`, `<=`, `>`, `>=`, and `BETWEEN`. Finite DOUBLE row results are
+sorted once, numeric outer bounds are converted to DOUBLE, and each lookup
+starts at the matching interval cut. The original SQL predicate still checks
+the selected rows. NULL bounds yield no candidates; string and non-finite
+bounds, mixed result types, and evaluation errors retain the scan. Candidate
+lists intersect under `AND` and union only for complete `OR` branches.
+
+The [MySQL 8.4.11 oracle](../scripts/correlated-materialized-double-oracle.py)
+and executor regression cover reversed and inclusive comparisons, DECIMAL and
+BIGINT bounds, NULL, BETWEEN, string fallback, and OR. On 1,000 materialized
+rows, a narrow `d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0` uses **11 residual
+calls across four outer rows** in the
+[profile](../scripts/correlated-materialized-double-profile.fsx). The oracle
+also exposed a decimal-to-binary64 halfway conversion error at 2⁵³+1: the
+CLR direct cast rounded to 2⁵³+2, while MySQL rounded to 2⁵³. Parsing the
+exact decimal digits now gives the matching single rounding for numeric
+comparisons and range bounds.
