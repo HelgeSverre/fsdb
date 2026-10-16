@@ -28,6 +28,16 @@ winding predicate in `GeometryOperations.fs` is therefore not a reliable
 containment oracle for some large global rings. The mismatch is not limited
 to `ST_IsValid`: it affects `ST_Within` and `ST_Intersects` directly.
 
+Further differential testing found a simpler antipodal counterexample. For
+`POLYGON((0 0,0 10,10 10,10 0,0 0))` in SRID 4326, MySQL places
+`POINT(5 5)` inside and `POINT(-5 -175)` outside. Fsdb places both inside.
+The existing tangent-plane winding test winds around both a query point and
+its antipode, so this error is not confined to large global rings. A
+prototype meridian-crossing replacement fixed these examples but failed the
+existing polar-cap regression (`POINT(85 0)` inside
+`POLYGON((80 -120,80 0,80 120,80 -120))`) and depended on ring direction
+where MySQL did not. It was reverted rather than broadening the regression.
+
 The second observed pair is:
 
 ```sql
