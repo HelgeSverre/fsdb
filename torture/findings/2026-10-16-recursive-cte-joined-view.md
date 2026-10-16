@@ -33,6 +33,22 @@ holding the matching physical row, then rebases after that writer commits.
 Both engines finish with two increments. This verifies that source rewrite
 keeps the existing physical row-lock path for that shape.
 
+## Nested and dependent read sources
+
+The native oracle now covers 14 writable layouts. A recursive CTE can feed a
+nested derived table or a joined derived source inside a dependent CTE. It can
+also be followed directly by a FROM-less dependent `LATERAL` projection or a
+`JSON_TABLE` whose input reads the recursive source's exposed column. MySQL
+marks all four views updatable and increments the physical target once. The
+matching fsdb regression checks metadata and target updates for each.
+
+The direct `LATERAL` and `JSON_TABLE` forms previously failed with 1288 in
+fsdb because the view rewrite required every outer source to be a table
+reference before wrapping recursive bindings. It now admits companion sources
+that only depend on already bound columns. A lateral body with its own FROM
+source or subquery, and a JSON_TABLE input with a subquery, still need a
+separate binding-scope audit before they can use this rewrite.
+
 MySQL labels a recursive-only view `IS_UPDATABLE=YES` but rejects its UPDATE
 with 1288. FSDB rejects that UPDATE too and currently reports `NO`; this
 metadata difference remains. More complex recursive/dependent source

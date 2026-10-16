@@ -1848,11 +1848,29 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             Joins = select.Joins |> List.map (fun join -> { join with Table = expand join.Table })
             Ctes = [] }
 
+    // Wrapping a referenced recursive CTE moves its binding into the derived
+    // source. Dependent table functions and FROM-less lateral projections can
+    // still read that source's columns, provided they do not need the CTE name
+    // in their own nested query scope.
+    let recursiveCompanionSource = function
+        | FromTable _ -> true
+        | FromLateral(PlainSelect body, _) ->
+            body.From.IsNone
+            && body.Joins.IsEmpty
+            && body.Ctes.IsEmpty
+            && not (Expression.statementExists
+                (function
+                 | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _ -> true
+                 | _ -> false)
+                (Select body))
+        | FromJsonTable(source, _, _, _) -> Expression.collectSubqueries source |> List.isEmpty
+        | _ -> false
+
     if hasRecursiveCte
        && not referencedCtes.IsEmpty
        && recursiveSources.Length = referencedCtes.Length
        && cteNames.Count = select.Ctes.Length
-       && (sources |> List.forall (function FromTable _ -> true | _ -> false))
+       && (sources |> List.forall recursiveCompanionSource)
        && (select.From |> Option.isSome) then
         wrapRecursiveSources (Map.ofList recursiveSources)
     elif select.Ctes.IsEmpty

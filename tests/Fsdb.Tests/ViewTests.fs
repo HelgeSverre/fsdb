@@ -2084,6 +2084,19 @@ let tests =
                     "nested_star",
                     recursive + ", copied AS (SELECT k FROM seq), again AS (SELECT * FROM copied) "
                     + "SELECT t.id,t.n FROM again a JOIN recursive_target t ON t.id=a.k"
+                    "nested_derived",
+                    recursive + ", copied AS (SELECT d.k FROM (SELECT k FROM seq) d) "
+                    + "SELECT t.id,t.n FROM copied c JOIN recursive_target t ON t.id=c.k"
+                    "nested_join",
+                    recursive + ", copied AS (SELECT s.k FROM seq s JOIN (SELECT 2 AS anchor) d ON d.anchor=s.k) "
+                    + "SELECT t.id,t.n FROM copied c JOIN recursive_target t ON t.id=c.k"
+                    "lateral_after_seq",
+                    recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                    + "(SELECT s.k AS lookup_key) l ON TRUE JOIN recursive_target t ON t.id=l.lookup_key"
+                    "json_after_seq",
+                    recursive + " SELECT t.id,t.n FROM seq s JOIN "
+                    + "JSON_TABLE(JSON_ARRAY(s.k),'$[*]' COLUMNS(k INT PATH '$')) j ON j.k=s.k "
+                    + "JOIN recursive_target t ON t.id=j.k"
                     "shared_volatile",
                     "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL SELECT k+1,r FROM seq WHERE k<3) "
                     + "SELECT t.id,t.n FROM seq a JOIN seq b ON b.k=a.k AND b.r=a.r "
@@ -2098,8 +2111,8 @@ let tests =
 
               Expect.equal
                   (rows store "SELECT n FROM recursive_target WHERE id=2")
-                  [ [ Some "30" ] ]
-                  "dependent, grouped, repeated, and starred recursive rows each update once"
+                  [ [ Some "34" ] ]
+                  "dependent, derived, lateral, JSON, and repeated recursive rows each update once"
 
               expectOk
                   (run store
