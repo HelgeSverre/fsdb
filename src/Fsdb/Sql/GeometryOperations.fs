@@ -345,18 +345,40 @@ let private sampleGeographicSegment referenceSystem start endpoint =
 
 let private geographicRingContains referenceSystem point ring =
     let query = geographicUnitVector point
-    let winding =
+    let segments =
         ring
         |> List.pairwise
-        |> List.sumBy (fun (start, endpoint) ->
-            sampleGeographicSegment referenceSystem start endpoint
-            |> Array.pairwise
-            |> Array.sumBy (fun (first, second) ->
-                let first, second = geographicUnitVector first, geographicUnitVector second
-                let numerator = dot3 query (cross3 first second)
-                let denominator = dot3 first second - dot3 query first * dot3 query second
-                atan2 numerator denominator))
-    abs winding > Math.PI
+        |> List.map (fun (start, endpoint) -> sampleGeographicSegment referenceSystem start endpoint)
+    let ringCenter =
+        segments
+        |> List.fold (fun center segment ->
+            segment
+            |> Array.fold (fun (x, y, z) vertex ->
+                let vx, vy, vz = geographicUnitVector vertex
+                x + vx, y + vy, z + vz) center) (0.0, 0.0, 0.0)
+    // A ring wholly within an open hemisphere bounds its smaller interior
+    // there. Leave room for the curve between samples near its boundary;
+    // the tangent-plane winding also counts the opposite hemisphere.
+    let outsideContainingHemisphere =
+        let margin = 1e-4
+        let centerLength = sqrt (dot3 ringCenter ringCenter)
+        centerLength > 1e-12
+        && dot3 ringCenter query < -centerLength * margin
+        && segments
+           |> List.forall (Array.forall (fun vertex -> dot3 ringCenter (geographicUnitVector vertex) > centerLength * margin))
+    if outsideContainingHemisphere then false
+    else
+        let winding =
+            segments
+            |> List.sumBy (fun segment ->
+                segment
+                |> Array.pairwise
+                |> Array.sumBy (fun (first, second) ->
+                    let first, second = geographicUnitVector first, geographicUnitVector second
+                    let numerator = dot3 query (cross3 first second)
+                    let denominator = dot3 first second - dot3 query first * dot3 query second
+                    atan2 numerator denominator))
+        abs winding > Math.PI
 
 [<RequireQualifiedAccess>]
 type internal GeographicPointPolygonPosition =

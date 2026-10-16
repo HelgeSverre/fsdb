@@ -948,6 +948,19 @@ let tests =
                     expectError 1235 (fun () -> call "ST_Union" [ geographic; geographic ])
                     expectError 1235 (fun () -> call "ST_Buffer" [ geographic; VInt 1L ])
 
+                testCase "geographic polygon excludes its antipodal exterior"
+                <| fun _ ->
+                    let geography text = call "ST_GeomFromText" [ VString text; VInt 4326L ]
+                    let square = geography "POLYGON((0 0,0 10,10 10,10 0,0 0))"
+                    let reversed = geography "POLYGON((0 0,10 0,10 10,0 10,0 0))"
+                    let center = geography "POINT(5 5)"
+                    let antipode = geography "POINT(-5 -175)"
+
+                    for polygon in [ square; reversed ] do
+                        Expect.equal (call "ST_Within" [ center; polygon ]) (VInt 1L) "square center"
+                        Expect.equal (call "ST_Within" [ antipode; polygon ]) (VInt 0L) "antipodal exterior"
+                        Expect.equal (call "ST_Intersects" [ antipode; polygon ]) (VInt 0L) "antipodal disjointness"
+
                 testCase "envelopes and MBR predicates preserve planar bounds"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]
