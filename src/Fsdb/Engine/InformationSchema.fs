@@ -1971,7 +1971,9 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
              && (match cte.Body with
                  | PlainSelect nested -> canWrapNestedSelect nested
                  | UnionSelect(first, rest, orderBy, limit, offset) ->
-                     orderBy.IsEmpty && limit.IsNone && offset.IsNone
+                     (orderBy |> List.forall (fst >> Expression.collectSubqueries >> List.isEmpty))
+                     && (limit |> Option.forall (Expression.collectSubqueries >> List.isEmpty))
+                     && (offset |> Option.forall (Expression.collectSubqueries >> List.isEmpty))
                      && canWrapNestedSelect first
                      && (rest |> List.forall (snd >> canWrapNestedSelect))
                  )))
