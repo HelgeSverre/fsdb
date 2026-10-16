@@ -1727,7 +1727,10 @@ implementation effort:
    covers audited overlap, containment, holes, and multipart shapes. A line
    exactly following a [geographic polygon hole edge](torture/findings/2026-10-14-geographic-hole-edge-touch.md)
    now reports boundary contact rather than crossing. Near-boundary
-   sampling and broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
+   [machine-precision offsets](torture/findings/2026-10-14-geographic-edge-topology-audit.md#near-machine-precision-hole-edge-offsets)
+   no longer allow crossing without an intersection, but MySQL's
+   intersection and distance thresholds still differ from fsdb's.
+   Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
 
 5. Extensible authentication providers. The built-in caching-SHA2, SHA-256,
