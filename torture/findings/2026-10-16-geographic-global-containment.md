@@ -73,3 +73,30 @@ validity extension was not retained. `ST_IsValid` for simple single-ring
 geographic polygons remains supported; holes and multipolygons retain the
 explicit unsupported response until containment and component separation
 match MySQL on both local and global shapes.
+
+## MySQL strategy identified
+
+MySQL 8.4.11 normalizes geographic polygon rings on WKB construction with
+Boost.Geometry's geographic area strategy, then evaluates point containment
+with `strategy::within::geographic_winding<Geographic_point>`. A standalone
+probe built against the pinned Boost 1.84 headers, using the WGS 84 spheroid,
+`boost::geometry::correct(polygon, geographic_area)`, and
+`boost::geometry::within(point, polygon, geographic_winding)`, reproduced the
+MySQL answers for the small square, polar cap, first global polygon, and
+second global polygon above. In particular, the first global polygon returned
+inside for `(0,0)` and `(-20,0)`, outside for `(80,0)` and the triangle vertex;
+the second returned inside for `(47.61723855,-61.46703001)`. The small square
+excluded its antipodal point, and the polar cap included `(85,0)`.
+
+This establishes a concrete reference algorithm for the recorded cases. The
+remaining work is a faithful F# implementation of ring normalization and
+geographic winding, followed by differential testing over the 2,712-query
+global corpus and local edge/antimeridian/polar regressions. The probe alone
+does not establish parity for all polygons, and no production containment
+change was made in this investigation.
+
+Source trail: MySQL [`wkb.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/wkb.cc)
+and [`ring_flip_visitor.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/ring_flip_visitor.cc)
+perform correction; [`within.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/within.cc)
+selects the geographic winding strategy. Boost 1.84 implements that strategy
+in [`point_in_poly_winding.hpp`](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/spherical/point_in_poly_winding.hpp).
