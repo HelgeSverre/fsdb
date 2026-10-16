@@ -40,6 +40,38 @@ until that interval ended. Reflow's invoice file then passed all 13 tests in
 needs an isolated multi-database reproduction before attributing a scheduler
 defect or estimating concurrent application throughput.
 
+Follow-up on the same three-file overlap reproduced the problem: Reflow timed
+out on `RENAME TABLE permissions TO old_permissions` after 62.5 seconds,
+Chatflow timed out on `CREATE TABLE chatbot_access` after 52.9 seconds, and
+Spamcalls passed but took 54.8 seconds. A managed dump taken during the wait
+showed two DDL requests blocked in `Storage.withDatabaseLocks`, another request
+blocked publishing a transaction in `Storage.commitCatalogIntoWith`, and a
+fourth blocked in `Storage.bumpAutoIncrementsInto`. These waits involve database
+slot monitors rather than a crashed process. A simple control with one open
+transaction in database A and an `information_schema.tables` read plus `SELECT
+1` in database B returned in 35 ms and 2 ms, respectively. Thus an open
+cross-database transaction alone is insufficient to reproduce the problem.
+
+The likely contention amplifier is `catalogHasQualifiedForeignKeys`: when any
+snapshot contains a schema-qualified foreign key, `commitCatalogIntoWith`
+sets `validateWholeSnapshot` and locks every database slot in the snapshot,
+even when the transaction changed only one database. Concurrent DDL takes the
+`mysql` metadata slot plus its target database slot. With several Laravel
+migration/test processes, these paths can therefore contend across otherwise
+independent databases. The dump establishes the wait sites, but does not yet
+prove a specific lock-order cycle or identify which qualified foreign key
+triggered whole-catalog validation. A focused regression should establish that
+trigger, compare independent-database progress against MySQL 8.4, and then
+narrow validation/locking without weakening cross-database referential checks.
+
+The crescat-website migration is SQLite-specific: its `WHERE status =
+'pending' AND email_verified_at IS NULL` clause makes a partial unique index,
+which MySQL 8.4 rejects. Its rollback also uses `DROP INDEX IF EXISTS`, another
+SQLite-style form. For MySQL support, the application should use a MySQL-valid
+conditional generated key (NULL outside open requests) with a unique index, or
+maintain separate database-specific migration paths. fsdb should continue to
+reject the partial-index syntax for MySQL compatibility.
+
 These are focused smoke tests, not full application suites or browser flows.
 Boatflow's checkout initially lacked its locked Bugsnag packages; installing
 the lockfile under PHP 8.4 restored them. Its ignored Laravel package and
