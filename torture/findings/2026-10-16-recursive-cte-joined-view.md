@@ -35,7 +35,7 @@ keeps the existing physical row-lock path for that shape.
 
 ## Nested and dependent read sources
 
-The native oracle now covers 17 writable layouts. A recursive CTE can feed a
+The native oracle now covers 21 writable layouts. A recursive CTE can feed a
 nested derived table or a joined derived source inside a dependent CTE. It can
 also be followed directly by a FROM-less dependent `LATERAL` projection or a
 `JSON_TABLE` whose input reads the recursive source's exposed column. MySQL
@@ -55,12 +55,20 @@ references still finds the target row. Fsdb now wraps the nested reference
 in the same CTE scope and shares its materialized rows across both sources.
 The regression checks metadata and one physical target update for each layout.
 
+A nested derived table inside the lateral body can also re-read the CTE. The
+ordinary and volatile-value versions both retain one shared rowset. A scalar
+or `EXISTS` subquery that only reads the already exposed outer alias is safe
+alongside the moved CTE scope, and MySQL marks that view writable. Fsdb now
+distinguishes that form from subqueries that directly name the moved CTE.
+
 The direct `LATERAL` and `JSON_TABLE` forms previously failed with 1288 in
 fsdb because the view rewrite required every outer source to be a table
 reference before wrapping recursive bindings. It now admits companion sources
 that only depend on already bound columns. Subqueries inside companion
-expressions, and a JSON_TABLE input with a subquery, still need a separate
-binding-scope audit before they can use this rewrite.
+expressions that directly name the moved CTE, and a JSON_TABLE input with a
+subquery, still need a separate binding-scope audit before they can use this
+rewrite. MySQL also accepts a CTE-dependent scalar or `EXISTS` expression and
+a local CTE inside `LATERAL`; those forms remain open in fsdb.
 
 MySQL labels a recursive-only view `IS_UPDATABLE=YES` but rejects its UPDATE
 with 1288. FSDB rejects that UPDATE too and currently reports `NO`; this

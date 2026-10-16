@@ -1888,10 +1888,13 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         not body.Ctes.IsEmpty
         || (body.From |> Option.exists needsCteScope)
         || (body.Joins |> List.exists (_.Table >> needsCteScope))
-        || Expression.statementExists
-            (function
-             | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _ -> true
-             | _ -> false)
+        || expressionSubqueriesNeedCteScope body
+
+    and expressionSubqueriesNeedCteScope body =
+        Expression.statementExists
+            (fun expression ->
+                Expression.subqueries expression
+                |> List.exists (PlainSelect >> queryNeedsCteScope))
             (Select body)
 
     let rec canWrapNestedSource = function
@@ -1911,11 +1914,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         body.Ctes.IsEmpty
         && (body.From |> Option.forall canWrapNestedSource)
         && (body.Joins |> List.forall (_.Table >> canWrapNestedSource))
-        && not (Expression.statementExists
-            (function
-             | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _ -> true
-             | _ -> false)
-            (Select body))
+        && not (expressionSubqueriesNeedCteScope body)
 
     let recursiveCompanionSource = function
         | FromTable _ -> true

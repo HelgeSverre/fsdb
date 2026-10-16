@@ -98,6 +98,25 @@ def main():
                          "SELECT t.id,t.n FROM seq s JOIN LATERAL "
                          "(SELECT k AS lookup_key FROM seq WHERE k=s.k AND r=s.r) l ON TRUE "
                          "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_nested_cte_reread",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(SELECT d.k AS lookup_key FROM (SELECT k FROM seq) d WHERE d.k=s.k) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_nested_volatile_reread",
+                         "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
+                         "SELECT k+1,r FROM seq WHERE k<3) "
+                         "SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(SELECT d.k AS lookup_key FROM (SELECT k,r FROM seq) d "
+                         "WHERE d.k=s.k AND d.r=s.r) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_independent_scalar",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(SELECT (SELECT s.k) AS lookup_key) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_independent_exists",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(SELECT s.k AS lookup_key WHERE EXISTS (SELECT 1 WHERE s.k>0)) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
                         ("recursive_json_after_seq",
                          f"{recursive} SELECT t.id,t.n FROM seq s JOIN "
                          "JSON_TABLE(JSON_ARRAY(s.k),'$[*]' COLUMNS(k INT PATH '$')) j ON j.k=s.k "
