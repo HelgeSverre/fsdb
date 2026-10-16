@@ -5988,11 +5988,24 @@ let private geometryIsEmptyFn: Scalar =
         | _ -> VInt 0L
     | _ -> nativeParameterCountError "st_isempty"
 
+let rec private containsAreaGeometry = function
+    | GPolygon _
+    | GMultiPolygon _ -> true
+    | GGeometryCollection geometries -> geometries |> List.exists (fun geometry -> containsAreaGeometry geometry.Shape)
+    | _ -> false
+
 let private geometryIsValidFn: Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] ->
-        let geometry = geometryArgument "ST_ISVALID" value |> requirePlanar "ST_ISVALID"
+        let geometry = geometryArgument "ST_ISVALID" value
+        let referenceSystem = spatialReferenceSystem "ST_ISVALID" geometry.Srid
+
+        // Point and line validity depends on finite coordinates and distinct
+        // line points in both domains. Polygon validity needs geodesic topology.
+        if referenceSystem.SemiMajorAxis.IsSome && containsAreaGeometry geometry.Shape then
+            requirePlanar "ST_ISVALID" geometry |> ignore
+
         VInt(if geometryIsValidPlanar geometry then 1L else 0L)
     | _ -> nativeParameterCountError "st_isvalid"
 

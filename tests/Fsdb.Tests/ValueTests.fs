@@ -987,7 +987,8 @@ let tests =
                     Expect.equal (call "ST_Distance" [ geographicLine; geographicLine ]) (VDouble 0.0) "identical geographic lines have zero distance"
                     Expect.equal (call "ST_Distance" [ geographicPolygon; geographicLine ]) (VDouble 0.0) "a line on a geographic polygon has zero distance"
                     expectError 1235 (fun () -> call "ST_Envelope" [ geographic ])
-                    expectError 1235 (fun () -> call "ST_IsValid" [ geographic ])
+                    Expect.equal (call "ST_IsValid" [ geographic ]) (VInt 1L) "geographic point is valid"
+                    expectError 1235 (fun () -> call "ST_IsValid" [ geographicPolygon ])
 
                 testCase "geographic points use WGS 84 axes, domains, and linear units"
                 <| fun _ ->
@@ -1142,6 +1143,32 @@ let tests =
                         "a separate component may occupy another component's hole"
                     Expect.equal (valid "MULTIPOINT((0 0),(0 0))") (VInt 1L) "duplicate point"
                     Expect.equal (valid "LINESTRING(0 0,-0.00 0,0.0 0)") (VInt 0L) "line without distinct points"
+
+                testCase "ST_IsValid checks geographic points and linework"
+                <| fun _ ->
+                    let valid text =
+                        let geometry = call "ST_GeomFromText" [ VString text; VInt 4326L ]
+                        call "ST_IsValid" [ geometry ]
+
+                    Expect.equal (valid "POINT(89 179)") (VInt 1L) "geographic point"
+                    Expect.equal
+                        (call "ST_IsValid" [ call "ST_GeomFromText" [ VString "LINESTRING(0 0,0 0)"; VInt 4258L ] ])
+                        (VInt 0L)
+                        "ETRS89 line uses the same distinct-point rule"
+                    Expect.equal (valid "LINESTRING(0 179,0 -179)") (VInt 1L) "antimeridian line"
+                    Expect.equal (valid "LINESTRING(0 0,0 0)") (VInt 0L) "zero-length line"
+                    Expect.equal (valid "MULTIPOINT((0 0),(0 0))") (VInt 1L) "duplicate multipoint"
+                    Expect.equal (valid "MULTILINESTRING((0 0,1 1),(1 1,2 2))") (VInt 1L) "multiline"
+                    Expect.equal (valid "MULTILINESTRING((0 0,0 0))") (VInt 0L) "invalid multiline member"
+                    Expect.equal (valid "GEOMETRYCOLLECTION EMPTY") (VInt 1L) "empty collection"
+                    Expect.equal
+                        (valid "GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(0 0,1 1))")
+                        (VInt 1L)
+                        "linear collection"
+                    Expect.equal
+                        (valid "GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(0 0,0 0))")
+                        (VInt 0L)
+                        "invalid linear collection member"
 
                 testCase "geometry validity rejects malformed in-memory component shapes"
                 <| fun _ ->
