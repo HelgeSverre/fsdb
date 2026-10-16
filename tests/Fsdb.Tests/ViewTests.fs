@@ -42,6 +42,40 @@ let tests =
                   [ [ Some "Acme"; Some "2"; Some "50.00" ] ]
                   "the view reevaluates its stored SELECT"
 
+          testCase "a grouped derived source keeps its source column inside HAVING aggregates"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE grouped_source (k INT,z INT)") "create source"
+              expectOk (run store "CREATE TABLE grouped_target (id INT PRIMARY KEY,k INT,val INT)") "create target"
+              expectOk (run store "INSERT INTO grouped_source VALUES (1,10),(1,5),(2,20),(3,-10),(3,-20)") "seed source"
+              expectOk (run store "INSERT INTO grouped_target VALUES (1,1,5),(2,2,7)") "seed target"
+              expectOk
+                  (run store "CREATE VIEW grouped_having_view AS SELECT t.id,t.val,d.z FROM (SELECT k,MAX(z) AS z FROM grouped_source GROUP BY k HAVING MAX(z)>0) d JOIN grouped_target t ON t.k=d.k")
+                  "create joined view"
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='grouped_having_view'")
+                  [ [ Some "YES" ] ]
+                  "the physical target remains writable"
+              Expect.equal
+                  (rows store "SELECT id,val,z FROM grouped_having_view ORDER BY id")
+                  [ [ Some "1"; Some "5"; Some "10" ]; [ Some "2"; Some "7"; Some "20" ] ]
+                  "the derived HAVING uses the source column"
+              expectOk (run store "UPDATE grouped_having_view SET val=val+1 WHERE id=1") "update through the view"
+              Expect.equal
+                  (rows store "SELECT id,val FROM grouped_target ORDER BY id")
+                  [ [ Some "1"; Some "6" ]; [ Some "2"; Some "7" ] ]
+                  "the joined write reaches the base table"
+
+              Expect.equal
+                  (rows store "SELECT k,MIN(z) AS z FROM grouped_source GROUP BY k HAVING ABS(z)>15 ORDER BY k")
+                  [ [ Some "2"; Some "20" ]; [ Some "3"; Some "-20" ] ]
+                  "outside an aggregate, HAVING still resolves the output alias first"
+
+              match run store "SELECT k,MAX(z) AS mz FROM grouped_source GROUP BY k HAVING MAX(mz)>0" with
+              | Err(1111, _) -> ()
+              | other -> failtestf "expected nested aggregate alias rejection, got %A" other
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()
