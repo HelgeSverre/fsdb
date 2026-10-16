@@ -51,6 +51,7 @@ def main():
                 for indexed in (False, True):
                     for scenario in ("predicate", "sort_key"):
                         for verb in ("UPDATE", "DELETE"):
+                          for limit in (1, 2):
                             waiter = connect(socket)
                             try:
                                 with owner.cursor() as cursor:
@@ -58,7 +59,7 @@ def main():
                                     index = ", KEY ix_n(n)" if indexed else ""
                                     cursor.execute(f"CREATE TABLE target(id INT PRIMARY KEY,n INT{index})")
                                     second_value = 0 if scenario == "predicate" else 1
-                                    cursor.execute(f"INSERT INTO target VALUES(1,0),(2,{second_value})")
+                                    cursor.execute(f"INSERT INTO target VALUES(1,0),(2,{second_value}),(3,3)")
                                     cursor.execute("BEGIN")
                                     owner_value = -1 if scenario == "predicate" else 2
                                     cursor.execute(f"UPDATE target SET n={owner_value} WHERE id=1")
@@ -71,7 +72,7 @@ def main():
                                     "UPDATE target SET n=n+1" if scenario == "predicate" else
                                     "UPDATE target SET n=n+10"
                                 ) if verb == "UPDATE" else "DELETE FROM target"
-                                statement = f"{action} WHERE n>=0 ORDER BY {ordering} LIMIT 1"
+                                statement = f"{action} WHERE n>=0 ORDER BY {ordering} LIMIT {limit}"
                                 started = threading.Event()
                                 outcome = {}
 
@@ -95,14 +96,24 @@ def main():
                                 thread.join(5)
                                 assert not thread.is_alive(), (statement, "writer did not resume")
                                 assert "error" not in outcome, outcome
-                                assert outcome["affected"] == 1, (statement, outcome)
+                                assert outcome["affected"] == limit, (statement, outcome)
                                 with owner.cursor() as cursor:
                                     cursor.execute("SELECT id,n FROM target ORDER BY id")
                                     actual = cursor.fetchall()
                                 if scenario == "predicate":
-                                    expected = ((1, -1), (2, 1)) if verb == "UPDATE" else ((1, -1),)
+                                    expected = (
+                                        ((1, -1), (2, 1), (3, 4)) if limit == 2 else
+                                        ((1, -1), (2, 1), (3, 3))
+                                    ) if verb == "UPDATE" else (
+                                        ((1, -1),) if limit == 2 else ((1, -1), (3, 3))
+                                    )
                                 else:
-                                    expected = ((1, 2), (2, 11)) if verb == "UPDATE" else ((1, 2),)
+                                    expected = (
+                                        ((1, 12), (2, 11), (3, 3)) if limit == 2 else
+                                        ((1, 2), (2, 11), (3, 3))
+                                    ) if verb == "UPDATE" else (
+                                        ((3, 3),) if limit == 2 else ((1, 2), (3, 3))
+                                    )
                                 assert actual == expected, (statement, indexed, actual)
                                 cases += 1
                             finally:
