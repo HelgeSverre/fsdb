@@ -1980,6 +1980,40 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected both autocommit and transaction increments, got %A" result
 
+          testCase "limited ordered writes reselect their target after a waiting row stops matching"
+          <| fun _ ->
+              for indexed in [ false; true ] do
+                  for statement, expectedRows in
+                      [ "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 1",
+                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ] ]
+                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 1",
+                        [ [ Some "1"; Some "-1" ] ] ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      let index = if indexed then ", KEY ix_n(n)" else ""
+                      handle setup ("CREATE TABLE tx_limited_rebase (id INT PRIMARY KEY, n INT" + index + ")") |> ignore
+                      handle setup "INSERT INTO tx_limited_rebase VALUES (1, 0), (2, 0)" |> ignore
+                      let owner, _ = handle (create 2 store) "BEGIN"
+                      let owner, firstWrite = handle owner "UPDATE tx_limited_rebase SET n=-1 WHERE id=1"
+                      Expect.equal firstWrite (Affected 1UL) "the owner changes the first candidate"
+                      let waiter, _ = handle (create 3 store) "BEGIN"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              handle waiter statement)
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes"
+                      let waiter, result = waiting.Result
+                      Expect.isTrue blocked "limited writer waits for the first candidate"
+                      Expect.equal result (Affected 1UL) "limited writer changes one rebased target"
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                      match handle setup "SELECT id,n FROM tx_limited_rebase ORDER BY id" |> snd with
+                      | ResultSet(_, rows) -> Expect.equal rows expectedRows (statement + $" (indexed={indexed})")
+                      | actual -> failtestf "expected a result set after %s, got %A" statement actual
+
           testCase "an autocommit full-scan delete rechecks the row after a competing commit"
           <| fun _ ->
               for predicate, affected, remaining in
