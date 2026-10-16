@@ -41,6 +41,25 @@ polar-cap regression (`POINT(85 0)` inside
 `POLYGON((80 -120,80 0,80 120,80 -120))`) and depended on ring direction
 where MySQL did not. It was reverted rather than broadening the regression.
 
+A second candidate used a signed spherical triangle area to choose between a
+ring's tangent-plane winding and its complementary region. It explained the
+first global example and the polar cap, but did not match MySQL generally.
+Among 226 MySQL-valid random global quadrilaterals (seed 9173, 12 point
+probes each), it disagreed on 155 of 2,712 point results. For example, MySQL
+reports the following polygon valid and the point inside, while the simple
+spherical winding around the point is zero:
+
+```sql
+SET @a = ST_GeomFromText('POLYGON((-49.39793223 39.25611065,18.32056422 148.75405757,-69.02455409 -117.92274540,55.83993074 -88.64082883,-49.39793223 39.25611065))',4326);
+SET @p = ST_GeomFromText('POINT(47.61723855 -61.46703001)',4326);
+SELECT ST_IsValid(@a), ST_Within(@p,@a);
+-- 1, 1
+```
+
+The spherical candidate was not added to fsdb. A full solution needs to
+follow MySQL's geographic side and point-in-polygon decisions for global
+geodesic edges, not infer them from a small-region spherical area.
+
 The second observed pair is:
 
 ```sql
