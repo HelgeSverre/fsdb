@@ -1514,6 +1514,25 @@ let tests =
                         Expect.isLessThan (col.ComparePrimary left right) 0 "vertical forms follow their implicit-weight order"
                     Expect.isFalse (col.Equals "︒" "\uE011\uE013") "a literal private-use marker cannot alias a vertical form"
 
+                testCase "legacy enclosed CJK implicit weights stay distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in
+                        [ "㉆", "㊥"; "㉆", "文"; "㉊", "㉚"; "㉊", "30"
+                          "㉋", "㊵"; "㉌", "㊿"; "㈎", "(가)"
+                          "㉮", "가"; "㉼", "참고" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
+                    Expect.isTrue (col.Equals "㊥" "中") "circled centre retains its MySQL expansion"
+                    Expect.isTrue (col.Equals "㋐" "ア") "enclosed katakana expands to its base character"
+                    Expect.isTrue (col.Equals "㌀" "アパート") "square unit forms expand under legacy UCA"
+                    for left, right in [ "㊥", "中"; "㋐", "ア"; "㌀", "アパート" ] do
+                        Expect.equal (col.KeyOf left) (col.KeyOf right) (left + " shares an index key with " + right)
+                        Expect.equal (col.HashOf left) (col.HashOf right) (left + " shares a hash with " + right)
+                    for left, right in [ "㉊", "㉋"; "㉋", "㉌" ] do
+                        Expect.isLessThan (col.ComparePrimary left right) 0 "implicit weights follow codepoint order"
+                    Expect.isFalse (col.Equals "㉆" "\uE030\uE146") "literal private-use text cannot alias an enclosed ideograph"
+
                 testTheory
                     "MySQL 8.4 hiragana and katakana equality follows collation sensitivity"
                     [ "utf8mb4_0900_ai_ci", "ば", "パ", true

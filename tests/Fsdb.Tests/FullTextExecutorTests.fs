@@ -402,6 +402,23 @@ let tests =
               Expect.equal (search "中，") [ "2"; "3" ] "fullwidth and small comma tokens share a key"
               Expect.equal (search "中﹐") [ "2"; "3" ] "small comma finds both token forms"
 
+          testCase "legacy Unicode ngrams keep implicit enclosed CJK forms distinct"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE enclosed_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO enclosed_docs VALUES(1,'中㉆文'),(2,'中㊥文'),(3,'中㉊文'),(4,'中㉚文'),(5,'中㉋文'),(6,'中㊵文'),(7,'中㉌文'),(8,'中㊿文')" |> ignore
+              let search term mode =
+                  let sql = $"SELECT id FROM enclosed_docs WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                  ids (run store sql)
+              for mode in [ "IN NATURAL LANGUAGE MODE"; "WITH QUERY EXPANSION" ] do
+                  for id, term in [ "1", "中㉆"; "2", "中㊥"; "3", "中㉊"; "4", "中㉚"
+                                    "5", "中㉋"; "6", "中㊵"; "7", "中㉌"; "8", "中㊿" ] do
+                      Expect.equal (search term mode) [ id ] (mode + " " + term)
+              for id, term in [ "4", "中㉚"; "6", "中㊵"; "8", "中㊿" ] do
+                  Expect.equal (search term "IN BOOLEAN MODE") [ id ] ("Boolean " + term)
+              for term in [ "中㉆"; "中㊥"; "中㉊"; "中㉋"; "中㉌" ] do
+                  Expect.equal (search term "IN BOOLEAN MODE") [] ("Boolean Unicode boundary " + term)
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()

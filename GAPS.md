@@ -978,7 +978,9 @@ token sizes and three search modes for the audited presentation ranges. An
 [expanded CJK punctuation and kana corpus](torture/findings/2026-10-15-cjk-kana-quote-ngram.md)
 now covers small/full-size kana equality, distinct CJK double-quote forms, and
 unbalanced ngram Boolean parentheses: 936 queries per startup token size from 1 to
-10 match MySQL in membership and relevance. Exact legacy weight bytes, broader
+10 match MySQL in membership and relevance. The [enclosed CJK legacy range](torture/findings/2026-10-17-enclosed-cjk-legacy-ngram.md)
+adds U+3200–U+33FF cross-form equality and 1,533 ngram queries per token
+size, matching MySQL across sizes 1–10. Exact legacy weight bytes, broader
 collation behavior, and MeCab remain open.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)

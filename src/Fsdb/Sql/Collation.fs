@@ -192,6 +192,29 @@ let private foldCjkQuoteForms (value: string) =
             | c -> result.Append(c) |> ignore
         result.ToString()
 
+// MySQL's legacy UCA keeps some enclosed Korean/ideograph forms distinct,
+// while expanding enclosed kana and square unit forms that ICU keeps apart.
+let private foldLegacyEnclosedCjk (value: string) =
+    let isDistinct c =
+        (c >= '\u320E' && c <= '\u321F')
+        || (c >= '\u3244' && c <= '\u324F')
+        || (c >= '\u326E' && c <= '\u327E')
+        || c = '\u32FF'
+    let isExpansion c =
+        (c >= '\u32D0' && c <= '\u32FE')
+        || (c >= '\u3300' && c <= '\u3357')
+    if not (value |> Seq.exists (fun c -> c = '\uE030' || isDistinct c || isExpansion c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = '\uE030' then result.Append("\uE030\uE030") |> ignore
+            elif isDistinct c then
+                result.Append('\uE030').Append(char (0xE100 + int c - 0x3200)) |> ignore
+            elif isExpansion c then
+                result.Append((string c).Normalize(NormalizationForm.FormKC)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
 // UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
 // newer MySQL weights fold its presentation forms.
 let private foldCjkPunctuationForms modern (value: string) =
@@ -261,7 +284,9 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" -> value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
-        | "utf8mb4_unicode_ci" -> value |> foldCjkPunctuationForms false |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
+        | "utf8mb4_unicode_ci" ->
+            value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk
+                  |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
         | _ -> value
 
     let primaryText (s: string) = trim s |> foldText

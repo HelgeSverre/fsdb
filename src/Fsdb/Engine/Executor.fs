@@ -5493,6 +5493,13 @@ let private compareWithColumnDomain
         -(Value.compareIntegerToDouble (bigint integer) bound)
     | _ -> Value.compare left right
 
+// CAST/CONVERT retain encoded bytes for charset-aware functions, but their
+// text comparisons still resolve through the expression's SQL collation.
+let private textComparisonOperand = function
+    | VString value -> Some value
+    | VEncodedString(charset, bytes) -> Some(Charset.decodeBytes charset bytes)
+    | _ -> None
+
 let private resolvedCompareWithColumns
     (ctx: EvalContext)
     (leftExpr: Expr)
@@ -5505,8 +5512,8 @@ let private resolvedCompareWithColumns
     : Result<int, EvalError> =
     let pa, pb = comparisonOperands leftColumn left rightColumn right
 
-    match pa, pb with
-    | VString sa, VString sb ->
+    match textComparisonOperand pa, textComparisonOperand pb with
+    | Some sa, Some sb ->
         comparisonCollation ctx operation leftExpr leftColumn rightExpr rightColumn
         |> Result.map (fun collation -> collation.ComparePrimary sa sb)
     | _ -> Ok(compareWithColumnDomain leftExpr leftColumn pa rightExpr rightColumn pb)
@@ -5570,8 +5577,8 @@ let private comparisonResult
             | Gte -> boolToValue (compared >= 0)
             | _ -> VNull
 
-        match comparedLeft, comparedRight with
-        | VString leftText, VString rightText ->
+        match textComparisonOperand comparedLeft, textComparisonOperand comparedRight with
+        | Some leftText, Some rightText ->
             comparisonCollation ctx operation leftExpr leftColumn rightExpr rightColumn
             |> Result.map (fun collation ->
                 finish
