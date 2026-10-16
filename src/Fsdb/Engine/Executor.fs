@@ -14223,17 +14223,18 @@ and private likePrefixRangePredicate constantValue textCharset scope (table: Tab
                         { Column = column.Name; Lower = lower; Upper = upper }))))
     | _ -> None
 
-and private collectClassifiedRangeBounds classify (whereExpr: Expr option) =
+and private collectClassifiedRangeBounds columnKey classify (whereExpr: Expr option) =
     let addBound bounds (predicate: RangeLookupBounds<_, _>) =
+        let key = columnKey predicate.Column
         let existing =
-            Map.tryFind predicate.Column bounds
+            Map.tryFind key bounds
             |> Option.defaultValue
                 { Column = predicate.Column
                   Lower = None
                   Upper = None }
 
         Map.add
-            predicate.Column
+            key
             { existing with
                 Lower = Option.orElse existing.Lower predicate.Lower
                 Upper = Option.orElse existing.Upper predicate.Upper }
@@ -14246,8 +14247,11 @@ and private collectClassifiedRangeBounds classify (whereExpr: Expr option) =
     |> Map.values
     |> List.ofSeq
 
+and private collectStringRangeBounds classify whereExpr =
+    collectClassifiedRangeBounds (fun (name: string) -> name.ToLowerInvariant()) classify whereExpr
+
 and private collectRangeBounds columnName boundValue whereExpr =
-    collectClassifiedRangeBounds (rangePredicatesFor columnName boundValue) whereExpr
+    collectStringRangeBounds (rangePredicatesFor columnName boundValue) whereExpr
 
 and private rangeLookupBounds
     (scope: ColumnReferenceScope)
@@ -14257,14 +14261,14 @@ and private rangeLookupBounds
     (tref: TableRef)
     (whereExpr: Expr option)
     : RangeLookupBounds<string, Value> list =
-    collectClassifiedRangeBounds (plannerRangePredicatesFor scope store registry table tref) whereExpr
+    collectStringRangeBounds (plannerRangePredicatesFor scope store registry table tref) whereExpr
 
 and private functionalRangeLookupBounds indexed boundValue (whereExpr: Expr option) =
     let bound expression =
         boundValue expression
         |> Option.map (fun value -> expression, value)
 
-    collectClassifiedRangeBounds (rangePredicatesFor indexed bound) whereExpr
+    collectClassifiedRangeBounds id (rangePredicatesFor indexed bound) whereExpr
 
 and private functionalRangeValues (bounds: RangeLookupBounds<'column, Expr * Value>) =
     let value = Option.map (fun ((_, value), inclusive) -> value, inclusive)
