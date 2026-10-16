@@ -199,6 +199,9 @@ matching-collation text `IN` lists bound to direct outer columns or literals
 reuse statement-local equality keys. [Multiple compatible materialized `IN`
 predicates](torture/findings/2026-10-15-correlated-materialized-in-intersection.md)
 intersect their candidate rows before residual evaluation.
+[Composite left-prefix text joins](torture/findings/2026-10-17-folded-composite-join.md)
+retain folded-equal leading keys and check later bound key parts, including
+descending indexes.
 [Correlated `ABS` equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-abs.md)
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete
 OR branches and exact `INT` minimum magnitude, while other operand types retain

@@ -5952,9 +5952,59 @@ let internal tryEqualityLookupForMatch
             table.SecondaryOrder
             |> Map.tryFind matched.Name
             |> Option.map (fun entries ->
-                let first, afterLast = orderedPrefixBounds entries prefix
-                let count = afterLast - first
-                let candidates = Seq.init count (fun offset -> entries.[first + offset])
+                let foldedPart =
+                    matched.ColumnIndices
+                    |> List.tryFindIndex (fun columnIndex ->
+                        match table.Columns.[columnIndex].Type with
+                        | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
+                            table.Columns.[columnIndex].Collation
+                            |> Collation.findOrDefault
+                            |> _.EqualityIsOrderEquivalence
+                            |> not
+                        | _ -> false)
+
+                let candidates, count =
+                    match foldedPart with
+                    | None ->
+                        let first, afterLast = orderedPrefixBounds entries prefix
+                        let count = afterLast - first
+                        Seq.init count (fun offset -> entries.[first + offset]), count
+                    | Some position ->
+                        // Full-order tie breaks can separate later key parts, but
+                        // a primary-equal value of the first folded part is
+                        // contiguous within an exact leading-key slice.
+                        let first, afterLast = orderedPrefixBounds entries (prefix |> List.take position)
+                        let columnIndex = matched.ColumnIndices.[position]
+                        let collation = table.Columns.[columnIndex].Collation |> Collation.findOrDefault
+                        let probe = prefix.[position]
+                        let direction =
+                            if entries.Count = 0 then Asc else entries.[0].Directions.[position]
+                        let compareAt offset =
+                            let value = entries.[first + offset].Values.[position]
+                            let comparison =
+                                match value, probe with
+                                | VString left, VString right -> collation.ComparePrimary left right
+                                | _ -> compareIndexedValues table.Columns.[columnIndex].Collation value probe
+                            if direction = Desc then -comparison else comparison
+                        let length = afterLast - first
+                        let lower = sortedInsertionPoint FirstEqual length compareAt
+                        let upper = sortedInsertionPoint AfterEqual length compareAt
+                        let boundColumns =
+                            matched.ColumnIndices
+                            |> List.map (fun columnIndex ->
+                                let column = table.Columns.[columnIndex]
+                                column, Collation.findOrDefault column.Collation)
+                        let matchesBoundParts (entry: SecondaryOrderEntry) =
+                            List.zip3 boundColumns (entry.Values |> List.take matched.KeyColumnCount) prefix
+                            |> List.forall (fun ((column, spec), stored, bound) ->
+                                match stored, bound with
+                                | VString left, VString right -> spec.ComparePrimary left right = 0
+                                | _ -> compareIndexedValues column.Collation stored bound = 0)
+                        let filtered =
+                            Seq.init (upper - lower) (fun offset -> entries.[first + lower + offset])
+                            |> Seq.filter matchesBoundParts
+                            |> Seq.toArray
+                        filtered :> seq<_>, filtered.Length
 
                 { CandidateCount = count
                   CandidateRowIds = lazy (candidates |> Seq.map _.RowId |> Set.ofSeq)
