@@ -697,6 +697,27 @@ let tests =
                       "an outer-dependent CTE is rebuilt for each outer row"
               | other -> failtestf "expected correlated CTE results, got %A" other
 
+          testCase "materialized correlated equality respects the effective collation"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_labels (label VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci)" |> ignore
+              runDefault store "CREATE TABLE inner_labels (label VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_bin)" |> ignore
+              runDefault store "INSERT INTO outer_labels VALUES ('A')" |> ignore
+              runDefault store "INSERT INTO inner_labels VALUES ('a')" |> ignore
+
+              for source in [ "(SELECT label FROM inner_labels) d"; "labels d" ] do
+                  let prefix =
+                      if source = "labels d" then
+                          "WITH labels AS (SELECT label FROM inner_labels) "
+                      else
+                          ""
+                  let sql =
+                      prefix + "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE d.label = o.label) FROM outer_labels o"
+                  match runDefault store sql with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected Unicode comparison collation for %s, got %A" source other
+
           testCase "correlated materialized lookup combines equality columns"
           <| fun _ ->
               let store = newStore ()
