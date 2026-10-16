@@ -91,7 +91,7 @@ let private isWordChar (c: char) =
 
 /// MySQL's word characters are alphanumerics plus `_` and an *in-word*
 /// apostrophe (`O'Brien` is one token, a trailing `'` is punctuation).
-let private rawTokens (text: string) : string[] =
+let private rawTokensBy isWord (text: string) : string[] =
     let tokens = ResizeArray<string>()
     let current = Text.StringBuilder()
 
@@ -102,12 +102,14 @@ let private rawTokens (text: string) : string[] =
         current.Clear() |> ignore
 
     for c in text do
-        if isWordChar c then current.Append c |> ignore
+        if isWord c then current.Append c |> ignore
         elif c = '\'' && current.Length > 0 then current.Append c |> ignore
         else flush ()
 
     flush ()
     tokens.ToArray()
+
+let private rawTokens = rawTokensBy isWordChar
 
 let private ngrams size (text: string) =
     let boundary (rune: Text.Rune) =
@@ -806,7 +808,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
 
     let readWord () =
         let start = i
-        while i < len && (isWordChar query.[i] || (query.[i] = '\'' && i > start)) do
+        while i < len && (BooleanWordChars.contains query.[i] || (query.[i] = '\'' && i > start)) do
             i <- i + 1
         let text = query.Substring(start, i - start).Trim('\'')
         tokenWith collation text
@@ -814,9 +816,9 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
     let phraseWords phrase =
         let words =
             match tokenizer with
-            | Words _ -> tokensWith tokenizer collation phrase
+            | Words _ -> rawTokensBy BooleanWordChars.contains phrase |> Array.map (tokenWith collation)
             | Ngrams size ->
-                rawTokens phrase
+                rawTokensBy BooleanWordChars.contains phrase
                 |> Array.collect (fun word ->
                     if runeLength word < size then [| tokenWith collation word |]
                     else tokensWith tokenizer collation word)
@@ -890,7 +892,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                         | Ngrams _ -> None
 
                     acc.Add(op, BPhrase(words, proximity))
-                elif isWordChar query.[i] then
+                elif BooleanWordChars.contains query.[i] then
                     let w = readWord ()
                     let prefix = i < len && query.[i] = '*'
                     if prefix then i <- i + 1

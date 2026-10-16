@@ -402,6 +402,21 @@ let tests =
               Expect.equal (search "中，") [ "2"; "3" ] "fullwidth and small comma tokens share a key"
               Expect.equal (search "中﹐") [ "2"; "3" ] "small comma finds both token forms"
 
+          testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE unicode_words(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO unicode_words VALUES(1,'中㉎文'),(2,'中①文'),(3,'中\u4DBC文'),(4,'中\u9FA6文')" |> ignore
+              let search term mode =
+                  let sql = $"SELECT id FROM unicode_words WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (search "中㉎" "IN NATURAL LANGUAGE MODE") [ "1" ] "ngram postings retain newer numeric symbols"
+              Expect.equal (search "中㉎" "IN BOOLEAN MODE") [] "Unicode 5 draft excludes U+324E from Boolean terms"
+              Expect.equal (search "\"中㉎\"" "IN BOOLEAN MODE") [] "quoted Boolean terms use the same boundary"
+              Expect.equal (search "中①" "IN BOOLEAN MODE") [ "2" ] "older circled digits remain Boolean terms"
+              Expect.equal (search "中\u4DBC" "IN BOOLEAN MODE") [] "later-assigned ideographs are not Boolean terms"
+              Expect.equal (search "中\u9FA6" "IN BOOLEAN MODE") [] "draft/final Unicode 5 exception is excluded"
+
           testCase "legacy Unicode ngrams share width-folded punctuation keys"
           <| fun _ ->
               let store = create ()

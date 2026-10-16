@@ -961,11 +961,9 @@ and assignments.
 | CJK | ngram and mecab parsers, WITH PARSER clause | ngram DDL, search modes, stopword and phrase boundaries, mutation, startup token sizes, and preserved postings across WAL/snapshot recovery are implemented; common metadata-only MODIFY/CHANGE column definitions also preserve historical postings ([recovery oracle](torture/findings/2026-10-07-ngram-startup-sizing.md)); [multi-column searches and relevance at startup sizes 1–10](torture/findings/2026-10-07-ngram-fulltext.md) match the audited default-collation MySQL corpus, including Unicode formatting and zero-width controls, combining-mark boundaries, decomposed and voiced kana, width and script variants, compatibility ideographs, ideographic variation selectors, CJK punctuation presentation forms, and numeric symbols, within score tolerance; [legacy `utf8mb4_unicode_ci` ideographic-comma equality and ngram membership](torture/findings/2026-10-15-legacy-ngram-punctuation.md) now match the audited MySQL cases, while exact legacy weight bytes, broader legacy-collation behavior, and MeCab remain open | medium (for CJK) | partial |
 
 The [Boolean query Unicode character-table gap](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md)
-remains open:
-MySQL 8.4's historical Unicode 5.0-draft lexer excludes many later-assigned
-letters and numbers that fsdb's current .NET-category lexer accepts. Natural
-and query-expansion indexing still find those characters. This is an open
-membership divergence for affected Boolean ngram searches.
+is closed for audited cases: Boolean word and phrase boundaries now use
+MySQL 8.4's historical Unicode 5.0-draft character set, while natural and
+query-expansion indexing continue to find later-assigned characters.
 
 The [legacy vertical-punctuation follow-up](torture/findings/2026-10-15-legacy-ngram-punctuation.md#vertical-punctuation-block-follow-up)
 also distinguishes all U+FE10–U+FE19 forms under `utf8mb4_unicode_ci` and

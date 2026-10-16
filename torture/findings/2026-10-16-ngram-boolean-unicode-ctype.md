@@ -25,7 +25,7 @@ query-expansion modes produced exactly two discrepancies, both the Boolean
 Unicode 3.2 found 85 that MySQL Boolean search excluded while fsdb accepted
 all 120. Natural and query-expansion searches still found their indexed rows.
 
-## Cause and bounded remedy
+## Cause and fix
 
 MySQL's `strings/my_uctype.cc` states that its character-type data was
 generated from `UnicodeData-5.0.0d9.txt`. Its multibyte classifier uses that
@@ -34,11 +34,12 @@ the public Unicode 5.0.0 `UnicodeData.txt` gives 48,108 versus 48,129 code
 points. The public final file has exactly 21 additional CJK ideographs,
 U+9FA6–U+9FBA; there are no code points present only in MySQL's table.
 
-A fix can generate compact Boolean word-character ranges from the public
-Unicode 5.0.0 data, exclude U+9FA6–U+9FBA, and use that predicate only in
-Boolean query lexing. It must leave ngram indexing and natural/query-expansion
-tokenization alone. The derived table should carry its Unicode provenance and
-be verified against targeted MySQL cases, including older circled digits,
-U+3248–U+324F, newer CJK ideographs, and the 21 draft/final exceptions.
-This investigation does not claim that every Boolean operator/phrase edge is
-covered by the sampled corpus.
+The Boolean lexer now uses compact ranges generated from the public Unicode
+5.0.0 data, excluding U+9FA6–U+9FBA. Ngram indexing and natural/query-expansion
+tokenization remain unchanged. The generator verifies the public file's hash
+and the expected 48,108-character set. An Expecto regression covers natural
+and Boolean modes, quoted terms, an older circled digit, a newer ideograph,
+and a draft/final exception. The full `just check` gate passed with 3,707 tests.
+
+This does not claim that every Boolean operator/phrase edge or collation is
+covered by the sampled corpus. MeCab remains separate.
