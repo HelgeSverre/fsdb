@@ -3317,6 +3317,26 @@ let tests =
                   | other -> failtestf "expected the bound name back, got %A" other
               | other -> failtestf "expected a parsed statement with 2 params, got %A" other
 
+          testCase "a bulk prepared INSERT binds thousands of parameters without growing the call stack"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let columns = [ 1 .. 20 ] |> List.map (sprintf "c%d")
+              let ddl = columns |> List.map (fun name -> name + " INT") |> String.concat ","
+              let session, created = handle session ("CREATE TABLE ps_bulk (" + ddl + ")")
+              Expect.equal created (Affected 0UL) "bulk table created"
+              let tuple = "(" + (List.replicate 20 "?" |> String.concat ",") + ")"
+              let sql = "INSERT INTO ps_bulk VALUES " + (List.replicate 150 tuple |> String.concat ",")
+              let ast, count =
+                  prepareStatementForSession session sql
+                  |> Result.defaultWith (fun error -> failtestf "bulk prepare failed: %A" error)
+              Expect.equal count 3000 "the prepared insert has all 3000 markers"
+              let prepared = createPreparedStatement session sql ast count
+              let session, inserted = executePrepared session prepared (List.replicate count (VInt 1L))
+              Expect.equal inserted (Affected 150UL) "all bulk rows inserted"
+              match handle session "SELECT COUNT(*),SUM(c20) FROM ps_bulk" |> snd with
+              | ResultSet(_, [ [ Some "150"; Some "150" ] ]) -> ()
+              | result -> failtestf "expected every last-column value, got %A" result
+
           testCase "prepared parameters are coerced to their inferred builtin argument types"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

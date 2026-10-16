@@ -779,25 +779,37 @@ let internal bindParameters source store registry schema schemaChanged refreshVa
                     Ok(VDecimal(Decimal.Parse(number.ToString("G29", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture)))
                 | _ -> Ok coerced
 
-    let rec bindAll parameterIndex bindings definitions types values bound =
-        match bindings, definitions, types, values with
-        | [], [], [], [] -> Ok(List.rev bound)
-        | binding :: bindings, definition :: definitions, expected :: types, value :: values ->
-            bind binding definition expected value
-            |> Result.bind (fun value ->
-                let expression =
-                    match binding, value, family expected with
-                    | Some(UnsignedIntegerOnly | ColumnAssignment), _, _ -> Lit value
-                    | _, _, (CalendarDate | ClockTime | CalendarTime)
-                        when value = VNull || family (metadataOfValue value) = family expected ->
-                        Cast(Lit value, parameterType expected)
-                    | _, VNull, _ | _, _, Integral _ when Set.contains parameterIndex analysis.ProjectedParameters ->
-                        Cast(Lit value, parameterType expected)
-                    | _ -> Lit value
-                bindAll (parameterIndex + 1) bindings definitions types values (expression :: bound))
-        | _ -> Error(1210, "Incorrect arguments to EXECUTE")
+    let bindings = List.toArray analysis.Bindings
+    let definitions = List.toArray analysis.Definitions
+    let typeArray = List.toArray types
+    let values = List.toArray actual
+    let bound = ResizeArray<Expr>(values.Length)
+    let mutable bindingError = None
 
-    bindAll 0 analysis.Bindings analysis.Definitions types actual []
+    if bindings.Length <> values.Length || definitions.Length <> values.Length || typeArray.Length <> values.Length then
+        bindingError <- Some(1210, "Incorrect arguments to EXECUTE")
+    else
+        for parameterIndex in 0 .. values.Length - 1 do
+            if bindingError.IsNone then
+                let binding = bindings[parameterIndex]
+                let expected = typeArray[parameterIndex]
+                match bind binding definitions[parameterIndex] expected values[parameterIndex] with
+                | Error error -> bindingError <- Some error
+                | Ok value ->
+                    let expression =
+                        match binding, value, family expected with
+                        | Some(UnsignedIntegerOnly | ColumnAssignment), _, _ -> Lit value
+                        | _, _, (CalendarDate | ClockTime | CalendarTime)
+                            when value = VNull || family (metadataOfValue value) = family expected ->
+                            Cast(Lit value, parameterType expected)
+                        | _, VNull, _ | _, _, Integral _ when Set.contains parameterIndex analysis.ProjectedParameters ->
+                            Cast(Lit value, parameterType expected)
+                        | _ -> Lit value
+                    bound.Add expression
+
+    (match bindingError with
+     | Some error -> Error error
+     | None -> Ok(List.ofSeq bound))
     |> Result.map (fun expressions ->
         { Types = { Context = original; Derived = types }
           Statement = statement
