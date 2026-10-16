@@ -6925,6 +6925,18 @@ let private checkGeometryKeyColumns (columns: ColumnDef list) (indexes: IndexDef
         |> Option.map Error
         |> Option.defaultValue (Ok())
 
+let private duplicatePlainIndexPart (parts: IndexColumn list) =
+    let rec find (seen: Set<string>) (remaining: IndexColumn list) =
+        match remaining with
+        | [] -> None
+        | part :: rest when part.Name <> "" && part.Transform.IsNone ->
+            let name = part.Name.ToLowerInvariant()
+            if Set.contains name seen then Some part.Name
+            else find (Set.add name seen) rest
+        | _ :: rest -> find seen rest
+
+    find Set.empty parts
+
 let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list) : Result<unit, StorageError> =
     let fullLength column =
         match column.Type with
@@ -6996,13 +7008,16 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
 
     indexes
     |> traverse (fun index ->
-        index.KeyColumns
-        |> traverse (partLength index)
-        |> Result.bind (fun lengths ->
-            if index.Kind = BTree && List.sum lengths > 3072 then
-                Error(ExpressionError(1071, "Specified key was too long; max key length is 3072 bytes"))
-            else
-                Ok()))
+        match duplicatePlainIndexPart index.KeyColumns with
+        | Some name -> Error(ExpressionError(1060, sprintf "Duplicate column name '%s'" name))
+        | None ->
+            index.KeyColumns
+            |> traverse (partLength index)
+            |> Result.bind (fun lengths ->
+                if index.Kind = BTree && List.sum lengths > 3072 then
+                    Error(ExpressionError(1071, "Specified key was too long; max key length is 3072 bytes"))
+                else
+                    Ok()))
     |> Result.map ignore
 
 /// Validate the FULLTEXT parser and its text-column compatibility.
@@ -7920,11 +7935,17 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
             checkVectorKeyColumns table.Columns [ ix ]
             |> Result.bind (fun () -> checkGeometryKeyColumns table.Columns [ ix ])
         | AddPrimaryKey cols ->
-            let names = cols |> List.map _.Name |> Set.ofList
-            let columns = table.Columns |> List.map (fun column -> if Set.contains column.Name names then { column with PrimaryKey = true } else column)
+            if table.Columns |> List.exists _.PrimaryKey then
+                Ok() // The action reports MySQL's multiple-primary-key error first.
+            else
+                match duplicatePlainIndexPart cols with
+                | Some name -> Error(ExpressionError(1060, sprintf "Duplicate column name '%s'" name))
+                | None ->
+                    let names = cols |> List.map _.Name |> Set.ofList
+                    let columns = table.Columns |> List.map (fun column -> if Set.contains column.Name names then { column with PrimaryKey = true } else column)
 
-            checkVectorKeyColumns columns []
-            |> Result.bind (fun () -> checkGeometryKeyColumns columns [])
+                    checkVectorKeyColumns columns []
+                    |> Result.bind (fun () -> checkGeometryKeyColumns columns [])
         | DropPrimaryKey -> Ok()
         | _ -> Ok()
 

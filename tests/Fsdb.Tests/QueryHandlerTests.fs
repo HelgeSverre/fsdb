@@ -2690,6 +2690,33 @@ let tests =
                   | ResultSet(_, [ [ _; _; _; _; defaultValue; _ ] ]) -> Expect.equal defaultValue (Some "rand()") "metadata excludes the DDL wrapper"
                   | result -> failtestf "expected the added column definition, got %A" result
 
+          testCase "duplicate plain index parts are rejected across DDL forms"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, created = handle session "CREATE TABLE duplicate_index_parts(a INT, b INT, KEY dup_a(a,a))"
+              Expect.equal created (Err(1060, "Duplicate column name 'a'")) "CREATE TABLE rejects a repeated key column"
+              let session, mixedCase = handle session "CREATE TABLE duplicate_case_parts(a INT, KEY ix(a,A))"
+              Expect.equal mixedCase (Err(1060, "Duplicate column name 'A'")) "key columns are case-insensitive"
+
+              let session, baseTable = handle session "CREATE TABLE duplicate_index_parts(a INT, b INT)"
+              Expect.equal baseTable (Affected 0UL) "the rejected definition left no table behind"
+
+              for sql in
+                  [ "CREATE INDEX dup_a ON duplicate_index_parts(a,a)"
+                    "ALTER TABLE duplicate_index_parts ADD KEY dup_a(a,a)"
+                    "ALTER TABLE duplicate_index_parts ADD UNIQUE KEY dup_a(a,a)"
+                    "ALTER TABLE duplicate_index_parts ADD PRIMARY KEY(a,a)" ] do
+                  let _, result = handle session sql
+                  Expect.equal result (Err(1060, "Duplicate column name 'a'")) sql
+
+              let _, mixed =
+                  handle session "CREATE TABLE mixed_index_parts(name VARCHAR(20), KEY ix_mixed(name,(LOWER(name))))"
+              Expect.equal mixed (Affected 0UL) "a column and its functional expression are distinct key parts"
+
+              let session, _ = handle session "CREATE TABLE existing_primary_part(a INT PRIMARY KEY, b INT)"
+              let _, existingPrimary = handle session "ALTER TABLE existing_primary_part ADD PRIMARY KEY(b,b)"
+              Expect.equal existingPrimary (Err(1068, "Multiple primary key defined")) "an existing primary key fails first"
+
           testCase "ALTER statement logging retains its warning before duplicate-column failure"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
