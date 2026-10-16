@@ -1392,6 +1392,14 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
             expression
 
     let rec classify seen (view: StoredView) (select: SelectStmt) =
+        let expressionQueries (body: SelectStmt) =
+            let queries = ResizeArray<SelectStmt>()
+            Expression.iterStatement
+                (fun expression ->
+                    Expression.subqueries expression |> List.iter queries.Add)
+                (Select { body with Ctes = [] })
+            List.ofSeq queries
+
         let sharedCteAliases =
             let sources = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
             let rec aliasesOf cteName = function
@@ -1402,7 +1410,10 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     @ (joins |> List.collect (_.Table >> aliasesOf cteName))
                 | FromSubquery(PlainSelect body, _) | FromLateral(PlainSelect body, _)
                     when body.Ctes.IsEmpty ->
-                    ((body.From |> Option.toList) @ (body.Joins |> List.map _.Table))
+                    (((body.From |> Option.toList) @ (body.Joins |> List.map _.Table))
+                     @ (expressionQueries body
+                        |> List.collect (fun query ->
+                            (query.From |> Option.toList) @ (query.Joins |> List.map _.Table))))
                     |> List.collect (aliasesOf cteName)
                 | _ -> []
             select.Ctes
@@ -1431,7 +1442,10 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     else
                         [])
             | FromLateral(PlainSelect body, _) ->
-                ((body.From |> Option.toList) @ (body.Joins |> List.map _.Table))
+                (((body.From |> Option.toList) @ (body.Joins |> List.map _.Table))
+                 @ (expressionQueries body
+                    |> List.collect (fun query ->
+                        (query.From |> Option.toList) @ (query.Joins |> List.map _.Table))))
                 |> List.collect wrappedDerivedSources
             | FromJoinGroup(first, joins) ->
                 wrappedDerivedSources first
