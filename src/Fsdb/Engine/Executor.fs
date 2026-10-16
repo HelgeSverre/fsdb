@@ -18247,22 +18247,37 @@ and private resolveGroupByRef (columnIndex: Map<string, int list>) (projections:
     | Col name -> resolveGroupOrHavingCol columnIndex projections name
     | _ -> Ok(resolvePositionalOrAlias projections expr)
 
-/// HAVING aliases may occur anywhere in the condition tree.
-and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: Projection list) (expr: Expr) : Result<Expr, EvalError> =
-    let sub = resolveHavingRef columnIndex projections
+/// HAVING aliases may occur anywhere in the condition tree, but an aggregate
+/// argument resolves a source column before an output alias of the same name.
+and private resolveHavingRef
+    (registry: Registry)
+    (columnIndex: Map<string, int list>)
+    (projections: Projection list)
+    (insideAggregate: bool)
+    (expr: Expr)
+    : Result<Expr, EvalError> =
+    let sub = resolveHavingRef registry columnIndex projections insideAggregate
 
     match expr with
     | Placeholder _ -> Ok expr
     | UserVariable _
     | SystemVariable _ -> Ok expr
     | MatchAgainst(cols, q, mode) -> sub q |> Result.map (fun q2 -> MatchAgainst(cols, q2, mode))
+    | Col name when insideAggregate ->
+        resolveGroupOrHavingCol columnIndex projections name
+        |> Result.bind (fun resolved ->
+            if containsAggregate registry resolved then Error(1111, "Invalid use of group function")
+            else Ok resolved)
     | Col name ->
         match projections |> List.tryPick (function
             | { Expression = projection; Alias = Some alias } when equalsIgnoreCase alias name -> Some projection
             | _ -> None) with
         | Some projection -> Ok projection
         | None -> resolveGroupOrHavingCol columnIndex projections name
-    | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
+    | FuncCall(name, args) ->
+        let resolveArgument =
+            resolveHavingRef registry columnIndex projections (insideAggregate || isAggregateFunctionName registry name)
+        args |> traverse resolveArgument |> Result.map (fun args' -> FuncCall(name, args'))
     | Row values -> values |> traverse sub |> Result.map Row
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
     | AssignUserVariable(name, value) -> sub value |> Result.map (fun value' -> AssignUserVariable(name, value'))
@@ -18871,7 +18886,7 @@ and private validateOnlyFullGroupBy
             |> traverse id
             |> Result.bind (fun _ ->
                 select.Having
-                |> Option.map (resolveHavingRef columnIndex select.Projections)
+                |> Option.map (resolveHavingRef registry columnIndex select.Projections false)
                 |> Option.defaultValue (Ok(Lit(VInt 1L)))
                 |> Result.bind (groupingError "HAVING clause" 1 groupExprs determined))
             |> Result.bind (fun _ ->
@@ -18962,7 +18977,7 @@ and private runGroupedSelect
     let ctxFor =
         if Map.isEmpty jsonViewSourceNames then baseCtxFor
         else fun row -> { baseCtxFor row with JsonViewSourceNames = jsonViewSourceNames }
-    let havingExpression = select.Having |> Option.map (resolveHavingRef columnIndex select.Projections)
+    let havingExpression = select.Having |> Option.map (resolveHavingRef registry columnIndex select.Projections false)
     let tryProjectedExpressionIndex expression =
         orderProjections |> List.tryFindIndex (fun projection -> projection.Expression = expression)
     let orderExpressions =
@@ -21853,7 +21868,7 @@ and private runSelect
     // `containsAggregate`/`GroupBy.IsEmpty` routing above) — so it's just
     // ANDed onto the same per-row `matches` check here.
     let matchesWhere = prepareWhereMatches ctxFor whereExpr
-    let havingExpression = select.Having |> Option.map (resolveHavingRef columnIndex projections)
+    let havingExpression = select.Having |> Option.map (resolveHavingRef registry columnIndex projections false)
     let constantHaving =
         havingExpression |> Option.bind (fun resolved -> resolved |> Result.toOption) |> Option.bind (fun expression ->
             let context = { ctxFor [||] with Clause = HavingClause }

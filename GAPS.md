@@ -844,6 +844,10 @@ write-grant denials. Broader join-source reorderings and layered
 authorization for those chains remain open. [Native MySQL 8.4.11 reports
 audited left- and right-outer-join views as non-updatable](torture/findings/2026-10-15-outer-join-view-updateability.md),
 even when the projection exposes only columns from the preserved side.
+[Grouped derived sources with a HAVING aggregate whose argument shares an
+output alias](torture/findings/2026-10-16-having-aggregate-shadow-view.md)
+now retain MySQL's source-column binding, view rows, and physical-target
+UPDATE behavior.
 
 Multi-component writes, outer-join view writes, and join-view DELETE/REPLACE
 are refused with MySQL-compatible errors for the audited shapes.
