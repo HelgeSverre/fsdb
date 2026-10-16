@@ -35,7 +35,7 @@ keeps the existing physical row-lock path for that shape.
 
 ## Nested and dependent read sources
 
-The native oracle now covers 26 writable layouts. A recursive CTE can feed a
+The native oracle now covers 29 writable layouts. A recursive CTE can feed a
 nested derived table or a joined derived source inside a dependent CTE. It can
 also be followed directly by a FROM-less dependent `LATERAL` projection or a
 `JSON_TABLE` whose input reads the recursive source's exposed column. MySQL
@@ -67,11 +67,12 @@ statement-local CTE rows.
 The direct `LATERAL` and `JSON_TABLE` forms previously failed with 1288 in
 fsdb because the view rewrite required every outer source to be a table
 reference before wrapping recursive bindings. It now admits companion sources
-that only depend on already bound columns. Subqueries inside companion
-expressions with their own local CTE scope, and a JSON_TABLE input with a
-subquery, still need a separate binding-scope audit before they can use this
-rewrite. MySQL also accepts a local CTE inside `LATERAL`; that form remains
-open in fsdb.
+that only depend on already bound columns. Non-shadowing local CTEs inside
+`LATERAL` now carry the outer recursive binding through one or two dependent
+layers. A volatile comparison against the outer source confirms that the
+nested wrapper shares the statement-local rowset. Local recursive or
+shadowing CTE scopes, UNION bodies, and a JSON_TABLE input with a subquery
+still need separate binding-scope audits.
 
 MySQL labels a recursive-only view `IS_UPDATABLE=YES` but rejects its UPDATE
 with 1288. FSDB rejects that UPDATE too and currently reports `NO`; this
