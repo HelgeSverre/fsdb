@@ -1626,6 +1626,9 @@ implementation effort:
    from MySQL past small data.
 
 2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements,
+   plus [ordered `LIMIT 1` UPDATE and DELETE re-selection after a contended
+   first candidate stops matching](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
+   with and without a secondary predicate index,
    plus audited joined UPDATE and DELETE statements with named physical targets,
    [audited single-table updatable-view UPDATE and DELETE statements and joined-view
    UPDATE statements with one writable physical target](torture/findings/2026-10-15-view-write-rebase.md),
