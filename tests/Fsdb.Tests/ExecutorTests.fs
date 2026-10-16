@@ -13662,6 +13662,21 @@ let tests =
 
                     Expect.isGreaterThan calls 0 "numeric comparison against text falls back to row evaluation"
 
+                testCase "correlated COUNT checks prefix collisions and uncovered equalities"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE count_outer (value VARBINARY(8), tenant INT, bucket INT)" |> ignore
+                    runDefault store "CREATE TABLE count_inner (value VARBINARY(8), tenant INT, bucket INT, KEY ix_value (value(2)), KEY ix_tenant_value (tenant, value))" |> ignore
+                    runDefault store "INSERT INTO count_outer VALUES (X'010203', 1, 1)" |> ignore
+                    runDefault store "INSERT INTO count_inner VALUES (X'010203', 1, 1), (X'010204', 1, 2)" |> ignore
+
+                    match runDefault store
+                        ("SELECT (SELECT COUNT(*) FROM count_inner i WHERE i.value = o.value), "
+                         + "(SELECT COUNT(*) FROM count_inner i WHERE i.tenant = o.tenant AND i.bucket = o.bucket) "
+                         + "FROM count_outer o") with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | other -> failtestf "prefix and uncovered equality counts must recheck rows, got %A" other
+
                 testCase "correlated derived sources use composite equality indexes"
                 <| fun _ ->
                     let mutable calls = 0
