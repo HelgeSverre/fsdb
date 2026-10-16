@@ -22,3 +22,23 @@ planar validity. Geographic polygons and collections containing polygons
 therefore retain the existing unsupported response until geodesic validity
 can be implemented and compared directly with MySQL. This change does not
 claim geographic polygon validity or a complete geographic topology model.
+
+## Polygon follow-up
+
+A fresh 1,000-quadrilateral probe (seed 4326, latitude in `[-85,85]`, longitude
+in `[-179,179]`) compared `ST_IsValid` for identical WKT at SRIDs 0 and 4326
+on MySQL 8.4.11. Planar and geographic results disagreed on 417 rows: 328
+were planar-invalid/geographic-valid, and 89 were planar-valid/geographic-invalid.
+Longitude span alone is not a sufficient classifier: 82 disagreements occurred
+among the 320 polygons whose sampled longitude span was below 180 degrees.
+
+For the same corpus, a separate diagnostic converted each vertex to a unit
+sphere and tested the two pairs of nonadjacent edges for intersection along
+their shorter great-circle arcs. That predicted MySQL geographic validity in
+999 of 1,000 cases. The remaining case has a 172.35-degree edge and MySQL
+returns invalid where the spherical test returns valid. The result supports
+geodesic self-intersection as the main missing rule, but the counterexample
+means a spherical shortcut is not yet an exact replacement for MySQL's
+geographic predicate. It needs ellipsoidal or otherwise oracle-matched edge
+handling, plus separate hole and multipolygon validation, before enabling
+geographic polygon `ST_IsValid` broadly.
