@@ -40,6 +40,9 @@ tokenization remain unchanged. The generator verifies the public file's hash
 and the expected 48,108-character set. An Expecto regression covers natural
 and Boolean modes, quoted terms, an older circled digit, a newer ideograph,
 and a draft/final exception. The full `just check` gate passed with 3,707 tests.
+The expanded 148-character differential corpus then matched MySQL on all 444
+queries at each of ngram token sizes 1, 2, and 10 (1,332 searches total),
+including Boolean membership and relevance.
 
 This does not claim that every Boolean operator/phrase edge or collation is
 covered by the sampled corpus. MeCab remains separate.
