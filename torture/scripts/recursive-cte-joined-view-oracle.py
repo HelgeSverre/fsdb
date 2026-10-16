@@ -3,6 +3,7 @@
 import pathlib
 import subprocess
 import tempfile
+import threading
 import time
 
 import pymysql
@@ -58,6 +59,26 @@ def main():
                         ("recursive_inferred",
                          "WITH RECURSIVE seq AS (SELECT 1 AS k UNION ALL SELECT k+1 FROM seq WHERE k<3) "
                          "SELECT t.id,t.n FROM seq JOIN target t ON t.id=seq.k"),
+                        ("recursive_dependent",
+                         f"{recursive}, doubled AS (SELECT k,k*2 AS v FROM seq) "
+                         "SELECT t.id,t.n FROM doubled d JOIN target t ON t.id=d.k"),
+                        ("recursive_grouped",
+                         f"{recursive}, grouped AS (SELECT k,COUNT(*) AS c FROM seq GROUP BY k) "
+                         "SELECT t.id,t.n FROM grouped g JOIN target t ON t.id=g.k"),
+                        ("recursive_repeated",
+                         f"{recursive} SELECT t.id,t.n FROM seq a JOIN seq b ON b.k=a.k "
+                         "JOIN target t ON t.id=a.k"),
+                        ("recursive_star",
+                         f"{recursive}, copied AS (SELECT * FROM seq) "
+                         "SELECT t.id,t.n FROM copied c JOIN target t ON t.id=c.k"),
+                        ("recursive_nested_star",
+                         f"{recursive}, copied AS (SELECT k FROM seq), again AS (SELECT * FROM copied) "
+                         "SELECT t.id,t.n FROM again a JOIN target t ON t.id=a.k"),
+                        ("recursive_shared_volatile",
+                         "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
+                         "SELECT k+1,r FROM seq WHERE k<3) "
+                         "SELECT t.id,t.n FROM seq a JOIN seq b ON b.k=a.k AND b.r=a.r "
+                         "JOIN target t ON t.id=a.k"),
                     ]
                     for index, (name, body) in enumerate(cases, start=1):
                         cursor.execute(f"CREATE VIEW {name} AS {body}")
@@ -94,7 +115,46 @@ def main():
                     except pymysql.MySQLError as error:
                         assert error.args[0] == 1288, error.args
 
-                    print(f"MySQL {version}: four recursive-source writes and two rejection cases match")
+                    waiter = connect(socket)
+                    waiter.select_db("probe")
+                    try:
+                        cursor.execute("UPDATE target SET n=0 WHERE id=2")
+                        cursor.execute("BEGIN")
+                        cursor.execute("UPDATE target SET n=n+1 WHERE id=2")
+                        started = threading.Event()
+                        finished = threading.Event()
+                        outcome = {}
+
+                        def waiting_update():
+                            try:
+                                with waiter.cursor() as waiting_cursor:
+                                    waiting_cursor.execute("BEGIN")
+                                    started.set()
+                                    waiting_cursor.execute(
+                                        "UPDATE recursive_dependent SET n=n+1 WHERE id=2"
+                                    )
+                                    outcome["affected"] = waiting_cursor.rowcount
+                                    waiting_cursor.execute("COMMIT")
+                            except Exception as error:
+                                outcome["error"] = error
+                            finally:
+                                finished.set()
+
+                        thread = threading.Thread(target=waiting_update, daemon=True)
+                        thread.start()
+                        assert started.wait(2), "recursive view writer did not start"
+                        assert not finished.wait(0.2), "recursive view writer did not wait"
+                        cursor.execute("COMMIT")
+                        assert finished.wait(5), "recursive view writer did not resume"
+                        thread.join()
+                        assert "error" not in outcome, outcome
+                        assert outcome["affected"] == 1, outcome
+                        cursor.execute("SELECT n FROM target WHERE id=2")
+                        assert cursor.fetchone() == (2,)
+                    finally:
+                        waiter.close()
+
+                    print(f"MySQL {version}: {len(cases)} recursive-source writes, two rejections, and a rebase match")
             finally:
                 if connection:
                     connection.close()

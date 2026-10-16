@@ -2293,6 +2293,35 @@ let tests =
               handle root "GRANT SELECT ON fsdb.tx_secure_view_lookup TO view_writer" |> ignore
               Expect.equal (handle writer sql |> snd) (Affected 1UL) "granted lookup read permits the update"
 
+          testCase "recursive CTE joined view updates wait and rebase on the physical row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_recursive_target(id INT PRIMARY KEY,n INT)" |> ignore
+              handle setup "INSERT INTO tx_recursive_target VALUES(1,0),(2,0),(3,0)" |> ignore
+              handle setup
+                  ("CREATE VIEW tx_recursive_view AS WITH RECURSIVE "
+                   + "seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3), "
+                   + "doubled AS (SELECT k,k*2 AS v FROM seq) "
+                   + "SELECT t.id,t.n FROM doubled d JOIN tx_recursive_target t ON t.id=d.k")
+              |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, ownerWrite = handle owner "UPDATE tx_recursive_target SET n=n+1 WHERE id=2"
+              Expect.equal ownerWrite (Affected 1UL) "owner updates the physical row"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_recursive_view SET n=n+1 WHERE id=2")
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "recursive view writer waits"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "recursive view writer resumes"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 1UL) "recursive view writer updates the rebased row"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "waiter commits"
+              match handle setup "SELECT n FROM tx_recursive_target WHERE id=2" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both recursive-view increments, got %A" result
+
           testCase "nested joined view updates wait for the physical target"
           <| fun _ ->
               for fromClause, assignment in
