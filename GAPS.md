@@ -182,6 +182,9 @@ strong observed reduction; otherwise the narrowest single index remains
 cheaper in the in-memory row store.
 Compatible `ORDER BY` suffixes continue streaming the same composite slice
 rather than sorting the narrowed rows again.
+[Indexed text ranges](torture/findings/2026-10-17-text-range-primary-boundaries.md)
+include every member of a folded collation equivalence class at their bounds,
+including `BETWEEN` and supported text-result functional indexes.
 
 Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership
