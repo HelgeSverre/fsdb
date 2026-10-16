@@ -193,8 +193,10 @@ Correlated equality probes use single keys, complete composite keys, or safe
 ordered left prefixes through direct tables and pass-through derived tables or
 CTEs. Materialized derived tables and stable CTEs build statement-local composite
 equality keys from their usable correlated predicates. Outer values and literals
-may bind different key parts. Numeric and matching-collation text ranges over
-materialized sources use statement-local ordered lookups. Numeric and
+may bind different key parts. [Exact byte equality](torture/findings/2026-10-16-correlated-materialized-byte-equality.md)
+now keys materialized `BINARY`, `VARBINARY`, and `BLOB` values while mixed
+byte/string probes retain their scan fallback. Numeric and matching-collation
+text ranges over materialized sources use statement-local ordered lookups. Numeric and
 matching-collation text `IN` lists bound to direct outer columns or literals
 reuse statement-local equality keys. [Multiple compatible materialized `IN`
 predicates](torture/findings/2026-10-15-correlated-materialized-in-intersection.md)
