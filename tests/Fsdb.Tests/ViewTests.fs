@@ -2185,6 +2185,20 @@ let tests =
                     recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
                     + "(WITH seq AS (SELECT s.k AS k) SELECT k AS lookup_key FROM seq) l ON TRUE "
                     + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "lateral_late_shadowed_local_cte",
+                    recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                    + "(WITH copied AS (SELECT k FROM seq WHERE k=s.k), "
+                    + "seq AS (SELECT s.k AS k) "
+                    + "SELECT copied.k AS lookup_key FROM copied JOIN seq ON seq.k=copied.k) l ON TRUE "
+                    + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "lateral_late_shadowed_volatile_cte",
+                    "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
+                    + "SELECT k+1,r FROM seq WHERE k<3) "
+                    + "SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                    + "(WITH copied AS (SELECT k FROM seq WHERE k=s.k AND r=s.r), "
+                    + "seq AS (SELECT s.k AS k) "
+                    + "SELECT copied.k AS lookup_key FROM copied JOIN seq ON seq.k=copied.k) l ON TRUE "
+                    + "JOIN recursive_target t ON t.id=l.lookup_key"
                     "json_after_seq",
                     recursive + " SELECT t.id,t.n FROM seq s JOIN "
                     + "JSON_TABLE(JSON_ARRAY(s.k),'$[*]' COLUMNS(k INT PATH '$')) j ON j.k=s.k "
@@ -2203,7 +2217,7 @@ let tests =
 
               Expect.equal
                   (rows store "SELECT n FROM recursive_target WHERE id=2")
-                  [ [ Some "52" ] ]
+                  [ [ Some "54" ] ]
                   "dependent, derived, lateral, JSON, and repeated recursive rows each update once"
 
               expectOk

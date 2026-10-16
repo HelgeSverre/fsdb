@@ -35,7 +35,7 @@ keeps the existing physical row-lock path for that shape.
 
 ## Nested and dependent read sources
 
-The native oracle now covers 32 writable layouts. A recursive CTE can feed a
+The native oracle now covers 34 writable layouts. A recursive CTE can feed a
 nested derived table or a joined derived source inside a dependent CTE. It can
 also be followed directly by a FROM-less dependent `LATERAL` projection or a
 `JSON_TABLE` whose input reads the recursive source's exposed column. MySQL
@@ -78,6 +78,11 @@ The oracle also confirms scalar recursive CTE re-reads inside a local CTE,
 including a volatile comparison, and a source-free local CTE that shadows the
 outer recursive name. Fsdb now keeps the local binding separate from the
 wrapped outer source while preserving the physical target's updateability.
+Two declaration-order cases put a `copied` CTE that reads the outer `seq`
+before a local `seq` shadows it. Both remain writable in MySQL. Fsdb now
+rewrites each CTE body using only the names visible at its declaration and
+groups the earlier outer re-read with the statement-local recursive rowset;
+the volatile `RAND()` case detects a second evaluation.
 
 MySQL labels a recursive-only view `IS_UPDATABLE=YES` but rejects its UPDATE
 with 1288. FSDB rejects that UPDATE too and currently reports `NO`; this

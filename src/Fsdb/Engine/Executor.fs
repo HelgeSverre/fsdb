@@ -1420,12 +1420,25 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                 | FromJoinGroup(first, joins) ->
                     aliasesOf cteName first
                     @ (joins |> List.collect (_.Table >> aliasesOf cteName))
-                | FromSubquery(PlainSelect body, _) | FromLateral(PlainSelect body, _)
-                    when body.Ctes
-                         |> List.forall (fun cte -> not (equalsIgnoreCase cte.CteName cteName)) ->
-                    (nestedQueries body |> List.collect sourcesOf)
-                    |> List.collect (aliasesOf cteName)
+                | FromSubquery(PlainSelect body, _) | FromLateral(PlainSelect body, _) ->
+                    aliasesInSelect cteName body
                 | _ -> []
+            and aliasesInSelect cteName body =
+                let localAliases, shadowed =
+                    (([], false), body.Ctes)
+                    ||> List.fold (fun (aliases, shadowed) cte ->
+                        let more =
+                            if shadowed then []
+                            else
+                                match cte.Body with
+                                | PlainSelect nested -> aliasesInSelect cteName nested
+                                | _ -> []
+                        aliases @ more, shadowed || equalsIgnoreCase cte.CteName cteName)
+                localAliases
+                @ (if shadowed then []
+                   else
+                       (sourcesOf body |> List.collect (aliasesOf cteName))
+                       @ (expressionQueries body |> List.collect (aliasesInSelect cteName)))
             select.Ctes
             |> List.collect (fun cte ->
                 let aliases =

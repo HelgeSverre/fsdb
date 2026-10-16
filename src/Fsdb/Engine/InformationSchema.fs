@@ -1868,18 +1868,38 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             let localNames =
                 body.Ctes
                 |> List.fold (fun names cte -> Map.remove (cte.CteName.ToLowerInvariant()) names) activeNames
-            let body =
-                if rewriteExpressions then Expression.rewriteSelectExpressions (replaceExpression localNames) body
+            let directExpressions =
+                if rewriteExpressions then
+                    // Nested FROM and CTE bodies have their own name scopes.
+                    Expression.rewriteSelectExpressions
+                        (replaceExpression localNames)
+                        { body with From = None; Joins = []; Ctes = [] }
                 else body
-            { body with
-                From = body.From |> Option.map (expand localNames false)
-                Joins = body.Joins |> List.map (fun join -> { join with Table = expand localNames false join.Table })
-                Ctes =
-                    body.Ctes
-                    |> List.map (fun cte ->
+            let ctes, _ =
+                body.Ctes
+                |> List.mapFold (fun visibleNames cte ->
+                    let expanded =
                         match cte.Body with
-                        | PlainSelect nested -> { cte with Body = PlainSelect(expandSelect localNames false nested) }
-                        | _ -> cte) }
+                        | PlainSelect nested -> { cte with Body = PlainSelect(expandSelect visibleNames true nested) }
+                        | _ -> cte
+                    expanded, Map.remove (cte.CteName.ToLowerInvariant()) visibleNames) activeNames
+            { body with
+                Projections = directExpressions.Projections
+                From = body.From |> Option.map (expand localNames false)
+                Joins =
+                    body.Joins
+                    |> List.map (fun join ->
+                        { join with
+                            Table = expand localNames false join.Table
+                            On = if rewriteExpressions then expandExpression localNames join.On else join.On })
+                Ctes = ctes
+                Where = directExpressions.Where
+                GroupBy = directExpressions.GroupBy
+                Windows = directExpressions.Windows
+                Having = directExpressions.Having
+                OrderBy = directExpressions.OrderBy
+                Limit = directExpressions.Limit
+                Offset = directExpressions.Offset }
 
         { select with
             From = select.From |> Option.map (expand namesByCte true)
