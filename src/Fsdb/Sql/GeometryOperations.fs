@@ -662,7 +662,7 @@ let internal geographicLinePolygonTopology referenceSystem lines polygons =
           Touches = true
           LineWithinPolygon = false }
     else
-        { Crosses = hasInterior && hasOutside
+        { Crosses = intersects && hasInterior && hasOutside
           Touches = intersects && not hasInterior
           LineWithinPolygon = hasInterior && not hasOutside }
 

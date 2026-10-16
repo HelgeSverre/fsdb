@@ -17688,6 +17688,16 @@ let tests =
                         | ResultSet(_, [ row ]) when row = expected -> ()
                         | result -> failtestf "expected MySQL geographic line-polygon topology for %s and %s, got %A" lineText polygonText result
 
+                testCase "geographic crossing requires an intersection at a near-hole edge"
+                <| fun _ ->
+                    let store = newStore ()
+                    let line = "ST_GeomFromText('LINESTRING(1.5 0.500000000000001,3.0 0.500000000000001)',4326)"
+                    let polygon = "ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0),(0.5 0.5,3.5 0.5,3.5 3.5,0.5 3.5,0.5 0.5))',4326)"
+                    let sql = sprintf "SELECT ST_Crosses(%s,%s),ST_Intersects(%s,%s)" line polygon line polygon
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "0"; Some "0" ] ]) -> ()
+                    | result -> failtestf "a geographic line must not cross without intersecting: %A" result
+
                 testCase "geographic polygon intersections distinguish overlap and holes"
                 <| fun _ ->
                     let store = newStore ()

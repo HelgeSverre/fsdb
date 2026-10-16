@@ -168,3 +168,25 @@ was reverted. This rules out coarse ring sampling as the sole cause on this
 corpus. A local coordinate exception would fit the sample but would not
 explain MySQL's overlay and relation behavior, so the point remains an
 explicit open spatial edge case.
+
+## Near-machine-precision hole-edge offsets
+
+A separate MySQL 8.4.11 probe placed `LINESTRING(1.5 y,3.0 y)` beside the
+`0.5`-longitude hole edge of
+`POLYGON((0 0,0 4,4 4,4 0,0 0),(0.5 0.5,3.5 0.5,3.5 3.5,0.5 3.5,0.5 0.5))`
+in SRID 4326. At `y=0.5`, both engines report touching. At
+`y=0.500000000000001` and `y=0.50000000000001`, MySQL reports
+`ST_Intersects=1` but neither crossing nor touching; fsdb reports no
+intersection. At `y=0.5000000000001` through `0.50000001`, both report
+disjointness. On the other side, MySQL reports intersection without `Within`
+at `y=0.499999999999999` and `0.49999999999999`, while fsdb reports `Within=1`.
+The engines agree on `Within=1` by `y=0.4999999999999`.
+
+Before the focused fix, fsdb also reported `ST_Crosses=1` and
+`ST_Intersects=0` at `y=0.500000000000001`. Crossing now requires a computed
+intersection, so that internal contradiction is gone. The finer MySQL
+boundary classifications still differ. MySQL's `ST_Distance` jumps from zero
+at the two closest positive offsets to about 1.2488642 metres at
+`y=0.5000000000001`; fsdb reports about 0.09504187 metres across those
+positive offsets. This is a floating-point/geographic strategy boundary,
+not evidence for applying a broad coordinate tolerance to topology.
