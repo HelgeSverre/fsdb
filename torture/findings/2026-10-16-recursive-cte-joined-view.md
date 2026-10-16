@@ -35,7 +35,7 @@ keeps the existing physical row-lock path for that shape.
 
 ## Nested and dependent read sources
 
-The native oracle now covers 15 writable layouts. A recursive CTE can feed a
+The native oracle now covers 17 writable layouts. A recursive CTE can feed a
 nested derived table or a joined derived source inside a dependent CTE. It can
 also be followed directly by a FROM-less dependent `LATERAL` projection or a
 `JSON_TABLE` whose input reads the recursive source's exposed column. MySQL
@@ -47,6 +47,13 @@ A further MySQL case puts an independent derived table inside the dependent
 exposed `s.k`, so the view remains writable. Fsdb now checks nested companion
 source trees for direct references to the moved CTE instead of requiring the
 lateral body to have no FROM clause.
+
+Two further `LATERAL` layouts re-read the outer recursive CTE inside the
+dependent body. MySQL keeps that view writable and uses one statement-local
+rowset for both references: comparing a projected `RAND()` value across the
+references still finds the target row. Fsdb now wraps the nested reference
+in the same CTE scope and shares its materialized rows across both sources.
+The regression checks metadata and one physical target update for each layout.
 
 The direct `LATERAL` and `JSON_TABLE` forms previously failed with 1288 in
 fsdb because the view rewrite required every outer source to be a table

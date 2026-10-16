@@ -1818,7 +1818,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             |> Option.map (fun names -> cte.CteName.ToLowerInvariant(), names))
 
     let wrapRecursiveSources namesByCte =
-        let expand = function
+        let rec expand = function
             | FromTable table as source
                 when table.Database.IsNone && Map.containsKey (table.Table.ToLowerInvariant()) namesByCte ->
                 let names = namesByCte.[table.Table.ToLowerInvariant()]
@@ -1842,7 +1842,22 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                       Offset = None
                       Locking = [] }
                 FromSubquery(PlainSelect wrapper, table.Alias |> Option.defaultValue table.Table)
+            | FromSubquery(PlainSelect body, alias) ->
+                FromSubquery(PlainSelect(expandSelect body), alias)
+            | FromLateral(PlainSelect body, alias) ->
+                FromLateral(PlainSelect(expandSelect body), alias)
+            | FromJoinGroup(first, joins) ->
+                FromJoinGroup(
+                    expand first,
+                    joins |> List.map (fun join -> { join with Table = expand join.Table })
+                )
             | source -> source
+
+        and expandSelect body =
+            { body with
+                From = body.From |> Option.map expand
+                Joins = body.Joins |> List.map (fun join -> { join with Table = expand join.Table }) }
+
         { select with
             From = select.From |> Option.map expand
             Joins = select.Joins |> List.map (fun join -> { join with Table = expand join.Table })
@@ -1879,8 +1894,32 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
              | _ -> false)
             (Select body)
 
+    let rec canWrapNestedSource = function
+        | FromTable table ->
+            table.Database.IsSome
+            || not (Set.contains (table.Table.ToLowerInvariant()) cteNames)
+            || Map.containsKey (table.Table.ToLowerInvariant()) recursiveNames
+        | FromJoinGroup(first, joins) ->
+            canWrapNestedSource first
+            && (joins |> List.forall (_.Table >> canWrapNestedSource))
+        | FromSubquery(PlainSelect body, _) | FromLateral(PlainSelect body, _) ->
+            canWrapNestedSelect body
+        | FromJsonTable(source, _, _, _) -> Expression.collectSubqueries source |> List.isEmpty
+        | _ -> false
+
+    and canWrapNestedSelect (body: SelectStmt) =
+        body.Ctes.IsEmpty
+        && (body.From |> Option.forall canWrapNestedSource)
+        && (body.Joins |> List.forall (_.Table >> canWrapNestedSource))
+        && not (Expression.statementExists
+            (function
+             | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _ -> true
+             | _ -> false)
+            (Select body))
+
     let recursiveCompanionSource = function
         | FromTable _ -> true
+        | FromLateral(PlainSelect body, _) -> canWrapNestedSelect body
         | FromLateral(body, _) -> not (queryNeedsCteScope body)
         | FromJsonTable(source, _, _, _) -> Expression.collectSubqueries source |> List.isEmpty
         | _ -> false

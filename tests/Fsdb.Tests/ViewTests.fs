@@ -2097,6 +2097,16 @@ let tests =
                     recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
                     + "(SELECT s.k AS lookup_key FROM (SELECT 1 AS marker) d) l ON TRUE "
                     + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "lateral_cte_reread",
+                    recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                    + "(SELECT k AS lookup_key FROM seq WHERE k=s.k) l ON TRUE "
+                    + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "lateral_volatile_reread",
+                    "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
+                    + "SELECT k+1,r FROM seq WHERE k<3) "
+                    + "SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                    + "(SELECT k AS lookup_key FROM seq WHERE k=s.k AND r=s.r) l ON TRUE "
+                    + "JOIN recursive_target t ON t.id=l.lookup_key"
                     "json_after_seq",
                     recursive + " SELECT t.id,t.n FROM seq s JOIN "
                     + "JSON_TABLE(JSON_ARRAY(s.k),'$[*]' COLUMNS(k INT PATH '$')) j ON j.k=s.k "
@@ -2115,7 +2125,7 @@ let tests =
 
               Expect.equal
                   (rows store "SELECT n FROM recursive_target WHERE id=2")
-                  [ [ Some "35" ] ]
+                  [ [ Some "37" ] ]
                   "dependent, derived, lateral, JSON, and repeated recursive rows each update once"
 
               expectOk

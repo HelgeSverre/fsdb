@@ -721,7 +721,7 @@ type private DecorrelatedKeyCounts =
 
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
-      SharedDerivedGroups: Dictionary<string, CteGroup * SelectOrUnion>
+      SharedDerivedGroups: Dictionary<string, (CteGroup * SelectOrUnion) list>
       SharedDerivedRows: Dictionary<CteGroup, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
       LiteralMemberships: Dictionary<Expr, EqualityMembership option>
@@ -740,7 +740,7 @@ type private StatementMemo =
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
 type private SharedViewCteScope =
-    { Aliases: Map<string, CteGroup * SelectOrUnion>
+    { Aliases: Map<string, (CteGroup * SelectOrUnion) list>
       mutable Pending: bool }
 
 let private statementMemo = System.Threading.AsyncLocal<StatementMemo>()
@@ -748,7 +748,7 @@ let private sharedViewCteScope = System.Threading.AsyncLocal<SharedViewCteScope 
 
 let private freshStatementMemo () =
     { FromSubqueries = Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
-      SharedDerivedGroups = Dictionary<string, CteGroup * SelectOrUnion>(System.StringComparer.OrdinalIgnoreCase)
+      SharedDerivedGroups = Dictionary<string, (CteGroup * SelectOrUnion) list>(System.StringComparer.OrdinalIgnoreCase)
       SharedDerivedRows = Dictionary<CteGroup, Result<ColumnDef list * Value[] list, QueryResult>>()
       ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
       LiteralMemberships = Dictionary<Expr, EqualityMembership option>(HashIdentity.Reference)
@@ -1078,7 +1078,7 @@ type private UpdatableView =
       InsertableTargets: Set<string * string * string>
       UpdateFrom: TableRef
       UpdateJoins: Join list
-      SharedCteAliases: Map<string, CteGroup * SelectOrUnion>
+      SharedCteAliases: Map<string, (CteGroup * SelectOrUnion) list>
       AuthorizationSources: (TableRef * Join list) option
       AccessPath: ViewAccess list
       ComponentAccessPaths: Map<ViewTargetKey, ViewAccess list>
@@ -1394,14 +1394,27 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
     let rec classify seen (view: StoredView) (select: SelectStmt) =
         let sharedCteAliases =
             let sources = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+            let rec aliasesOf cteName = function
+                | FromTable table when table.Database.IsNone && equalsIgnoreCase table.Table cteName ->
+                    [ table.Alias |> Option.defaultValue table.Table ]
+                | FromJoinGroup(first, joins) ->
+                    aliasesOf cteName first
+                    @ (joins |> List.collect (_.Table >> aliasesOf cteName))
+                | FromSubquery(PlainSelect body, _) | FromLateral(PlainSelect body, _)
+                    when body.Ctes.IsEmpty ->
+                    ((body.From |> Option.toList) @ (body.Joins |> List.map _.Table))
+                    |> List.collect (aliasesOf cteName)
+                | _ -> []
             select.Ctes
             |> List.collect (fun cte ->
                 let aliases =
-                    sources
-                    |> List.choose (function
-                        | FromTable table when table.Database.IsNone && equalsIgnoreCase table.Table cte.CteName ->
-                            Some(table.Alias |> Option.defaultValue table.Table)
-                        | _ -> None)
+                    if cte.Recursive then sources |> List.collect (aliasesOf cte.CteName)
+                    else
+                        sources
+                        |> List.choose (function
+                            | FromTable table when table.Database.IsNone && equalsIgnoreCase table.Table cte.CteName ->
+                                Some(table.Alias |> Option.defaultValue table.Table)
+                            | _ -> None)
                 if aliases.Length > 1 then
                     let group =
                         view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant(), cte.CteName.ToLowerInvariant()
@@ -1409,6 +1422,21 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                 else
                     [])
             |> Map.ofList
+        let rec wrappedDerivedSources = function
+            | FromSubquery(PlainSelect body as statement, alias) ->
+                (alias, statement)
+                :: (if body.Ctes.IsEmpty then
+                        ((body.From |> Option.toList) @ (body.Joins |> List.map _.Table))
+                        |> List.collect wrappedDerivedSources
+                    else
+                        [])
+            | FromLateral(PlainSelect body, _) ->
+                ((body.From |> Option.toList) @ (body.Joins |> List.map _.Table))
+                |> List.collect wrappedDerivedSources
+            | FromJoinGroup(first, joins) ->
+                wrappedDerivedSources first
+                @ (joins |> List.collect (_.Table >> wrappedDerivedSources))
+            | _ -> []
         let select =
             select
             |> InformationSchema.inlineReadOnlyViewCtes store.Catalog view.Schema
@@ -2217,13 +2245,13 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               UpdateJoins = updateJoins
                               SharedCteAliases =
                                 updateJoins
-                                |> List.choose (fun join ->
-                                    match join.Table with
-                                    | FromSubquery(body, alias) ->
-                                        sharedCteAliases
-                                        |> Map.tryFind (alias.ToLowerInvariant())
-                                        |> Option.map (fun group -> alias.ToLowerInvariant(), (group, body))
-                                    | _ -> None)
+                                |> List.collect (_.Table >> wrappedDerivedSources)
+                                |> List.choose (fun (alias, body) ->
+                                    sharedCteAliases
+                                    |> Map.tryFind (alias.ToLowerInvariant())
+                                    |> Option.map (fun group -> alias.ToLowerInvariant(), (group, body)))
+                                |> List.groupBy fst
+                                |> List.map (fun (alias, matches) -> alias, matches |> List.map snd)
                                 |> Map.ofList
                               AuthorizationSources = Some(authorizationFrom, authorizationJoins)
                               AccessPath =
@@ -10008,10 +10036,17 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
                 | Ok doc -> jsonTableRows doc path columns |> Result.map (fun rows -> definitions, rows))
     | FromSubquery(body, alias) ->
         let statement = currentStatementMemo ()
-        match statement.SharedDerivedGroups.TryGetValue alias with
-        | true, (group, expectedBody) when expectedBody = body ->
+        let sharedGroup =
+            match statement.SharedDerivedGroups.TryGetValue alias with
+            | true, candidates ->
+                candidates
+                |> List.tryPick (fun (group, expectedBody) ->
+                    if expectedBody = body then Some group else None)
+            | _ -> None
+        match sharedGroup with
+        | Some group ->
             getMemoized statement.SharedDerivedRows group (fun () -> resolveFromSubquery store registry dbName item None)
-        | _ ->
+        | None ->
             getMemoized statement.FromSubqueries item (fun () -> resolveFromSubquery store registry dbName item None)
 
 and private resolveFromItemWithOuter store registry dbName outer item =
