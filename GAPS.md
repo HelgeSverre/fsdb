@@ -1224,6 +1224,15 @@ routines, events, and administrative probes.
 
 ## 15. Differential-testing and performance tails
 
+The [Laravel application compatibility probe](torture/findings/2026-10-16-real-app-compatibility.md)
+ran migrations and selected feature tests from Reflow, Boatflow, Chatflow,
+Spamcalls, and Sysflow against isolated fsdb databases. It exposed a
+stack-overflowing prepared bulk-insert binder, now covered by a 3,000-marker
+regression. An overlapping three-app run also produced a 50-second metadata
+lock wait that still needs an isolated scheduler reproduction. The
+`crescat-website` migration stops at partial-index syntax rejected by both
+fsdb and MySQL 8.4.
+
 The [null-rejected OR join snapshot](benchmarks/results/2026-10-11-null-rejected-or-join.md)
 compares the indexed-union handoff with its prior revision on native servers.
 The focused fsdb query fell from about 4.63 ms to 0.18 ms at 1,000 users and
