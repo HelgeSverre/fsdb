@@ -6075,14 +6075,19 @@ let private trySecondaryOrderSliceInTable
                     let fullAfterEqual value = insertionIndex (entry value (RowId.create Int32.MaxValue))
                     let hasBounds = lower.IsSome || upper.IsSome
                     let prefixed = group.PrefixLength.IsSome
+                    let collation = table.Columns.[index].Collation |> Collation.findOrDefault
+                    let primaryBounds =
+                        prefixed
+                        || (match table.Columns.[index].Type with
+                            | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
+                                not collation.EqualityIsOrderEquivalence
+                            | _ -> false)
 
                     let comparePrimary left right =
                         let comparison =
                             match left, right with
                             | VString left, VString right ->
-                                table.Columns.[index].Collation
-                                |> Collation.findOrDefault
-                                |> fun collation -> collation.ComparePrimary left right
+                                collation.ComparePrimary left right
                             | _ -> Value.compare left right
 
                         if group.Direction = Desc then -comparison else comparison
@@ -6092,10 +6097,10 @@ let private trySecondaryOrderSliceInTable
                             comparePrimary entries.[current].Values.Head value)
 
                     let firstEqual value =
-                        if prefixed then primaryInsertionIndex FirstEqual value else fullFirstEqual value
+                        if primaryBounds then primaryInsertionIndex FirstEqual value else fullFirstEqual value
 
                     let afterEqual value =
-                        if prefixed then primaryInsertionIndex AfterEqual value else fullAfterEqual value
+                        if primaryBounds then primaryInsertionIndex AfterEqual value else fullAfterEqual value
 
                     let first, afterLast =
                         orderedSliceBounds
