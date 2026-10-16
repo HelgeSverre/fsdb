@@ -49,57 +49,64 @@ def main():
 
                 cases = 0
                 for indexed in (False, True):
-                    for verb in ("UPDATE", "DELETE"):
-                        waiter = connect(socket)
-                        try:
-                            with owner.cursor() as cursor:
-                                cursor.execute("DROP TABLE IF EXISTS target")
-                                index = ", KEY ix_n(n)" if indexed else ""
-                                cursor.execute(f"CREATE TABLE target(id INT PRIMARY KEY,n INT{index})")
-                                cursor.execute("INSERT INTO target VALUES(1,0),(2,0)")
-                                cursor.execute("BEGIN")
-                                cursor.execute("UPDATE target SET n=-1 WHERE id=1")
-                            with waiter.cursor() as cursor:
-                                cursor.execute("USE probe")
-                                cursor.execute("BEGIN")
+                    for scenario in ("predicate", "sort_key"):
+                        for verb in ("UPDATE", "DELETE"):
+                            waiter = connect(socket)
+                            try:
+                                with owner.cursor() as cursor:
+                                    cursor.execute("DROP TABLE IF EXISTS target")
+                                    index = ", KEY ix_n(n)" if indexed else ""
+                                    cursor.execute(f"CREATE TABLE target(id INT PRIMARY KEY,n INT{index})")
+                                    second_value = 0 if scenario == "predicate" else 1
+                                    cursor.execute(f"INSERT INTO target VALUES(1,0),(2,{second_value})")
+                                    cursor.execute("BEGIN")
+                                    owner_value = -1 if scenario == "predicate" else 2
+                                    cursor.execute(f"UPDATE target SET n={owner_value} WHERE id=1")
+                                with waiter.cursor() as cursor:
+                                    cursor.execute("USE probe")
+                                    cursor.execute("BEGIN")
 
-                            statement = (
-                                "UPDATE target SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 1"
-                                if verb == "UPDATE" else
-                                "DELETE FROM target WHERE n>=0 ORDER BY id LIMIT 1"
-                            )
-                            started = threading.Event()
-                            outcome = {}
+                                ordering = "id" if scenario == "predicate" else "n,id"
+                                action = (
+                                    "UPDATE target SET n=n+1" if scenario == "predicate" else
+                                    "UPDATE target SET n=n+10"
+                                ) if verb == "UPDATE" else "DELETE FROM target"
+                                statement = f"{action} WHERE n>=0 ORDER BY {ordering} LIMIT 1"
+                                started = threading.Event()
+                                outcome = {}
 
-                            def waiting_write():
-                                try:
-                                    with waiter.cursor() as cursor:
-                                        started.set()
-                                        cursor.execute(statement)
-                                        outcome["affected"] = cursor.rowcount
-                                        cursor.execute("COMMIT")
-                                except Exception as error:
-                                    outcome["error"] = error
+                                def waiting_write():
+                                    try:
+                                        with waiter.cursor() as cursor:
+                                            started.set()
+                                            cursor.execute(statement)
+                                            outcome["affected"] = cursor.rowcount
+                                            cursor.execute("COMMIT")
+                                    except Exception as error:
+                                        outcome["error"] = error
 
-                            thread = threading.Thread(target=waiting_write, daemon=True)
-                            thread.start()
-                            assert started.wait(2), statement
-                            thread.join(0.2)
-                            assert thread.is_alive(), (statement, "writer did not wait")
-                            with owner.cursor() as cursor:
-                                cursor.execute("COMMIT")
-                            thread.join(5)
-                            assert not thread.is_alive(), (statement, "writer did not resume")
-                            assert "error" not in outcome, outcome
-                            assert outcome["affected"] == 1, (statement, outcome)
-                            with owner.cursor() as cursor:
-                                cursor.execute("SELECT id,n FROM target ORDER BY id")
-                                actual = cursor.fetchall()
-                            expected = ((1, -1), (2, 1)) if verb == "UPDATE" else ((1, -1),)
-                            assert actual == expected, (statement, indexed, actual)
-                            cases += 1
-                        finally:
-                            waiter.close()
+                                thread = threading.Thread(target=waiting_write, daemon=True)
+                                thread.start()
+                                assert started.wait(2), statement
+                                thread.join(0.2)
+                                assert thread.is_alive(), (statement, "writer did not wait")
+                                with owner.cursor() as cursor:
+                                    cursor.execute("COMMIT")
+                                thread.join(5)
+                                assert not thread.is_alive(), (statement, "writer did not resume")
+                                assert "error" not in outcome, outcome
+                                assert outcome["affected"] == 1, (statement, outcome)
+                                with owner.cursor() as cursor:
+                                    cursor.execute("SELECT id,n FROM target ORDER BY id")
+                                    actual = cursor.fetchall()
+                                if scenario == "predicate":
+                                    expected = ((1, -1), (2, 1)) if verb == "UPDATE" else ((1, -1),)
+                                else:
+                                    expected = ((1, 2), (2, 11)) if verb == "UPDATE" else ((1, 2),)
+                                assert actual == expected, (statement, indexed, actual)
+                                cases += 1
+                            finally:
+                                waiter.close()
 
                 print(f"MySQL {version}: {cases} ordered LIMIT writes waited and reselected")
             finally:
