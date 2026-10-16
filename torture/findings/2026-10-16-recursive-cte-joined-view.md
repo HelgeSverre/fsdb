@@ -35,7 +35,7 @@ keeps the existing physical row-lock path for that shape.
 
 ## Nested and dependent read sources
 
-The native oracle now covers 34 writable layouts. A recursive CTE can feed a
+The native oracle now covers 36 writable layouts. A recursive CTE can feed a
 nested derived table or a joined derived source inside a dependent CTE. It can
 also be followed directly by a FROM-less dependent `LATERAL` projection or a
 `JSON_TABLE` whose input reads the recursive source's exposed column. MySQL
@@ -71,8 +71,8 @@ that only depend on already bound columns. Non-shadowing local CTEs inside
 `LATERAL` now carry the outer recursive binding through one or two dependent
 layers. A volatile comparison against the outer source confirms that the
 nested wrapper shares the statement-local rowset. Local recursive or
-complex shadowing CTE scopes and UNION bodies still need separate binding-scope
-audits. MySQL 8.4 rejects a JSON_TABLE input with a scalar subquery during
+complex shadowing CTE scopes and ordered or limited UNION bodies still need
+separate binding-scope audits. MySQL 8.4 rejects a JSON_TABLE input with a scalar subquery during
 view creation (1210), so that shape is not a writable-view parity target.
 The oracle also confirms scalar recursive CTE re-reads inside a local CTE,
 including a volatile comparison, and a source-free local CTE that shadows the
@@ -83,6 +83,12 @@ before a local `seq` shadows it. Both remain writable in MySQL. Fsdb now
 rewrites each CTE body using only the names visible at its declaration and
 groups the earlier outer re-read with the statement-local recursive rowset;
 the volatile `RAND()` case detects a second evaluation.
+Unordered `UNION ALL` and deduplicating `UNION` bodies inside a dependent
+local CTE also leave the physical target writable. Fsdb now wraps their
+branches in the outer recursive scope and discovers re-reads across both
+branches as one statement-local rowset. The deduplicating case compares a
+volatile value to catch independent CTE evaluation. Ordered or limited local
+UNION bodies still need a separate scope audit.
 
 MySQL labels a recursive-only view `IS_UPDATABLE=YES` but rejects its UPDATE
 with 1288. FSDB rejects that UPDATE too and currently reports `NO`; this

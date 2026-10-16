@@ -1410,7 +1410,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                    |> List.collect (fun cte ->
                        match cte.Body with
                        | PlainSelect nested -> nestedQueries nested
-                       | _ -> [])))
+                       | UnionSelect(first, rest, _, _, _) ->
+                           nestedQueries first @ (rest |> List.collect (snd >> nestedQueries)))))
 
         let sharedCteAliases =
             let sources = sourcesOf select
@@ -1432,7 +1433,9 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             else
                                 match cte.Body with
                                 | PlainSelect nested -> aliasesInSelect cteName nested
-                                | _ -> []
+                                | UnionSelect(first, rest, _, _, _) ->
+                                    aliasesInSelect cteName first
+                                    @ (rest |> List.collect (snd >> aliasesInSelect cteName))
                         aliases @ more, shadowed || equalsIgnoreCase cte.CteName cteName)
                 localAliases
                 @ (if shadowed then []
