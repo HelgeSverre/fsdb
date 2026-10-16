@@ -125,6 +125,39 @@ point containment. In case 76 MySQL returns invalid and fsdb valid; in case
 These remain open geographic validity findings; the 1,000-case validation
 sample described in the adjacent validity report did not include them.
 
+## Validity strategy follow-up
+
+The two validity differences come from the segment-intersection decision, not
+the new winding predicate. MySQL 8.4.11 calls Boost.Geometry `is_valid` with
+`strategy::intersection::geographic_segments<>` on geographic polygons. A
+standalone Boost 1.84 probe using the WGS 84 spheroid, counterclockwise rings,
+and MySQL's exact radian conversion reproduced MySQL's answers for both
+polygons. Using Boost's default degree-coordinate validity call instead
+incorrectly accepted case 76, so the explicit geographic strategy and stored
+coordinate representation matter here.
+
+For case 76, Boost's strategy reports an intersection between nonadjacent
+segments 0 and 2, near longitude 89.96° and latitude 2.38°. Fsdb's sampled
+arc test misses it. At nearby fractions, `ST_LineInterpolatePoint` on both
+MySQL and fsdb places segment 0 near latitude 2.42° and segment 2 near
+latitude 6.7° at longitude 90°. The interpolation functions agree with each
+other, but they do not explain Boost's validity decision for this long-edge
+case. For case 92, Boost reports the polygon valid; fsdb's sampled-arc test
+instead reports a crossing between adjacent segments 1 and 2.
+
+A candidate that replaced sampled crossings with opposite azimuth-side signs
+fixed the two examples but introduced 37 false invalid results among the same
+300 global rings. It was reverted. The next validity change needs the
+geographic intersection calculation and segment-range checks used by Boost,
+or a separately validated equivalent; side signs alone are insufficient.
+
+Source trail: MySQL [`is_valid.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/is_valid.cc)
+and [`is_valid_functor.h`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/is_valid_functor.h)
+select the strategy; Boost 1.84's
+[`intersection.hpp`](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp)
+uses the Sjöberg intersection calculation and then checks that the resulting
+point lies on both segments.
+
 Source trail: MySQL [`wkb.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/wkb.cc)
 and [`ring_flip_visitor.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/ring_flip_visitor.cc)
 perform correction; [`within.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/within.cc)
