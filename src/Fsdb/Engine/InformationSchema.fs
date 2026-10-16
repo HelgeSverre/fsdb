@@ -1818,7 +1818,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             |> Option.map (fun names -> cte.CteName.ToLowerInvariant(), names))
 
     let wrapRecursiveSources namesByCte =
-        let rec expand = function
+        let rec expand rewriteExpressions = function
             | FromTable table as source
                 when table.Database.IsNone && Map.containsKey (table.Table.ToLowerInvariant()) namesByCte ->
                 let names = namesByCte.[table.Table.ToLowerInvariant()]
@@ -1842,30 +1842,44 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                       Offset = None
                       Locking = [] }
                 FromSubquery(PlainSelect wrapper, table.Alias |> Option.defaultValue table.Table)
-            | FromSubquery(PlainSelect body, alias) ->
-                FromSubquery(PlainSelect(expandSelect body), alias)
+            | FromSubquery(PlainSelect body, alias) when body.Ctes.IsEmpty ->
+                FromSubquery(PlainSelect(expandSelect rewriteExpressions body), alias)
             | FromLateral(PlainSelect body, alias) ->
-                FromLateral(PlainSelect(expandSelect body), alias)
+                FromLateral(PlainSelect(expandSelect rewriteExpressions body), alias)
             | FromJoinGroup(first, joins) ->
                 FromJoinGroup(
-                    expand first,
-                    joins |> List.map (fun join -> { join with Table = expand join.Table })
+                    expand rewriteExpressions first,
+                    joins |> List.map (fun join -> { join with Table = expand rewriteExpressions join.Table })
                 )
             | source -> source
 
-        and expandSelect body =
+        and replaceExpression = function
+            | Subquery body -> Some(Subquery(expandSelect true body))
+            | Exists body -> Some(Exists(expandSelect true body))
+            | InSubquery(value, body) ->
+                Some(InSubquery(expandExpression value, expandSelect true body))
+            | QuantifiedComparison(value, operator, quantifier, body) ->
+                Some(QuantifiedComparison(expandExpression value, operator, quantifier, expandSelect true body))
+            | _ -> None
+
+        and expandExpression expression = Expression.rewriteTree replaceExpression expression
+
+        and expandSelect rewriteExpressions body =
+            let body =
+                if rewriteExpressions then Expression.rewriteSelectExpressions replaceExpression body
+                else body
             { body with
-                From = body.From |> Option.map expand
-                Joins = body.Joins |> List.map (fun join -> { join with Table = expand join.Table }) }
+                From = body.From |> Option.map (expand false)
+                Joins = body.Joins |> List.map (fun join -> { join with Table = expand false join.Table }) }
 
         { select with
-            From = select.From |> Option.map expand
-            Joins = select.Joins |> List.map (fun join -> { join with Table = expand join.Table })
+            From = select.From |> Option.map (expand true)
+            Joins = select.Joins |> List.map (fun join -> { join with Table = expand true join.Table })
             Ctes = [] }
 
-    // Wrapping a referenced recursive CTE moves its binding into the derived
-    // source. A lateral companion may still read the wrapper's exposed columns,
-    // but must not name the moved CTE in its own nested query scope.
+    // Wrapping a recursive CTE moves its binding into each derived source.
+    // Companion queries may read the exposed columns or re-read an inferable
+    // recursive binding, but local CTE scopes need a separate rewrite.
     let rec needsCteScope = function
         | FromTable table ->
             table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) cteNames
@@ -1914,7 +1928,11 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         body.Ctes.IsEmpty
         && (body.From |> Option.forall canWrapNestedSource)
         && (body.Joins |> List.forall (_.Table >> canWrapNestedSource))
-        && not (expressionSubqueriesNeedCteScope body)
+        && not (Expression.statementExists
+            (fun expression ->
+                Expression.subqueries expression
+                |> List.exists (canWrapNestedSelect >> not))
+            (Select body))
 
     let recursiveCompanionSource = function
         | FromTable _ -> true

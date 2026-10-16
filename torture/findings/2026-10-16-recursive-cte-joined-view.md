@@ -35,7 +35,7 @@ keeps the existing physical row-lock path for that shape.
 
 ## Nested and dependent read sources
 
-The native oracle now covers 21 writable layouts. A recursive CTE can feed a
+The native oracle now covers 26 writable layouts. A recursive CTE can feed a
 nested derived table or a joined derived source inside a dependent CTE. It can
 also be followed directly by a FROM-less dependent `LATERAL` projection or a
 `JSON_TABLE` whose input reads the recursive source's exposed column. MySQL
@@ -58,17 +58,20 @@ The regression checks metadata and one physical target update for each layout.
 A nested derived table inside the lateral body can also re-read the CTE. The
 ordinary and volatile-value versions both retain one shared rowset. A scalar
 or `EXISTS` subquery that only reads the already exposed outer alias is safe
-alongside the moved CTE scope, and MySQL marks that view writable. Fsdb now
-distinguishes that form from subqueries that directly name the moved CTE.
+alongside the moved CTE scope, and MySQL marks that view writable.
+CTE-dependent scalar, `EXISTS`, `IN`, and quantified-comparison expressions
+now get nested read-only wrappers that retain the moved binding. A projected
+volatile `RAND()` value verifies that a scalar re-read shares the outer source's
+statement-local CTE rows.
 
 The direct `LATERAL` and `JSON_TABLE` forms previously failed with 1288 in
 fsdb because the view rewrite required every outer source to be a table
 reference before wrapping recursive bindings. It now admits companion sources
 that only depend on already bound columns. Subqueries inside companion
-expressions that directly name the moved CTE, and a JSON_TABLE input with a
+expressions with their own local CTE scope, and a JSON_TABLE input with a
 subquery, still need a separate binding-scope audit before they can use this
-rewrite. MySQL also accepts a CTE-dependent scalar or `EXISTS` expression and
-a local CTE inside `LATERAL`; those forms remain open in fsdb.
+rewrite. MySQL also accepts a local CTE inside `LATERAL`; that form remains
+open in fsdb.
 
 MySQL labels a recursive-only view `IS_UPDATABLE=YES` but rejects its UPDATE
 with 1288. FSDB rejects that UPDATE too and currently reports `NO`; this
