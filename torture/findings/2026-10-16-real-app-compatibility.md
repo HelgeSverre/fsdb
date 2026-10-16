@@ -37,8 +37,8 @@ summary files on one fsdb process caused Reflow's first test to time out after
 suites completed after roughly 51–54 seconds. A fresh `SELECT 1` also waited
 until that interval ended. Reflow's invoice file then passed all 13 tests in
 9.3 seconds when rerun alone. The process remained alive. This observation
-needs an isolated multi-database reproduction before attributing a scheduler
-defect or estimating concurrent application throughput.
+prompted an isolated multi-database reproduction before attributing a
+scheduler defect or estimating concurrent application throughput.
 
 Follow-up on the same three-file overlap reproduced the problem: Reflow timed
 out on `RENAME TABLE permissions TO old_permissions` after 62.5 seconds,
@@ -58,11 +58,24 @@ sets `validateWholeSnapshot` and locks every database slot in the snapshot,
 even when the transaction changed only one database. Concurrent DDL takes the
 `mysql` metadata slot plus its target database slot. With several Laravel
 migration/test processes, these paths can therefore contend across otherwise
-independent databases. The dump establishes the wait sites, but does not yet
-prove a specific lock-order cycle or identify which qualified foreign key
-triggered whole-catalog validation. A focused regression should establish that
-trigger, compare independent-database progress against MySQL 8.4, and then
-narrow validation/locking without weakening cross-database referential checks.
+independent databases. The dump establishes the wait sites, but does not prove
+a specific lock-order cycle or identify which qualified foreign key triggered
+whole-catalog validation. The focused regression below tests the locking
+scope without depending on that exact cycle.
+
+A follow-up focused regression held the parent database slot of a qualified
+foreign key while inserting and committing in an unrelated third database.
+Before the change, both unrelated write paths waited for that slot. MySQL
+8.4.11 completed the corresponding unrelated insert in 7 ms while the parent
+table was locked. fsdb now limits qualified-foreign-key whole-catalog
+validation to writes involving the child or parent database and skips
+unchanged database slots when publishing transaction AUTO_INCREMENT advances.
+The focused regression and the full 3,707-test gate pass. With fresh isolated
+databases, the same three application files overlapped successfully: Reflow
+13 tests in 12.9 seconds, Chatflow 8 in 1.9 seconds, and Spamcalls 5 in 4.3
+seconds. These file durations overlap and are not an aggregate throughput
+benchmark. Broader concurrent workloads and cross-database foreign-key pairs
+still need dedicated scheduling measurements.
 
 The crescat-website migration is SQLite-specific: its `WHERE status =
 'pending' AND email_verified_at IS NULL` clause makes a partial unique index,

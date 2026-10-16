@@ -2601,7 +2601,7 @@ let private rollbackSession (session: Session) : Session =
     match session.Tx with
     | Some tx when not tx.Seeded -> Storage.releaseTransactionLocks tx.Snapshot
     | Some tx ->
-        Storage.bumpAutoIncrementsInto session.Store tx.Snapshot.Catalog
+        Storage.bumpAutoIncrementsIntoChanged session.Store tx.BaseCatalog tx.Snapshot.Catalog
         Storage.releaseTransactionLocks tx.Snapshot
     | None -> ()
 
@@ -2729,7 +2729,7 @@ let private completePreparedXa commit xid session =
     else
         match Storage.rollbackPreparedXa session.Store xid with
         | Some prepared ->
-            Storage.bumpAutoIncrementsInto session.Store prepared.Catalog
+            Storage.bumpAutoIncrementsIntoChanged session.Store prepared.BaseCatalog prepared.Catalog
             session, Affected 0UL
         | None -> session, xaUnknown
 
@@ -2749,7 +2749,7 @@ let private rollbackXa xid session =
         removeXaAssociation session xid
 
         if transaction.Seeded then
-            Storage.bumpAutoIncrementsInto session.Store transaction.Snapshot.Catalog
+            Storage.bumpAutoIncrementsIntoChanged session.Store transaction.BaseCatalog transaction.Snapshot.Catalog
 
         Storage.releaseTransactionLocks transaction.Snapshot
         removeTransactionView session
@@ -3512,7 +3512,8 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                 || Storage.requiresImmediateAutoIncrementPublication executed.Store)
         then
             executed.Tx
-            |> Option.iter (fun transaction -> Storage.bumpAutoIncrementsInto executed.Store transaction.Snapshot.Catalog)
+            |> Option.iter (fun transaction ->
+                Storage.bumpAutoIncrementsIntoChanged executed.Store transaction.BaseCatalog transaction.Snapshot.Catalog)
 
         executed, result
     | None -> execute session
