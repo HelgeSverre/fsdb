@@ -1047,6 +1047,67 @@ let tests =
 
               handle a "ROLLBACK" |> ignore
 
+          testCase "a qualified foreign key doesn't serialize writes to an unrelated database"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql in
+                  [ "CREATE DATABASE fk_parent_db"
+                    "CREATE DATABASE fk_child_db"
+                    "CREATE DATABASE fk_unrelated_db"
+                    "CREATE TABLE fk_parent_db.parent (id INT PRIMARY KEY)"
+                    "CREATE TABLE fk_child_db.child (parent_id INT, FOREIGN KEY (parent_id) REFERENCES fk_parent_db.parent (id))"
+                    "CREATE TABLE fk_unrelated_db.t (id INT PRIMARY KEY)"
+                    "INSERT INTO fk_parent_db.parent VALUES (1)" ] do
+                  match handle setup sql |> snd with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+
+              let parentSlot = store.Databases.["fk_parent_db"]
+              use entered = new Threading.ManualResetEventSlim(false)
+              use release = new Threading.ManualResetEventSlim(false)
+              let blocker =
+                  Threading.Tasks.Task.Run(fun () ->
+                      lock parentSlot (fun () ->
+                          entered.Set()
+                          release.Wait()))
+
+              Expect.isTrue (entered.Wait(TimeSpan.FromSeconds 1.0)) "the parent slot is held"
+              let writer =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle (create 2 store) "INSERT INTO fk_unrelated_db.t VALUES (1)" |> snd)
+
+              let completedWhileBlocked = writer.Wait(TimeSpan.FromSeconds 1.0)
+              let transaction =
+                  Threading.Tasks.Task.Run(fun () ->
+                      let session, _ = handle (create 3 store) "BEGIN"
+                      let session, inserted = handle session "INSERT INTO fk_unrelated_db.t VALUES (2)"
+                      let _, committed = handle session "COMMIT"
+                      inserted, committed)
+              let transactionCompletedWhileBlocked = transaction.Wait(TimeSpan.FromSeconds 1.0)
+              use childStarted = new Threading.ManualResetEventSlim(false)
+              let childWriter =
+                  Threading.Tasks.Task.Run(fun () ->
+                      childStarted.Set()
+                      handle (create 4 store) "INSERT INTO fk_child_db.child VALUES (1)" |> snd)
+              let childStartedWhileBlocked = childStarted.Wait(TimeSpan.FromSeconds 1.0)
+              let childCompletedWhileBlocked =
+                  try
+                      childStartedWhileBlocked && childWriter.Wait(TimeSpan.FromMilliseconds 100.0)
+                  finally
+                      release.Set()
+              Expect.isTrue (blocker.Wait(TimeSpan.FromSeconds 5.0)) "the blocker exits"
+              Expect.isTrue (writer.Wait(TimeSpan.FromSeconds 5.0)) "the writer exits"
+              Expect.isTrue (transaction.Wait(TimeSpan.FromSeconds 5.0)) "the transaction exits"
+              Expect.isTrue (childWriter.Wait(TimeSpan.FromSeconds 5.0)) "the child writer exits"
+              Expect.isTrue completedWhileBlocked "the unrelated write completes without the parent slot"
+              Expect.isTrue transactionCompletedWhileBlocked "the unrelated transaction commits without the parent slot"
+              Expect.isTrue childStartedWhileBlocked "the child write starts"
+              Expect.isFalse childCompletedWhileBlocked "the child write waits for the parent slot"
+              Expect.equal writer.Result (Affected 1UL) "the unrelated write succeeds"
+              Expect.equal transaction.Result (Affected 1UL, Affected 0UL) "the unrelated transaction succeeds"
+              Expect.equal childWriter.Result (Affected 1UL) "the child write succeeds after the parent slot releases"
+
           testCase "row locks in separate databases use separate namespaces"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
