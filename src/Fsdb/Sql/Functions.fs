@@ -5992,8 +5992,19 @@ let private geometryIsValidFn: Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] ->
-        let geometry = geometryArgument "ST_ISVALID" value |> requirePlanar "ST_ISVALID"
-        VInt(if geometryIsValidPlanar geometry then 1L else 0L)
+        let geometry = geometryArgument "ST_ISVALID" value
+        let referenceSystem = spatialReferenceSystem "ST_ISVALID" geometry.Srid
+
+        let valid =
+            if referenceSystem.SemiMajorAxis.IsSome then
+                match geographicValidity referenceSystem geometry with
+                | Some result -> result
+                | None ->
+                    requirePlanar "ST_ISVALID" geometry |> ignore
+                    false
+            else geometryIsValidPlanar geometry
+
+        VInt(if valid then 1L else 0L)
     | _ -> nativeParameterCountError "st_isvalid"
 
 let private pointCoordinateFn functionName select: Scalar =
