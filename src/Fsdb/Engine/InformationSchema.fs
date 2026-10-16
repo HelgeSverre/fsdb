@@ -1870,7 +1870,13 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                 else body
             { body with
                 From = body.From |> Option.map (expand false)
-                Joins = body.Joins |> List.map (fun join -> { join with Table = expand false join.Table }) }
+                Joins = body.Joins |> List.map (fun join -> { join with Table = expand false join.Table })
+                Ctes =
+                    body.Ctes
+                    |> List.map (fun cte ->
+                        match cte.Body with
+                        | PlainSelect nested -> { cte with Body = PlainSelect(expandSelect false nested) }
+                        | _ -> cte) }
 
         { select with
             From = select.From |> Option.map (expand true)
@@ -1879,7 +1885,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
 
     // Wrapping a recursive CTE moves its binding into each derived source.
     // Companion queries may read the exposed columns or re-read an inferable
-    // recursive binding, but local CTE scopes need a separate rewrite.
+    // recursive binding, including through non-shadowing local CTEs.
     let rec needsCteScope = function
         | FromTable table ->
             table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) cteNames
@@ -1925,7 +1931,13 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         | _ -> false
 
     and canWrapNestedSelect (body: SelectStmt) =
-        body.Ctes.IsEmpty
+        (body.Ctes
+         |> List.forall (fun cte ->
+             not cte.Recursive
+             && not (Set.contains (cte.CteName.ToLowerInvariant()) cteNames)
+             && (match cte.Body with
+                 | PlainSelect nested -> canWrapNestedSelect nested
+                 | _ -> false)))
         && (body.From |> Option.forall canWrapNestedSource)
         && (body.Joins |> List.forall (_.Table >> canWrapNestedSource))
         && not (Expression.statementExists

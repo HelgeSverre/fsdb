@@ -142,6 +142,24 @@ def main():
                          "(SELECT s.k AS lookup_key WHERE s.k = ANY "
                          "(SELECT k FROM seq WHERE k=s.k)) l ON TRUE "
                          "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_local_cte_reread",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH local_cte AS (SELECT k FROM seq WHERE k=s.k) "
+                         "SELECT k AS lookup_key FROM local_cte) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_local_cte_volatile_reread",
+                         "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
+                         "SELECT k+1,r FROM seq WHERE k<3) "
+                         "SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH local_cte AS (SELECT k FROM seq WHERE k=s.k AND r=s.r) "
+                         "SELECT k AS lookup_key FROM local_cte) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_two_local_ctes",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH local_cte AS (SELECT k FROM seq WHERE k=s.k), "
+                         "again AS (SELECT * FROM local_cte) "
+                         "SELECT k AS lookup_key FROM again) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
                         ("recursive_json_after_seq",
                          f"{recursive} SELECT t.id,t.n FROM seq s JOIN "
                          "JSON_TABLE(JSON_ARRAY(s.k),'$[*]' COLUMNS(k INT PATH '$')) j ON j.k=s.k "

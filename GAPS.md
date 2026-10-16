@@ -795,13 +795,14 @@ now also expand audited `SELECT *`, qualified-star, and mixed-star projections
 over independent physical or nested-derived read sources, including ordinary,
 `USING`, and `NATURAL` joins with their merged-column order and ownership.
 [Recursive and dependent CTE read sources](torture/findings/2026-10-16-recursive-cte-joined-view.md)
-also leave a joined physical component updatable in 26 audited layouts,
+also leave a joined physical component updatable in 29 audited layouts,
 including inferred and dependent-star column names, a parenthesized operand,
 aggregate and repeated recursive sources, nested derived CTE bodies, and
 direct dependent `LATERAL` and `JSON_TABLE` sources, including a nested
 derived source, shared recursive CTE re-reads through nested derived and
-expression subqueries, and independent scalar and `EXISTS` subqueries inside
-a lateral body; CHECK OPTION still rejects invalid target rows. An audited
+expression subqueries, independent scalar and `EXISTS` subqueries, and
+non-shadowing local CTE chains inside a lateral body; CHECK OPTION still
+rejects invalid target rows. An audited
 dependent-CTE UPDATE waits and rebases on its physical row under contention.
 Broader recursive compositions, layered security, and
 other concurrent write shapes remain open.

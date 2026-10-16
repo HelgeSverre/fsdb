@@ -1400,8 +1400,20 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                 (Select { body with Ctes = [] })
             List.ofSeq queries
 
+        let sourcesOf (body: SelectStmt) =
+            (body.From |> Option.toList) @ (body.Joins |> List.map _.Table)
+
+        let rec nestedQueries body =
+            body
+            :: (expressionQueries body
+                @ (body.Ctes
+                   |> List.collect (fun cte ->
+                       match cte.Body with
+                       | PlainSelect nested -> nestedQueries nested
+                       | _ -> [])))
+
         let sharedCteAliases =
-            let sources = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+            let sources = sourcesOf select
             let rec aliasesOf cteName = function
                 | FromTable table when table.Database.IsNone && equalsIgnoreCase table.Table cteName ->
                     [ table.Alias |> Option.defaultValue table.Table ]
@@ -1409,11 +1421,9 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     aliasesOf cteName first
                     @ (joins |> List.collect (_.Table >> aliasesOf cteName))
                 | FromSubquery(PlainSelect body, _) | FromLateral(PlainSelect body, _)
-                    when body.Ctes.IsEmpty ->
-                    (((body.From |> Option.toList) @ (body.Joins |> List.map _.Table))
-                     @ (expressionQueries body
-                        |> List.collect (fun query ->
-                            (query.From |> Option.toList) @ (query.Joins |> List.map _.Table))))
+                    when body.Ctes
+                         |> List.forall (fun cte -> not (equalsIgnoreCase cte.CteName cteName)) ->
+                    (nestedQueries body |> List.collect sourcesOf)
                     |> List.collect (aliasesOf cteName)
                 | _ -> []
             select.Ctes
@@ -1442,10 +1452,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     else
                         [])
             | FromLateral(PlainSelect body, _) ->
-                (((body.From |> Option.toList) @ (body.Joins |> List.map _.Table))
-                 @ (expressionQueries body
-                    |> List.collect (fun query ->
-                        (query.From |> Option.toList) @ (query.Joins |> List.map _.Table))))
+                (nestedQueries body |> List.collect sourcesOf)
                 |> List.collect wrappedDerivedSources
             | FromJoinGroup(first, joins) ->
                 wrappedDerivedSources first
