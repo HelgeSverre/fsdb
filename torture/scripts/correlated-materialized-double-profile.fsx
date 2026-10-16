@@ -33,3 +33,12 @@ for expression, bound in
     match connection.QueryValues(sql, []) with
     | Ok(_, rows) -> printfn "%s=%s: rows=%A residual_calls=%d" expression bound rows calls
     | Error error -> failwithf "%s=%s: %A" expression bound error
+
+calls <- 0
+let rangeSql =
+    "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM inner_rows) d "
+    + "WHERE TOUCH(d.id)=d.id AND d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0) "
+    + "FROM outer_bounds o ORDER BY o.id"
+match connection.QueryValues(rangeSql, []) with
+| Ok(_, rows) -> printfn "narrow DOUBLE range: rows=%A residual_calls=%d" rows calls
+| Error error -> failwithf "narrow DOUBLE range: %A" error

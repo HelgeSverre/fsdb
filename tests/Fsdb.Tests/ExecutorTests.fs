@@ -13096,6 +13096,30 @@ let tests =
                         if keyed then Expect.isLessThan calls 80 (predicate + " must bound residual work")
                         else Expect.isGreaterThan calls 1000 "string coercion must retain the scan"
 
+                    for predicate, expected in
+                        [ "d.k+0e0<o.x", [ 513; 1001; 0; 488; 500; 1001 ]
+                          "o.x>d.k+0e0", [ 513; 1001; 0; 488; 500; 1001 ]
+                          "d.k+0e0<=o.x", [ 514; 1001; 0; 489; 501; 1002 ]
+                          "d.k+0e0>o.d", [ 489; 2; 0; 514; 502; 1 ]
+                          "d.k+0e0>=o.i", [ 490; 2; 0; 514; 503; 2 ]
+                          "d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0", [ 3; 0; 0; 3; 2; 1 ]
+                          "d.k+0e0<o.s", [ 513; 1001; 0; 488; 500; 1001 ]
+                          "d.k+0e0<o.x OR d.id=999", [ 514; 1001; 1; 489; 501; 1001 ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                            + "FROM double_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual (expected |> List.map Some) predicate
+                        | other -> failtestf "expected materialized DOUBLE range matches for %s, got %A" predicate other
+                        if predicate = "d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0" then
+                            Expect.isLessThan calls 80 "narrow DOUBLE range must bound residual work"
+                        if predicate = "d.k+0e0<o.s" then
+                            Expect.isGreaterThan calls 1000 "string-coerced DOUBLE range must retain the scan"
+
                     match runDefault store
                         ("SELECT x=i,x+0e0=i,9007199254740992e0=i,"
                          + "9007199254740992e0+0e0=i FROM double_bounds WHERE id=6") with

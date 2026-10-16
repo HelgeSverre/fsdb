@@ -731,6 +731,7 @@ type private StatementMemo =
       MaterializedCorrelatedIntegerExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedDecimalExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedDoubleExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
+      MaterializedCorrelatedDoubleRanges: Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>
       MaterializedCorrelatedTextExpressions: Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
@@ -761,6 +762,8 @@ let private freshStatementMemo () =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedDoubleExpressions =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+      MaterializedCorrelatedDoubleRanges =
+        Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedTextExpressions =
         Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedRanges =
@@ -15878,6 +15881,13 @@ and private tryMaterializedCorrelatedLookup
                     | _ -> None)
                 |> intersectSharedRows
 
+            let finiteNumericDouble = function
+                | VDouble number when System.Double.IsFinite number -> Some number
+                | VInt _ | VUInt _ | VDecimal _ | VBit _ as value ->
+                    let number = Value.toDouble value
+                    if System.Double.IsFinite number then Some number else None
+                | _ -> None
+
             // Numeric bounds compare with a DOUBLE result in the approximate
             // domain, including exact values that round to the same double.
             // Text bounds retain the scan because their coercion is broader.
@@ -15885,10 +15895,10 @@ and private tryMaterializedCorrelatedLookup
                 let doubleKey = function
                     | VDouble number when System.Double.IsFinite number -> Some(VDouble number)
                     | _ -> None
-                let probeKey = function
+                let probeKey value =
+                    match value with
                     | VInt _ | VUInt _ | VDecimal _ | VBit _ as value ->
-                        let number = Value.toDouble value
-                        if System.Double.IsFinite number then Some(VDouble number) else None
+                        finiteNumericDouble value |> Option.map VDouble
                     | value -> doubleKey value
 
                 let doubleLookup expression =
@@ -15916,6 +15926,83 @@ and private tryMaterializedCorrelatedLookup
                     | BinOp(Eq, left, right) ->
                         candidate left right |> Option.orElseWith (fun () -> candidate right left)
                     | _ -> None)
+                |> intersectSharedRows
+
+            let doubleRangeCandidates predicate =
+                let rangeLookup expression =
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedDoubleRanges source (fun () ->
+                            Dictionary<Expr, MaterializedRangeLookup option>(HashIdentity.Reference))
+
+                    getMemoized lookups expression (fun () ->
+                        let buckets = Dictionary<double, ResizeArray<Value[]>>()
+                        let mutable compatible = true
+                        for row in rows do
+                            if compatible then
+                                match evalExpr (rowContext row) expression with
+                                | Ok VNull -> ()
+                                | Ok(VDouble number) when System.Double.IsFinite number ->
+                                    match buckets.TryGetValue number with
+                                    | true, matches -> matches.Add row
+                                    | _ -> buckets.[number] <- ResizeArray [ row ]
+                                | _ -> compatible <- false
+
+                        if not compatible then None
+                        else
+                            let sorted = buckets |> Seq.map (fun pair -> pair.Key, pair.Value) |> Seq.sortBy fst |> Seq.toArray
+                            Some(fun lower upper ->
+                                let convert = function
+                                    | None -> Some None
+                                    | Some(VNull, _) -> None
+                                    | Some(value, inclusive) -> finiteNumericDouble value |> Option.map (fun number -> Some(number, inclusive))
+
+                                let isNullBound = function Some(VNull, _) -> true | _ -> false
+                                match convert lower, convert upper with
+                                | _ when isNullBound lower || isNullBound upper -> Some []
+                                | Some lower, Some upper ->
+                                    let within number =
+                                        let aboveLower =
+                                            match lower with
+                                            | None -> true
+                                            | Some(bound, inclusive) -> number > bound || (inclusive && number = bound)
+                                        let belowUpper =
+                                            match upper with
+                                            | None -> true
+                                            | Some(bound, inclusive) -> number < bound || (inclusive && number = bound)
+                                        aboveLower && belowUpper
+                                    let first =
+                                        let mutable lo, hi = 0, sorted.Length
+                                        while lo < hi do
+                                            let middle = lo + (hi - lo) / 2
+                                            let number = fst sorted.[middle]
+                                            let before =
+                                                match lower with
+                                                | None -> false
+                                                | Some(bound, inclusive) -> number < bound || (not inclusive && number = bound)
+                                            if before then lo <- middle + 1 else hi <- middle
+                                        lo
+                                    let mutable index = first
+                                    let selected = ResizeArray<Value[]>()
+                                    while index < sorted.Length && within (fst sorted.[index]) do
+                                        selected.AddRange(snd sorted.[index])
+                                        index <- index + 1
+                                    Some(List.ofSeq selected)
+                                | _ -> None))
+
+                let indexed expression =
+                    if rowLocalExpression expression then Some expression else None
+                let bound expression =
+                    tryCorrelatedProbeValue probeSource context expression
+                    |> Option.map (fun value -> expression, value)
+
+                predicate
+                |> optionalConjuncts
+                |> List.collect (rangePredicatesFor indexed bound)
+                |> List.choose (fun range ->
+                    rangeLookup range.Column
+                    |> Option.bind (fun lookup ->
+                        let value = Option.map (fun ((_, value), inclusive) -> value, inclusive)
+                        lookup (value range.Lower) (value range.Upper)))
                 |> intersectSharedRows
 
             // The evaluated text expression is a statement-local key over a
@@ -16143,6 +16230,7 @@ and private tryMaterializedCorrelatedLookup
                       integerExpressionCandidates (Some branch)
                       decimalExpressionCandidates (Some branch)
                       doubleExpressionCandidates (Some branch)
+                      doubleRangeCandidates (Some branch)
                       textExpressionCandidates (Some branch)
                       absoluteCandidates (Some branch)
                       affineCandidates (Some branch)
@@ -16167,6 +16255,7 @@ and private tryMaterializedCorrelatedLookup
               integerExpressionCandidates whereExpr
               decimalExpressionCandidates whereExpr
               doubleExpressionCandidates whereExpr
+              doubleRangeCandidates whereExpr
               textExpressionCandidates whereExpr
               absoluteCandidates whereExpr
               affineCandidates whereExpr

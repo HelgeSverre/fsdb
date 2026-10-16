@@ -27,7 +27,13 @@ let private callAgg (name: string) (args: Value list) : Value =
 let tests =
     testList
         "Value"
-        [ testCase "temporal arithmetic uses complete exact numeric fields"
+        [ testCase "decimal to DOUBLE rounds halfway values once"
+          <| fun _ ->
+              Expect.equal (toDouble (VDecimal 9007199254740993.00M)) 9007199254740992.0 "halfway rounds to even"
+              Expect.equal (toDouble (VDecimal 9007199254740994.00M)) 9007199254740994.0 "representable neighbor"
+              Expect.equal (toDouble (VDecimal -9007199254740993.00M)) -9007199254740992.0 "negative halfway rounds to even"
+
+          testCase "temporal arithmetic uses complete exact numeric fields"
           <| fun _ ->
               let date = VDate(DateOnly(2020, 1, 1))
               let timestamp = DateTime(2020, 1, 2, 3, 4, 5).AddTicks(1234560L)

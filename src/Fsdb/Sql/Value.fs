@@ -1712,7 +1712,9 @@ let toDouble (v: Value) : float =
     | VBit(_, value) -> float value
     | VBinaryLiteral bytes -> float (binaryLiteralNumber bytes)
     | VDouble d -> d
-    | VDecimal d -> float d
+    // The CLR decimal cast can double-round halfway values above 2^53.
+    // Parsing the exact decimal digits gives the correctly rounded binary64.
+    | VDecimal d -> Double.Parse(d.ToString("G29", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture)
     | VString s -> parseLeadingNumeric s
     | TemporalNumber number ->
         // Decimal-to-double conversion can round twice for fourteen-digit temporal fields.
