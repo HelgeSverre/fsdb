@@ -10278,6 +10278,13 @@ let tests =
                     Expect.equal bitPlan.AccessType (Some "const") "unique BIT ABS access"
                     Expect.equal bitPlan.Key (Some "uq_abs_bit") "BIT ABS key"
 
+                    runDefault store "CREATE TABLE wide_bits (id INT PRIMARY KEY, value BIT(64), UNIQUE INDEX uq_abs_wide ((ABS(value))))" |> ignore
+                    runDefault store "INSERT INTO wide_bits VALUES (1, 9007199254740993)" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM wide_bits WHERE ABS(value) = 9.007199254740992e15")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "a rounded DOUBLE bound must not narrow to one exact BIT key"
+
                     Expect.equal
                         (runDefault store "UPDATE magnitudes SET signed_value = -9 WHERE ABS(signed_value) = 7")
                         (Affected 1UL)
