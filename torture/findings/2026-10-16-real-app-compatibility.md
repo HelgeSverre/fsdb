@@ -70,7 +70,9 @@ Before the change, both unrelated write paths waited for that slot. MySQL
 table was locked. fsdb now limits qualified-foreign-key whole-catalog
 validation to writes involving the child or parent database and skips
 unchanged database slots when publishing transaction AUTO_INCREMENT advances.
-The focused regression and the full 3,707-test gate pass. With fresh isolated
+The focused regression also confirms that a child write still waits while the
+parent database slot is held, while unrelated writes and commits finish. The
+full 3,707-test gate passes. With fresh isolated
 databases, the same three application files overlapped successfully: Reflow
 13 tests in 12.9 seconds, Chatflow 8 in 1.9 seconds, and Spamcalls 5 in 4.3
 seconds. These file durations overlap and are not an aggregate throughput
