@@ -340,6 +340,9 @@ functional-equality profile](torture/findings/2026-10-15-correlated-materialized
 now shows six residual calls for both an exposed-column equality and its
 supported signed-integer `ABS` form. [A statement-local integer-expression key](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-integer-expression-lookup)
 reduces `ABS(d.k)+0=o.x` from 4,004 to six calls on the same profile.
+[Exact integer `COALESCE` and `IFNULL` expressions](torture/findings/2026-10-16-correlated-integer-fallback-lookup.md)
+also reuse that key over stable materialized rows, including NULL fallback
+and multi-argument `COALESCE`; the audited profile uses six residual calls.
 The [matched in-memory timing](benchmarks/results/2026-10-15-materialized-integer-expression-lookup.md)
 confirms a repeated-query speedup for this shape. [Text expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-text-expression-lookup)
 use the effective comparison collation and reduce the audited `LOWER(d.k)=o.x`

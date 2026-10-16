@@ -41,4 +41,7 @@ let probe predicate =
 probe "d.k"
 probe "ABS(d.k)"
 probe "ABS(d.k)+0"
+probe "COALESCE(d.k,0)"
+probe "IFNULL(d.k,0)"
+probe "COALESCE(d.k,NULL,0)"
 (connection :> System.IDisposable).Dispose()
