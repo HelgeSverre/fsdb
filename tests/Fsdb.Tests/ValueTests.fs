@@ -988,7 +988,7 @@ let tests =
                     Expect.equal (call "ST_Distance" [ geographicPolygon; geographicLine ]) (VDouble 0.0) "a line on a geographic polygon has zero distance"
                     expectError 1235 (fun () -> call "ST_Envelope" [ geographic ])
                     Expect.equal (call "ST_IsValid" [ geographic ]) (VInt 1L) "geographic point is valid"
-                    expectError 1235 (fun () -> call "ST_IsValid" [ geographicPolygon ])
+                    Expect.equal (call "ST_IsValid" [ geographicPolygon ]) (VInt 1L) "simple geographic triangle is valid"
 
                 testCase "geographic points use WGS 84 axes, domains, and linear units"
                 <| fun _ ->
@@ -1169,6 +1169,34 @@ let tests =
                         (valid "GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(0 0,0 0))")
                         (VInt 0L)
                         "invalid linear collection member"
+
+                testCase "ST_IsValid uses geodesic crossings for simple geographic polygons"
+                <| fun _ ->
+                    let valid text =
+                        call "ST_IsValid" [ call "ST_GeomFromText" [ VString text; VInt 4326L ] ]
+                    Expect.equal (valid "POLYGON((0 0,0 2,2 2,2 0,0 0))") (VInt 1L) "simple square"
+                    Expect.equal (valid "POLYGON((0 0,2 2,0 2,2 0,0 0))") (VInt 0L) "crossed ring"
+                    Expect.equal (valid "POLYGON((0 179,1 -179,2 179,0 179))") (VInt 1L) "antimeridian triangle"
+                    Expect.equal (valid "POLYGON((0 0,0 2,0 2,2 2,2 0,0 0))") (VInt 1L) "adjacent duplicate vertex"
+                    Expect.equal (valid "POLYGON((0 0,0 2,2 2,0 2,2 0,0 0))") (VInt 0L) "nonadjacent duplicate vertex"
+                    Expect.equal (valid "POLYGON((0 0,0 2,0 1,2 0,0 0))") (VInt 0L) "adjacent edges must not backtrack"
+                    Expect.equal (valid "POLYGON((0 0,1 1,2 2,0 0))") (VInt 1L) "collinear ring"
+                    Expect.equal
+                        (valid "POLYGON((-61.89917942 -72.77188666,-2.52611056 -49.81594459,-2.21090959 136.19729698,-36.61698428 -114.44363263,-61.89917942 -72.77188666))")
+                        (VInt 0L)
+                        "ellipsoidal crossing near a long edge"
+                    Expect.equal
+                        (valid "GEOMETRYCOLLECTION(POINT(0 0),POLYGON((0 0,0 2,2 0,0 0)))")
+                        (VInt 1L)
+                        "collection of supported shapes"
+                    for unsupported in
+                        [ "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,2 1,1 2,1 1))"
+                          "MULTIPOLYGON(((0 0,0 2,2 0,0 0)))" ] do
+                        try
+                            valid unsupported |> ignore
+                            failtest "geographic holes and multipolygons remain unsupported"
+                        with
+                        | Fsdb.Functions.SqlError(1235, _) -> ()
 
                 testCase "geometry validity rejects malformed in-memory component shapes"
                 <| fun _ ->

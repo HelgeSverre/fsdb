@@ -474,6 +474,63 @@ let private geographicSegmentsProperlyCross referenceSystem (firstStart, firstEn
                 not (nearEndpoint intersection firstStart || nearEndpoint intersection firstEnd
                      || nearEndpoint intersection secondStart || nearEndpoint intersection secondEnd))))
 
+let private geographicSimpleRingIsValid referenceSystem ring =
+    // A zero-length edge between equal neighbors is allowed; remove it before
+    // deciding which remaining edges are adjacent.
+    let ring =
+        ring
+        |> List.fold (fun points point ->
+            match points with
+            | previous :: _ when previous = point -> points
+            | _ -> point :: points) []
+        |> List.rev
+    let vertices = ring |> List.take (max 0 (List.length ring - 1))
+    if List.length ring < 4
+       || List.head ring <> List.last ring
+       || (vertices |> Seq.distinct |> Seq.truncate 3 |> Seq.length) < 3 then
+        false
+    else
+        let segments = ring |> List.pairwise |> List.toArray
+        let last = segments.Length - 1
+        let pointPosition point (start, endpoint) =
+            geographicPointLinePosition referenceSystem point [ [ start; endpoint ] ]
+        let invalidPair firstIndex secondIndex =
+            let (a, b) as first = segments.[firstIndex]
+            let (c, d) as second = segments.[secondIndex]
+            let adjacent = secondIndex = firstIndex + 1 || (firstIndex = 0 && secondIndex = last)
+            if adjacent then
+                geographicSegmentsProperlyCross referenceSystem first second
+                || pointPosition a second = GeographicPointLinePosition.Interior
+                || pointPosition b second = GeographicPointLinePosition.Interior
+                || pointPosition c first = GeographicPointLinePosition.Interior
+                || pointPosition d first = GeographicPointLinePosition.Interior
+            else
+                geographicSegmentsProperlyCross referenceSystem first second
+                || pointPosition a second <> GeographicPointLinePosition.Outside
+                || pointPosition b second <> GeographicPointLinePosition.Outside
+                || pointPosition c first <> GeographicPointLinePosition.Outside
+                || pointPosition d first <> GeographicPointLinePosition.Outside
+        seq {
+            for first in 0 .. last do
+                for second in first + 1 .. last do
+                    yield first, second
+        }
+        |> Seq.exists (fun (first, second) -> invalidPair first second)
+        |> not
+
+/// None preserves the explicit unsupported boundary for geographic polygons
+/// with holes and multipolygons until their geodesic containment is validated.
+let rec internal geographicValidity referenceSystem (geometry: Geometry) : bool option =
+    match geometry.Shape with
+    | GPolygon [ ring ] -> Some(geographicSimpleRingIsValid referenceSystem ring)
+    | GPolygon _
+    | GMultiPolygon _ -> None
+    | GGeometryCollection geometries ->
+        let results = geometries |> List.map (geographicValidity referenceSystem)
+        if results |> List.exists Option.isNone then None
+        else Some(results |> List.forall ((=) (Some true)))
+    | _ -> Some(geometryIsValidPlanar geometry)
+
 let private geographicLineCovers referenceSystem covering covered =
     let coveredPoints = covered |> List.collect id |> List.distinct
     let onLine point =

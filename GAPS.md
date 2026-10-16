@@ -1738,9 +1738,9 @@ implementation effort:
    WGS 84 ellipsoidal operations but refuses cross-SRS transforms without a
    datum shift. [Inverse projected longitude wrapping](torture/findings/2026-10-11-projected-longitude-wrap.md)
    follows MySQL across geographic and projected targets.
-   Geographic [`ST_IsValid` for points and linework](torture/findings/2026-10-16-geographic-validity.md)
-   now accepts the audited geographic shapes, including linear geometry
-   collections; geographic polygons still need geodesic validity rules.
+   Geographic [`ST_IsValid` for points, linework, and simple single-ring polygons](torture/findings/2026-10-16-geographic-validity.md)
+   now accepts the audited geographic shapes, including collections of them;
+   polygons with holes and multipolygons still need geodesic validity rules.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)
    are covered for audited cases. [Point-to-polygon distance](torture/findings/2026-10-11-geographic-point-polygon-distance.md)

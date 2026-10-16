@@ -1,4 +1,4 @@
-# Geographic `ST_IsValid` for point and line shapes
+# Geographic `ST_IsValid` for point, line, and simple polygon shapes
 
 Pinned MySQL 8.4.11 evaluates `ST_IsValid` on SRID 4326 point, line,
 multiline, multipoint, polygon, and collection values. fsdb previously
@@ -15,13 +15,11 @@ also matched. `ST_IsValid` now uses that validation for geographic shapes
 without polygon components. A focused Expecto regression pins valid and
 invalid representatives, including the antimeridian and a zero-length line.
 
-The same shortcut is unsafe for polygons: a 200-case rectangle and
+The same planar shortcut is unsafe for polygons: a 200-case rectangle and
 bow-tie corpus from seed 116 happened to match, but 402 of 1,000 global quadrilaterals
 from seed 4326 differed between MySQL's geographic validity and fsdb's
-planar validity. Geographic polygons and collections containing polygons
-therefore retain the existing unsupported response until geodesic validity
-can be implemented and compared directly with MySQL. This change does not
-claim geographic polygon validity or a complete geographic topology model.
+planar validity. Polygon validity therefore requires geodesic edges rather
+than the planar predicate.
 
 ## Polygon follow-up
 
@@ -39,6 +37,19 @@ their shorter great-circle arcs. That predicted MySQL geographic validity in
 returns invalid where the spherical test returns valid. The result supports
 geodesic self-intersection as the main missing rule, but the counterexample
 means a spherical shortcut is not yet an exact replacement for MySQL's
-geographic predicate. It needs ellipsoidal or otherwise oracle-matched edge
-handling, plus separate hole and multipolygon validation, before enabling
-geographic polygon `ST_IsValid` broadly.
+geographic predicate.
+
+The existing ellipsoidal line-crossing primitive detects that counterexample.
+Using it to check nonadjacent ring edges, with consecutive duplicate vertices
+removed and backtracking edges rejected, makes simple single-ring polygons
+available to `ST_IsValid`. A direct 1,000-case MySQL/fsdb comparison on the
+seeded quadrilateral corpus returned identical results for all cases: 734 valid
+and 266 invalid. Focused regressions also pin a square, bow-tie, antimeridian
+triangle, adjacent and nonadjacent duplicate vertices, backtracking, a
+collinear ring, and the long-edge counterexample. `just check` passed 3,708
+tests with no build warnings.
+
+Polygons with holes and multipolygons still return the explicit unsupported
+response until geographic ring containment and component separation are
+validated. Long global edges cause substantial geodesic sampling work in the
+current predicate; this is a performance follow-up, not a parity claim.
