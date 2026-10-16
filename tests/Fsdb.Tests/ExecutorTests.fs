@@ -12889,7 +12889,7 @@ let tests =
                     | other -> failtestf "expected 0900 binary materialized LIKE counts, got %A" other
                     Expect.isLessThan calls 60 "the 0900 binary prefix restricts residual evaluation"
 
-                testCase "materialized correlated ABS equality probes both signed keys"
+                testCase "materialized correlated integer expressions probe equality keys"
                 <| fun _ ->
                     let mutable calls = 0
                     let registry =
@@ -12908,6 +12908,38 @@ let tests =
                     |> ignore
                     runDefault store "INSERT INTO abs_rows VALUES(1000,-2147483648)" |> ignore
                     runDefault store "INSERT INTO abs_rows VALUES(1001,NULL)" |> ignore
+
+                    runDefault store "CREATE TABLE fallback_bounds(id INT PRIMARY KEY,x INT)" |> ignore
+                    runDefault store "INSERT INTO fallback_bounds VALUES(1,0),(2,10),(3,NULL)" |> ignore
+                    for prefix, source in
+                        [ "", "(SELECT DISTINCT id,k FROM abs_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM abs_rows) ", "materialized d" ] do
+                        for expression in
+                            [ "COALESCE(d.k,0)"
+                              "IFNULL(d.k,0)"
+                              "COALESCE(d.k,NULL,0)"
+                              "COALESCE(NULL,d.k,0)" ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND " + expression + "=o.x) "
+                                + "FROM fallback_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]) -> ()
+                            | other -> failtestf "expected %s materialized fallback matches, got %A" expression other
+                            Expect.isLessThan calls 60 (expression + " key bounds residual work")
+
+                    runDefault store "CREATE TABLE unsigned_fallback_rows(id INT PRIMARY KEY,k BIGINT UNSIGNED)" |> ignore
+                    runDefault store "CREATE TABLE unsigned_fallback_bounds(id INT PRIMARY KEY,x BIGINT UNSIGNED)" |> ignore
+                    runDefault store "INSERT INTO unsigned_fallback_rows VALUES(1,0),(2,9223372036854775808),(3,18446744073709551615),(4,NULL)" |> ignore
+                    runDefault store "INSERT INTO unsigned_fallback_bounds VALUES(1,0),(2,9223372036854775808),(3,18446744073709551615),(4,NULL)" |> ignore
+                    for expression in [ "COALESCE(d.k,0)"; "IFNULL(d.k,0)" ] do
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM unsigned_fallback_rows) d "
+                            + "WHERE " + expression + "=o.x) FROM unsigned_fallback_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ]; [ Some "4"; Some "0" ] ]) -> ()
+                        | other -> failtestf "expected %s unsigned-bound matches, got %A" expression other
 
                     for prefix, source in
                         [ "", "(SELECT DISTINCT id,k FROM abs_rows) d"
