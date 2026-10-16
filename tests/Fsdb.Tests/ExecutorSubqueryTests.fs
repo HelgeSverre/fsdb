@@ -2061,6 +2061,48 @@ let tests =
               | other -> failtestf "expected ignored-index NULL-safe count, got %A" other
               Expect.isGreaterThan touches 900 "ignoring the key restores the scan"
 
+          testCase "materialized correlated byte equality uses exact byte keys"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE byte_inner(id INT PRIMARY KEY,k VARBINARY(8))" |> ignore
+              runDefault store "CREATE TABLE byte_outer(id INT PRIMARY KEY,k VARBINARY(8))" |> ignore
+              runDefault store "INSERT INTO byte_outer VALUES(1,X'0001'),(2,X'03E8'),(3,NULL),(4,X'FFFF')" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,X'%04X')" id id)
+              |> String.concat ","
+              |> sprintf "INSERT INTO byte_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              let sql =
+                  "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM byte_inner) d "
+                  + "WHERE TOUCH(d.id)=d.id AND d.k=o.k) FROM byte_outer o ORDER BY o.id"
+              match run store registry sql with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows
+                      [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]
+                        [ Some "3"; Some "0" ]; [ Some "4"; Some "0" ] ]
+                      "byte equality preserves exact values and NULL behavior"
+              | other -> failtestf "expected MySQL byte equality counts, got %A" other
+              Expect.isLessThan touches 30 "two matching byte keys avoid scanning 1,000 materialized rows per outer row"
+
+              runDefault store "CREATE TABLE byte_text_outer(id INT PRIMARY KEY,k VARCHAR(8))" |> ignore
+              runDefault store "INSERT INTO byte_text_outer VALUES(1,'A'),(2,NULL)" |> ignore
+              runDefault store "INSERT INTO byte_inner VALUES(1001,X'41')" |> ignore
+              touches <- 0
+              let mixedSql =
+                  "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM byte_inner) d "
+                  + "WHERE TOUCH(d.id)=d.id AND d.k=o.k) FROM byte_text_outer o ORDER BY o.id"
+              match run store registry mixedSql with
+              | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]) -> ()
+              | other -> failtestf "expected byte/string comparison fallback, got %A" other
+              Expect.isGreaterThan touches 900 "mixed byte/string coercion retains the residual scan"
+
           testCase "materialized correlated decimal IN probes preserve exact keys"
           <| fun _ ->
               let mutable touches = 0
