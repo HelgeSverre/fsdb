@@ -1670,9 +1670,9 @@ let internal flattenInnerJoinedOperands (catalog: Catalog) schema (select: Selec
 
     { select with Joins = select.Joins |> List.collect flatten }
 
-/// A referenced, independent CTE reads like a derived table during a joined
-/// view write. Keep other CTEs in their original form until their materialized
-/// or recursive write behavior has its own contract.
+/// A referenced independent CTE reads like a derived table during a joined
+/// view write. A single recursive CTE is also a read-only derived source;
+/// its wrapper keeps the recursive binding within its own query block.
 let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStmt) =
     let sources = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
     let cteNames = select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
@@ -1779,7 +1779,62 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         |> List.choose (fun cte ->
             tryInlineBody cte |> Option.map (fun body -> cte.CteName.ToLowerInvariant(), body))
 
-    if select.Ctes.IsEmpty
+    let recursiveSource =
+        match select.Ctes with
+        | [ cte ] when cte.Recursive && referenceCount cte.CteName > 0 ->
+            let first =
+                match cte.Body with
+                | PlainSelect body
+                | UnionSelect(body, _, _, _, _) -> body
+            let names =
+                if not cte.CteColumns.IsEmpty then Some cte.CteColumns
+                else
+                    expandedProjections first
+                    |> Option.bind (fun projections ->
+                        let names = projections |> List.map projectionName
+                        if names |> List.exists Option.isNone then None
+                        else Some(List.choose id names))
+            names
+            |> Option.filter (fun names ->
+                not names.IsEmpty
+                && (names |> List.map _.ToLowerInvariant() |> Set.ofList).Count = names.Length)
+            |> Option.map (fun names -> cte.CteName.ToLowerInvariant(), names)
+        | _ -> None
+
+    let wrapRecursiveSource (name, names) =
+        let expand = function
+            | FromTable table as source when table.Database.IsNone && eqI table.Table name ->
+                let wrapper =
+                    { Projections = names |> List.map (fun column -> Projection.create (Col column) (Some column))
+                      IntoVariables = []
+                      IntoFile = None
+                      Distinct = false
+                      CalculateFoundRows = false
+                      StraightJoin = false
+                      From = Some source
+                      Joins = []
+                      Where = None
+                      GroupBy = []
+                      Rollup = false
+                      Windows = []
+                      Ctes = select.Ctes
+                      Having = None
+                      OrderBy = []
+                      Limit = None
+                      Offset = None
+                      Locking = [] }
+                FromSubquery(PlainSelect wrapper, table.Alias |> Option.defaultValue table.Table)
+            | source -> source
+        { select with
+            From = select.From |> Option.map expand
+            Joins = select.Joins |> List.map (fun join -> { join with Table = expand join.Table })
+            Ctes = [] }
+
+    if recursiveSource.IsSome
+       && (sources |> List.forall (function FromTable _ -> true | _ -> false))
+       && (select.From |> Option.isSome) then
+        wrapRecursiveSource recursiveSource.Value
+    elif select.Ctes.IsEmpty
        || cteNames.Count <> select.Ctes.Length
        || (sources |> List.exists (function FromTable _ -> false | _ -> true))
        || Expression.statementExists
