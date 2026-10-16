@@ -2066,6 +2066,41 @@ let tests =
                   [ [ Some "1"; Some "10" ]; [ Some "2"; Some "24" ]; [ Some "3"; Some "30" ]; [ Some "4"; Some "40" ] ]
                   "each recursive read source leaves one physical row update"
 
+              let recursive =
+                  "WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3)"
+              for name, body in
+                  [ "dependent",
+                    recursive + ", doubled AS (SELECT k,k*2 AS v FROM seq) "
+                    + "SELECT t.id,t.n FROM doubled d JOIN recursive_target t ON t.id=d.k"
+                    "grouped",
+                    recursive + ", grouped AS (SELECT k,COUNT(*) AS c FROM seq GROUP BY k) "
+                    + "SELECT t.id,t.n FROM grouped g JOIN recursive_target t ON t.id=g.k"
+                    "repeated",
+                    recursive + " SELECT t.id,t.n FROM seq a JOIN seq b ON b.k=a.k "
+                    + "JOIN recursive_target t ON t.id=a.k"
+                    "star",
+                    recursive + ", copied AS (SELECT * FROM seq) "
+                    + "SELECT t.id,t.n FROM copied c JOIN recursive_target t ON t.id=c.k"
+                    "nested_star",
+                    recursive + ", copied AS (SELECT k FROM seq), again AS (SELECT * FROM copied) "
+                    + "SELECT t.id,t.n FROM again a JOIN recursive_target t ON t.id=a.k"
+                    "shared_volatile",
+                    "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL SELECT k+1,r FROM seq WHERE k<3) "
+                    + "SELECT t.id,t.n FROM seq a JOIN seq b ON b.k=a.k AND b.r=a.r "
+                    + "JOIN recursive_target t ON t.id=a.k" ] do
+                  let view = "recursive_" + name
+                  expectOk (run store ($"CREATE VIEW {view} AS {body}")) ("create " + view)
+                  Expect.equal
+                      (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{view}'"))
+                      [ [ Some "YES" ] ]
+                      (view + " metadata")
+                  expectOk (run store ($"UPDATE {view} SET n=n+1 WHERE id=2")) ("update " + view)
+
+              Expect.equal
+                  (rows store "SELECT n FROM recursive_target WHERE id=2")
+                  [ [ Some "30" ] ]
+                  "dependent, grouped, repeated, and starred recursive rows each update once"
+
               expectOk
                   (run store
                       "CREATE VIEW recursive_checked AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) SELECT t.id,t.n FROM seq JOIN recursive_target t ON t.id=seq.k WHERE t.n>=0 WITH CASCADED CHECK OPTION")
