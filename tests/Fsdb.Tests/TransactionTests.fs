@@ -1980,21 +1980,29 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected both autocommit and transaction increments, got %A" result
 
-          testCase "limited ordered writes reselect their target after a waiting row stops matching"
+          testCase "limited ordered writes reselect after a contended predicate or sort key changes"
           <| fun _ ->
               for indexed in [ false; true ] do
-                  for statement, expectedRows in
-                      [ "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 1",
+                  for initialRows, ownerWrite, statement, expectedRows in
+                      [ "(1,0),(2,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
+                        "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 1",
                         [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ] ]
+                        "(1,0),(2,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
                         "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 1",
-                        [ [ Some "1"; Some "-1" ] ] ] do
+                        [ [ Some "1"; Some "-1" ] ]
+                        "(1,0),(2,1)", "UPDATE tx_limited_rebase SET n=2 WHERE id=1",
+                        "UPDATE tx_limited_rebase SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 1",
+                        [ [ Some "1"; Some "2" ]; [ Some "2"; Some "11" ] ]
+                        "(1,0),(2,1)", "UPDATE tx_limited_rebase SET n=2 WHERE id=1",
+                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 1",
+                        [ [ Some "1"; Some "2" ] ] ] do
                       let store = Fsdb.Storage.create ()
                       let setup = create 1 store
                       let index = if indexed then ", KEY ix_n(n)" else ""
                       handle setup ("CREATE TABLE tx_limited_rebase (id INT PRIMARY KEY, n INT" + index + ")") |> ignore
-                      handle setup "INSERT INTO tx_limited_rebase VALUES (1, 0), (2, 0)" |> ignore
+                      handle setup ("INSERT INTO tx_limited_rebase VALUES " + initialRows) |> ignore
                       let owner, _ = handle (create 2 store) "BEGIN"
-                      let owner, firstWrite = handle owner "UPDATE tx_limited_rebase SET n=-1 WHERE id=1"
+                      let owner, firstWrite = handle owner ownerWrite
                       Expect.equal firstWrite (Affected 1UL) "the owner changes the first candidate"
                       let waiter, _ = handle (create 3 store) "BEGIN"
                       use started = new Threading.ManualResetEventSlim(false)
