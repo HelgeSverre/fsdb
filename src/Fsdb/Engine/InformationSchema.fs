@@ -1881,7 +1881,14 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                     let expanded =
                         match cte.Body with
                         | PlainSelect nested -> { cte with Body = PlainSelect(expandSelect visibleNames true nested) }
-                        | _ -> cte
+                        | UnionSelect(first, rest, orderBy, limit, offset) ->
+                            { cte with
+                                Body =
+                                    UnionSelect(
+                                        expandSelect visibleNames true first,
+                                        rest |> List.map (fun (kind, nested) -> kind, expandSelect visibleNames true nested),
+                                        orderBy, limit, offset
+                                    ) }
                     expanded, Map.remove (cte.CteName.ToLowerInvariant()) visibleNames) activeNames
             { body with
                 Projections = directExpressions.Projections
@@ -1963,7 +1970,11 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                      | _ -> false))
              && (match cte.Body with
                  | PlainSelect nested -> canWrapNestedSelect nested
-                 | _ -> false)))
+                 | UnionSelect(first, rest, orderBy, limit, offset) ->
+                     orderBy.IsEmpty && limit.IsNone && offset.IsNone
+                     && canWrapNestedSelect first
+                     && (rest |> List.forall (snd >> canWrapNestedSelect))
+                 )))
         && (body.From |> Option.forall canWrapNestedSource)
         && (body.Joins |> List.forall (_.Table >> canWrapNestedSource))
         && not (Expression.statementExists
