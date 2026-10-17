@@ -24,9 +24,12 @@ The native differential command is:
 ```sh
 python3 torture/scripts/ngram-multicol-oracle.py --legacy-range 3190:31C0 --collation utf8mb4_general_ci
 python3 torture/scripts/ngram-multicol-oracle.py --legacy-range 3100:3190 --collation utf8mb4_general_ci
+python3 torture/scripts/ngram-multicol-oracle.py --legacy-range 31C0:3200 --collation utf8mb4_general_ci
 ```
 
 The audited two-column corpus agrees on matching rows and relevance for all
 288 extension-block searches and all 822 base-block searches at each token
-size from 1 through 10. Other Unicode blocks and full-text query shapes
-remain outside this finding.
+size from 1 through 10. The adjacent U+31C0–U+31FF control also agrees for
+all 330 searches at each size from 1 through 10, without needing another
+weight override. Other Unicode blocks and full-text query shapes remain
+outside this finding.

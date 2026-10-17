@@ -1050,7 +1050,8 @@ matches MySQL at sizes 1 and 2.
 The [Bopomofo and Kanbun probe](torture/findings/2026-10-17-general-ci-bopomofo-weights.md)
 preserves distinct U+3100–U+31BF primary weights; the extension-block ngram
 lane matches MySQL at sizes 1–10 (288 searches per size), as does the
-base-block lane (822 searches per size).
+base-block lane (822 searches per size). The adjacent U+31C0–U+31FF control
+also matches (330 searches per size) without an override.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
