@@ -45,6 +45,20 @@ waits and rebases when a pending key crosses the `LIMIT` frontier, including
 when fewer rows currently match than the limit. An insert after the frontier
 does not delay the write. MySQL 8.4.11 and `TransactionTests` agree across 36
 UPDATE/DELETE cases covering `LIMIT 1` and `LIMIT 2`, ASC and DESC, INT and
-BIGINT UNSIGNED, and both wait and no-wait outcomes. This is scoped to
-single-column integer PRIMARY ordering; other order expressions and key types
-still need separate audits.
+BIGINT UNSIGNED, and both wait and no-wait outcomes. The integer audit is
+scoped to single-column PRIMARY ordering; other order expressions and key
+types need separate audits.
+
+## DATE primary keys
+
+The same pending-insert gap affected valid single-column `DATE` primary keys.
+Starting with January 2 and 3, 2026, an uncommitted January 1 insert makes
+`UPDATE` or `DELETE ... ORDER BY id ASC LIMIT 1` wait; an uncommitted January 4
+insert makes the descending form wait. Inserting beyond the opposite frontier
+does not make either write wait. MySQL 8.4.11 confirms the wait behavior,
+affected count, and final rows for both verbs in all eight combinations.
+
+The scheduler now reads the stored day number from an active `DATE` PRIMARY
+claim and compares it with visible candidate dates at the `LIMIT` frontier.
+The focused transaction regression covers the eight cases. Zero dates,
+composite keys, and other order expressions remain outside this audit.

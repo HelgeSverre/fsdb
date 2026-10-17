@@ -2139,6 +2139,50 @@ let tests =
                   | ResultSet(_, rows) -> Expect.equal rows expectedRows statement
                   | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
 
+          testCase "limited ordered write respects DATE primary-key insert frontiers"
+          <| fun _ ->
+              for verb, direction, insertedId, shouldWait, changedId in
+                  [ for verb in [ "UPDATE"; "DELETE" ] do
+                        for direction, insertedId, shouldWait, changedId in
+                            [ "ASC", "2026-01-01", true, "2026-01-01"
+                              "ASC", "2026-01-04", false, "2026-01-02"
+                              "DESC", "2026-01-04", true, "2026-01-04"
+                              "DESC", "2026-01-01", false, "2026-01-03" ] do
+                            yield verb, direction, insertedId, shouldWait, changedId ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_date_insert_candidate(id DATE PRIMARY KEY,n INT)" |> ignore
+                  handle setup "INSERT INTO tx_date_insert_candidate VALUES('2026-01-02',0),('2026-01-03',0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted = handle owner (sprintf "INSERT INTO tx_date_insert_candidate VALUES('%s',0)" insertedId)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a date key"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  let action =
+                      if verb = "UPDATE" then "UPDATE tx_date_insert_candidate SET n=n+1"
+                      else "DELETE FROM tx_date_insert_candidate"
+                  let statement = action + " WHERE n>=0 ORDER BY id " + direction + " LIMIT 1"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait (statement + " wait behavior")
+                  Expect.equal result (Affected 1UL) "the inserted row fills the first slot"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                  let expected =
+                      [ "2026-01-02"; "2026-01-03"; insertedId ]
+                      |> List.sort
+                      |> List.filter (fun id -> verb = "UPDATE" || id <> changedId)
+                      |> List.map (fun id -> [ Some id; Some(if id = changedId then "1" else "0") ])
+                  match handle setup "SELECT id,n FROM tx_date_insert_candidate ORDER BY id" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expected statement
+                  | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
+
           testCase "an autocommit full-scan delete rechecks the row after a competing commit"
           <| fun _ ->
               for predicate, affected, remaining in

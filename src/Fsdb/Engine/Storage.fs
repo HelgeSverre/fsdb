@@ -4284,15 +4284,15 @@ let acquireTransactionWriteTargets
     | Some _ -> withWriteLocksFor timeout store dbName tableName rowIds keys ignore
     | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
 
-/// Active single-column integer PRIMARY claims that another transaction holds.
+/// Active single-column ordered PRIMARY claims that another transaction holds.
 /// Ordered limited writes use these pending keys before their snapshot can see
 /// the inserted row; idle weak-cache entries never become candidate claims.
-let activePrimaryIntegerKeyClaims (store: Store) (dbName: string) (tableName: string) : (decimal * string) list =
+let activePrimaryOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (keyType: ColumnType) : (decimal * string) list =
     let tableKey = lockNamespaceKey dbName tableName
     let prefix = "PRIMARY\u0000"
     let ownOwner = store.TransactionLocks |> Option.map _.Owner
 
-    let tryIntegerKey (key: string) =
+    let tryOrderedKey (key: string) =
         if not (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) then None
         else
             let encoded = key.Substring(prefix.Length)
@@ -4302,11 +4302,17 @@ let activePrimaryIntegerKeyClaims (store: Store) (dbName: string) (tableName: st
                 match Int32.TryParse(encoded.Substring(0, separator)) with
                 | true, length when encoded.Length = separator + 1 + length && length > 1 ->
                     let value = encoded.Substring(separator + 1, length)
-                    if value.[0] <> 'I' then None
-                    else
-                        match Decimal.TryParse(value.Substring(1), NumberStyles.Integer, CultureInfo.InvariantCulture) with
-                        | true, integer -> Some integer
+                    let expectedTag =
+                        match keyType with
+                        | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ -> Some 'I'
+                        | TDate -> Some 'T'
                         | _ -> None
+                    match expectedTag with
+                    | Some tag when value.[0] = tag ->
+                        match Decimal.TryParse(value.Substring(1), NumberStyles.Integer, CultureInfo.InvariantCulture) with
+                        | true, ordered -> Some ordered
+                        | _ -> None
+                    | _ -> None
                 | _ -> None
 
     match store.KeyLocks.TryGetValue tableKey with
@@ -4315,7 +4321,7 @@ let activePrimaryIntegerKeyClaims (store: Store) (dbName: string) (tableName: st
     | true, cache ->
         cache.Entries
         |> Seq.choose (fun entry ->
-            tryIntegerKey entry.Key
+            tryOrderedKey entry.Key
             |> Option.bind (fun value ->
                 let mutable stripe = Unchecked.defaultof<RowLockStripe>
                 if not (entry.Value.TryGetTarget(&stripe)) then None

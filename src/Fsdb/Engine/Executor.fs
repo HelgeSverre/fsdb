@@ -29822,7 +29822,10 @@ let transactionWriteTargets
                  && (match Storage.primaryKeyColumns table with
                      | [ primary ] -> equalsIgnoreCase primary name
                      | _ -> false) ->
-            let pending = Storage.activePrimaryIntegerKeyClaims store database tableRef.Table
+            let columnIndex =
+                table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name)
+            let pending =
+                Storage.activePrimaryOrderedKeyClaims store database tableRef.Table table.Columns.[columnIndex].Type
             if pending.IsEmpty then []
             else
                 let allKeys = pending |> List.map snd
@@ -29836,8 +29839,6 @@ let transactionWriteTargets
 
                 if hasRuntimeEffects then allKeys
                 else
-                    let columnIndex =
-                        table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name)
                     let columns = table.Columns
                     let ctxFor =
                         contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None
@@ -29848,13 +29849,14 @@ let transactionWriteTargets
                         for _, row in table.RowsArray.Indexed do
                             if valid then
                                 match row.[columnIndex] with
-                                | (VInt _ | VUInt _ | VBit _) as key ->
+                                | (VInt _ | VUInt _ | VBit _ | VDate _) as key ->
                                     match whereMatches ctxFor where row with
                                     | Ok true ->
                                         match key with
                                         | VInt integer -> matched.Add(decimal integer)
                                         | VUInt integer
                                         | VBit(_, integer) -> matched.Add(decimal integer)
+                                        | VDate date -> matched.Add(decimal date.DayNumber)
                                         | _ -> ()
                                     | Ok false -> ()
                                     | Error _ -> valid <- false
