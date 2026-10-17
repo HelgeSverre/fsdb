@@ -1046,8 +1046,11 @@ let private viewTargetKey (target: ViewColumnTarget) =
 
 type private ViewTargetKey = string * string * string
 
+type private JoinViewCheck = { Predicate: Expr option }
+
 type private WritableViewSource =
     { Reference: FromItem
+      JoinedSources: Join list
       Qualifier: string
       Columns: string list
       Expressions: Map<string, Expr>
@@ -1057,9 +1060,8 @@ type private WritableViewSource =
       InsertableTargets: Set<ViewTargetKey>
       AccessPath: ViewAccess list
       ReadAccessPaths: ViewReadAccess list list
+      JoinCheck: JoinViewCheck option
       Mergeable: bool }
-
-type private JoinViewCheck = { Predicate: Expr option }
 
 type private UpdatableView =
     { ViewDatabase: string
@@ -1865,6 +1867,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                                 Some
                                     { Reference = FromTable { tableRef with Database = Some database }
+                                      JoinedSources = []
                                       Qualifier = qualifier
                                       Columns = columns
                                       Expressions = expressions
@@ -1875,6 +1878,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                       AccessPath = []
                                       ReadAccessPaths =
                                         [ [ { View = stored; Definition = statement; WritableColumns = [] } ] ]
+                                      JoinCheck = None
                                       Mergeable = false }
 
                     match tryStoredView store database tableRef.Table with
@@ -1889,36 +1893,73 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                             nested
                             |> Option.bind (fun nested ->
-                                if not nested.UpdateJoins.IsEmpty then
+                                let baseQualifier = nested.UpdateFrom.Alias |> Option.defaultValue nested.UpdateFrom.Table
+                                let joinedQualifiers = nested.UpdateJoins |> List.map (_.Table >> FromItem.tryQualifier)
+                                let outerQualifiers =
+                                    sourceItems
+                                    |> List.choose FromItem.tryQualifier
+                                    |> List.map _.ToLowerInvariant()
+                                    |> Set.ofList
+                                let hasSubquery =
+                                    Expression.exists (function
+                                        | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _ -> true
+                                        | _ -> false)
+                                let needsScopedRewrite =
+                                    not nested.UpdateJoins.IsEmpty
+                                    && ((nested.Expressions |> Map.exists (fun _ expression -> hasSubquery expression))
+                                        || (nested.Predicate |> Option.exists hasSubquery)
+                                        || (nested.UpdateJoins |> List.exists (_.On >> hasSubquery)))
+                                let cannotInlineJoins =
+                                    (joinedQualifiers
+                                     |> List.exists (function
+                                         | None -> true
+                                         | Some name -> Set.contains (name.ToLowerInvariant()) outerQualifiers))
+                                    || (nested.UpdateJoins
+                                        |> List.exists (fun join ->
+                                            match join.Table with
+                                            | FromTable _ | FromSubquery _ -> false
+                                            | _ -> true))
+                                    || not nested.SharedCteAliases.IsEmpty
+                                    || needsScopedRewrite
+
+                                if cannotInlineJoins then
                                     None
                                 else
                                     let qualify =
                                         Expression.rewrite (function
-                                            | Col column
-                                            | QualifiedCol(_, column) -> Some(QualifiedCol(qualifier, column))
+                                            | Col column -> Some(QualifiedCol(qualifier, column))
+                                            | QualifiedCol(source, column) when equalsIgnoreCase source baseQualifier ->
+                                                Some(QualifiedCol(qualifier, column))
                                             | _ -> None)
+
+                                    let remapQualifier name =
+                                        if equalsIgnoreCase name baseQualifier then qualifier else name
 
                                     let targets =
                                         nested.Targets
                                         |> Map.map (fun column target ->
-                                            { target with Qualifier = qualifier; ComponentColumn = Some column })
+                                            { target with
+                                                Qualifier = remapQualifier target.Qualifier
+                                                ComponentColumn = Some column })
 
                                     let checkPredicates =
                                         nested.CheckPredicates
                                         |> Map.toList
-                                        |> List.map (fun ((targetDatabase, targetTable, _), predicate) ->
-                                            (targetDatabase, targetTable, qualifier), predicate)
+                                        |> List.map (fun ((targetDatabase, targetTable, targetQualifier), predicate) ->
+                                            (targetDatabase, targetTable, remapQualifier targetQualifier), qualify predicate)
                                         |> Map.ofList
 
                                     let insertableTargets =
                                         nested.InsertableTargets
-                                        |> Set.map (fun (targetDatabase, targetTable, _) -> targetDatabase, targetTable, qualifier)
+                                        |> Set.map (fun (targetDatabase, targetTable, targetQualifier) ->
+                                            targetDatabase, targetTable, remapQualifier targetQualifier)
 
                                     Some
                                         { Reference =
                                             FromTable
                                                 { nested.UpdateFrom with
                                                     Alias = Some qualifier }
+                                          JoinedSources = nested.UpdateJoins |> List.map (Join.mapConditions qualify)
                                           Qualifier = qualifier
                                           Columns = nested.OrderedColumns
                                           Expressions = nested.Expressions |> Map.map (fun _ expression -> qualify expression)
@@ -1929,6 +1970,13 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                           AccessPath =
                                             if sameSecurityContext then
                                                 []
+                                            elif not nested.UpdateJoins.IsEmpty then
+                                                { SecurityType = view.SecurityType
+                                                  Definer = view.Definer
+                                                  Database = stored.Schema
+                                                  Table = stored.Name
+                                                  Mode = TargetGrantOnly }
+                                                :: nested.AccessPath
                                             else
                                                 nested.AccessPath |> List.map (fun access -> { access with Mode = TargetGrantOnly })
                                           ReadAccessPaths =
@@ -1938,6 +1986,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                                   WritableColumns = nested.Targets |> Map.toList |> List.map fst }
                                             [ [ own ] ]
                                             @ (nested.ReadAccessPaths |> List.map (fun path -> own :: path))
+                                          JoinCheck = nested.JoinCheck |> Option.map (fun check -> { Predicate = check.Predicate |> Option.map qualify })
                                           Mergeable = true })
                             |> Option.orElseWith (fun () -> readOnlySource stored (Select definition) definition.Projections)
                         | Ok(Union(first, _, _, _, _) as statement) -> readOnlySource stored statement first.Projections
@@ -1963,6 +2012,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 |> Map.ofList
 
                             { Reference = FromTable { tableRef with Database = Some database }
+                              JoinedSources = []
                               Qualifier = qualifier
                               Columns = table.Columns |> List.map _.Name
                               Expressions = expressions
@@ -1972,10 +2022,12 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               InsertableTargets = Set.singleton (database, tableRef.Table, qualifier)
                               AccessPath = []
                               ReadAccessPaths = []
+                              JoinCheck = None
                               Mergeable = true })
 
                 let readOnlySource reference qualifier columns : WritableViewSource =
                     { Reference = reference
+                      JoinedSources = []
                       Qualifier = qualifier
                       Columns = columns
                       Expressions =
@@ -1988,6 +2040,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                       InsertableTargets = Set.empty
                       AccessPath = []
                       ReadAccessPaths = []
+                      JoinCheck = None
                       Mergeable = false }
 
                 let resolveSourceItem = function
@@ -2004,7 +2057,78 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                 let sources = sourceItems |> List.choose resolveSourceItem
 
-                if sources.Length <> sourceItems.Length then
+                let rec shadowsExpandedQualifier (aliases: Set<string>) (body: SelectStmt) =
+                    let shadowsSource = function
+                        | FromTable table ->
+                            let name = table.Alias |> Option.defaultValue table.Table
+                            Set.contains (name.ToLowerInvariant()) aliases
+                        | FromSubquery(query, name)
+                        | FromLateral(query, name) ->
+                            Set.contains (name.ToLowerInvariant()) aliases
+                            || (match query with
+                                | PlainSelect nested -> shadowsExpandedQualifier aliases nested
+                                | UnionSelect(first, rest, _, _, _) ->
+                                    shadowsExpandedQualifier aliases first
+                                    || (rest |> List.exists (snd >> shadowsExpandedQualifier aliases)))
+                        | FromJsonTable(_, _, _, name) -> Set.contains (name.ToLowerInvariant()) aliases
+                        | FromJoinGroup _ -> false
+
+                    let localSources =
+                        ((body.From |> Option.toList) @ (body.Joins |> List.map _.Table))
+                        |> List.collect FromItem.leaves
+
+                    (localSources |> List.exists shadowsSource)
+                    || (body.Ctes |> List.exists (fun cte ->
+                        match cte.Body with
+                        | PlainSelect nested -> shadowsExpandedQualifier aliases nested
+                        | UnionSelect(first, rest, _, _, _) ->
+                            shadowsExpandedQualifier aliases first
+                            || (rest |> List.exists (snd >> shadowsExpandedQualifier aliases))))
+                    || (expressionQueries body |> List.exists (shadowsExpandedQualifier aliases))
+
+                let expressionShadowsExpandedQualifier aliases expression =
+                    Expression.fold
+                        (fun found node ->
+                            let shadowed =
+                                Expression.subqueries node
+                                |> List.exists (shadowsExpandedQualifier aliases)
+                            if found || shadowed then Expression.Prune true else Expression.Descend false)
+                        false
+                        expression
+
+                let unsafeNestedShadow =
+                    let expandedAliases =
+                        sources
+                        |> List.filter (fun source -> not source.JoinedSources.IsEmpty)
+                        |> List.map (fun source -> source.Qualifier.ToLowerInvariant())
+                        |> Set.ofList
+                    if expandedAliases.IsEmpty then false
+                    else
+                        sourceItems
+                        |> List.exists (function
+                            | FromLateral(PlainSelect body, _) -> shadowsExpandedQualifier expandedAliases body
+                            | FromLateral(UnionSelect(first, rest, orderBy, limit, offset), _) ->
+                                shadowsExpandedQualifier expandedAliases first
+                                || (rest |> List.exists (snd >> shadowsExpandedQualifier expandedAliases))
+                                || (orderBy |> List.exists (fst >> expressionShadowsExpandedQualifier expandedAliases))
+                                || (limit |> Option.exists (expressionShadowsExpandedQualifier expandedAliases))
+                                || (offset |> Option.exists (expressionShadowsExpandedQualifier expandedAliases))
+                            | FromJsonTable(expression, _, _, _) ->
+                                expressionShadowsExpandedQualifier expandedAliases expression
+                            | _ -> false)
+
+                let unsupportedJoinedSourcePosition =
+                    let positions =
+                        sources
+                        |> List.mapi (fun index source -> if source.JoinedSources.IsEmpty then None else Some index)
+                        |> List.choose id
+                    match positions, source with
+                    | [], _
+                    | [ 0 ], FromTable _
+                    | [ 1 ], (FromSubquery _ | FromLateral _ | FromJsonTable _) -> false
+                    | _ -> true
+
+                if sources.Length <> sourceItems.Length || unsafeNestedShadow || unsupportedJoinedSourcePosition then
                     None
                 else
                     let coalescedNames =
@@ -2070,6 +2194,34 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 | _ -> None
                             | _ -> None)
 
+                    let rewriteOuterReference =
+                        function
+                        | QualifiedCol(sourceName, column) ->
+                            sources
+                            |> List.tryFind (fun source -> equalsIgnoreCase source.Qualifier sourceName)
+                            |> Option.bind (fun source -> source.Expressions |> Map.tryFind (column.ToLowerInvariant()))
+                        | _ -> None
+
+                    let rewriteJoinedTable =
+                        let rewriteSelect = Expression.rewriteSelectExpressions rewriteOuterReference
+                        function
+                        | FromLateral(PlainSelect body, alias) ->
+                            FromLateral(PlainSelect(rewriteSelect body), alias)
+                        | FromLateral(UnionSelect(first, rest, orderBy, limit, offset), alias) ->
+                            FromLateral(
+                                UnionSelect(
+                                    rewriteSelect first,
+                                    rest |> List.map (fun (kind, body) -> kind, rewriteSelect body),
+                                    orderBy |> List.map (fun (expression, direction) -> Expression.rewriteTree rewriteOuterReference expression, direction),
+                                    limit |> Option.map (Expression.rewriteTree rewriteOuterReference),
+                                    offset |> Option.map (Expression.rewriteTree rewriteOuterReference)
+                                ),
+                                alias
+                            )
+                        | FromJsonTable(expression, path, columns, alias) ->
+                            FromJsonTable(Expression.rewriteTree rewriteOuterReference expression, path, columns, alias)
+                        | table -> table
+
                     let projected =
                         expandedProjections
                         |> List.map (projectedColumn rewriteSources directTarget)
@@ -2118,23 +2270,37 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             List.map2
                                 (fun join source ->
                                     { join with
-                                        Table = source.Reference
+                                        Table = rewriteJoinedTable source.Reference
                                         On = rewriteSources join.On })
                                 select.Joins
                                 (List.tail sources)
 
                         let updateSources =
                             match source, sources, select.Joins with
-                            | FromTable original, { Reference = FromTable physical } :: _, _ ->
-                                Some(physical, rewrittenJoins, original, select.Joins)
-                            | (FromSubquery _ | FromLateral _ | FromJsonTable _), derived :: { Reference = FromTable physical } :: _, join :: trailing
+                            | FromTable original, { Reference = FromTable physical; JoinedSources = nestedJoins } :: _, _ ->
+                                Some(physical, nestedJoins @ rewrittenJoins, original, select.Joins)
+                            | (FromSubquery _ | FromLateral _ | FromJsonTable _), derived :: ({ Reference = FromTable physical; JoinedSources = nestedJoins } as targetSource) :: _, join :: trailing
                                 when (join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin || join.Kind = NaturalJoin) ->
+                                let physicalQualifier = physical.Alias |> Option.defaultValue physical.Table
+                                let commonColumns =
+                                    if join.Kind = NaturalJoin then
+                                        let derivedNames = derived.Columns |> List.map _.ToLowerInvariant() |> Set.ofList
+                                        targetSource.Columns
+                                        |> List.filter (fun name -> Set.contains (name.ToLowerInvariant()) derivedNames)
+                                    else join.Using
+                                let on =
+                                    commonColumns
+                                    |> List.fold (fun condition column ->
+                                        BinOp(And, condition, BinOp(Eq, QualifiedCol(physicalQualifier, column), QualifiedCol(derived.Qualifier, column))))
+                                        (rewriteSources join.On)
                                 let reordered =
                                     { join with
+                                        Kind = if not nestedJoins.IsEmpty && join.Kind = NaturalJoin then InnerJoin else join.Kind
                                         Table = derived.Reference
-                                        On = rewriteSources join.On }
+                                        On = if nestedJoins.IsEmpty then rewriteSources join.On else on
+                                        Using = if nestedJoins.IsEmpty then join.Using else [] }
                                 let authorizationJoin = { join with Table = derived.Reference }
-                                Some(physical, reordered :: List.tail rewrittenJoins, physical, authorizationJoin :: trailing)
+                                Some(physical, nestedJoins @ (reordered :: List.tail rewrittenJoins), physical, authorizationJoin :: trailing)
                             | (FromSubquery _ | FromLateral _ | FromJsonTable _), _, _ ->
                                 match InformationSchema.tryLeadingReadOnlyWritableTarget source select.Joins with
                                 | Some leadingCount when leadingCount >= 2 && leadingCount < sources.Length ->
@@ -2266,8 +2432,13 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               Predicate = predicate
                               OrderBy = select.OrderBy
                               JoinCheck =
-                                if view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase) then None
-                                else Some { Predicate = predicate }
+                                if not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase)) then
+                                    Some { Predicate = predicate }
+                                else
+                                    match sources |> List.choose _.JoinCheck with
+                                    | [] -> None
+                                    | checks ->
+                                        Some { Predicate = checks |> List.fold (fun combined check -> combine combined check.Predicate) None }
                               CheckPredicates = checkPredicates
                               Insertable = not insertableTargets.IsEmpty
                               InsertableTargets = insertableTargets

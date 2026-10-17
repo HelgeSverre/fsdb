@@ -588,6 +588,127 @@ let tests =
               | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
               Expect.equal (rows store "SELECT n FROM layer_target WHERE id=1") [ [ Some "11" ] ] "rejected write is atomic"
 
+          testCase "checked joined layers can update a target inside a joined view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE layered_target(id INT PRIMARY KEY,n INT NOT NULL)") "create target"
+              expectOk (run store "CREATE TABLE layered_aux(id INT PRIMARY KEY,v INT NOT NULL)") "create aux"
+              expectOk (run store "INSERT INTO layered_target VALUES (1,10)") "seed target"
+              expectOk (run store "INSERT INTO layered_aux VALUES (1,1)") "seed aux"
+              expectOk
+                  (run store "CREATE VIEW layered_base AS SELECT t.id,t.n,a.v FROM layered_target t JOIN layered_aux a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create inner joined view"
+              let cases =
+                  [ "layered_lateral",
+                    "SELECT b.id,b.n,x.min_n FROM layered_base b JOIN LATERAL (SELECT b.v+1 AS min_n) x ON TRUE WHERE b.n>x.min_n"
+                    "layered_json",
+                    "SELECT b.id,b.n,j.jv FROM layered_base b JOIN JSON_TABLE(JSON_ARRAY(b.v),'$[*]' COLUMNS(jv INT PATH '$')) j WHERE b.n>j.jv"
+                    "layered_derived",
+                    "SELECT b.id,b.n,y.v AS aux_v FROM layered_base b JOIN (SELECT id,v FROM layered_aux) y ON y.id=b.id WHERE b.n>y.v" ]
+              for name, definition in cases do
+                  expectOk
+                      (run store $"CREATE VIEW {name} AS {definition} WITH CASCADED CHECK OPTION")
+                      $"create {name}"
+                  Expect.equal
+                      (rows store $"SELECT is_updatable FROM information_schema.views WHERE table_schema='fsdb' AND table_name='{name}'")
+                      [ [ Some "YES" ] ]
+                      $"{name} is updatable"
+                  expectOk (run store $"UPDATE {name} SET n=n+1 WHERE id=1") $"update through {name}"
+                  match run store $"UPDATE {name} SET n=0 WHERE id=1" with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected CHECK OPTION rejection through %s, got %A" name other
+                  Expect.equal (rows store "SELECT n FROM layered_target WHERE id=1") [ [ Some "11" ] ] "rejected write is atomic"
+                  expectOk (run store "UPDATE layered_target SET n=10 WHERE id=1") "reset target"
+
+              expectOk
+                  (run store "CREATE VIEW layered_component AS SELECT b.id,b.n,b.v,y.v AS marker FROM layered_base b JOIN (SELECT id,v FROM layered_aux) y ON y.id=b.id WHERE b.n>y.v WITH CASCADED CHECK OPTION")
+                  "create view exposing the joined component"
+              expectOk (run store "UPDATE layered_component SET v=2 WHERE id=1") "update the joined component"
+              match run store "UPDATE layered_component SET v=12 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected joined component CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT v FROM layered_aux WHERE id=1") [ [ Some "2" ] ] "joined component write and rejection persist"
+
+              expectOk
+                  (run store "CREATE VIEW layered_aggregate_base AS SELECT t.id,t.n,x.v FROM (SELECT id,v FROM layered_aux GROUP BY id,v) x JOIN layered_target t ON t.id=x.id WHERE t.n>x.v WITH CASCADED CHECK OPTION")
+                  "create inner view with a derived source"
+              expectOk
+                  (run store "CREATE VIEW layered_aggregate_outer AS SELECT b.id,b.n,y.v AS aux_v FROM layered_aggregate_base b JOIN (SELECT id,v FROM layered_aux) y ON y.id=b.id WHERE b.n>y.v WITH CASCADED CHECK OPTION")
+                  "create outer view with a derived source"
+              expectOk (run store "UPDATE layered_aggregate_outer SET n=n+1 WHERE id=1") "update through derived layers"
+              match run store "UPDATE layered_aggregate_outer SET n=0 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection through derived layers, got %A" other
+              Expect.equal (rows store "SELECT n FROM layered_target WHERE id=1") [ [ Some "11" ] ] "derived-layer rejection is atomic"
+
+          testCase "a derived source can precede a joined writable view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE using_target(id INT PRIMARY KEY,n INT NOT NULL)") "create target"
+              expectOk (run store "CREATE TABLE using_aux(id INT PRIMARY KEY,v INT NOT NULL)") "create aux"
+              expectOk (run store "INSERT INTO using_target VALUES (1,10)") "seed target"
+              expectOk (run store "INSERT INTO using_aux VALUES (1,1)") "seed aux"
+              expectOk
+                  (run store "CREATE VIEW using_base AS SELECT t.id,t.n,a.v FROM using_target t JOIN using_aux a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create inner joined view"
+              expectOk
+                  (run store "CREATE VIEW using_outer AS SELECT b.id,b.n,y.v AS aux_v FROM (SELECT id,v FROM using_aux GROUP BY id,v) y JOIN using_base b USING(id) WHERE b.n>y.v WITH CASCADED CHECK OPTION")
+                  "create outer joined view"
+              expectOk (run store "UPDATE using_outer SET n=n+1 WHERE id=1") "update nested target"
+              match run store "UPDATE using_outer SET n=0 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM using_target WHERE id=1") [ [ Some "11" ] ] "rejected write is atomic"
+
+          testCase "an unchecked outer join enforces only the inner view check"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE inner_check_target(id INT PRIMARY KEY,n INT NOT NULL)") "create target"
+              expectOk (run store "CREATE TABLE inner_check_aux(id INT PRIMARY KEY,v INT NOT NULL)") "create aux"
+              expectOk (run store "INSERT INTO inner_check_target VALUES (1,10)") "seed target"
+              expectOk (run store "INSERT INTO inner_check_aux VALUES (1,1)") "seed aux"
+              expectOk
+                  (run store "CREATE VIEW inner_checked AS SELECT t.id,t.n,a.v FROM inner_check_target t JOIN inner_check_aux a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create checked inner view"
+              expectOk
+                  (run store "CREATE VIEW outer_unchecked AS SELECT b.id,b.n FROM inner_checked b JOIN (SELECT 1 AS k) x ON x.k=b.id WHERE b.n>5")
+                  "create unchecked outer view"
+              expectOk (run store "UPDATE outer_unchecked SET n=3 WHERE id=1") "leave the unchecked outer view"
+              Expect.equal (rows store "SELECT n FROM inner_check_target WHERE id=1") [ [ Some "3" ] ] "outer predicate does not constrain the new value"
+              expectOk (run store "UPDATE inner_check_target SET n=10 WHERE id=1") "reset target"
+              match run store "UPDATE outer_unchecked SET n=1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected inner CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM inner_check_target WHERE id=1") [ [ Some "10" ] ] "inner rejection is atomic"
+
+          testCase "joined layers retain a component view's definer grant boundary"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE layered_grant_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE layered_grant_aux(id INT PRIMARY KEY,v INT)"
+                    "INSERT INTO layered_grant_target VALUES(1,10)"
+                    "INSERT INTO layered_grant_aux VALUES(1,1)"
+                    "CREATE USER layered_inner_owner"
+                    "CREATE USER layered_outer_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.layered_grant_target TO layered_inner_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.layered_grant_aux TO layered_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO layered_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO layered_outer_owner"
+                    "CREATE DEFINER='layered_inner_owner'@'%' SQL SECURITY DEFINER VIEW layered_grant_inner AS SELECT t.id,t.n AS metric,a.v FROM layered_grant_target t JOIN layered_grant_aux a ON a.id=t.id"
+                    "GRANT SELECT,UPDATE ON fsdb.layered_grant_inner TO layered_outer_owner"
+                    "CREATE DEFINER='layered_outer_owner'@'%' SQL SECURITY DEFINER VIEW layered_grant_outer AS SELECT b.id,b.metric AS n FROM layered_grant_inner b JOIN (SELECT 1 AS k) x ON x.k=b.id" ] do
+                  expectOk (run store sql) sql
+              expectOk (run store "UPDATE layered_grant_outer SET n=n+1 WHERE id=1") "write through two definers"
+              expectOk (run store "REVOKE UPDATE ON fsdb.layered_grant_inner FROM layered_outer_owner") "revoke component write grant"
+              match run store "UPDATE layered_grant_outer SET n=n+1 WHERE id=1" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected revoked inner-view grant to block the outer write, got %A" other
+              Expect.equal (rows store "SELECT n FROM layered_grant_target") [ [ Some "11" ] ] "denied write changes nothing"
+              expectOk (run store "GRANT UPDATE(metric) ON fsdb.layered_grant_inner TO layered_outer_owner") "grant the exposed column"
+              expectOk (run store "UPDATE layered_grant_outer SET n=n+1 WHERE id=1") "column grant permits the renamed write"
+              Expect.equal (rows store "SELECT n FROM layered_grant_target") [ [ Some "12" ] ] "column-authorized write persists"
+
           testCase "joined view outer layers preserve invoker and definer grants"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
