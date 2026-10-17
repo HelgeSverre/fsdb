@@ -989,7 +989,9 @@ The [legacy Unicode collation probe](torture/findings/2026-10-17-unicode-520-ngr
 now matches the audited spacing, format-control, and Korean Jamo ngram cases
 under both `utf8mb4_unicode_ci` and `utf8mb4_unicode_520_ci`. The full
 two-column corpus matches at token sizes 1–10 for each collation. Broader
-collation behavior and MeCab remain open.
+compatibility-ideograph searches under `utf8mb4_unicode_ci` and the full
+two-column corpus under `utf8mb4_0900_as_cs` also match the audited MySQL
+membership and relevance. Broader collation behavior and MeCab remain open.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
