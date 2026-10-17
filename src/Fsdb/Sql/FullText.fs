@@ -1162,10 +1162,14 @@ let private tryRepeatedNgramScores candidateIds (view: ReadView<'id>) nodes =
 let internal booleanScoresInView candidateIds (view: ReadView<'id>) (query: string) =
     let candidateIds = candidatesInView candidateIds view
     let nodes = parseBooleanQuery view.Rules view.Collation query
-    tryRepeatedNgramScores candidateIds view nodes
-    |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes)
-    |> Option.defaultWith (fun () -> evalNodes candidateIds view nodes)
-    |> Map.map (fun _ score -> visibleBooleanScore score)
+    if (nodes |> List.forall (fun (operator, _) -> operator = MustNot))
+       || (candidateIds |> Option.exists Set.isEmpty) then
+        Map.empty
+    else
+        tryRepeatedNgramScores candidateIds view nodes
+        |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes)
+        |> Option.defaultWith (fun () -> evalNodes candidateIds view nodes)
+        |> Map.map (fun _ score -> visibleBooleanScore score)
 
 let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
     booleanScoresInView None (readView index) query
@@ -1310,21 +1314,19 @@ let internal tryFlatBooleanScoresDictionaryInView
             | _ -> accumulatePositivePostings ()
 
     let nodes = parseBooleanQuery view.Rules view.Collation query
-    match tryRepeatedNgramScores candidateIds view nodes
-          |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes) with
-    | Some scores ->
-        let result = Collections.Generic.Dictionary<'id, float>()
-        scores |> Map.iter (fun id score -> result.Add(id, visibleBooleanScore score))
-        Some result
-    | None ->
-        nodes
-        |> flatTerms []
-        |> Option.map (fun terms ->
-            if (terms |> List.forall (fun (operator, _, _) -> operator = MustNot))
-               || (candidateIds |> Option.exists Set.isEmpty) then
-                Collections.Generic.Dictionary<'id, float>()
-            else
-                scoreTerms terms)
+    let flat = flatTerms [] nodes
+    let onlyExclusions = nodes |> List.forall (fun (operator, _) -> operator = MustNot)
+
+    if onlyExclusions || (candidateIds |> Option.exists Set.isEmpty) then
+        flat |> Option.map (fun _ -> Collections.Generic.Dictionary<'id, float>())
+    else
+        match tryRepeatedNgramScores candidateIds view nodes
+              |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes) with
+        | Some scores ->
+            let result = Collections.Generic.Dictionary<'id, float>()
+            scores |> Map.iter (fun id score -> result.Add(id, visibleBooleanScore score))
+            Some result
+        | None -> flat |> Option.map scoreTerms
 
 let internal tryFlatBooleanScoresDictionaryWithin candidateIds index query =
     tryFlatBooleanScoresDictionaryInView candidateIds (readView index) query

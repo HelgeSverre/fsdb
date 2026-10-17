@@ -34,3 +34,25 @@ path, not general full-text throughput.
 The 500-term query was about 43 times faster in this small run. Parsing still
 depends on query length; the result does not imply a constant-time search or
 remove broader full-text planning gaps.
+
+## Repeated CJK exclusions
+
+The ngram scorer has a separate repeated-term path that previously ran before
+the flat scorer's early exit. With 5,000 rows of `生日快乐中文` and a two-character
+ngram index, `SELECT COUNT(*) FROM docs WHERE MATCH(body) AGAINST
+(? IN BOOLEAN MODE)` still scanned postings for repeated `-生日` terms even
+though no positive term could seed a result. Both the general scorer and the
+flat dictionary path now recognize this empty result after parsing. A
+non-flat negative phrase retains the general-scorer fallback.
+
+The same native-host Release-server method gave these three-call medians:
+
+| Negative `-生日` terms | Before | After | Result |
+|---:|---:|---:|---:|
+| 100 | 30.29 ms | 1.04 ms | 0 rows |
+| 500 | 166.81 ms | 2.45 ms | 0 rows |
+
+Native MySQL 8.4.11 and fsdb also returned identical IDs for `-生日`, repeated
+`-生日`, `-生日 -中文`, and the mixed positive query `生日 -中文` on a separate
+three-row ngram fixture. The 500-term result was about 68 times faster in this
+small run; it does not characterize other CJK search shapes.
