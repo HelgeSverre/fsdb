@@ -475,6 +475,24 @@ def main():
 
                     cursor.execute("CREATE TABLE z(id INT PRIMARY KEY,n INT)")
                     extended_source = right_source + " LEFT JOIN z ON z.id=v.id"
+                    cursor.execute("DELETE FROM z")
+                    cursor.execute("INSERT INTO z VALUES(1,0)")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    try:
+                        cursor.execute(
+                            "UPDATE x LEFT JOIN y ON y.id=x.id "
+                            "RIGHT JOIN checked v ON v.id=y.id "
+                            "LEFT JOIN z ON z.id=v.id "
+                            "SET x.n=x.n+1,v.id=2,z.n=z.n+1 WHERE v.id=1"
+                        )
+                        raise AssertionError("four-source CHECK OPTION accepted a disappearing view row")
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                    for table, column, expected in (("x", "n", 0), ("t", "id", 1),
+                                                     ("z", "n", 0)):
+                        cursor.execute(f"SELECT {column} FROM {table} WHERE id=1")
+                        assert cursor.fetchone() == (expected,), (table, column)
                     for has_y, has_z in itertools.product((True, False), repeat=2):
                         cursor.execute("DELETE FROM y")
                         cursor.execute("DELETE FROM z")
@@ -603,7 +621,8 @@ def main():
                     "disjoint rows did not wait; three-source outer joins preserved both left- and right-hand targets; "
                     "four-source right/left and right/right chains updated only matched physical targets; "
                     "contended view and outer targets waited and rebased all three assignments; "
-                    "a bare outer-only column waited and rebased its physical target"
+                    "a bare outer-only column waited and rebased its physical target; "
+                    "four-source CHECK OPTION rejected atomically"
                 )
             finally:
                 for connection in connections:

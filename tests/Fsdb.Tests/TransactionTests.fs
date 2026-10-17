@@ -2574,6 +2574,25 @@ let tests =
               | result -> failtestf "right-preserving view row should update, got %A" result
               handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
               handle session "CREATE TABLE tx_read_view_last(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let rejectedFourSource =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_three_checked v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2,z.n=z.n+1 WHERE v.id=1"
+              match handle session rejectedFourSource |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected four-source CHECK OPTION rejection, got %A" result
+              for table, column, expected in
+                  [ "tx_read_view_outer", "n", "0"
+                    "tx_read_view_target", "id", "1"
+                    "tx_read_view_last", "n", "0" ] do
+                  match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + "." + column + " survives CHECK OPTION")
+                  | result -> failtestf "expected unchanged %s.%s, got %A" table column result
               let extendedRightPreserving =
                   "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
                   + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "

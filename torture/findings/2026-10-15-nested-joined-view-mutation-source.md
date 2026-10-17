@@ -111,3 +111,8 @@ claims `x` despite the view's hidden base table having its own `m` column.
 With an owner holding `x.m=10`, MySQL and Fsdb both wait, then set `x.m=11`,
 `t.n=1`, and `z.n=1` while leaving `x.n=0`. The focused regression covers
 this uniquely owned bare target as well as the qualified assignments above.
+
+The same four-source right/left chain preserves statement atomicity when its
+joined view has `CASCADED CHECK OPTION`: assigning an `id` that removes the
+view row yields MySQL error 1369, and neither outer physical target changes.
+Fsdb matches the error and all three unchanged rows in the focused regression.
