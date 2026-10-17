@@ -4,7 +4,8 @@ The prior ngram corpus covered punctuation, kana, and selected compatibility
 ideographs. A new `--legacy-range 3200:3400` lane in
 [`ngram-multicol-oracle.py`](../scripts/ngram-multicol-oracle.py) puts all 511
 printable U+3200–U+33FF forms in one `utf8mb4_unicode_ci` table. It compares
-natural, Boolean, and query-expansion membership and relevance against native
+natural, Boolean, and query-expansion membership and relevance, including
+quoted phrase terms, against native
 MySQL 8.4.11 at every startup token size from 1 through 10. The same lane
 compares each of 502 forms with its distinct Unicode NFKC expansion.
 
@@ -30,8 +31,8 @@ encoded-text value. Text comparisons now decode encoded-text operands and
 apply the resolved collation. An oracle-backed regression covers literal and
 row-derived casts while leaving binary values on their byte-comparison path.
 
-The new range lane reports zero ngram and NFKC-equality differences at every
-token size from 1 through 10: 1,533 ngram queries and 502 NFKC comparisons
+The expanded range lane reports zero ngram and NFKC-equality differences at every
+token size from 1 through 10: 3,066 ngram queries and 502 NFKC comparisons
 per size. The earlier size-two legacy-punctuation lane (936 queries) and
 default-collation lane (387 queries) also remain at zero. This is an audited
 range, not complete legacy UCA weight-byte parity or MeCab support.

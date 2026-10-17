@@ -172,6 +172,8 @@ def verify(size, legacy_punctuation=False, legacy_range=None):
                  if legacy_chars is not None else DOCUMENTS)
     terms = ([prefix + char for char in legacy_chars]
              if legacy_chars is not None else TERMS)
+    if legacy_range is not None:
+        terms += [f'"{prefix + char}"' for char in legacy_chars]
     modes = MODES
     collation = "utf8mb4_unicode_ci" if legacy_chars is not None else None
     with tempfile.TemporaryDirectory(prefix=f"fsdb-ngram-{size}-") as directory:
