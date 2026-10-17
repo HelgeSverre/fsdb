@@ -16115,7 +16115,26 @@ and private tryMaterializedCorrelatedLookup
                 |> intersectSharedRows
 
             let equalityCandidates predicate =
-                let equalities = correlatedProbeEqualities probeSource predicate (Some context) |> Option.defaultValue []
+                let equalities =
+                    predicate
+                    |> optionalConjuncts
+                    |> List.choose (fun expression ->
+                        match expression, tryCorrelatedProbeEqualityPredicate probeSource context expression with
+                        | BinOp((Eq | NullSafeEq), left, right), Some(name, value) ->
+                            let bound =
+                                match tryCorrelatedInnerColumn probeSource left with
+                                | Some inner when equalsIgnoreCase inner name -> right
+                                | _ -> left
+
+                            resolveColumn columns name
+                            |> Result.toOption
+                            |> Option.bind (fun index ->
+                                let column = columns.[index]
+                                equalityMembershipDomain store column
+                                |> Option.filter (fun domain ->
+                                    compatibleCorrelatedMembershipBound context column domain bound value)
+                                |> Option.map (fun _ -> name, value))
+                        | _ -> None)
 
                 // One statement-local key covers every usable equality.
                 let probes =
