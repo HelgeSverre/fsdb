@@ -298,7 +298,8 @@ now follow LEFT/RIGHT join direction, including `USING` and `NATURAL`
 equalities. A nullable unique key on the null-complemented side contributes a
 dependency when an `ON` equality rules out NULL in matched rows; extra
 preserved-side `ON` inputs must be fixed by the group before dependencies
-cross the join.
+cross the join. Physical unique keys inside parenthesized joined operands also
+participate in this inference.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
 multi-column `COUNT(DISTINCT ...)`, the `GROUP_CONCAT` byte ceiling,

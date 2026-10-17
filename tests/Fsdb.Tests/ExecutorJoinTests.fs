@@ -96,6 +96,30 @@ let tests =
               | Err(1055, _) -> ()
               | other -> failtestf "nullable-side key must not determine the parent, got %A" other
 
+          testCase "grouped join operands retain physical unique keys for outer-join grouping"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE fd_parent (id INT PRIMARY KEY, label VARCHAR(20))" |> ignore
+              runDefault store "CREATE TABLE fd_child (id INT PRIMARY KEY, pid INT UNIQUE, label VARCHAR(20))" |> ignore
+              runDefault store "CREATE TABLE fd_grandchild (cid INT, tag VARCHAR(20))" |> ignore
+              runDefault store "INSERT INTO fd_parent VALUES (1,'a'),(2,'b')" |> ignore
+              runDefault store "INSERT INTO fd_child VALUES (10,1,'child')" |> ignore
+              runDefault store "INSERT INTO fd_grandchild VALUES (10,'x'),(10,'y')" |> ignore
+
+              let joined =
+                  "FROM fd_parent p LEFT JOIN (fd_child c JOIN fd_grandchild d ON c.id=d.cid) ON p.id=c.pid"
+
+              match runDefault store ("SELECT p.id,c.label,COUNT(*) " + joined + " GROUP BY p.id ORDER BY p.id") with
+              | ResultSet(_, [ [ Some "1"; Some "child"; Some "2" ]; [ Some "2"; None; Some "1" ] ]) -> ()
+              | other -> failtestf "the grouped child retains its unique key, got %A" other
+
+              for sql in
+                  [ "SELECT c.pid,p.label,COUNT(*) " + joined + " GROUP BY c.pid"
+                    "SELECT p.id,d.tag,COUNT(*) " + joined + " GROUP BY p.id" ] do
+                  match runDefault store sql with
+                  | Err(1055, _) -> ()
+                  | other -> failtestf "grouped source must not infer an unrelated label for %s, got %A" sql other
+
           testCase "INNER JOIN matches rows across two aliased instances of the same table"
           <| fun _ ->
               let store = newStore ()

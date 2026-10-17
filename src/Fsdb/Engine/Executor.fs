@@ -18724,6 +18724,7 @@ and private validateOnlyFullGroupBy
 
     let physicalSources =
         (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+        |> List.collect FromItem.leaves
         |> List.choose (function
             | FromTable tableRef ->
                 let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table

@@ -36,3 +36,11 @@ preserved primary key and a unique child projection for `LEFT JOIN ... USING`,
 `NATURAL LEFT JOIN`, and mirrored `RIGHT JOIN ... USING`; they reject grouping
 by the nullable child key while selecting an arbitrary parent label. Focused
 fsdb regressions cover accepted and rejected forms.
+
+A parenthesized joined operand can contain the unique child. MySQL accepts
+`p LEFT JOIN (c JOIN d ON c.id=d.cid) ON p.id=c.pid`, grouped by `p.id`, while
+selecting `c.label` when `c.pid` is unique, even if two `d` rows multiply the
+matching child. It rejects selecting the non-unique `d.tag` or selecting
+`p.label` while grouping by the nullable `c.pid`. The validator now walks
+physical leaves inside grouped operands when collecting candidate keys; the
+focused regression pins all three results.
