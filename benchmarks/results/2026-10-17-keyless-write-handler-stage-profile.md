@@ -129,3 +129,23 @@ publication alone is unlikely to close this measured throughput gap.
 These are diagnostic single trials, not an optimization comparison. The
 temporary counters were removed after measurement; the ordinary Release
 build had zero warnings.
+
+## WAL batch follow-up
+
+The durable action above waits on `GroupCommit.Queue`. A temporary counter in
+`Persistence.appendBatch` measured only its leader-side work, including file
+open, event encoding and write, fsync, application to the checkpoint replica,
+and rotation. The same fresh-database, three-second warmup, 20-second
+single-trial workload used the final complete 20,000-event delta. Concurrent
+acknowledgement wall times above also include waiting for the leader and
+other queued batches; these leader-side times must not be equated with them.
+
+| Writers | fsdb inserts/s | MySQL inserts/s | Events per fsync | Open, encode, write µs/event | fsync µs/event | Replica apply µs/event | Rotation µs/event |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 6,867 | 16,787 | 1.00 | 15.69 | 27.55 | 4.99 | 0.01 |
+| 8 | 11,771 | 47,606 | 2.11 | 21.82 | 41.02 | 7.85 | 0.01 |
+
+The eight-writer window wrote 19,996 events in 9,479 batches. Low batch
+occupancy and work around each fsync are now concrete targets for a controlled
+experiment. The counters do not separate file-open cost from encoding and
+writing, and these one-off rates are not a before/after comparison.
