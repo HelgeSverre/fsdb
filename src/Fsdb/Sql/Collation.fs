@@ -244,7 +244,7 @@ let private generalSyntheticPair c =
     let pair marker weight = ValueSome(struct (marker, weight))
     match c with
     | '\uE0C0' | '\uE0D0' | '\uE0E0' | '\uE300' | '\uE0F0' | '\uE600'
-    | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5' as marker -> pair marker marker
+    | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5' | '\uE0B6' as marker -> pair marker marker
     // Halfwidth voicing and decomposed kana marks have their own positional weights.
     | '\uff9e' -> pair '\uE0C0' '\uE0C1'
     | '\uff9f' -> pair '\uE0C0' '\uE0C2'
@@ -289,6 +289,9 @@ let private generalSyntheticPair c =
     | c when c >= '\u2100' && c <= '\u21ff' ->
         let upper = if c >= '\u2170' && c <= '\u217f' then char (int c - 16) else c
         pair '\uE0B5' (char (0xF000 + int upper - 0x2100))
+    // Mathematical operators in this block keep one primary weight per code point.
+    | c when c >= '\u2200' && c <= '\u22ff' ->
+        pair '\uE0B6' (char (0xF100 + int c - 0x2200))
     | _ -> ValueNone
 
 let private foldGeneralSyntheticWeights (value: string) =

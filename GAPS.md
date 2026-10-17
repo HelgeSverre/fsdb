@@ -964,6 +964,9 @@ The [general Unicode letterlike-symbol audit](torture/findings/2026-10-17-genera
 matches MySQL's U+2100–U+21FF primary-weight classes in two-column
 ngram searches at token sizes 1–10. Broader collation and parser behavior
 remains open.
+The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
+also matches MySQL's distinct U+2200–U+22FF primary weights in the same
+two-column ngram lane at token sizes 1–10.
 
 The [Boolean query Unicode character-table gap](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md)
 is closed for audited cases: Boolean word and phrase boundaries now use

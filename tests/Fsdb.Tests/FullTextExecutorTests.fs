@@ -540,6 +540,17 @@ let tests =
               Expect.equal (search "ↄ") [ "8" ] "reversed small C keeps its own posting"
               Expect.equal (search "Ⅰ") [ "9"; "10" ] "Roman numeral case shares postings"
 
+          testCase "general Unicode mathematical ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE operator_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO operator_docs VALUES(1,'中∃文'),(2,'中∄文'),(3,'中∈文'),(4,'中∉文'),(5,'中∣文'),(6,'中∤文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM operator_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              for term, expected in [ "∃", "1"; "∄", "2"; "∈", "3"; "∉", "4"; "∣", "5"; "∤", "6" ] do
+                  Expect.equal (search term) [ expected ] (term + " keeps its own posting")
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()
