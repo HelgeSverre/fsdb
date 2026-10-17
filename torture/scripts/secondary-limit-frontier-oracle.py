@@ -57,7 +57,11 @@ def main():
                           (2, 3, "id<=2", False, 4, "UPDATE"),
                           (2, 3, "rank_value<=2", False, 4, "UPDATE"),
                           (2, 3, "id<=2", False, 0, "UPDATE"),
-                          (2, 3, "id<=2", False, 0, "DELETE")]
+                          (2, 3, "id<=2", False, 0, "DELETE"),
+                          (2, 3, "id IN (1,2)", False, 0, "UPDATE"),
+                          (2, 3, "id IN (1,2)", False, 0, "DELETE"),
+                          (2, 3, "id IN (1,2,4)", True, 0, "UPDATE"),
+                          (2, 3, "id IN (1,2,4)", True, 0, "DELETE")]
                 for limit, size, predicate, should_wait, inserted_rank, verb in cases:
                     waiter = connect(socket)
                     try:
@@ -98,9 +102,11 @@ def main():
                         with owner.cursor() as cursor:
                             cursor.execute("SELECT id,n FROM target ORDER BY id")
                             final_rows = cursor.fetchall()
-                        expected_rows = (tuple((i, int(i <= limit)) for i in range(1, size + 2))
+                        selected_ids = ((size + 1, 1) if predicate == "id IN (1,2,4)"
+                                        else tuple(range(1, limit + 1)))
+                        expected_rows = (tuple((i, int(i in selected_ids)) for i in range(1, size + 2))
                                          if verb == "UPDATE" else
-                                         tuple((i, 0) for i in range(limit + 1, size + 2)))
+                                         tuple((i, 0) for i in range(1, size + 2) if i not in selected_ids))
                         assert final_rows == expected_rows, (limit, size, predicate, final_rows)
                         print(f"MySQL {version}: {verb} limit={limit} visible_rows={size} predicate={predicate or 'none'} inserted_rank={inserted_rank} wait={waited}", flush=True)
                     finally:

@@ -29967,6 +29967,18 @@ let transactionWriteTargets
                                             comparisonIsFalse operation (if reverse then -comparison else comparison))
                                     | _ -> false
                                 excludes left right false || excludes right left true
+                            | In(column, candidates) when not candidates.IsEmpty ->
+                                match columnName column with
+                                | Some name ->
+                                    match keyFor name ordered primary with
+                                    | Some key ->
+                                        candidates
+                                        |> List.forall (fun candidate ->
+                                            comparableLiteral candidate
+                                            |> Option.bind (keyComparison name key)
+                                            |> Option.exists ((<>) 0))
+                                    | None -> false
+                                | None -> false
                             | _ -> false)
 
                     let pending =

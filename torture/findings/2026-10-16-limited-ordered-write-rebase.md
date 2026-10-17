@@ -171,6 +171,15 @@ cannot match. The native oracle and focused transaction regression pin the
 wait, affected count, and final rows for both verbs. Predicates that cannot
 be proven false from those keys remain conservative.
 
+The same proof covers a literal `IN` filter. With visible primary keys 1, 2,
+and 3, pending `(id,rank_value)=(4,0)` cannot enter `WHERE id IN (1,2)
+ORDER BY rank_value LIMIT 2`. MySQL 8.4.11 does not wait for the insert for
+UPDATE or DELETE; fsdb now skips its secondary-key claim after proving every
+literal member unequal to the pending primary key. Unsupported comparison
+domains retain the conservative wait. When the list also contains 4, both
+engines wait and then select rows 4 and 1. The oracle and focused transaction
+regression pin both verbs and their final rows.
+
 The same proof now covers a text primary-key filter using the column's
 collation key. With visible `b,d,f` ordered by a secondary integer key, a
 pending `z` at rank zero does not delay `WHERE id<='f' ORDER BY rank_value
