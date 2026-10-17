@@ -47,8 +47,14 @@ also agrees on writable metadata, one update, and error 1369. Bare
 columns or subqueries in the JSON_TABLE source still retain the read-only
 path because rebinding them requires the original inner join scope.
 
-An inner LATERAL join, inner subqueries requiring scoped qualifier rewriting,
-and a LATERAL source whose local aliases shadow the expanded view alias
-remain read-only rather than risking a wrong write. Additional layered source
-orders and further security-context combinations still need differential
-coverage.
+An inner LATERAL join with qualified outer references can also be inlined.
+The MySQL 8.4.11 differential oracle uses distinct definers, an inner
+dependent LATERAL source, and an outer derived join. Both engines report the
+outer view writable, update one row, reject inner and outer CHECK OPTION
+violations with 1369, and retain the accepted value. Revoking the inner
+definer's SELECT on the dependent source or the outer definer's UPDATE on
+the inner view yields 1356 in both engines. Inner LATERAL bodies
+with bare references, subqueries requiring scoped qualifier rewriting, or
+local aliases that shadow the expanded view alias remain read-only rather
+than risking a wrong write. Additional layered source orders and security
+context combinations still need differential coverage.

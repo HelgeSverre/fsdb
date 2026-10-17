@@ -214,6 +214,32 @@ def exercise(connection):
                     "UPDATE json_chain_joined_outer SET n=8 WHERE id=1")))
     results.append(("joined JSON chain check", outcome(connection,
                     "UPDATE json_chain_joined_outer SET n=10 WHERE id=1")))
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_joined_inner AS "
+        "SELECT t.id,t.n,d.aux FROM target t JOIN LATERAL "
+        "(SELECT a.aux FROM aux a WHERE a.id=t.id) d ON d.aux>0 "
+        "WHERE t.n>=0 WITH CASCADED CHECK OPTION",
+        "GRANT SELECT,UPDATE ON probe.lateral_joined_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_joined_outer AS "
+        "SELECT v.id,v.n,v.aux,q.mark FROM lateral_joined_inner v "
+        "JOIN (SELECT 1 AS mark) q ON q.mark=v.id "
+        "WHERE v.n<10 WITH CASCADED CHECK OPTION",
+    ]:
+        results.append(("joined lateral create", outcome(connection, sql)))
+    results.append(("joined lateral metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_joined_outer'")))
+    for label, value in (("update", 7), ("inner check", -1), ("outer check", 10)):
+        results.append((f"joined lateral {label}", outcome(connection,
+                        f"UPDATE lateral_joined_outer SET n={value} WHERE id=1")))
+    run(connection, "REVOKE SELECT ON probe.aux FROM inner_owner")
+    results.append(("joined lateral revoked source SELECT", outcome(connection,
+                    "UPDATE lateral_joined_outer SET n=7 WHERE id=1")))
+    run(connection, "GRANT SELECT ON probe.aux TO inner_owner")
+    run(connection, "REVOKE UPDATE ON probe.lateral_joined_inner FROM outer_owner")
+    results.append(("joined lateral revoked component UPDATE", outcome(connection,
+                    "UPDATE lateral_joined_outer SET n=7 WHERE id=1")))
+    run(connection, "GRANT UPDATE ON probe.lateral_joined_inner TO outer_owner")
     results.append(("final rows", outcome(connection, "SELECT id,n FROM target ORDER BY id")))
     return results
 

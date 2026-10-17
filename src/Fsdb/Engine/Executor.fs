@@ -1926,6 +1926,29 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                     Expression.exists (function
                                         | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _ -> true
                                         | _ -> false)
+                                let canInlineLateral (body: SelectStmt) =
+                                    let localSources =
+                                        (body.From |> Option.toList) @ (body.Joins |> List.map _.Table)
+                                    let rebindingNames =
+                                        baseQualifier :: qualifier :: (joinedQualifiers |> List.choose id)
+                                        |> List.map _.ToLowerInvariant()
+                                        |> Set.ofList
+                                    let shadowsRebindingName =
+                                        localSources
+                                        |> List.collect FromItem.leaves
+                                        |> List.choose FromItem.tryQualifier
+                                        |> List.exists (fun name -> Set.contains (name.ToLowerInvariant()) rebindingNames)
+                                    let mutable hasUnscopedReference = false
+                                    Expression.iterStatement
+                                        (function
+                                        | Col _ | Star _ -> hasUnscopedReference <- true
+                                        | expression when hasSubquery expression -> hasUnscopedReference <- true
+                                        | _ -> ())
+                                        (Select body)
+                                    body.Ctes.IsEmpty
+                                    && (localSources |> List.forall (function FromTable _ -> true | _ -> false))
+                                    && not shadowsRebindingName
+                                    && not hasUnscopedReference
                                 let needsScopedRewrite =
                                     not nested.UpdateJoins.IsEmpty
                                     && ((nested.Expressions |> Map.exists (fun _ expression -> hasSubquery expression))
@@ -1942,6 +1965,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                                 // Bare and scoped names need the original inner join scope.
                                                 hasSubquery expression
                                                 || Expression.exists (function Col _ -> true | _ -> false) expression
+                                            | FromLateral(PlainSelect body, _) -> not (canInlineLateral body)
                                             | _ -> true))
                                     || not nested.SharedCteAliases.IsEmpty
                                     || needsScopedRewrite
@@ -1953,14 +1977,14 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                         if equalsIgnoreCase name baseQualifier then qualifier
                                         else Map.tryFind (name.ToLowerInvariant()) renamedJoinAliases |> Option.defaultValue name
 
-                                    let qualify =
-                                        Expression.rewrite (function
-                                            | Col column -> Some(QualifiedCol(qualifier, column))
-                                            | QualifiedCol(source, column) ->
-                                                let renamed = remapQualifier source
-                                                if equalsIgnoreCase renamed source then None
-                                                else Some(QualifiedCol(renamed, column))
-                                            | _ -> None)
+                                    let rewriteInnerReference = function
+                                        | Col column -> Some(QualifiedCol(qualifier, column))
+                                        | QualifiedCol(source, column) ->
+                                            let renamed = remapQualifier source
+                                            if equalsIgnoreCase renamed source then None
+                                            else Some(QualifiedCol(renamed, column))
+                                        | _ -> None
+                                    let qualify = Expression.rewrite rewriteInnerReference
 
                                     let renameJoinedSource = function
                                         | FromTable table ->
@@ -1977,6 +2001,11 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                                 Map.tryFind (alias.ToLowerInvariant()) renamedJoinAliases
                                                 |> Option.defaultValue alias
                                             FromJsonTable(qualify expression, path, columns, renamed)
+                                        | FromLateral(PlainSelect body, alias) ->
+                                            let renamed =
+                                                Map.tryFind (alias.ToLowerInvariant()) renamedJoinAliases
+                                                |> Option.defaultValue alias
+                                            FromLateral(PlainSelect(Expression.rewriteSelectExpressions rewriteInnerReference body), renamed)
                                         | source -> source
 
                                     let targets =

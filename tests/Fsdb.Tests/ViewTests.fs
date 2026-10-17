@@ -1076,6 +1076,35 @@ let tests =
                   [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
                   "both rejected writes leave the accepted value intact"
 
+          testCase "joined outer views rebind qualified inner LATERAL references"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for sql in
+                  [ "CREATE TABLE nested_lateral_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE nested_lateral_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO nested_lateral_target VALUES(1,0),(2,0)"
+                    "INSERT INTO nested_lateral_aux VALUES(1,7)"
+                    "CREATE VIEW nested_lateral_inner AS SELECT t.id,t.n,d.aux FROM nested_lateral_target t JOIN LATERAL (SELECT a.aux FROM nested_lateral_aux a WHERE a.id=t.id) d ON d.aux>0 WHERE t.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_lateral_outer AS SELECT v.id,v.n,v.aux,q.mark FROM nested_lateral_inner v JOIN (SELECT 1 AS mark) q ON q.mark=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_lateral_outer'")
+                  [ [ Some "YES" ] ]
+                  "the qualified dependent source leaves the joined layer writable"
+              Expect.equal (run store "UPDATE nested_lateral_outer SET n=7 WHERE id=1") (Affected 1UL) "the layer updates its matched row"
+
+              for rejected in [ -1; 10 ] do
+                  match run store (sprintf "UPDATE nested_lateral_outer SET n=%d WHERE id=1" rejected) with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected CHECK OPTION rejection for %d, got %A" rejected other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_lateral_target ORDER BY id")
+                  [ [ Some "1"; Some "7" ]; [ Some "2"; Some "0" ] ]
+                  "the accepted value survives both rejected writes"
+
           testCase "layered JSON_TABLE chains retain writable target grants across source orders"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
