@@ -2545,6 +2545,58 @@ let tests =
                       Expect.equal rows expected "the indexed filter selects only its matching rows"
                   | other -> failtestf "expected filtered frontier rows, got %A" other
 
+          testCase "indexed text filter excludes pending secondary keys"
+          <| fun _ ->
+              let cases =
+                  [ "utf8mb4_bin", "z", false, [ "b"; "d" ]
+                    "utf8mb4_bin", "a", true, [ "a"; "b" ]
+                    "utf8mb4_0900_ai_ci", "Ä", true, [ "Ä"; "b" ] ]
+              for collation, insertedId, shouldWait, selected in cases do
+                  for verb in [ "UPDATE"; "DELETE" ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      handle setup
+                          ("CREATE TABLE tx_text_filter(id VARCHAR(16) COLLATE " + collation
+                           + " PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))")
+                      |> ignore
+                      handle setup "INSERT INTO tx_text_filter VALUES('b',1,0),('d',2,0),('f',3,0)" |> ignore
+                      let owner, _ = handle (create 2 store) "BEGIN"
+                      let owner, inserted =
+                          handle owner ("INSERT INTO tx_text_filter VALUES('" + insertedId + "',0,0)")
+                      Expect.equal inserted (Affected 1UL) "owner inserts a secondary-order candidate"
+                      let waiter, _ = handle (create 3 store) "BEGIN"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              let command =
+                                  if verb = "UPDATE" then "UPDATE tx_text_filter SET n=n+1"
+                                  else "DELETE FROM tx_text_filter"
+                              handle waiter (command + " WHERE id<='f' ORDER BY rank_value ASC LIMIT 2"))
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "text-filter writer starts"
+                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "text-filter writer completes"
+                      let waiter, result = waiting.Result
+                      Expect.equal blocked shouldWait "text primary filter wait matches MySQL"
+                      Expect.equal result (Affected 2UL) "two filtered rows change"
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                      match handle setup "SELECT id,n FROM tx_text_filter" |> snd with
+                      | ResultSet(_, rows) ->
+                          let actual =
+                              rows
+                              |> List.map (function
+                                  | [ Some id; Some n ] -> id, n
+                                  | row -> failtestf "unexpected text-filter row: %A" row)
+                              |> Map.ofList
+                          let expected =
+                              [ "b"; "d"; "f"; insertedId ]
+                              |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id selected))
+                              |> List.map (fun id -> id, if List.contains id selected then "1" else "0")
+                              |> Map.ofList
+                          Expect.equal actual expected "text-filter write selects MySQL rows"
+                      | other -> failtestf "expected text-filter rows, got %A" other
+
           testCase "equal non-unique secondary keys do not serialize inserts"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

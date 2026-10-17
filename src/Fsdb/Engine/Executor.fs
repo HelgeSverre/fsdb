@@ -29915,16 +29915,26 @@ let transactionWriteTargets
                                 indexedNames |> List.exists (equalsIgnoreCase name)
                             | _ -> false))
 
-                    let numericKeyFor name ordered primary =
+                    let keyFor name ordered primary =
                         let lookup names keys =
                             List.zip names keys
                             |> List.tryPick (fun (column, key) ->
-                                if equalsIgnoreCase name column then
-                                    match key with OrderedNumber number -> Some(VDecimal number) | _ -> None
-                                else None)
+                                if equalsIgnoreCase name column then Some key else None)
                         lookup (orderedColumns |> List.map fst) ordered
                         |> Option.orElseWith (fun () ->
                             primary |> Option.bind (lookup primaryColumns))
+
+                    let keyComparison name key bound =
+                        match key, bound with
+                        | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) ->
+                            Some(Value.compare (VDecimal number) bound)
+                        | OrderedText key, VString text ->
+                            table.Columns
+                            |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+                            |> Option.map (fun column ->
+                                let other = (column.Collation |> Collation.findOrDefault).KeyOf text
+                                System.String.CompareOrdinal(key, other))
+                        | _ -> None
 
                     let comparisonIsFalse operation comparison =
                         match operation with
@@ -29937,8 +29947,8 @@ let transactionWriteTargets
                         | _ -> false
 
                     let excludesPending ordered primary =
-                        let numericLiteral = function
-                            | LiteralValue(VInt _ | VUInt _ | VDecimal _ as value) -> Some value
+                        let comparableLiteral = function
+                            | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VString _ as value) -> Some value
                             | _ -> None
                         let columnName = function
                             | Col name -> Some name
@@ -29949,11 +29959,11 @@ let transactionWriteTargets
                         |> List.exists (function
                             | BinOp(operation, left, right) ->
                                 let excludes column literal reverse =
-                                    match columnName column, numericLiteral literal with
+                                    match columnName column, comparableLiteral literal with
                                     | Some name, Some bound ->
-                                        numericKeyFor name ordered primary
-                                        |> Option.exists (fun key ->
-                                            let comparison = Value.compare key bound
+                                        keyFor name ordered primary
+                                        |> Option.bind (fun key -> keyComparison name key bound)
+                                        |> Option.exists (fun comparison ->
                                             comparisonIsFalse operation (if reverse then -comparison else comparison))
                                     | _ -> false
                                 excludes left right false || excludes right left true

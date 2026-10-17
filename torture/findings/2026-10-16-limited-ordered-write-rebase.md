@@ -171,6 +171,16 @@ cannot match. The native oracle and focused transaction regression pin the
 wait, affected count, and final rows for both verbs. Predicates that cannot
 be proven false from those keys remain conservative.
 
+The same proof now covers a text primary-key filter using the column's
+collation key. With visible `b,d,f` ordered by a secondary integer key, a
+pending `z` at rank zero does not delay `WHERE id<='f' ORDER BY rank_value
+LIMIT 2`; a pending `a` does. Under `utf8mb4_0900_ai_ci`, pending `Ä` also
+enters the filtered result and makes the write wait. The maintained native
+oracle and transaction regression cover UPDATE and DELETE for all six cases,
+including affected counts and final rows. The check applies only to literal
+text comparisons with an indexed text key; other coercion domains retain the
+conservative wait.
+
 An in-memory A/B/A check with 1,000 sequential inserts into a table with one
 secondary index measured warm trials around 186–205 ms on the previous and
 current revisions. The spread does not establish a precise cost difference;

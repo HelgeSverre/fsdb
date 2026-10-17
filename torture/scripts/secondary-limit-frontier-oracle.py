@@ -105,6 +105,69 @@ def main():
                         print(f"MySQL {version}: {verb} limit={limit} visible_rows={size} predicate={predicate or 'none'} inserted_rank={inserted_rank} wait={waited}", flush=True)
                     finally:
                         waiter.close()
+                text_cases = (
+                    ("utf8mb4_bin", "z", False, ("b", "d")),
+                    ("utf8mb4_bin", "a", True, ("a", "b")),
+                    ("utf8mb4_0900_ai_ci", "Ä", True, ("Ä", "b")),
+                )
+                for collation, inserted_id, should_wait, selected in text_cases:
+                    for verb in ("UPDATE", "DELETE"):
+                        waiter = connect(socket)
+                        try:
+                            with owner.cursor() as cursor:
+                                cursor.execute("DROP TABLE IF EXISTS target_text")
+                                cursor.execute(
+                                    "CREATE TABLE target_text(id VARCHAR(16) COLLATE " + collation
+                                    + " PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))"
+                                )
+                                cursor.executemany(
+                                    "INSERT INTO target_text VALUES(%s,%s,0)",
+                                    (("b", 1), ("d", 2), ("f", 3)),
+                                )
+                                cursor.execute("BEGIN")
+                                cursor.execute("INSERT INTO target_text VALUES(%s,0,0)", (inserted_id,))
+                            with waiter.cursor() as cursor:
+                                cursor.execute("USE probe")
+                                cursor.execute("BEGIN")
+                            started = threading.Event()
+                            result = {}
+
+                            def write_text():
+                                try:
+                                    with waiter.cursor() as cursor:
+                                        started.set()
+                                        command = "UPDATE target_text SET n=n+1" if verb == "UPDATE" else "DELETE FROM target_text"
+                                        cursor.execute(
+                                            command + " WHERE id<='f' ORDER BY rank_value ASC LIMIT 2"
+                                        )
+                                        result["affected"] = cursor.rowcount
+                                        cursor.execute("COMMIT")
+                                except Exception as error:
+                                    result["error"] = str(error)
+
+                            thread = threading.Thread(target=write_text, daemon=True)
+                            thread.start()
+                            assert started.wait(2)
+                            thread.join(0.25)
+                            waited = thread.is_alive()
+                            owner.commit()
+                            thread.join(5)
+                            assert not thread.is_alive(), (collation, inserted_id, result)
+                            assert result == {"affected": 2}, (collation, inserted_id, result)
+                            assert waited == should_wait, (collation, inserted_id, verb, waited)
+                            with owner.cursor() as cursor:
+                                cursor.execute("SELECT id,n FROM target_text")
+                                actual = dict(cursor.fetchall())
+                            expected = {key: int(key in selected) for key in ("b", "d", "f", inserted_id)}
+                            if verb == "DELETE":
+                                expected = {key: value for key, value in expected.items() if key not in selected}
+                            assert actual == expected, (collation, inserted_id, verb, actual, expected)
+                            print(
+                                f"MySQL {version}: {verb} text primary={collation} pending={inserted_id} wait={waited}",
+                                flush=True,
+                            )
+                        finally:
+                            waiter.close()
             finally:
                 if owner:
                     owner.close()
