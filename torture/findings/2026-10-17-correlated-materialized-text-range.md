@@ -7,7 +7,10 @@ The inner `SELECT DISTINCT id,k` is stable and materialized; `LOWER(d.k)` is
 a row-local expression over its exposed text column. The oracle covers
 strict and inclusive inequalities, reversed operands, `BETWEEN`, an explicit
 case-insensitive comparison collation, NULL bounds, and a complete OR branch.
-It also repeats the selective `BETWEEN` case through a stable CTE source.
+It also repeats the selective `BETWEEN` case through a stable CTE source and
+checks a selective `NOT BETWEEN` case. The latter returns five outside rows
+for `word001`–`word998` and exercises the complete union of two strict
+text-expression ranges.
 
 Fsdb already returned MySQL's rows, but it scanned the materialized source
 for every outer bound. The focused `BETWEEN` regression evaluated a
@@ -21,7 +24,8 @@ source order. A different explicit comparison collation gets a separate
 lookup. Complete OR branches can union these candidate sets.
 
 The focused regression now keeps each selective range below 80 residual
-calls while preserving seven derived-source and one CTE MySQL result vectors.
+calls while preserving seven derived-source, one CTE, and one `NOT BETWEEN`
+MySQL result vectors.
 Unsupported result
 types, non-text bounds, unstable or outer-dependent expressions, and
 collation-resolution errors retain the scan path. Broader expression and

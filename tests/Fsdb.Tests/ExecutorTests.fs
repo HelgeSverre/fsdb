@@ -13057,6 +13057,16 @@ let tests =
                     | other -> failtestf "expected stable CTE text range, got %A" other
                     Expect.isLessThan calls 80 "stable CTE range must bound residual work"
 
+                    runDefault store "INSERT INTO text_range_bounds VALUES(6,NULL,'word001','word998')" |> ignore
+                    calls <- 0
+                    match run store registry
+                        ("SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM text_range_rows) d "
+                         + "WHERE TOUCH(d.id)=d.id AND LOWER(d.k) NOT BETWEEN o.lo AND o.hi) "
+                         + "FROM text_range_bounds o WHERE o.id=6") with
+                    | ResultSet(_, [ [ Some "5" ] ]) -> ()
+                    | other -> failtestf "expected MySQL 8.4 selective text NOT BETWEEN result, got %A" other
+                    Expect.isLessThan calls 80 "text NOT BETWEEN must union only the outside expression ranges"
+
                 testCase "materialized correlated decimal expressions key exact bounds only"
                 <| fun _ ->
                     let mutable calls = 0

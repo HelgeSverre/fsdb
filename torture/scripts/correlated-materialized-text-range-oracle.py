@@ -94,7 +94,17 @@ def main():
                     )
                     actual = tuple(count for _, count in cursor.fetchall())
                     assert actual == (3, 3, 5, 0, 0), ("stable CTE", actual)
-                    print(f"MySQL {version}: {len(CASES)} derived ranges and one CTE range match")
+                    cursor.execute(
+                        "INSERT INTO outer_bounds VALUES(6,NULL,'word001','word998')"
+                    )
+                    cursor.execute(
+                        "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM inner_rows) d "
+                        "WHERE LOWER(d.k) NOT BETWEEN o.lo AND o.hi) "
+                        "FROM outer_bounds o WHERE o.id=6"
+                    )
+                    actual = cursor.fetchone()[0]
+                    assert actual == 5, ("selective NOT BETWEEN", actual)
+                    print(f"MySQL {version}: {len(CASES)} derived ranges, one CTE range, and selective NOT BETWEEN match")
             finally:
                 if connection:
                     connection.close()
