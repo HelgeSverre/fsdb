@@ -13003,6 +13003,60 @@ let tests =
                         | other -> failtestf "expected materialized text matches for %s, got %A" predicate other
                         Expect.isLessThan calls 80 (predicate + " must bound residual work")
 
+                testCase "materialized correlated text expression ranges use comparison collation"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE text_range_bounds(id INT PRIMARY KEY,x VARCHAR(20) COLLATE utf8mb4_bin,lo VARCHAR(20) COLLATE utf8mb4_bin,hi VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "CREATE TABLE text_range_rows(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store
+                        "INSERT INTO text_range_bounds VALUES(1,'word010','word010','word012'),(2,'alpha','alpha','beta'),(3,'zeta','word995','word999'),(4,NULL,NULL,NULL),(5,'ALPHA','ALPHA','ALPHA')"
+                    |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,'word%03d')" id id)
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO text_range_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO text_range_rows VALUES(1000,'ALPHA'),(1001,'alpha'),(1002,'Beta'),(1003,NULL)" |> ignore
+
+                    for predicate, expected, selective in
+                        [ "LOWER(d.k)<o.x", [ 13; 0; 1003; 0; 0 ], false
+                          "LOWER(d.k)<=o.x", [ 14; 2; 1003; 0; 0 ], false
+                          "LOWER(d.k)>o.x", [ 989; 1001; 0; 0; 1003 ], false
+                          "o.x>LOWER(d.k)", [ 13; 0; 1003; 0; 0 ], false
+                          "LOWER(d.k) BETWEEN o.lo AND o.hi", [ 3; 3; 5; 0; 0 ], true
+                          "LOWER(d.k) COLLATE utf8mb4_0900_ai_ci BETWEEN o.lo AND o.hi", [ 3; 3; 5; 0; 2 ], true
+                          "LOWER(d.k) BETWEEN o.lo AND o.hi OR d.id=999", [ 4; 4; 5; 1; 1 ], true ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM text_range_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                            + "FROM text_range_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual (expected |> List.map Some) predicate
+                        | other -> failtestf "expected materialized text range for %s, got %A" predicate other
+                        if selective then Expect.isLessThan calls 80 (predicate + " must bound residual work")
+
+                    calls <- 0
+                    let cteSql =
+                        "WITH materialized AS (SELECT DISTINCT id,k FROM text_range_rows) "
+                        + "SELECT o.id,(SELECT COUNT(*) FROM materialized d "
+                        + "WHERE TOUCH(d.id)=d.id AND LOWER(d.k) BETWEEN o.lo AND o.hi) "
+                        + "FROM text_range_bounds o ORDER BY o.id"
+                    match run store registry cteSql with
+                    | ResultSet(_, rows) ->
+                        let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                        Expect.equal actual ([ 3; 3; 5; 0; 0 ] |> List.map Some) "stable CTE range rows"
+                    | other -> failtestf "expected stable CTE text range, got %A" other
+                    Expect.isLessThan calls 80 "stable CTE range must bound residual work"
+
                 testCase "materialized correlated decimal expressions key exact bounds only"
                 <| fun _ ->
                     let mutable calls = 0
