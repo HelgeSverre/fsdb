@@ -5366,12 +5366,18 @@ let tryEqualityIndex (table: Table) (columnName: string) : EqualityIndex option 
 
 let private exactProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
     let column = table.Columns.[index]
-    let cleanDoubleString =
+    let doubleStringProbe =
         match column.Type, value with
-        | TDouble _, VString text when not (String.IsNullOrWhiteSpace text) ->
+        | TDouble _, VString text ->
+            let leadingNumber, _ = Value.coerceLeadingDouble text
             match Double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
             | true, number when Double.IsFinite number -> Some(VDouble number)
-            | _ -> None
+            | true, number when Double.IsInfinity number && abs leadingNumber = Double.MaxValue ->
+                Some(VDouble number)
+            | _ ->
+                // A malformed overflow may have been clamped to MaxValue;
+                // leave that ambiguous boundary on the scan path.
+                if abs leadingNumber = Double.MaxValue then None else Some(VDouble leadingNumber)
         | _ -> None
     let integerColumn =
         match column.Type with
@@ -5414,7 +5420,7 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
         | TBigInt false, VInt _ -> Ok value
         | _ -> Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) column value)
 
-    match cleanDoubleString, coerced with
+    match doubleStringProbe, coerced with
     | Some probe, _ -> Some probe
     | None, Ok coerced when coerced = Value.materialize value -> Some coerced
     | None, Ok coerced when exactIntegralDouble ->
@@ -5439,6 +5445,10 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
 
 let private exactRangeProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
     match table.Columns.[index].Type, value with
+    | TDouble _, VString text ->
+        match Double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
+        | true, number when Double.IsFinite number -> Some(VDouble number)
+        | _ -> None
     | (TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _), VDecimal _ ->
         // The ordered key comparator compares integer and DECIMAL values
         // exactly, so a fractional boundary needs no stored-key coercion.

@@ -13172,7 +13172,7 @@ let tests =
                     runDefault store "CREATE TABLE physical_double_bounds(id INT PRIMARY KEY,s VARCHAR(32))" |> ignore
                     runDefault store "CREATE TABLE physical_double_rows(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))" |> ignore
                     runDefault store
-                        "INSERT INTO physical_double_bounds VALUES(1,'12.5'),(2,'-12.5'),(3,'999'),(4,'12.5x'),(5,'1e-500'),(6,' 12.5 '),(7,'1e309')"
+                        "INSERT INTO physical_double_bounds VALUES(1,'12.5'),(2,'-12.5'),(3,'999'),(4,'12.5x'),(5,'1e-500'),(6,' 12.5 '),(7,'1e309'),(8,'1e309x')"
                     |> ignore
                     [ 0..999 ]
                     |> List.map (fun id -> sprintf "(%d,%d.5)" id (id - 500))
@@ -13186,11 +13186,12 @@ let tests =
                             [ "d.k=o.s", 1, "1", true
                               "d.k BETWEEN o.s AND o.s", 1, "1", true
                               "d.k IN(o.s,o.s)", 1, "1", true
-                              "d.k=o.s", 4, "1", false
-                              "d.k IN(o.s,o.s)", 4, "1", false
+                              "d.k=o.s", 4, "1", true
+                              "d.k IN(o.s,o.s)", 4, "1", true
                               "d.k=o.s", 5, "1", true
                               "d.k=o.s", 6, "1", true
-                              "d.k=o.s", 7, "0", false ] do
+                              "d.k=o.s", 7, "0", true
+                              "d.k=o.s", 8, "0", false ] do
                             calls <- 0
                             let sql =
                                 "SELECT (SELECT COUNT(*) FROM " + source
@@ -13200,7 +13201,7 @@ let tests =
                             | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected predicate
                             | other -> failtestf "expected physical DOUBLE result for %s, got %A" predicate other
                             if keyed then Expect.isLessThan calls 80 (source + " must use the index")
-                            else Expect.isGreaterThan calls 900 "truncated numeric text retains a scan"
+                            else Expect.isGreaterThan calls 900 "non-indexable text retains a scan"
 
                 testCase "physical correlated ABS equality probes indexed signed keys"
                 <| fun _ ->
