@@ -2070,6 +2070,50 @@ let tests =
                               Expect.equal rows (if update then updatedRows else remainingRows) (statement + $" (indexed={indexed})")
                           | actual -> failtestf "expected a result set after %s, got %A" statement actual
 
+          testCase "limited ordered writes reselect after two owners commit"
+          <| fun _ ->
+              for indexed in [ false; true ] do
+                  for update in [ true; false ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      let index = if indexed then ", KEY ix_n(n)" else ""
+                      handle setup ("CREATE TABLE tx_limited_two_waits (id INT PRIMARY KEY, n INT" + index + ")") |> ignore
+                      handle setup "INSERT INTO tx_limited_two_waits VALUES (1,0),(2,1),(3,2),(4,3)" |> ignore
+                      let first, _ = handle (create 2 store) "BEGIN"
+                      let second, _ = handle (create 3 store) "BEGIN"
+                      let first, firstWrite = handle first "UPDATE tx_limited_two_waits SET n=-1 WHERE id=1"
+                      Expect.equal firstWrite (Affected 1UL) "first owner changes its row"
+                      let second, secondWrite = handle second "UPDATE tx_limited_two_waits SET n=-2 WHERE id=2"
+                      Expect.equal secondWrite (Affected 1UL) "second owner changes its row"
+                      let waiter, _ = handle (create 4 store) "BEGIN"
+                      let action =
+                          if update then "UPDATE tx_limited_two_waits SET n=n+10"
+                          else "DELETE FROM tx_limited_two_waits"
+                      let statement = $"{action} WHERE n>=0 ORDER BY id LIMIT 2"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              handle waiter statement)
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                      let firstWait = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "first owner commits"
+                      let secondWait = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "second owner commits"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes after both commits"
+                      let waiter, result = waiting.Result
+                      Expect.isTrue firstWait "limited writer waits for the first owner"
+                      Expect.isTrue secondWait "limited writer waits for the second owner"
+                      Expect.equal result (Affected 2UL) "limited writer changes two reselected rows"
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                      let expected =
+                          if update then
+                              [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "-2" ]; [ Some "3"; Some "12" ]; [ Some "4"; Some "13" ] ]
+                          else [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "-2" ] ]
+                      match handle setup "SELECT id,n FROM tx_limited_two_waits ORDER BY id" |> snd with
+                      | ResultSet(_, rows) -> Expect.equal rows expected (statement + $" (indexed={indexed})")
+                      | actual -> failtestf "expected a result set after %s, got %A" statement actual
+
           testCase "an autocommit full-scan delete rechecks the row after a competing commit"
           <| fun _ ->
               for predicate, affected, remaining in
