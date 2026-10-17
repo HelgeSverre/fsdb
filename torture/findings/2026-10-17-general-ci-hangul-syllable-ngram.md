@@ -12,11 +12,19 @@ query-expansion modes. This includes `가` and `각` next to `가`, `가�
 `ㄱㅏ`; the corpus does not equate written forms merely because they can
 represent related sounds.
 
+The adjacent U+AD00–U+ADFF block also has 256 distinct literal weights in
+MySQL 8.4.11. Its separate two-column differential run matches all 1,536
+queries per token size from 1–10 with zero membership or relevance mismatches.
+The two audits therefore cover the first 512 syllables, without claiming the
+remaining Hangul syllabary.
+
 With a Release CLI build, reproduce the audit using:
 
 ```sh
 python3 torture/scripts/general-ci-range-weight-oracle.py AC00 AD00
 python3 torture/scripts/ngram-multicol-oracle.py --legacy-range AC00:AD00 --collation utf8mb4_general_ci
+python3 torture/scripts/general-ci-range-weight-oracle.py AD00 AE00
+python3 torture/scripts/ngram-multicol-oracle.py --legacy-range AD00:AE00 --collation utf8mb4_general_ci
 ```
 
 No engine change was needed. This is evidence for the sampled block and

@@ -1015,6 +1015,8 @@ compatibility Jamo, resolving the audited size-5 Boolean short-term mismatch.
 The [Hangul-syllable probe](torture/findings/2026-10-17-general-ci-hangul-syllable-ngram.md)
 also matches 1,551 two-column searches per token size from 1–10 over
 U+AC00–U+ACFF with decomposed and compatibility Jamo controls.
+The adjacent U+AD00–U+ADFF block has distinct literal MySQL weights and
+matches another 1,536 searches per size across the same ten token sizes.
 The [halfwidth voicing-mark probe](torture/findings/2026-10-17-general-ci-halfwidth-marks.md)
 keeps mark positions in `utf8mb4_general_ci` keys; the audited two-column
 ngram corpus now matches MySQL at token sizes 6–10, while smaller sizes retain
