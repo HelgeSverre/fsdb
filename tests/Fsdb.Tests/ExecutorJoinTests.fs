@@ -49,6 +49,32 @@ let tests =
               | ResultSet(_, [ [ Some "7"; Some "hit"; Some "2" ] ]) -> ()
               | other -> failtestf "RIGHT JOIN should preserve the same dependency direction, got %A" other
 
+          testCase "nullable unique join keys determine outer-joined rows only when ON rejects their NULLs"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE fd_parent (id INT PRIMARY KEY, grp INT)" |> ignore
+              runDefault store "CREATE TABLE fd_child (grp INT UNIQUE, label VARCHAR(20), other INT)" |> ignore
+              runDefault store "INSERT INTO fd_parent VALUES (1,7),(2,7),(3,NULL)" |> ignore
+              runDefault store "INSERT INTO fd_child VALUES (7,'hit',1),(NULL,'orphan1',2),(NULL,'orphan2',3)" |> ignore
+
+              let accepted =
+                  [ "SELECT p.grp,c.label,COUNT(*) FROM fd_parent p LEFT JOIN fd_child c ON p.grp=c.grp GROUP BY p.grp ORDER BY p.grp"
+                    "SELECT c.grp,c.label,COUNT(*) FROM fd_parent p LEFT JOIN fd_child c ON p.grp=c.grp GROUP BY c.grp ORDER BY c.grp"
+                    "SELECT p.grp,c.label,COUNT(*) FROM fd_child c RIGHT JOIN fd_parent p ON p.grp=c.grp GROUP BY p.grp ORDER BY p.grp" ]
+
+              for sql in accepted do
+                  match runDefault store sql with
+                  | ResultSet(_, [ [ None; None; Some "1" ]; [ Some "7"; Some "hit"; Some "2" ] ]) -> ()
+                  | other -> failtestf "nullable unique outer-join key should determine the child for %s, got %A" sql other
+
+              for sql in
+                  [ "SELECT c.grp,c.label,COUNT(*) FROM fd_child c GROUP BY c.grp"
+                    "SELECT c.grp,c.label,COUNT(*) FROM fd_parent p LEFT JOIN fd_child c ON p.id=c.other GROUP BY c.grp"
+                    "SELECT p.grp,c.label,COUNT(*) FROM fd_parent p LEFT JOIN fd_child c ON p.grp=c.grp AND p.id=1 GROUP BY p.grp" ] do
+                  match runDefault store sql with
+                  | Err(1055, _) -> ()
+                  | other -> failtestf "nullable key should not overdetermine %s, got %A" sql other
+
           testCase "INNER JOIN matches rows across two aliased instances of the same table"
           <| fun _ ->
               let store = newStore ()

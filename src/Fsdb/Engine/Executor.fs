@@ -18734,7 +18734,7 @@ and private validateOnlyFullGroupBy
                 | _ -> None
             | _ -> None)
 
-    let uniqueKeys =
+    let uniqueKeyCandidates =
         physicalSources
         |> List.collect (fun (sourceColumns, offset, table) ->
             table.Indexes
@@ -18747,10 +18747,18 @@ and private validateOnlyFullGroupBy
                         |> List.tryFindIndex (fun column -> equalsIgnoreCase column.Name name)
                         |> Option.map (fun position -> offset + position, sourceColumns.[position]))
 
-                if sameLength keyColumns index.Columns && keyColumns |> List.forall (snd >> _.Nullable >> not) then
-                    Some(keyColumns |> List.map fst, [ offset .. offset + sourceColumns.Length - 1 ])
+                if sameLength keyColumns index.Columns then
+                    Some(keyColumns, [ offset .. offset + sourceColumns.Length - 1 ])
                 else
                     None))
+
+    let uniqueKeys =
+        uniqueKeyCandidates
+        |> List.choose (fun (keyColumns, source) ->
+            if keyColumns |> List.forall (snd >> _.Nullable >> not) then
+                Some(keyColumns |> List.map fst, source)
+            else
+                None)
 
     let resolveGroupExprs () = select.GroupBy |> traverse (resolveGroupByRef columnIndex select.Projections)
 
@@ -18858,9 +18866,9 @@ and private validateOnlyFullGroupBy
                 |> Option.map (fun expr -> equalityPairs expr [] |> List.collect bothWays)
                 |> Option.defaultValue []
 
-            let joinDependencies =
+            let joinFacts =
                 select.Joins
-                |> List.collect (fun join ->
+                |> List.map (fun join ->
                     let equalities = equalityPairs join.On []
 
                     match join.Kind with
@@ -18891,20 +18899,50 @@ and private validateOnlyFullGroupBy
                         if Set.isEmpty rightPositions
                            || resolvedReferences.Length <> onReferences.Length
                            || not (isStatementStableExpr store registry dbName onScope join.On) then
-                            []
+                            [], []
                         else
                             // Every preserved-side ON input must be fixed: another
                             // input can decide whether a row is null-complemented.
                             let required = resolvedReferences |> List.filter preserved |> Set.ofList
 
-                            equalities
-                            |> List.collect (fun (left, right) ->
-                                match preserved left, preserved right with
-                                | true, false -> [ left, right, required ]
-                                | false, true -> [ right, left, required ]
-                                | false, false -> bothWays (left, right)
-                                | true, true -> [])
-                    | _ -> equalities |> List.collect bothWays)
+                            let dependencies =
+                                equalities
+                                |> List.collect (fun (left, right) ->
+                                    match preserved left, preserved right with
+                                    | true, false -> [ left, right, required ]
+                                    | false, true -> [ right, left, required ]
+                                    | false, false -> bothWays (left, right)
+                                    | true, true -> [])
+
+                            let nullableSide =
+                                if join.Kind = LeftJoin || join.Kind = NaturalLeftJoin then
+                                    rightPositions
+                                else
+                                    [ 0 .. Set.minElement rightPositions - 1 ] |> Set.ofList
+
+                            let nullRejected =
+                                equalities
+                                |> List.collect (fun (left, right) -> [ left; right ])
+                                |> Set.ofList
+
+                            // A nullable UNIQUE part becomes non-NULL in every
+                            // matched row when an ON equality uses it. In the
+                            // unmatched rows the whole nullable side is NULL.
+                            let conditionalKeys =
+                                uniqueKeyCandidates
+                                |> List.choose (fun (keyColumns, source) ->
+                                    if source |> List.forall (fun position -> Set.contains position nullableSide)
+                                       && keyColumns |> List.forall (fun (position, column) ->
+                                           not column.Nullable || Set.contains position nullRejected) then
+                                        Some(keyColumns |> List.map fst, source)
+                                    else
+                                        None)
+
+                            dependencies, conditionalKeys
+                    | _ -> equalities |> List.collect bothWays, [])
+
+            let joinDependencies = joinFacts |> List.collect fst
+            let outerUniqueKeys = joinFacts |> List.collect snd
 
             let initial =
                 groupExprs
@@ -18915,7 +18953,7 @@ and private validateOnlyFullGroupBy
                     |> Option.map (fun expr -> singletonColumns expr grouped)
                     |> Option.defaultValue grouped
 
-            let determined = expandDetermined (whereDependencies @ joinDependencies) uniqueKeys initial
+            let determined = expandDetermined (whereDependencies @ joinDependencies) (uniqueKeys @ outerUniqueKeys) initial
 
             select.Projections
             |> List.mapi (fun index { Expression = expr } -> groupingError "SELECT list" (index + 1) groupExprs determined expr)
