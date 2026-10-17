@@ -472,6 +472,21 @@ let tests =
               Expect.equal (search "中𠮷") [ "1"; "2"; "3" ] "supplementary query shares fallback postings"
               Expect.equal (search "中生") [ "4" ] "BMP Han remains a distinct posting"
 
+          testCase "general Unicode single-character ngrams count compatibility ideographs separately"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE compatibility_scores(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,title TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body,title) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO compatibility_scores VALUES(38,'神神社','神社')" |> ignore
+              let score term mode =
+                  match run store ($"SELECT id,MATCH(body,title) AGAINST('{term}' {mode}) FROM compatibility_scores") with
+                  | ResultSet(_, [ [ Some "38"; Some value ] ]) -> float value
+                  | other -> failtestf "expected one scored compatibility row, got %A" other
+              for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
+                  let compatibility = score "神" mode
+                  let unified = score "神" mode
+                  Expect.isLessThan (abs (unified / compatibility - 2.0)) 0.00001 ("MySQL 8.4 " + mode)
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()

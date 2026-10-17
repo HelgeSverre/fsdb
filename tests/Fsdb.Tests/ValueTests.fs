@@ -1529,6 +1529,14 @@ let tests =
                         Expect.notEqual (col.KeyOf radical) (col.KeyOf ideograph) "index keys preserve the radical"
                     Expect.isFalse (col.Equals "⽇" "\uE0F0\uE1C7") "literal marker cannot alias a radical"
 
+                testCase "utf8mb4_general_ci keeps compatibility ideographs distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for compatibility, baseForm in [ "神", "神"; "郞", "郞"; "並", "並" ] do
+                        Expect.isFalse (col.Equals compatibility baseForm) (compatibility + " differs from " + baseForm)
+                        Expect.notEqual (col.KeyOf compatibility) (col.KeyOf baseForm) "index keys preserve the written ideograph"
+                    Expect.isFalse (col.Equals "神" "\uE0B1\uEB19") "literal marker cannot alias an ideograph"
+
                 testCase "utf8mb4_general_ci retains decomposed combining accents"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
