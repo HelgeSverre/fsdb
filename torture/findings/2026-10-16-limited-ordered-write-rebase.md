@@ -31,7 +31,7 @@ transaction; the waiting UPDATE or DELETE fills the vacated result slot at
 8.4.11 and the matching `TransactionTests` cases agree on all 24 combinations.
 No engine change was required for these row-change audits.
 
-## Open inserted-candidate gap
+## Pending inserted candidates
 
 The same oracle pins a different outcome when the owner inserts an earlier
 primary-key candidate. Starting with `(1,0),(2,0)`, the owner inserts `(0,0)`
@@ -39,7 +39,11 @@ without committing. A second transaction runs
 `UPDATE target SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 1`. MySQL waits for
 the insert, then changes row 0, leaving `(0,1),(1,0),(2,0)`. A focused fsdb
 reproduction completed before the owner committed and changed row 1 instead,
-leaving `(0,0),(1,1),(2,0)` after both commits. Its row-only preclaim cannot
-see the pending row in its snapshot. This is an open insertion-gap scheduling
-issue; claiming every insert on the table would be a broad contention tradeoff,
-so the fix needs an ordered-key or gap-aware claim.
+leaving `(0,0),(1,1),(2,0)` after both commits. The ordered-write scheduler
+now inspects active integer PRIMARY-key claims before selecting its rows. It
+waits and rebases when a pending key crosses the `LIMIT` frontier, including
+when fewer rows currently match than the limit. An insert after the frontier
+does not delay the write. MySQL 8.4.11 and `TransactionTests` agree across 20
+UPDATE/DELETE cases covering ASC and DESC, INT and BIGINT UNSIGNED, and both
+wait and no-wait outcomes. This is scoped to single-column integer PRIMARY
+ordering; other order expressions and key types still need separate audits.

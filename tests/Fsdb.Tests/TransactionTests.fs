@@ -2080,6 +2080,57 @@ let tests =
                               Expect.equal actual expectedRows (statement + $" (indexed={indexed})")
                           | actual -> failtestf "expected a result set after %s, got %A" statement actual
 
+          testCase "limited ordered write waits only for inserts across its primary-key frontier"
+          <| fun _ ->
+              for idType, verb, direction, insertedId, shouldWait, changedId, initialN in
+                  [ for idType in [ "INT"; "BIGINT UNSIGNED" ] do
+                        for verb in [ "UPDATE"; "DELETE" ] do
+                            for direction, insertedId, shouldWait, changedId, initialN in
+                                [ "ASC", 0, true, 0, 0
+                                  "ASC", 100, false, 1, 0
+                                  "DESC", 100, true, 100, 0
+                                  "DESC", 0, false, 2, 0
+                                  "ASC", 100, true, 100, -1 ] do
+                                yield idType, verb, direction, insertedId, shouldWait, changedId, initialN ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup (sprintf "CREATE TABLE tx_limited_insert_candidate (id %s PRIMARY KEY,n INT)" idType)
+                  |> ignore
+                  handle setup (sprintf "INSERT INTO tx_limited_insert_candidate VALUES(1,%d),(2,%d)" initialN initialN)
+                  |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_limited_insert_candidate VALUES(%d,0)" insertedId)
+                  Expect.equal inserted (Affected 1UL) "owner inserts an ordered candidate"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let action =
+                      if verb = "UPDATE" then "UPDATE tx_limited_insert_candidate SET n=n+1"
+                      else "DELETE FROM tx_limited_insert_candidate"
+                  let statement = sprintf "%s WHERE n>=0 ORDER BY id %s LIMIT 1" action direction
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait (statement + " wait behavior")
+                  Expect.equal result (Affected 1UL) "limited writer changes one row"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                  let expectedRows =
+                      [ 1; 2; insertedId ]
+                      |> List.sort
+                      |> List.filter (fun id -> verb = "UPDATE" || id <> changedId)
+                      |> List.map (fun id ->
+                          let n = if id = changedId then 1 elif id = insertedId then 0 else initialN
+                          [ Some(string id); Some(string n) ])
+                  match handle setup "SELECT id,n FROM tx_limited_insert_candidate ORDER BY id" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expectedRows statement
+                  | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
+
           testCase "an autocommit full-scan delete rechecks the row after a competing commit"
           <| fun _ ->
               for predicate, affected, remaining in

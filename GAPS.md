@@ -1662,8 +1662,9 @@ implementation effort:
    do likewise, including uniquely owned bare assignments. Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.
-   A [pending earlier insert](torture/findings/2026-10-16-limited-ordered-write-rebase.md#open-inserted-candidate-gap)
-   still evades the ordered write's snapshot and changes the wrong row.
+   [Pending integer PRIMARY-key inserts](torture/findings/2026-10-16-limited-ordered-write-rebase.md#pending-inserted-candidates)
+   now delay ordered limited writes when their key crosses the result frontier;
+   unrelated inserts beyond the frontier remain concurrent.
    Broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in

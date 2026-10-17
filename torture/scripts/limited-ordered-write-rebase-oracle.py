@@ -1,5 +1,6 @@
 """Check ordered LIMIT write rebasing against a disposable MySQL 8.4 server."""
 
+import itertools
 import pathlib
 import subprocess
 import tempfile
@@ -167,50 +168,63 @@ def main():
                             finally:
                                 waiter.close()
 
-                waiter = connect(socket)
-                try:
-                    with owner.cursor() as cursor:
-                        cursor.execute("DROP TABLE IF EXISTS target")
-                        cursor.execute("CREATE TABLE target(id INT PRIMARY KEY,n INT)")
-                        cursor.execute("INSERT INTO target VALUES(1,0),(2,0)")
-                        cursor.execute("BEGIN")
-                        cursor.execute("INSERT INTO target VALUES(0,0)")
-                    with waiter.cursor() as cursor:
-                        cursor.execute("USE probe")
-                        cursor.execute("BEGIN")
-                    started = threading.Event()
-                    outcome = {}
+                for id_type, verb, (direction, inserted_id, should_wait, changed_id, initial_n) in itertools.product(
+                    ("INT", "BIGINT UNSIGNED"),
+                    ("UPDATE", "DELETE"),
+                    (("ASC", 0, True, 0, 0), ("ASC", 100, False, 1, 0),
+                     ("DESC", 100, True, 100, 0), ("DESC", 0, False, 2, 0),
+                     ("ASC", 100, True, 100, -1)),
+                ):
+                    waiter = connect(socket)
+                    try:
+                        with owner.cursor() as cursor:
+                            cursor.execute("DROP TABLE IF EXISTS target")
+                            cursor.execute(f"CREATE TABLE target(id {id_type} PRIMARY KEY,n INT)")
+                            cursor.execute(f"INSERT INTO target VALUES(1,{initial_n}),(2,{initial_n})")
+                            cursor.execute("BEGIN")
+                            cursor.execute(f"INSERT INTO target VALUES({inserted_id},0)")
+                        with waiter.cursor() as cursor:
+                            cursor.execute("USE probe")
+                            cursor.execute("BEGIN")
+                        started = threading.Event()
+                        outcome = {}
 
-                    def waiting_after_insert():
-                        try:
-                            with waiter.cursor() as cursor:
-                                started.set()
-                                cursor.execute("UPDATE target SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 1")
-                                outcome["affected"] = cursor.rowcount
-                                cursor.execute("COMMIT")
-                        except Exception as error:
-                            outcome["error"] = error
+                        def waiting_after_insert():
+                            try:
+                                with waiter.cursor() as cursor:
+                                    started.set()
+                                    action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
+                                    cursor.execute(f"{action} WHERE n>=0 ORDER BY id {direction} LIMIT 1")
+                                    outcome["affected"] = cursor.rowcount
+                                    cursor.execute("COMMIT")
+                            except Exception as error:
+                                outcome["error"] = error
 
-                    thread = threading.Thread(target=waiting_after_insert, daemon=True)
-                    thread.start()
-                    assert started.wait(2)
-                    thread.join(0.2)
-                    waited = thread.is_alive()
-                    with owner.cursor() as cursor:
-                        cursor.execute("COMMIT")
-                    thread.join(5)
-                    assert not thread.is_alive(), "writer did not complete after insert commit"
-                    assert outcome == {"affected": 1}, outcome
-                    with owner.cursor() as cursor:
-                        cursor.execute("SELECT id,n FROM target ORDER BY id")
-                        inserted_result = cursor.fetchall()
-                    assert waited, "the earlier uncommitted insert must delay the limited writer"
-                    assert inserted_result == ((0, 1), (1, 0), (2, 0)), inserted_result
-                finally:
-                    waiter.close()
+                        thread = threading.Thread(target=waiting_after_insert, daemon=True)
+                        thread.start()
+                        assert started.wait(2)
+                        thread.join(0.2)
+                        waited = thread.is_alive()
+                        with owner.cursor() as cursor:
+                            cursor.execute("COMMIT")
+                        thread.join(5)
+                        assert not thread.is_alive(), "writer did not complete after insert commit"
+                        assert outcome == {"affected": 1}, outcome
+                        with owner.cursor() as cursor:
+                            cursor.execute("SELECT id,n FROM target ORDER BY id")
+                            inserted_result = cursor.fetchall()
+                        assert waited == should_wait, (id_type, verb, direction, inserted_id, waited)
+                        expected = tuple(
+                            (id, 1 if id == changed_id else 0 if id == inserted_id else initial_n)
+                            for id in sorted((1, 2, inserted_id))
+                            if verb == "UPDATE" or id != changed_id
+                        )
+                        assert inserted_result == expected, (id_type, verb, direction, inserted_id, inserted_result)
+                    finally:
+                        waiter.close()
 
                 print(f"MySQL {version}: {cases} ordered LIMIT 1/2 writes reselected after updates/deletes; "
-                      "a pending earlier insert delayed the writer and became its target")
+                      "frontier-crossing inserts delayed the writer in both sort directions")
             finally:
                 if owner is not None:
                     owner.close()

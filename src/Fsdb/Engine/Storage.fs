@@ -399,10 +399,13 @@ let internal stripIdentifierQuotes = SqlText.unquoteIdentifier
 let splitQualified (defaultDb: string) (name: string) : string * string =
     SqlText.splitObjectName defaultDb name
 
+type KeyLockActivity = { mutable Owners: int64 }
+
 type RowLockStripe =
     { SyncRoot: obj
       mutable ExclusiveOwner: int64 option
-      SharedOwners: HashSet<int64> }
+      SharedOwners: HashSet<int64>
+      KeyActivity: KeyLockActivity option }
 
 /// A catalog rebase staged until every generated-key and duplicate-row claim
 /// succeeds, so a failed lock wait cannot mutate the transaction root.
@@ -457,10 +460,18 @@ let private rowLockStripeCount = 4096
 let private createRowLockStripe () =
     { SyncRoot = obj ()
       ExclusiveOwner = None
-      SharedOwners = HashSet() }
+      SharedOwners = HashSet()
+      KeyActivity = None }
+
+let private createKeyLockStripe activity =
+    { SyncRoot = obj ()
+      ExclusiveOwner = None
+      SharedOwners = HashSet()
+      KeyActivity = Some activity }
 
 type KeyLockCache =
     { Entries: ConcurrentDictionary<string, WeakReference<RowLockStripe>>
+      Activity: KeyLockActivity
       mutable Insertions: int64 }
 
 type ExecutionSettings =
@@ -958,6 +969,8 @@ let private releaseLockStripes (context: TransactionLockContext) (stripes: seq<R
 
             if releasedExclusive then
                 stripe.ExclusiveOwner <- None
+                stripe.KeyActivity
+                |> Option.iter (fun activity -> Threading.Interlocked.Decrement(&activity.Owners) |> ignore)
 
             if releasedExclusive || releasedShared then
                 lock context.HeldStripes (fun () -> context.HeldStripes.Remove stripe |> ignore)
@@ -1014,6 +1027,8 @@ let withTransactionLockCheckpoint (store: Store) (body: unit -> 'a) : 'a =
 
                     if releasedExclusive then
                         stripe.ExclusiveOwner <- None
+                        stripe.KeyActivity
+                        |> Option.iter (fun activity -> Threading.Interlocked.Decrement(&activity.Owners) |> ignore)
 
                     if releasedExclusive || releasedShared then
                         Threading.Monitor.PulseAll stripe.SyncRoot)
@@ -4030,7 +4045,11 @@ let private acquireStripe
 
         match mode with
         | SharedStripe -> stripe.SharedOwners.Add context.Owner |> ignore
-        | ExclusiveStripe -> stripe.ExclusiveOwner <- Some context.Owner
+        | ExclusiveStripe ->
+            if stripe.ExclusiveOwner.IsNone then
+                stripe.KeyActivity
+                |> Option.iter (fun activity -> Threading.Interlocked.Increment(&activity.Owners) |> ignore)
+            stripe.ExclusiveOwner <- Some context.Owner
 
         true, newlyHeld
 
@@ -4132,6 +4151,7 @@ let private withWriteLocksFor
                     tableKey,
                     (fun _ ->
                         { Entries = ConcurrentDictionary<string, WeakReference<RowLockStripe>>(StringComparer.Ordinal)
+                          Activity = { Owners = 0L }
                           Insertions = 0L })
                 )
             let locks = cache.Entries
@@ -4146,14 +4166,14 @@ let private withWriteLocksFor
                     if existing.TryGetTarget(&target) then
                         target
                     else
-                        let target = createRowLockStripe ()
+                        let target = createKeyLockStripe cache.Activity
 
                         if locks.TryUpdate(key, WeakReference<RowLockStripe>(target), existing) then
                             target
                         else
                             stripe key
                 else
-                    let target = createRowLockStripe ()
+                    let target = createKeyLockStripe cache.Activity
 
                     if locks.TryAdd(key, WeakReference<RowLockStripe>(target)) then
                         if Threading.Interlocked.Increment(&cache.Insertions) % 8192L = 0L then
@@ -4263,6 +4283,46 @@ let acquireTransactionWriteTargets
     match store.TransactionLocks with
     | Some _ -> withWriteLocksFor timeout store dbName tableName rowIds keys ignore
     | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
+
+/// Active single-column integer PRIMARY claims that another transaction holds.
+/// Ordered limited writes use these pending keys before their snapshot can see
+/// the inserted row; idle weak-cache entries never become candidate claims.
+let activePrimaryIntegerKeyClaims (store: Store) (dbName: string) (tableName: string) : (decimal * string) list =
+    let tableKey = lockNamespaceKey dbName tableName
+    let prefix = "PRIMARY\u0000"
+    let ownOwner = store.TransactionLocks |> Option.map _.Owner
+
+    let tryIntegerKey (key: string) =
+        if not (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) then None
+        else
+            let encoded = key.Substring(prefix.Length)
+            let separator = encoded.IndexOf(':')
+            if separator <= 0 then None
+            else
+                match Int32.TryParse(encoded.Substring(0, separator)) with
+                | true, length when encoded.Length = separator + 1 + length && length > 1 ->
+                    let value = encoded.Substring(separator + 1, length)
+                    if value.[0] <> 'I' then None
+                    else
+                        match Decimal.TryParse(value.Substring(1), NumberStyles.Integer, CultureInfo.InvariantCulture) with
+                        | true, integer -> Some integer
+                        | _ -> None
+                | _ -> None
+
+    match store.KeyLocks.TryGetValue tableKey with
+    | false, _ -> []
+    | true, cache when Threading.Interlocked.Read(&cache.Activity.Owners) = 0L -> []
+    | true, cache ->
+        cache.Entries
+        |> Seq.choose (fun entry ->
+            tryIntegerKey entry.Key
+            |> Option.bind (fun value ->
+                let mutable stripe = Unchecked.defaultof<RowLockStripe>
+                if not (entry.Value.TryGetTarget(&stripe)) then None
+                elif lock stripe.SyncRoot (fun () -> stripe.ExclusiveOwner |> Option.exists (fun owner -> Some owner <> ownOwner)) then
+                    Some(value, entry.Key)
+                else None))
+        |> Seq.toList
 
 /// Claims prepared unique keys, then refreshes and claims duplicate rows from
 /// the rebased catalog before applying it.

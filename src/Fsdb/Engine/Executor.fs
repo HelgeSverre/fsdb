@@ -29806,6 +29806,74 @@ let transactionWriteTargets
         |> Result.toOption
         |> Option.bind (insertTargets tableName columns)
 
+    let pendingOrderedInsertKeys (tableRef: TableRef) where orderBy limit =
+        let database = tableRef.Database |> Option.defaultValue dbName
+        let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+        let orderedPrimary =
+            match orderBy with
+            | [ (Col name, direction) ] -> Some(name, direction)
+            | [ (QualifiedCol(owner, name), direction) ] when equalsIgnoreCase owner qualifier ->
+                Some(name, direction)
+            | _ -> None
+
+        match limit, orderedPrimary, physicalFastPathTable store dbName tableRef with
+        | Some limitExpr, Some(name, direction), Some table
+            when rowCount limitExpr > 0
+                 && (match Storage.primaryKeyColumns table with
+                     | [ primary ] -> equalsIgnoreCase primary name
+                     | _ -> false) ->
+            let pending = Storage.activePrimaryIntegerKeyClaims store database tableRef.Table
+            if pending.IsEmpty then []
+            else
+                let allKeys = pending |> List.map snd
+                let hasRuntimeEffects =
+                    where
+                    |> Option.exists (Expression.exists (function
+                        | FuncCall _ | UserVariable _ | AssignUserVariable _ | SystemVariable _
+                        | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _
+                        | MatchAgainst _ | WindowOver _ | Placeholder _ -> true
+                        | _ -> false))
+
+                if hasRuntimeEffects then allKeys
+                else
+                    let columnIndex =
+                        table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name)
+                    let columns = table.Columns
+                    let ctxFor =
+                        contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None
+                    let matched = ResizeArray<decimal>()
+                    let mutable valid = true
+
+                    Diagnostics.suppress (fun () ->
+                        for _, row in table.RowsArray.Indexed do
+                            if valid then
+                                match row.[columnIndex] with
+                                | (VInt _ | VUInt _ | VBit _) as key ->
+                                    match whereMatches ctxFor where row with
+                                    | Ok true ->
+                                        match key with
+                                        | VInt integer -> matched.Add(decimal integer)
+                                        | VUInt integer
+                                        | VBit(_, integer) -> matched.Add(decimal integer)
+                                        | _ -> ()
+                                    | Ok false -> ()
+                                    | Error _ -> valid <- false
+                                | _ -> valid <- false)
+
+                    let count = rowCount limitExpr
+                    if not valid || matched.Count < count then allKeys
+                    else
+                        let ordered = matched |> Seq.sort |> Seq.toArray
+                        let frontier =
+                            if direction = Asc then ordered.[count - 1]
+                            else ordered.[ordered.Length - count]
+                        pending
+                        |> List.choose (fun (key, claim) ->
+                            if (direction = Asc && key < frontier)
+                               || (direction = Desc && key > frontier) then Some claim
+                            else None)
+        | _ -> []
+
     let joinedTargets (from: TableRef) (joins: Join list) (names: string list) predicate =
         let joinedTables =
             joins
@@ -29860,7 +29928,11 @@ let transactionWriteTargets
                 else
                     joinedTargets view.UpdateFrom view.UpdateJoins [ target.Qualifier ] predicate
             | _ -> []
-        | None -> targets update.From update.Where |> Option.toList
+        | None ->
+            let keys = pendingOrderedInsertKeys update.From update.Where update.OrderBy update.Limit
+            targets update.From update.Where
+            |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
+            |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
         let viewDatabase = update.From.Database |> Option.defaultValue dbName
 
@@ -29998,7 +30070,11 @@ let transactionWriteTargets
                 |> combineViewPredicate view.Predicate
 
             targets view.UpdateFrom predicate |> Option.toList
-        | _ -> targets delete.From delete.Where |> Option.toList
+        | _ ->
+            let keys = pendingOrderedInsertKeys delete.From delete.Where delete.OrderBy delete.Limit
+            targets delete.From delete.Where
+            |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
+            |> Option.toList
     | Delete delete when not delete.Joins.IsEmpty ->
         joinedTargets delete.From delete.Joins delete.Targets delete.Where
     | Insert(tableName, columns, rows, _, _)
