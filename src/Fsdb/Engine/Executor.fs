@@ -4313,12 +4313,44 @@ let private bindNestedAggregates store registry dbName columnIndex qualifiers ex
         { Aggregates = []; UngroupedColumns = [] }
     else
         let sourceScope (select: SelectStmt) =
+            let projectionNames (select: SelectStmt) =
+                select.Projections
+                |> List.choose (fun projection ->
+                    match projection.Expression with
+                    | Star _ -> None
+                    | _ -> Some(projectionLabel projection))
             (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
             |> List.collect FromItem.leaves
             |> List.choose (function
                 | FromItem.Qualified qualifier as source ->
                     let columns = selectSourceColumns store dbName source |> List.choose id
-                    Some(qualifier.ToLowerInvariant(), columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList)
+                    let computedNames =
+                        match source with
+                        | FromSubquery(PlainSelect select, _)
+                        | FromLateral(PlainSelect select, _) -> projectionNames select
+                        | FromSubquery(UnionSelect(first, _, _, _, _), _)
+                        | FromLateral(UnionSelect(first, _, _, _, _), _) -> projectionNames first
+                        | FromTable table when
+                            table.Database.IsNone
+                            && (currentCteScope () |> Map.containsKey (table.Table.ToLowerInvariant())) ->
+                            []
+                        | FromTable table ->
+                            let database = table.Database |> Option.defaultValue dbName
+                            tryStoredView store database table.Table
+                            |> Option.map (fun view ->
+                                if view.Columns.IsEmpty then
+                                    match parseStoredViewStatement view with
+                                    | Ok(Select definition) -> projectionNames definition
+                                    | _ -> []
+                                else view.Columns)
+                            |> Option.defaultValue []
+                        | _ -> []
+                    Some(
+                        qualifier.ToLowerInvariant(),
+                        (columns |> List.map _.Name) @ computedNames
+                        |> List.map _.ToLowerInvariant()
+                        |> Set.ofList
+                    )
                 | _ -> None)
             |> Map.ofList
         let expressions (select: SelectStmt) =
