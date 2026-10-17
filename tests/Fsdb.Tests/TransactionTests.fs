@@ -1983,19 +1983,43 @@ let tests =
           testCase "limited ordered writes reselect after a contended predicate or sort key changes"
           <| fun _ ->
               for indexed in [ false; true ] do
-                  for initialRows, ownerWrite, statement, expectedRows in
+                  for initialRows, ownerWrite, statement, expectedRows, affected in
                       [ "(1,0),(2,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
                         "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 1",
-                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ] ]
+                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ] ], 1UL
                         "(1,0),(2,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
                         "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 1",
-                        [ [ Some "1"; Some "-1" ] ]
+                        [ [ Some "1"; Some "-1" ] ], 1UL
                         "(1,0),(2,1)", "UPDATE tx_limited_rebase SET n=2 WHERE id=1",
                         "UPDATE tx_limited_rebase SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 1",
-                        [ [ Some "1"; Some "2" ]; [ Some "2"; Some "11" ] ]
+                        [ [ Some "1"; Some "2" ]; [ Some "2"; Some "11" ] ], 1UL
                         "(1,0),(2,1)", "UPDATE tx_limited_rebase SET n=2 WHERE id=1",
                         "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 1",
-                        [ [ Some "1"; Some "2" ] ] ] do
+                        [ [ Some "1"; Some "2" ] ], 1UL
+                        "(1,0),(2,0),(3,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
+                        "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 2",
+                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ] ], 2UL
+                        "(1,0),(2,0),(3,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
+                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 2",
+                        [ [ Some "1"; Some "-1" ] ], 2UL
+                        "(1,0),(2,1),(3,2)", "UPDATE tx_limited_rebase SET n=3 WHERE id=1",
+                        "UPDATE tx_limited_rebase SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 2",
+                        [ [ Some "1"; Some "3" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "12" ] ], 2UL
+                        "(1,0),(2,1),(3,2)", "UPDATE tx_limited_rebase SET n=3 WHERE id=1",
+                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 2",
+                        [ [ Some "1"; Some "3" ] ], 2UL
+                        "(1,0),(2,0),(3,0),(4,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
+                        "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 3",
+                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ]; [ Some "4"; Some "1" ] ], 3UL
+                        "(1,0),(2,0),(3,0),(4,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
+                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 3",
+                        [ [ Some "1"; Some "-1" ] ], 3UL
+                        "(1,0),(2,1),(3,2),(4,3)", "UPDATE tx_limited_rebase SET n=4 WHERE id=1",
+                        "UPDATE tx_limited_rebase SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 3",
+                        [ [ Some "1"; Some "4" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "12" ]; [ Some "4"; Some "13" ] ], 3UL
+                        "(1,0),(2,1),(3,2),(4,3)", "UPDATE tx_limited_rebase SET n=4 WHERE id=1",
+                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 3",
+                        [ [ Some "1"; Some "4" ] ], 3UL ] do
                       let store = Fsdb.Storage.create ()
                       let setup = create 1 store
                       let index = if indexed then ", KEY ix_n(n)" else ""
@@ -2016,11 +2040,584 @@ let tests =
                       Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes"
                       let waiter, result = waiting.Result
                       Expect.isTrue blocked "limited writer waits for the first candidate"
-                      Expect.equal result (Affected 1UL) "limited writer changes one rebased target"
+                      Expect.equal result (Affected affected) "limited writer changes the rebased targets"
                       Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
                       match handle setup "SELECT id,n FROM tx_limited_rebase ORDER BY id" |> snd with
                       | ResultSet(_, rows) -> Expect.equal rows expectedRows (statement + $" (indexed={indexed})")
                       | actual -> failtestf "expected a result set after %s, got %A" statement actual
+
+          testCase "limited ordered writes reselect after a contended first row is deleted"
+          <| fun _ ->
+              for limit in [ 1; 2; 3 ] do
+                  for indexed in [ false; true ] do
+                      for verb in [ "UPDATE"; "DELETE" ] do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          let index = if indexed then ", KEY ix_n(n)" else ""
+                          handle setup ("CREATE TABLE tx_limited_deleted_candidate (id INT PRIMARY KEY,n INT" + index + ")")
+                          |> ignore
+                          let rows =
+                              [ 1 .. limit + 1 ]
+                              |> List.map (fun id -> sprintf "(%d,0)" id)
+                              |> String.concat ","
+                          handle setup ("INSERT INTO tx_limited_deleted_candidate VALUES " + rows) |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let owner, deleted = handle owner "DELETE FROM tx_limited_deleted_candidate WHERE id=1"
+                          Expect.equal deleted (Affected 1UL) "the owner deletes the first candidate"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          let action =
+                              if verb = "UPDATE" then "UPDATE tx_limited_deleted_candidate SET n=n+1"
+                              else "DELETE FROM tx_limited_deleted_candidate"
+                          let statement = sprintf "%s WHERE n>=0 ORDER BY id LIMIT %d" action limit
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes"
+                          let waiter, result = waiting.Result
+                          Expect.isTrue blocked "limited writer waits for the deleted candidate"
+                          Expect.equal result (Affected(uint64 limit)) "limited writer fills the vacated result slot"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                          let expectedRows =
+                              if verb = "UPDATE" then
+                                  [ 2 .. limit + 1 ]
+                                  |> List.map (fun id -> [ Some(string id); Some "1" ])
+                              else []
+                          match handle setup "SELECT id,n FROM tx_limited_deleted_candidate ORDER BY id" |> snd with
+                          | ResultSet(_, actual) ->
+                              Expect.equal actual expectedRows (statement + $" (indexed={indexed})")
+                          | actual -> failtestf "expected a result set after %s, got %A" statement actual
+
+          testCase "limited ordered write waits only for inserts across its primary-key frontier"
+          <| fun _ ->
+              for idType, verb, direction, insertedId, shouldWait, changedIds, initialN, baseIds, limit in
+                  [ for idType in [ "INT"; "BIGINT UNSIGNED" ] do
+                        for verb in [ "UPDATE"; "DELETE" ] do
+                            for direction, insertedId, shouldWait, changedIds, initialN, baseIds, limit in
+                                [ "ASC", 0, true, [ 0 ], 0, [ 1; 2 ], 1
+                                  "ASC", 100, false, [ 1 ], 0, [ 1; 2 ], 1
+                                  "DESC", 100, true, [ 100 ], 0, [ 1; 2 ], 1
+                                  "DESC", 0, false, [ 2 ], 0, [ 1; 2 ], 1
+                                  "ASC", 100, true, [ 100 ], -1, [ 1; 2 ], 1
+                                  "ASC", 0, true, [ 0; 1 ], 0, [ 1; 2; 3 ], 2
+                                  "ASC", 100, false, [ 1; 2 ], 0, [ 1; 2; 3 ], 2
+                                  "DESC", 100, true, [ 100; 3 ], 0, [ 1; 2; 3 ], 2
+                                  "DESC", 0, false, [ 3; 2 ], 0, [ 1; 2; 3 ], 2 ] do
+                                yield idType, verb, direction, insertedId, shouldWait, changedIds, initialN, baseIds, limit ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup (sprintf "CREATE TABLE tx_limited_insert_candidate (id %s PRIMARY KEY,n INT)" idType)
+                  |> ignore
+                  let initialRows =
+                      baseIds
+                      |> List.map (fun id -> sprintf "(%d,%d)" id initialN)
+                      |> String.concat ","
+                  handle setup ("INSERT INTO tx_limited_insert_candidate VALUES" + initialRows)
+                  |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_limited_insert_candidate VALUES(%d,0)" insertedId)
+                  Expect.equal inserted (Affected 1UL) "owner inserts an ordered candidate"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let action =
+                      if verb = "UPDATE" then "UPDATE tx_limited_insert_candidate SET n=n+1"
+                      else "DELETE FROM tx_limited_insert_candidate"
+                  let statement = sprintf "%s WHERE n>=0 ORDER BY id %s LIMIT %d" action direction limit
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait (statement + " wait behavior")
+                  Expect.equal result (Affected(uint64 limit)) "limited writer fills the ordered result"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                  let expectedRows =
+                      insertedId :: baseIds
+                      |> List.sort
+                      |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
+                      |> List.map (fun id ->
+                          let n = if List.contains id changedIds then 1 elif id = insertedId then 0 else initialN
+                          [ Some(string id); Some(string n) ])
+                  match handle setup "SELECT id,n FROM tx_limited_insert_candidate ORDER BY id" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expectedRows statement
+                  | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
+
+          testCase "limited ordered write respects DATE primary-key insert frontiers"
+          <| fun _ ->
+              for verb, direction, insertedId, shouldWait, changedId in
+                  [ for verb in [ "UPDATE"; "DELETE" ] do
+                        for direction, insertedId, shouldWait, changedId in
+                            [ "ASC", "2026-01-01", true, "2026-01-01"
+                              "ASC", "2026-01-04", false, "2026-01-02"
+                              "DESC", "2026-01-04", true, "2026-01-04"
+                              "DESC", "2026-01-01", false, "2026-01-03" ] do
+                            yield verb, direction, insertedId, shouldWait, changedId ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_date_insert_candidate(id DATE PRIMARY KEY,n INT)" |> ignore
+                  handle setup "INSERT INTO tx_date_insert_candidate VALUES('2026-01-02',0),('2026-01-03',0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted = handle owner (sprintf "INSERT INTO tx_date_insert_candidate VALUES('%s',0)" insertedId)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a date key"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  let action =
+                      if verb = "UPDATE" then "UPDATE tx_date_insert_candidate SET n=n+1"
+                      else "DELETE FROM tx_date_insert_candidate"
+                  let statement = action + " WHERE n>=0 ORDER BY id " + direction + " LIMIT 1"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait (statement + " wait behavior")
+                  Expect.equal result (Affected 1UL) "the inserted row fills the first slot"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                  let expected =
+                      [ "2026-01-02"; "2026-01-03"; insertedId ]
+                      |> List.sort
+                      |> List.filter (fun id -> verb = "UPDATE" || id <> changedId)
+                      |> List.map (fun id -> [ Some id; Some(if id = changedId then "1" else "0") ])
+                  match handle setup "SELECT id,n FROM tx_date_insert_candidate ORDER BY id" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expected statement
+                  | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
+
+          testCase "limited ordered write respects composite primary-key insert frontiers"
+          <| fun _ ->
+              let baseKeys = [ 1, 1; 1, 3; 2, 1 ]
+              for verb, firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit in
+                  [ for verb in [ "UPDATE"; "DELETE" ] do
+                        for firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit in
+                            [ "ASC", "ASC", (1, 0), true, [ 1, 0 ], 1
+                              "ASC", "ASC", (3, 1), false, [ 1, 1 ], 1
+                              "DESC", "DESC", (3, 1), true, [ 3, 1 ], 1
+                              "DESC", "DESC", (1, 0), false, [ 2, 1 ], 1
+                              "ASC", "DESC", (1, 4), true, [ 1, 4 ], 1
+                              "ASC", "DESC", (2, 0), true, [ 1, 3 ], 1
+                              "DESC", "ASC", (2, 0), true, [ 2, 0 ], 1
+                              "DESC", "ASC", (1, 4), true, [ 2, 1 ], 1
+                              "ASC", "ASC", (1, 2), true, [ 1, 1; 1, 2 ], 2
+                              "ASC", "ASC", (3, 1), false, [ 1, 1; 1, 3 ], 2
+                              "DESC", "DESC", (2, 2), true, [ 2, 2; 2, 1 ], 2
+                              "DESC", "DESC", (1, 0), false, [ 2, 1; 1, 3 ], 2 ] do
+                            yield verb, firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_composite_insert_candidate(a INT,b INT,n INT,PRIMARY KEY(a,b))" |> ignore
+                  handle setup "INSERT INTO tx_composite_insert_candidate VALUES(1,1,0),(1,3,0),(2,1,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let a, b = insertedKey
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_composite_insert_candidate VALUES(%d,%d,0)" a b)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a composite key"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  let action =
+                      if verb = "UPDATE" then "UPDATE tx_composite_insert_candidate SET n=n+1"
+                      else "DELETE FROM tx_composite_insert_candidate"
+                  let statement = action + " WHERE n>=0 ORDER BY a " + firstDirection + ",b " + secondDirection + sprintf " LIMIT %d" limit
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait (statement + " wait behavior")
+                  Expect.equal result (Affected(uint64 limit)) "the composite frontier fills the result"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                  let expected =
+                      insertedKey :: baseKeys
+                      |> List.sort
+                      |> List.filter (fun key -> verb = "UPDATE" || not (List.contains key changedKeys))
+                      |> List.map (fun (a, b) ->
+                          [ Some(string a); Some(string b); Some(if List.contains (a, b) changedKeys then "1" else "0") ])
+                  match handle setup "SELECT a,b,n FROM tx_composite_insert_candidate ORDER BY a,b" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expected statement
+                  | actual -> failtestf "expected composite rows after %s, got %A" statement actual
+
+          testCase "limited ordered write respects text primary-key insert frontiers"
+          <| fun _ ->
+              for collation in [ "utf8mb4_bin"; "utf8mb4_0900_ai_ci" ] do
+                  for verb in [ "UPDATE"; "DELETE" ] do
+                      let cases =
+                          [ "ASC", "", true, [ "" ], 1
+                            "ASC", "a", true, [ "a" ], 1
+                            "ASC", "z", false, [ "b" ], 1
+                            "DESC", "z", true, [ "z" ], 1
+                            "DESC", "a", false, [ "d" ], 1
+                            "ASC", "c", true, [ "b"; "c" ], 2
+                            "ASC", "z", false, [ "b"; "d" ], 2
+                            "DESC", "c", true, [ "d"; "c" ], 2
+                            "DESC", "a", false, [ "d"; "b" ], 2 ]
+                          @ if collation = "utf8mb4_bin" then
+                                [ "ASC", "Ä", false, [ "b"; "d" ], 2
+                                  "DESC", "Ä", true, [ "Ä"; "d" ], 2 ]
+                            else
+                                [ "ASC", "Ä", true, [ "Ä"; "b" ], 2
+                                  "DESC", "Ä", false, [ "d"; "b" ], 2 ]
+                      for direction, insertedId, shouldWait, changedIds, limit in cases do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          handle setup
+                              (sprintf "CREATE TABLE tx_text_insert_candidate(id VARCHAR(10) COLLATE %s PRIMARY KEY,n INT)" collation)
+                          |> ignore
+                          handle setup "INSERT INTO tx_text_insert_candidate VALUES('b',0),('d',0)" |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let owner, inserted =
+                              handle owner (sprintf "INSERT INTO tx_text_insert_candidate VALUES('%s',0)" insertedId)
+                          Expect.equal inserted (Affected 1UL) "owner inserts a text key"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          let action =
+                              if verb = "UPDATE" then "UPDATE tx_text_insert_candidate SET n=n+1"
+                              else "DELETE FROM tx_text_insert_candidate"
+                          let statement = action + " WHERE n>=0 ORDER BY id " + direction + sprintf " LIMIT %d" limit
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                          let waiter, result = waiting.Result
+                          Expect.equal blocked shouldWait (statement + " wait behavior")
+                          Expect.equal result (Affected(uint64 limit)) "the text frontier fills the result"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                          let expected =
+                              insertedId :: [ "b"; "d" ]
+                              |> List.sortBy (fun id -> if collation = "utf8mb4_0900_ai_ci" && id = "Ä" then "a" else id)
+                              |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
+                              |> List.map (fun id -> [ Some id; Some(if List.contains id changedIds then "1" else "0") ])
+                          match handle setup "SELECT id,n FROM tx_text_insert_candidate ORDER BY id" |> snd with
+                          | ResultSet(_, rows) -> Expect.equal rows expected statement
+                          | actual -> failtestf "expected text rows after %s, got %A" statement actual
+
+          testCase "limited ordered write respects composite text primary-key insert frontiers"
+          <| fun _ ->
+              let baseKeys = [ "b", 1; "b", 3; "d", 1 ]
+              for collation in [ "utf8mb4_bin"; "utf8mb4_0900_ai_ci" ] do
+                  for verb in [ "UPDATE"; "DELETE" ] do
+                      let cases =
+                          [ "ASC", "ASC", ("b", 0), true, [ "b", 0 ], 1
+                            "ASC", "ASC", ("b", 4), false, [ "b", 1 ], 1
+                            "ASC", "ASC", ("b", 2), true, [ "b", 1; "b", 2 ], 2
+                            "ASC", "DESC", ("b", 2), true, [ "b", 3 ], 1
+                            "DESC", "ASC", ("b", 2), true, [ "d", 1 ], 1 ]
+                          @ if collation = "utf8mb4_bin" then
+                                [ "ASC", "ASC", ("Ä", 0), false, [ "b", 1 ], 1
+                                  "DESC", "DESC", ("Ä", 0), true, [ "Ä", 0 ], 1 ]
+                            else
+                                [ "ASC", "ASC", ("Ä", 0), true, [ "Ä", 0 ], 1
+                                  "DESC", "DESC", ("Ä", 0), false, [ "d", 1 ], 1 ]
+                      for firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit in cases do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          handle setup
+                              (sprintf "CREATE TABLE tx_text_pair_candidate(a VARCHAR(10) COLLATE %s,b INT,n INT,PRIMARY KEY(a,b))" collation)
+                          |> ignore
+                          handle setup "INSERT INTO tx_text_pair_candidate VALUES('b',1,0),('b',3,0),('d',1,0)" |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let a, b = insertedKey
+                          let owner, inserted =
+                              handle owner (sprintf "INSERT INTO tx_text_pair_candidate VALUES('%s',%d,0)" a b)
+                          Expect.equal inserted (Affected 1UL) "owner inserts a composite text key"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          let action =
+                              if verb = "UPDATE" then "UPDATE tx_text_pair_candidate SET n=n+1"
+                              else "DELETE FROM tx_text_pair_candidate"
+                          let statement =
+                              action + " WHERE n>=0 ORDER BY a " + firstDirection + ",b " + secondDirection
+                              + sprintf " LIMIT %d" limit
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                          let waiter, result = waiting.Result
+                          Expect.equal blocked shouldWait (statement + " wait behavior")
+                          Expect.equal result (Affected(uint64 limit)) "the composite text frontier fills the result"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                          let expected =
+                              insertedKey :: baseKeys
+                              |> List.filter (fun key -> verb = "UPDATE" || not (List.contains key changedKeys))
+                              |> List.map (fun (a, b) ->
+                                  (a, string b), (if List.contains (a, b) changedKeys then "1" else "0"))
+                              |> Map.ofList
+                          match handle setup "SELECT a,b,n FROM tx_text_pair_candidate ORDER BY a,b" |> snd with
+                          | ResultSet(_, rows) ->
+                              let actual =
+                                  rows
+                                  |> List.map (function
+                                      | [ Some a; Some b; Some n ] -> (a, b), n
+                                      | row -> failtestf "unexpected composite text row: %A" row)
+                                  |> Map.ofList
+                              Expect.equal actual expected statement
+                          | actual -> failtestf "expected composite text rows after %s, got %A" statement actual
+
+          testCase "limited ordered write respects secondary-index insert frontiers"
+          <| fun _ ->
+              let cases =
+                  [ "ASC", 0, "0", true, 0
+                    "ASC", 3, "3", false, 1
+                    "DESC", 3, "3", true, 3
+                    "DESC", 0, "0", false, 2
+                    "ASC", 0, "NULL", true, 0 ]
+              for verb in [ "UPDATE"; "DELETE" ] do
+                for direction, insertedId, rankSql, shouldWait, changedId in cases do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_secondary_order(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  handle setup "INSERT INTO tx_secondary_order VALUES(1,1,0),(2,2,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_secondary_order VALUES(%d,%s,0)" insertedId rankSql)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a secondary-order candidate"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let statement =
+                              (if verb = "UPDATE" then "UPDATE tx_secondary_order SET n=n+1"
+                               else "DELETE FROM tx_secondary_order")
+                              + " WHERE n>=0 ORDER BY rank_value " + direction + " LIMIT 1"
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "secondary ordered writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "secondary ordered writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait "secondary-order frontier wait matches MySQL"
+                  Expect.equal result (Affected 1UL) "one secondary-ordered row changes"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                  match handle setup "SELECT id,n FROM tx_secondary_order ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          ([ 1; 2; insertedId ] |> List.sort)
+                          |> List.filter (fun id -> verb = "UPDATE" || id <> changedId)
+                          |> List.map (fun id -> [ Some(string id); Some(if id = changedId then "1" else "0") ])
+                      Expect.equal rows expected "secondary-order write reselects after the insert"
+                  | other -> failtestf "expected secondary-order rows, got %A" other
+
+          testCase "limited ordered write reselects secondary-index inserts at LIMIT two"
+          <| fun _ ->
+              let cases =
+                  [ "ASC", 0, "0", true, [ 0; 1 ]
+                    "ASC", 4, "4", true, [ 1; 2 ]
+                    "DESC", 4, "4", true, [ 4; 3 ]
+                    "DESC", 0, "0", true, [ 3; 2 ]
+                    "ASC", 0, "NULL", true, [ 0; 1 ] ]
+              for verb in [ "UPDATE"; "DELETE" ] do
+                for direction, insertedId, rankSql, shouldWait, changedIds in cases do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_secondary_two(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  handle setup "INSERT INTO tx_secondary_two VALUES(1,1,0),(2,2,0),(3,3,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_secondary_two VALUES(%d,%s,0)" insertedId rankSql)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a secondary-order candidate"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let statement =
+                              (if verb = "UPDATE" then "UPDATE tx_secondary_two SET n=n+1"
+                               else "DELETE FROM tx_secondary_two")
+                              + " WHERE n>=0 ORDER BY rank_value " + direction + " LIMIT 2"
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "secondary LIMIT two writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "secondary LIMIT two writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait "secondary LIMIT two frontier wait"
+                  Expect.equal result (Affected 2UL) "two secondary-ordered rows change"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                  match handle setup "SELECT id,n FROM tx_secondary_two ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          ([ 1; 2; 3; insertedId ] |> List.sort)
+                          |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
+                          |> List.map (fun id ->
+                              [ Some(string id); Some(if List.contains id changedIds then "1" else "0") ])
+                      Expect.equal rows expected "secondary LIMIT two write reselects after insert"
+                  | other -> failtestf "expected secondary LIMIT two rows, got %A" other
+
+          testCase "limited secondary ordered write waits through MySQL's short-table frontier"
+          <| fun _ ->
+              let cases =
+                  [ 1, 1; 1, 2; 2, 3; 2, 4; 3, 5; 3, 6; 4, 7; 4, 8 ]
+                  |> List.map (fun (limit, visibleRows) -> limit, visibleRows, " WHERE n>=0", visibleRows < 2 * limit)
+              let cases = cases @ [ 2, 3, "", true; 2, 3, " WHERE id<=2", false; 2, 3, " WHERE rank_value<=2", false ]
+              for limit, visibleRows, predicate, shouldWait in cases do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_secondary_short(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  let rows =
+                      [ 1 .. visibleRows ]
+                      |> List.map (fun id -> sprintf "(%d,%d,0)" id id)
+                      |> String.concat ","
+                  handle setup ("INSERT INTO tx_secondary_short VALUES" + rows) |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_secondary_short VALUES(%d,%d,0)" (visibleRows + 1) (visibleRows + 1))
+                  Expect.equal inserted (Affected 1UL) "owner inserts beyond the visible frontier"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter (sprintf "UPDATE tx_secondary_short SET n=n+1%s ORDER BY rank_value ASC LIMIT %d" predicate limit))
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "secondary ordered writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "secondary ordered writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait "short-table wait matches MySQL"
+                  Expect.equal result (Affected(uint64 limit)) "writer changes limited rows"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                  match handle setup "SELECT id,n FROM tx_secondary_short ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          [ 1 .. visibleRows + 1 ]
+                          |> List.map (fun id -> [ Some(string id); Some(if id <= limit then "1" else "0") ])
+                      Expect.equal rows expected "short-table writer retains the selected frontier"
+                  | other -> failtestf "expected secondary short-table rows, got %A" other
+
+          testCase "indexed filter excludes pending secondary key before the ordered frontier"
+          <| fun _ ->
+              for verb in [ "UPDATE"; "DELETE" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_filtered_frontier(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  handle setup "INSERT INTO tx_filtered_frontier VALUES(1,1,0),(2,2,0),(3,3,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted = handle owner "INSERT INTO tx_filtered_frontier VALUES(4,0,0)"
+                  Expect.equal inserted (Affected 1UL) "owner inserts before the ordering frontier"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let statement =
+                              (if verb = "UPDATE" then "UPDATE tx_filtered_frontier SET n=n+1"
+                               else "DELETE FROM tx_filtered_frontier")
+                              + " WHERE id<=2 ORDER BY rank_value ASC LIMIT 2"
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "filtered writer starts"
+                  let completedBeforeCommit = waiting.Wait(TimeSpan.FromMilliseconds 100.0)
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the excluded insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "filtered writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.isTrue completedBeforeCommit "MySQL does not wait for the excluded insert"
+                  Expect.equal result (Affected 2UL) "two filtered rows change"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "filtered writer commits"
+                  match handle setup "SELECT id,n FROM tx_filtered_frontier ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          if verb = "UPDATE" then
+                              [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ];
+                                [ Some "3"; Some "0" ]; [ Some "4"; Some "0" ] ]
+                          else [ [ Some "3"; Some "0" ]; [ Some "4"; Some "0" ] ]
+                      Expect.equal rows expected "the indexed filter selects only its matching rows"
+                  | other -> failtestf "expected filtered frontier rows, got %A" other
+
+          testCase "indexed text filter excludes pending secondary keys"
+          <| fun _ ->
+              let cases =
+                  [ "utf8mb4_bin", "z", false, [ "b"; "d" ]
+                    "utf8mb4_bin", "a", true, [ "a"; "b" ]
+                    "utf8mb4_0900_ai_ci", "Ä", true, [ "Ä"; "b" ] ]
+              for collation, insertedId, shouldWait, selected in cases do
+                  for verb in [ "UPDATE"; "DELETE" ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      handle setup
+                          ("CREATE TABLE tx_text_filter(id VARCHAR(16) COLLATE " + collation
+                           + " PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))")
+                      |> ignore
+                      handle setup "INSERT INTO tx_text_filter VALUES('b',1,0),('d',2,0),('f',3,0)" |> ignore
+                      let owner, _ = handle (create 2 store) "BEGIN"
+                      let owner, inserted =
+                          handle owner ("INSERT INTO tx_text_filter VALUES('" + insertedId + "',0,0)")
+                      Expect.equal inserted (Affected 1UL) "owner inserts a secondary-order candidate"
+                      let waiter, _ = handle (create 3 store) "BEGIN"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              let command =
+                                  if verb = "UPDATE" then "UPDATE tx_text_filter SET n=n+1"
+                                  else "DELETE FROM tx_text_filter"
+                              handle waiter (command + " WHERE id<='f' ORDER BY rank_value ASC LIMIT 2"))
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "text-filter writer starts"
+                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "text-filter writer completes"
+                      let waiter, result = waiting.Result
+                      Expect.equal blocked shouldWait "text primary filter wait matches MySQL"
+                      Expect.equal result (Affected 2UL) "two filtered rows change"
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                      match handle setup "SELECT id,n FROM tx_text_filter" |> snd with
+                      | ResultSet(_, rows) ->
+                          let actual =
+                              rows
+                              |> List.map (function
+                                  | [ Some id; Some n ] -> id, n
+                                  | row -> failtestf "unexpected text-filter row: %A" row)
+                              |> Map.ofList
+                          let expected =
+                              [ "b"; "d"; "f"; insertedId ]
+                              |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id selected))
+                              |> List.map (fun id -> id, if List.contains id selected then "1" else "0")
+                              |> Map.ofList
+                          Expect.equal actual expected "text-filter write selects MySQL rows"
+                      | other -> failtestf "expected text-filter rows, got %A" other
+
+          testCase "equal non-unique secondary keys do not serialize inserts"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_equal_secondary(id INT PRIMARY KEY,rank_value INT,KEY ix_rank(rank_value))" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, inserted = handle owner "INSERT INTO tx_equal_secondary VALUES(1,0)"
+              Expect.equal inserted (Affected 1UL) "first insert holds its ordered-key claim"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter "INSERT INTO tx_equal_secondary VALUES(2,0)")
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "second insert starts"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 1.0))
+                  "equal non-unique secondary values do not block independent primary keys"
+              let waiter, second = waiting.Result
+              Expect.equal second (Affected 1UL) "second insert succeeds"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "second insert commits"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "first insert commits"
 
           testCase "an autocommit full-scan delete rechecks the row after a competing commit"
           <| fun _ ->

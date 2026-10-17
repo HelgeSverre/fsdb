@@ -399,10 +399,13 @@ let internal stripIdentifierQuotes = SqlText.unquoteIdentifier
 let splitQualified (defaultDb: string) (name: string) : string * string =
     SqlText.splitObjectName defaultDb name
 
+type KeyLockActivity = { mutable Owners: int64 }
+
 type RowLockStripe =
     { SyncRoot: obj
       mutable ExclusiveOwner: int64 option
-      SharedOwners: HashSet<int64> }
+      SharedOwners: HashSet<int64>
+      KeyActivity: KeyLockActivity option }
 
 /// A catalog rebase staged until every generated-key and duplicate-row claim
 /// succeeds, so a failed lock wait cannot mutate the transaction root.
@@ -457,10 +460,18 @@ let private rowLockStripeCount = 4096
 let private createRowLockStripe () =
     { SyncRoot = obj ()
       ExclusiveOwner = None
-      SharedOwners = HashSet() }
+      SharedOwners = HashSet()
+      KeyActivity = None }
+
+let private createKeyLockStripe activity =
+    { SyncRoot = obj ()
+      ExclusiveOwner = None
+      SharedOwners = HashSet()
+      KeyActivity = Some activity }
 
 type KeyLockCache =
     { Entries: ConcurrentDictionary<string, WeakReference<RowLockStripe>>
+      Activity: KeyLockActivity
       mutable Insertions: int64 }
 
 type ExecutionSettings =
@@ -958,6 +969,8 @@ let private releaseLockStripes (context: TransactionLockContext) (stripes: seq<R
 
             if releasedExclusive then
                 stripe.ExclusiveOwner <- None
+                stripe.KeyActivity
+                |> Option.iter (fun activity -> Threading.Interlocked.Decrement(&activity.Owners) |> ignore)
 
             if releasedExclusive || releasedShared then
                 lock context.HeldStripes (fun () -> context.HeldStripes.Remove stripe |> ignore)
@@ -1014,6 +1027,8 @@ let withTransactionLockCheckpoint (store: Store) (body: unit -> 'a) : 'a =
 
                     if releasedExclusive then
                         stripe.ExclusiveOwner <- None
+                        stripe.KeyActivity
+                        |> Option.iter (fun activity -> Threading.Interlocked.Decrement(&activity.Owners) |> ignore)
 
                     if releasedExclusive || releasedShared then
                         Threading.Monitor.PulseAll stripe.SyncRoot)
@@ -2811,6 +2826,21 @@ let private rangeKeyGroups (table: Table) : IndexKeyGroup list =
 let private orderedKeyGroups (table: Table) : IndexKeyGroup list =
     indexKeyGroups table |> List.filter supportsOrderedAccess
 
+let private insertOrderKeyGroups (table: Table) : IndexKeyGroup list =
+    let supportedColumn index =
+        match table.Columns.[index].Type with
+        | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _
+        | TDate | TChar _ | TVarchar _ -> true
+        | _ -> false
+    orderedKeyGroups table
+    |> visibleGroups
+    |> List.filter (fun group -> indexesWholeColumns group && List.forall supportedColumn group.Indices)
+
+let orderedIndexKeyColumns (table: Table) : (string * string list) list =
+    insertOrderKeyGroups table
+    |> List.map (fun group ->
+        group.Name, group.Indices |> List.map (fun index -> table.Columns.[index].Name))
+
 type private FullTextKeyGroup =
     { Name: string
       Indices: int list
@@ -3139,10 +3169,35 @@ let tryInsertLockTargets
 
                                 encodeUniqueKey table.Columns group candidate
                                 |> Option.map (fun key -> group.Name, key, group.Name + "\u0000" + key)))
-                    |> Result.map (List.choose id))
+                    |> Result.map (fun uniqueKeys ->
+                        let orderedKeys =
+                            let primaryKey =
+                                uniqueKeys
+                                |> List.choose id
+                                |> List.tryPick (fun (name, key, _) ->
+                                    if name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase) then Some key else None)
+                            insertOrderKeyGroups table
+                            |> List.filter (fun group -> not (group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
+                            |> List.choose (fun group ->
+                                group.Indices
+                                |> traverse keyValue
+                                |> Result.toOption
+                                |> Option.bind (fun values ->
+                                    let resolved = values |> List.choose id
+                                    if resolved.Length <> values.Length then None
+                                    else
+                                        let encoded = encodeEqualityValues table.Columns group.Indices resolved
+                                        // Each pending insertion needs its own observation claim.
+                                        // Equal non-unique index values must not serialize writers.
+                                        let primarySuffix =
+                                            primaryKey |> Option.map (fun key -> "\u0000" + key) |> Option.defaultValue ""
+                                        Some("ORDERED\u0000" + group.Name + "\u0000" + encoded
+                                             + primarySuffix + "\u0000" + Guid.NewGuid().ToString("N"))))
+                        List.choose id uniqueKeys, orderedKeys))
                 |> Result.toOption
-                |> Option.map (fun encodedKeys ->
-                    let encodedKeys = encodedKeys |> List.concat |> List.distinct
+                |> Option.map (fun encodedRows ->
+                    let encodedKeys = encodedRows |> List.collect fst |> List.distinct
+                    let orderedKeys = encodedRows |> List.collect snd
 
                     let rowIds =
                         encodedKeys
@@ -3153,7 +3208,7 @@ let tryInsertLockTargets
                         |> List.distinct
 
                     { RowIds = rowIds
-                      Keys = encodedKeys |> List.map (fun (_, _, lockKey) -> lockKey) }))
+                      Keys = (encodedKeys |> List.map (fun (_, _, lockKey) -> lockKey)) @ orderedKeys }))
 
     match store.Databases.TryGetValue dbName with
     | true, slot -> tryGetTable dbName slot.Value tableName |> Result.toOption |> Option.bind findInTable
@@ -4030,7 +4085,11 @@ let private acquireStripe
 
         match mode with
         | SharedStripe -> stripe.SharedOwners.Add context.Owner |> ignore
-        | ExclusiveStripe -> stripe.ExclusiveOwner <- Some context.Owner
+        | ExclusiveStripe ->
+            if stripe.ExclusiveOwner.IsNone then
+                stripe.KeyActivity
+                |> Option.iter (fun activity -> Threading.Interlocked.Increment(&activity.Owners) |> ignore)
+            stripe.ExclusiveOwner <- Some context.Owner
 
         true, newlyHeld
 
@@ -4132,6 +4191,7 @@ let private withWriteLocksFor
                     tableKey,
                     (fun _ ->
                         { Entries = ConcurrentDictionary<string, WeakReference<RowLockStripe>>(StringComparer.Ordinal)
+                          Activity = { Owners = 0L }
                           Insertions = 0L })
                 )
             let locks = cache.Entries
@@ -4146,14 +4206,14 @@ let private withWriteLocksFor
                     if existing.TryGetTarget(&target) then
                         target
                     else
-                        let target = createRowLockStripe ()
+                        let target = createKeyLockStripe cache.Activity
 
                         if locks.TryUpdate(key, WeakReference<RowLockStripe>(target), existing) then
                             target
                         else
                             stripe key
                 else
-                    let target = createRowLockStripe ()
+                    let target = createKeyLockStripe cache.Activity
 
                     if locks.TryAdd(key, WeakReference<RowLockStripe>(target)) then
                         if Threading.Interlocked.Increment(&cache.Insertions) % 8192L = 0L then
@@ -4263,6 +4323,82 @@ let acquireTransactionWriteTargets
     match store.TransactionLocks with
     | Some _ -> withWriteLocksFor timeout store dbName tableName rowIds keys ignore
     | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
+
+type OrderedIndexKeyPart =
+    | OrderedNull
+    | OrderedNumber of decimal
+    | OrderedText of string
+
+/// Active numeric, date, or text ordered index claims that another transaction holds.
+/// Ordered limited writes use these pending keys before their snapshot can see
+/// the inserted row; idle weak-cache entries never become candidate claims.
+let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (indexName: string) (keyTypes: ColumnType list) (primaryKeyTypes: ColumnType list) : (OrderedIndexKeyPart list * OrderedIndexKeyPart list option * string) list =
+    let tableKey = lockNamespaceKey dbName tableName
+    let primary = indexName.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
+    let prefix = if primary then "PRIMARY\u0000" else "ORDERED\u0000" + indexName + "\u0000"
+    let ownOwner = store.TransactionLocks |> Option.map _.Owner
+
+    let orderedValue keyType (value: string) =
+        let expectedTag =
+            match keyType with
+            | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ -> Some 'I'
+            | TDate -> Some 'T'
+            | TChar _ | TVarchar _ -> Some 'S'
+            | _ -> None
+        match expectedTag with
+        | _ when value = "N" -> Some OrderedNull
+        | Some 'S' when value.Length > 1 && value.[0] = 'S' ->
+            Some(OrderedText(value.Substring(1)))
+        | Some tag when value.Length > 1 && value.[0] = tag ->
+            match Decimal.TryParse(value.Substring(1), NumberStyles.Integer, CultureInfo.InvariantCulture) with
+            | true, ordered -> Some(OrderedNumber ordered)
+            | _ -> None
+        | _ -> None
+
+    let tryOrderedKey (key: string) =
+        if not (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) then None
+        else
+            let encoded = key.Substring(prefix.Length)
+            let rec read (offset: int) remaining acc =
+                match remaining with
+                | [] -> Some(List.rev acc, offset)
+                | keyType :: rest ->
+                    let separator = encoded.IndexOf(':', offset)
+                    if separator <= offset then None
+                    else
+                        match Int32.TryParse(encoded.Substring(offset, separator - offset)) with
+                        | true, length when length >= 1 && length <= encoded.Length - separator - 1 ->
+                            let value = encoded.Substring(separator + 1, length)
+                            orderedValue keyType value
+                            |> Option.bind (fun ordered -> read (separator + 1 + length) rest (ordered :: acc))
+                        | _ -> None
+            read 0 keyTypes []
+            |> Option.bind (fun (ordered, offset) ->
+                if primary then
+                    if offset = encoded.Length then Some(ordered, Some ordered) else None
+                elif offset < encoded.Length && encoded.[offset] = '\u0000' then
+                    let primaryKey =
+                        read (offset + 1) primaryKeyTypes []
+                        |> Option.bind (fun (values, endOffset) ->
+                            if endOffset < encoded.Length && encoded.[endOffset] = '\u0000' then Some values
+                            else None)
+                    Some(ordered, primaryKey)
+                else None)
+
+    match store.KeyLocks.TryGetValue tableKey with
+    | false, _ -> []
+    | true, cache when Threading.Interlocked.Read(&cache.Activity.Owners) = 0L -> []
+    | true, cache ->
+        cache.Entries
+        |> Seq.choose (fun entry ->
+            tryOrderedKey entry.Key
+            |> Option.bind (fun (ordered, primaryKey) ->
+                let mutable stripe = Unchecked.defaultof<RowLockStripe>
+                if not (entry.Value.TryGetTarget(&stripe)) then None
+                elif lock stripe.SyncRoot (fun () -> stripe.ExclusiveOwner |> Option.exists (fun owner -> Some owner <> ownOwner)) then
+                    Some(ordered, primaryKey, entry.Key)
+                else None))
+        |> Seq.toList
 
 /// Claims prepared unique keys, then refreshes and claims duplicate rows from
 /// the rebased catalog before applying it.

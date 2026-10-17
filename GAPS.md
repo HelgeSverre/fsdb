@@ -619,7 +619,7 @@ resolved.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
-| Write parallelism within a database | row-lock concurrency | indexed and single-table full-scan UPDATE/DELETE paths coordinate row stripes; full scans conservatively claim current rows but not gaps or later inserts; insert, upsert, and replacement candidates are prepared once, then claim supplied, generated, or defaulted unique keys and refresh existing duplicate rows before publication, including SELECT sources; [unique-key locks use exact keys](torture/findings/2026-10-15-exact-key-locks.md), so unrelated keys no longer wait because their old hash stripes collided; AUTO_INCREMENT identities are reserved across transaction snapshots; joined writes claim [physical targets inside nested join groups](torture/findings/2026-10-14-grouped-joined-write-rebase.md) and [bare assignments beside derived sources](torture/findings/2026-10-14-derived-joined-write-rebase.md); [keyless inserts](benchmarks/results/2026-10-12-keyless-insert-load.md), CTE writes without inferable physical targets, and other multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced; a [durability-matched keyless-insert run](benchmarks/results/2026-10-14-durable-keyless-scale.md) confirms the worker-scaling gap but does not isolate its cause | medium (throughput) | partial |
+| Write parallelism within a database | row-lock concurrency | indexed and single-table full-scan UPDATE/DELETE paths coordinate row stripes; full scans conservatively claim current rows but not gaps or later inserts; insert, upsert, and replacement candidates are prepared once, then claim supplied, generated, or defaulted unique keys and refresh existing duplicate rows before publication, including SELECT sources; [unique-key locks use exact keys](torture/findings/2026-10-15-exact-key-locks.md), so unrelated keys no longer wait because their old hash stripes collided; AUTO_INCREMENT identities are reserved across transaction snapshots; joined writes claim [physical targets inside nested join groups](torture/findings/2026-10-14-grouped-joined-write-rebase.md) and [bare assignments beside derived sources](torture/findings/2026-10-14-derived-joined-write-rebase.md); [secondary-index ordered limited writes](torture/findings/2026-10-16-limited-ordered-write-rebase.md#secondary-index-ordered-frontiers) reselect crossing inserts, match MySQL's audited short-table beyond-frontier waits, and skip claims excluded by proven numeric indexed predicates; [keyless inserts](benchmarks/results/2026-10-12-keyless-insert-load.md), CTE writes without inferable physical targets, and other multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced; a [durability-matched keyless-insert run](benchmarks/results/2026-10-14-durable-keyless-scale.md) confirms the worker-scaling gap but does not isolate its cause | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize catalog-wide referential actions, and recorded campaigns show CPU saturation limiting higher worker counts | medium | partial |
 
 A [current write-path control](benchmarks/results/2026-10-14-write-path-control.md)
@@ -1636,10 +1636,14 @@ implementation effort:
    from MySQL past small data.
 
 2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements,
-   plus [ordered `LIMIT 1` UPDATE and DELETE re-selection after a contended
-   first candidate stops matching or moves behind another candidate](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
-   with and without a secondary predicate index,
-   plus audited joined UPDATE and DELETE statements with named physical targets,
+   plus [ordered `LIMIT 1`, `LIMIT 2`, and `LIMIT 3` UPDATE and DELETE re-selection after a contended
+   first candidate stops matching, moves behind another candidate, or is
+   deleted](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
+   with and without a secondary predicate index, plus pending inserts across
+   integer, valid `DATE`, [text](torture/findings/2026-10-16-limited-ordered-write-rebase.md#text-primary-keys),
+   audited two-part integer, and [text-plus-integer](torture/findings/2026-10-16-limited-ordered-write-rebase.md#composite-text-and-integer-primary-keys) primary-key order
+   frontiers, plus audited joined UPDATE and DELETE statements with named
+   physical targets,
    [audited single-table updatable-view UPDATE and DELETE statements and joined-view
    UPDATE statements with one writable physical target](torture/findings/2026-10-15-view-write-rebase.md),
    and joined UPDATEs with uniquely owned bare assignments, including
@@ -1661,6 +1665,14 @@ implementation effort:
    do likewise, including uniquely owned bare assignments. Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.
+   [Pending PRIMARY-key inserts](torture/findings/2026-10-16-limited-ordered-write-rebase.md#pending-inserted-candidates)
+   now delay ordered limited writes when their key crosses an audited uniform
+   order frontier. [Mixed-direction composite ordering](torture/findings/2026-10-16-limited-ordered-write-rebase.md#composite-primary-keys)
+   waits on all active primary claims as observed in the native oracle;
+   [audited secondary-index orderings](torture/findings/2026-10-16-limited-ordered-write-rebase.md#secondary-index-ordered-frontiers)
+   also wait for crossing pending inserts without serializing equal-key
+   inserts, while unrelated inserts beyond uniform-order frontiers remain
+   concurrent.
    Broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in
