@@ -772,6 +772,32 @@ def main():
                         assert error.args[0] == 1369, error
                     cursor.execute("SELECT a.id,a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
                     assert cursor.fetchone() == (1, 12, 22)
+                    cursor.execute(
+                        "CREATE VIEW dual_vb_same AS SELECT a.id,a.n FROM dual_b a "
+                        "JOIN dual_link lb ON a.id=lb.id"
+                    )
+                    cursor.execute(
+                        "UPDATE dual_va va JOIN dual_vb_same vb ON va.id=vb.id "
+                        "SET va.n=va.n+1,vb.n=vb.n+1"
+                    )
+                    assert cursor.rowcount == 2, "two view-local physical targets share alias a"
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (13, 23)
+                    cursor.execute(
+                        "UPDATE dual_vb_same vb JOIN dual_va va ON va.id=vb.id "
+                        "SET vb.n=vb.n+1,va.n=va.n+1"
+                    )
+                    assert cursor.rowcount == 2, "reversed same-alias physical targets"
+                    try:
+                        cursor.execute(
+                            "UPDATE dual_checked vc JOIN dual_vb_same vb ON vc.id=vb.id "
+                            "SET vc.id=2,vb.n=vb.n+1"
+                        )
+                        raise AssertionError("same-alias joined CHECK OPTION accepted an invalid update")
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                    cursor.execute("SELECT a.id,a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (1, 14, 24)
 
                 print(
                     f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
@@ -785,7 +811,7 @@ def main():
                     "a bare outer-only column waited and rebased its physical target; "
                     "four- and five-source CHECK OPTION rejected atomically; "
                     "two writable views with matching internal aliases updated both physical targets in both orders; "
-                    "their CHECK OPTION rejected atomically"
+                    "their CHECK OPTION rejected atomically; shared physical target aliases updated both targets in both orders"
                 )
             finally:
                 for connection in connections:

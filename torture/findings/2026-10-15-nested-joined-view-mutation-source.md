@@ -52,7 +52,13 @@ regression covers both view orders and an invalid CHECK OPTION update that
 leaves both physical targets unchanged. The first view also projects `l.id`
 and filters on `l.id=1`, exercising the renamed alias outside the join
 condition. Collisions involving writable target
-aliases or non-table read sources remain to audit.
+aliases are now handled too: MySQL and fsdb both update two views whose
+physical target tables are separately named `a` inside their definitions,
+in either view order. Runtime target and CHECK OPTION references use the fresh
+alias, while authorization checks use the stored target alias. The oracle and
+focused regression also verify a CHECK OPTION rejection leaves both targets
+unchanged after this rewrite. Non-table read-source alias collisions remain
+to audit.
 
 ## A physical target beside the writable view
 

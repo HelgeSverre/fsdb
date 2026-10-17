@@ -2470,6 +2470,33 @@ let tests =
               match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
               | ResultSet(_, [ [ Some "1"; Some "12"; Some "22" ] ]) -> ()
               | result -> failtestf "CHECK OPTION must preserve both targets, got %A" result
+              handle session
+                  ("CREATE VIEW tx_dual_vb_same AS SELECT a.id,a.n FROM tx_dual_b a "
+                   + "JOIN tx_dual_link lb ON a.id=lb.id")
+              |> ignore
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_va va JOIN tx_dual_vb_same vb ON va.id=vb.id "
+                       + "SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                  (Affected 2UL)
+                  "two view-local physical targets may share alias a"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "13"; Some "23" ] ]) -> ()
+              | result -> failtestf "expected both same-alias view targets to change, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_vb_same vb JOIN tx_dual_va va ON va.id=vb.id "
+                       + "SET vb.n=vb.n+1,va.n=va.n+1") |> snd)
+                  (Affected 2UL)
+                  "reversed same-alias target order updates both views"
+              match handle session
+                  ("UPDATE tx_dual_checked vc JOIN tx_dual_vb_same vb ON vc.id=vb.id "
+                   + "SET vc.id=2,vb.n=vb.n+1") |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected renamed target CHECK OPTION error, got %A" result
+              match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "14"; Some "24" ] ]) -> ()
+              | result -> failtestf "renamed target CHECK OPTION must preserve both rows, got %A" result
 
           testCase "joined view can supply read rows while another source is updated"
           <| fun _ ->
