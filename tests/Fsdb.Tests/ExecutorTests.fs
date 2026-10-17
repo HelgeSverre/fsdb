@@ -13207,6 +13207,29 @@ let tests =
                         | other -> failtestf "expected materialized text matches for %s, got %A" predicate other
                         Expect.isLessThan calls 80 (predicate + " must bound residual work")
 
+                    for prefix, source in
+                        [ "", "(SELECT DISTINCT id,k FROM text_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM text_rows) ", "materialized d" ] do
+                        for predicate, expected in
+                            [ "LOWER(d.k) IN (o.x,'word20')", [ 3; 1; 1; 1 ]
+                              "LOWER(d.k) IN (o.x,NULL)", [ 2; 0; 0; 0 ]
+                              "LOWER(d.k) IN (o.x,o.x,NULL)", [ 2; 0; 0; 0 ]
+                              "LOWER(d.k) IN (o.x,CONCAT(o.x,'!'))", [ 2; 0; 0; 0 ]
+                              "LOWER(d.k) IN (o.x,'ALPHA' COLLATE utf8mb4_0900_ai_ci)", [ 2; 2; 2; 2 ]
+                              "LOWER(d.k) IN (o.x,'word20') OR d.id=12", [ 4; 2; 2; 2 ]
+                              "LOWER(d.k) COLLATE utf8mb4_0900_ai_ci IN (o.x,'word20')", [ 3; 1; 1; 3 ] ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                                + "FROM text_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, rows) ->
+                                let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                                Expect.equal actual (expected |> List.map Some) (source + " " + predicate)
+                            | other -> failtestf "expected materialized text IN matches, got %A" other
+                            Expect.isLessThan calls 80 (source + " " + predicate + " bounds residual work")
+
                 testCase "materialized correlated text expression ranges bound residual work"
                 <| fun _ ->
                     let mutable calls = 0

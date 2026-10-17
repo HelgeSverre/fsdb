@@ -14652,6 +14652,7 @@ and private tryCorrelatedOuterValue source context expression =
 
 and private tryCorrelatedProbeValue source context = function
     | LiteralValue value -> Some value
+    | Expression.CollationOverride(LiteralValue value, _) -> Some value
     | expression -> tryCorrelatedOuterValue source context expression
 
 and private correlatedBinaryLikePrefixes store source context columns predicate =
@@ -16350,36 +16351,63 @@ and private tryMaterializedCorrelatedLookup
             // materialized source. Its collation belongs to the comparison,
             // not necessarily to the source column or the connection.
             let textExpressionCandidates predicate =
+                let indexable indexed =
+                    rowLocalExpression indexed
+                    && Option.isNone (tryCorrelatedInnerColumn probeSource indexed)
+
+                let comparisonCollation indexed bound =
+                    resolveOperandCollation "="
+                        (collationOperand (rowContext [||]) indexed None)
+                        (collationOperand context bound (tryColumnDefForExpr context bound))
+                    |> Result.toOption
+
+                let lookup indexed (collation: Collation.Collation) =
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedTextExpressions source (fun () ->
+                            Dictionary<Expr * string, MaterializedEqualityLookup option>())
+                    getMemoized lookups (indexed, collation.Name) (fun () ->
+                        let textKey = function
+                            | VString text -> Some(VString(collation.KeyOf text))
+                            | _ -> None
+                        buildExpressionLookup indexed textKey textKey)
+
                 let candidate indexed bound =
-                    if not (rowLocalExpression indexed) || Option.isSome (tryCorrelatedInnerColumn probeSource indexed) then
-                        None
+                    if not (indexable indexed) then None
                     else
                         tryCorrelatedProbeValue probeSource context bound
                         |> Option.bind (fun value ->
                             match value with
                             | VString _ | VNull ->
-                                resolveOperandCollation "="
-                                    (collationOperand (rowContext [||]) indexed None)
-                                    (collationOperand context bound (tryColumnDefForExpr context bound))
-                                |> Result.toOption
+                                comparisonCollation indexed bound
                                 |> Option.bind (fun collation ->
-                                    let lookups =
-                                        getMemoized memo.MaterializedCorrelatedTextExpressions source (fun () ->
-                                            Dictionary<Expr * string, MaterializedEqualityLookup option>())
-                                    let lookup =
-                                        getMemoized lookups (indexed, collation.Name) (fun () ->
-                                            let textKey = function
-                                                | VString text -> Some(VString(collation.KeyOf text))
-                                                | _ -> None
-                                            buildExpressionLookup indexed textKey textKey)
-                                    lookup |> Option.bind (fun probe -> probe [ value ]))
+                                    lookup indexed collation |> Option.bind (fun probe -> probe [ value ]))
                             | _ -> None)
+
+                let inCandidate indexed bounds =
+                    if not (indexable indexed) then None
+                    else
+                        bounds
+                        |> List.map (fun bound ->
+                            tryCorrelatedProbeValue probeSource context bound
+                            |> Option.bind (fun value ->
+                                match value with
+                                | VString _ | VNull ->
+                                    comparisonCollation indexed bound
+                                    |> Option.bind (fun collation ->
+                                        lookup indexed collation
+                                        |> Option.bind (fun probe -> probe [ value ]))
+                                | _ -> None))
+                        |> tryAllSome
+                        |> Option.map (fun groups ->
+                            let seen = HashSet<Value[]>(HashIdentity.Reference)
+                            groups |> List.collect id |> List.filter seen.Add)
 
                 predicate
                 |> optionalConjuncts
                 |> List.choose (function
                     | BinOp(Eq, left, right) ->
                         candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | In(indexed, bounds) -> inCandidate indexed bounds
                     | _ -> None)
                 |> intersectSharedRows
 

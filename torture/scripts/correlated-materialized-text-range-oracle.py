@@ -60,6 +60,11 @@ def main():
                         ("LOWER(d.k) BETWEEN o.x AND CONCAT(o.x,'9')", (11, 0, 0)),
                         ("LOWER(d.k) COLLATE utf8mb4_0900_ai_ci >= o.x", (11, 0, 0)),
                         ("LOWER(d.k)>=o.x OR d.id=1", (12, 1, 1)),
+                        ("LOWER(d.k) IN (o.x,'word10')", (2, 1, 1)),
+                        ("LOWER(d.k) IN (o.x,CONCAT(o.x,'9'))", (2, 0, 0)),
+                        ("LOWER(d.k) IN (o.x,NULL)", (1, 0, 0)),
+                        ("LOWER(d.k) IN (o.x,o.x,NULL)", (1, 0, 0)),
+                        ("LOWER(d.k) IN (o.x,'word10') OR d.id=1", (3, 2, 2)),
                     ]
                     for predicate, expected in cases:
                         cursor.execute(
@@ -89,7 +94,19 @@ def main():
                         "FROM accent_bounds o"
                     )
                     assert cursor.fetchone() == (2,), "accent-insensitive range"
-                    print(f"MySQL {version}: {len(cases)} materialized text range cases, upper bound, and accent range match")
+                    cursor.execute(
+                        "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM accent_rows) d "
+                        "WHERE LOWER(d.k) COLLATE utf8mb4_0900_ai_ci IN (o.x,'z')) "
+                        "FROM accent_bounds o"
+                    )
+                    assert cursor.fetchone() == (3,), "accent-insensitive IN"
+                    cursor.execute(
+                        "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM accent_rows) d "
+                        "WHERE LOWER(d.k) IN (o.x,'Ä' COLLATE utf8mb4_0900_ai_ci)) "
+                        "FROM accent_bounds o"
+                    )
+                    assert cursor.fetchone() == (2,), "mixed per-member comparison collations"
+                    print(f"MySQL {version}: {len(cases)} materialized text range/IN cases, upper bound, and accent cases match")
             finally:
                 if connection:
                     connection.close()
