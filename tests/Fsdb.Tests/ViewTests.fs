@@ -2111,6 +2111,33 @@ let tests =
                   Expect.equal (rows store "SELECT n FROM composed_target WHERE id=1") [ [ Some "1" ] ] "rejected update leaves target unchanged"
                   expectOk (run store "DROP VIEW composed_checked") "drop checked composed view"
 
+          testCase "layered lateral and aggregate view checks retain the renamed target"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE layered_lateral_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE layered_lateral_source(id INT,flag INT)"
+                    "CREATE TABLE layered_lateral_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO layered_lateral_target VALUES(1,0),(2,0)"
+                    "INSERT INTO layered_lateral_source VALUES(1,7),(1,8)"
+                    "INSERT INTO layered_lateral_aux VALUES(1,9)"
+                    "CREATE VIEW lateral_checked_inner AS SELECT a.id AS target_id,a.n AS metric,d.flag,e.x FROM (SELECT id,SUM(flag) flag FROM layered_lateral_source GROUP BY id) d JOIN LATERAL (SELECT d.id x) e ON TRUE JOIN layered_lateral_target a ON a.id=e.x WHERE a.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW lateral_checked_outer AS SELECT iv.target_id AS id,iv.metric AS n,s.aux FROM lateral_checked_inner iv JOIN (SELECT id,SUM(aux) aux FROM layered_lateral_aux GROUP BY id) s ON s.id=iv.target_id WHERE iv.metric<s.aux WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='lateral_checked_outer'")
+                  [ [ Some "YES" ] ]
+                  "the layered composed view remains updatable"
+              Expect.equal (run store "UPDATE lateral_checked_outer SET n=1 WHERE id=1") (Affected 1UL) "renamed target updates"
+              for value in [ -1; 10 ] do
+                  match run store (sprintf "UPDATE lateral_checked_outer SET n=%d WHERE id=1" value) with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected checked update %d to fail with 1369, got %A" value other
+              Expect.equal
+                  (rows store "SELECT id,n FROM layered_lateral_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
+                  "both rejected writes leave the target unchanged"
+
           testCase "independent lateral source before a view target remains writable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

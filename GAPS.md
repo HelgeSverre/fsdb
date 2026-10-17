@@ -833,7 +833,9 @@ also preserve writable metadata and target identity through a two-source
 dependency chain. [Aggregate-derived sources followed by one or two dependent
 `LATERAL` projections](torture/findings/2026-10-15-composed-join-view-writes.md#aggregate-source-followed-by-dependent-lateral-sources)
 also retain writable metadata, target identity, and CHECK OPTION behavior
-when the physical target is last. [JSON_TABLE joined views](torture/findings/2026-10-15-json-table-joined-view.md)
+when the physical target is last. A [two-layer lateral/aggregate checked view](torture/findings/2026-10-15-composed-join-view-writes.md#layered-lateral-and-aggregate-checks)
+also updates a renamed target and enforces both CASCADED predicates.
+[JSON_TABLE joined views](torture/findings/2026-10-15-json-table-joined-view.md)
 also update a physical component when the table function follows or precedes
 it, including dependent table-function chains; JSON_TABLE columns remain
 read-only. An [independent `LATERAL` first source](torture/findings/2026-10-15-composed-join-view-writes.md#independent-lateral-source-first)
