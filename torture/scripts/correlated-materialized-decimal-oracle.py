@@ -107,6 +107,18 @@ def main():
                         "FROM wide_bounds o ORDER BY o.id"
                     )
                     assert cursor.fetchall() == ((1, "2,3"), (2, "4"))
+                    for predicate, expected in [
+                        ("d.k+0.00 IN (o.lo)", ((1, "2,3"), (2, "4"))),
+                        ("d.k+0.00 IN (o.lo,9007199254740993.00)", ((1, "2,3"), (2, "3,4"))),
+                        ("d.k+0.00 IN (9007199254740993.00,o.lo)", ((1, "2,3"), (2, "3,4"))),
+                        ("d.k+0.00 IN (o.lo,NULL)", ((1, "2,3"), (2, "4"))),
+                    ]:
+                        cursor.execute(
+                            "SELECT o.id,(SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                            "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                            f"WHERE {predicate}) FROM wide_bounds o ORDER BY o.id"
+                        )
+                        assert cursor.fetchall() == expected, predicate
                     cursor.execute(
                         "SELECT o.id,(SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
                         "FROM (SELECT DISTINCT id,k FROM wide_rows) d "

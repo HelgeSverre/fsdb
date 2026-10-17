@@ -59,3 +59,16 @@ match connection.QueryValues(doubleEquality, []) with
           [ Some(Value.VInt 4L); Some(Value.VInt 1L) ] ]) ->
     printfn "finite DOUBLE equality over DECIMAL expression: expected rows; residual_calls=%d" calls
 | other -> failwithf "Unexpected DOUBLE-bound decimal equality result: %A" other
+
+calls <- 0
+let doubleIn =
+    "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM inner_rows) d "
+    + "WHERE TOUCH(d.id)=d.id AND d.k+0.00 IN (o.f,NULL)) "
+    + "FROM outer_bounds o ORDER BY o.id"
+match connection.QueryValues(doubleIn, []) with
+| Ok(_, [ [ Some(Value.VInt 1L); Some(Value.VInt 1L) ]
+          [ Some(Value.VInt 2L); Some(Value.VInt 0L) ]
+          [ Some(Value.VInt 3L); Some(Value.VInt 0L) ]
+          [ Some(Value.VInt 4L); Some(Value.VInt 1L) ] ]) ->
+    printfn "finite DOUBLE IN over DECIMAL expression: expected rows; residual_calls=%d" calls
+| other -> failwithf "Unexpected DOUBLE-bound decimal IN result: %A" other

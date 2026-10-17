@@ -15888,6 +15888,10 @@ and private tryMaterializedCorrelatedLookup
                     let seen = HashSet<Value[]>(HashIdentity.Reference)
                     groups |> List.collect id |> List.filter seen.Add)
 
+            let correlatedBoundValue = function
+                | Cast(LiteralValue VNull, _) -> Some VNull
+                | expression -> tryCorrelatedProbeValue probeSource context expression
+
             let expressionEqualityCandidates indexable lookup acceptsEqualityBound acceptsInBound predicate =
                 let candidate indexed bound =
                     if not (indexable indexed) then None
@@ -15901,11 +15905,8 @@ and private tryMaterializedCorrelatedLookup
                 let inCandidate indexed bounds =
                     if not (indexable indexed) then None
                     else
-                        let boundValue = function
-                            | Cast(LiteralValue VNull, _) -> Some VNull
-                            | expression -> tryCorrelatedProbeValue probeSource context expression
                         bounds
-                        |> List.map boundValue
+                        |> List.map correlatedBoundValue
                         |> tryAllSome
                         |> Option.bind (fun values ->
                             if values |> List.forall acceptsInBound then
@@ -16148,6 +16149,20 @@ and private tryMaterializedCorrelatedLookup
                         approximateEquality left right
                         |> Option.orElseWith (fun () -> approximateEquality right left)
                         |> Option.toList
+                    | In(indexedExpression, boundExpressions) ->
+                        match indexed indexedExpression, boundExpressions |> List.map correlatedBoundValue |> tryAllSome with
+                        | Some indexedExpression, Some values
+                            when values |> List.exists (function VDouble _ -> true | _ -> false) ->
+                            rangeLookup indexedExpression
+                            |> Option.bind (fun lookup ->
+                                values
+                                |> List.map (fun value -> lookup (Some(value, true)) (Some(value, true)))
+                                |> tryAllSome
+                                |> Option.map (fun groups ->
+                                    let seen = HashSet<Value[]>(HashIdentity.Reference)
+                                    groups |> List.collect id |> List.filter seen.Add))
+                            |> Option.toList
+                        | _ -> regular ()
                     | Between(indexedExpression, lowerExpression, upperExpression) ->
                         match indexed indexedExpression, bound lowerExpression, bound upperExpression with
                         | Some indexedExpression, Some(_, lower), Some(_, upper)

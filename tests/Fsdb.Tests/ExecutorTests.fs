@@ -13212,22 +13212,22 @@ let tests =
                     |> ignore
                     runDefault store "INSERT INTO decimal_rows VALUES(1000,NULL)" |> ignore
 
-                    for predicate, expected, keyed in
-                        [ "d.k+0.00=o.x", [ 1; 0; 0; 1 ], true
-                          "o.x=d.k+0.00", [ 1; 0; 0; 1 ], true
-                          "d.k*1.00=o.x", [ 1; 0; 0; 1 ], true
-                          "d.k+0.00=o.i", [ 0; 0; 0; 0 ], true
-                          "d.k+0.00=o.f", [ 1; 0; 0; 1 ], true
-                          "d.k+0.00=o.x OR d.id=12", [ 2; 1; 1; 2 ], true
-                          "d.k+0.00 IN (o.x,o.x+1.00)", [ 2; 0; 0; 2 ], true
-                          "d.k+0.00 IN (o.x,NULL)", [ 1; 0; 0; 1 ], true
-                          "d.k+0.00 IN (o.x,o.x)", [ 1; 0; 0; 1 ], true
-                          "d.k+0.00 IN (o.x,NULL) OR d.id=12", [ 2; 1; 1; 2 ], true
-                          "d.k+0.00 IN (o.f,NULL)", [ 1; 0; 0; 1 ], false
-                          "d.k+0.00>o.x+480.00", [ 9; 0; 0; 30 ], true
-                          "d.k+0.00 BETWEEN o.x+480.00 AND o.x+481.00", [ 2; 0; 0; 1 ], true
-                          "d.k+0.00>o.x+480.00 OR d.id=12", [ 10; 1; 1; 31 ], true
-                          "d.k+0.00>o.f+480e0", [ 9; 0; 0; 30 ], true ] do
+                    for predicate, expected in
+                        [ "d.k+0.00=o.x", [ 1; 0; 0; 1 ]
+                          "o.x=d.k+0.00", [ 1; 0; 0; 1 ]
+                          "d.k*1.00=o.x", [ 1; 0; 0; 1 ]
+                          "d.k+0.00=o.i", [ 0; 0; 0; 0 ]
+                          "d.k+0.00=o.f", [ 1; 0; 0; 1 ]
+                          "d.k+0.00=o.x OR d.id=12", [ 2; 1; 1; 2 ]
+                          "d.k+0.00 IN (o.x,o.x+1.00)", [ 2; 0; 0; 2 ]
+                          "d.k+0.00 IN (o.x,NULL)", [ 1; 0; 0; 1 ]
+                          "d.k+0.00 IN (o.x,o.x)", [ 1; 0; 0; 1 ]
+                          "d.k+0.00 IN (o.x,NULL) OR d.id=12", [ 2; 1; 1; 2 ]
+                          "d.k+0.00 IN (o.f,NULL)", [ 1; 0; 0; 1 ]
+                          "d.k+0.00>o.x+480.00", [ 9; 0; 0; 30 ]
+                          "d.k+0.00 BETWEEN o.x+480.00 AND o.x+481.00", [ 2; 0; 0; 1 ]
+                          "d.k+0.00>o.x+480.00 OR d.id=12", [ 10; 1; 1; 31 ]
+                          "d.k+0.00>o.f+480e0", [ 9; 0; 0; 30 ] ] do
                         calls <- 0
                         let sql =
                             "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM decimal_rows) d "
@@ -13238,8 +13238,7 @@ let tests =
                             let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
                             Expect.equal actual (expected |> List.map Some) predicate
                         | other -> failtestf "expected materialized decimal matches for %s, got %A" predicate other
-                        if keyed then Expect.isLessThan calls 80 (predicate + " must bound residual work")
-                        else Expect.isGreaterThan calls 1000 "DOUBLE equality and IN retain their scan"
+                        Expect.isLessThan calls 80 (predicate + " must bound residual work")
 
                     runDefault store "CREATE TABLE wide_decimal_bounds(id INT PRIMARY KEY,lo DOUBLE,hi DOUBLE)" |> ignore
                     runDefault store "CREATE TABLE wide_decimal_rows(id INT PRIMARY KEY,k DECIMAL(20,2))" |> ignore
@@ -13268,6 +13267,22 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected rounded DOUBLE equality over wide DECIMAL rows, got %A" other
                     Expect.isLessThan calls 8 "approximate equality avoids unrelated wide DECIMAL rows"
+
+                    for predicate, expected in
+                        [ "d.k+0.00 IN (o.lo)", [ "2"; "1" ]
+                          "d.k+0.00 IN (o.lo,9007199254740993.00)", [ "2"; "2" ]
+                          "d.k+0.00 IN (9007199254740993.00,o.lo)", [ "2"; "2" ]
+                          "d.k+0.00 IN (o.lo,NULL)", [ "2"; "1" ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM wide_decimal_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                            + "FROM wide_decimal_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some "1"; Some first ]; [ Some "2"; Some second ] ]) ->
+                            Expect.equal [ first; second ] expected predicate
+                        | other -> failtestf "expected wide DECIMAL IN matches for %s, got %A" predicate other
+                        Expect.isLessThan calls 12 (predicate + " must avoid unrelated wide DECIMAL rows")
 
                     runDefault store "CREATE TABLE mixed_decimal_bounds(id INT PRIMARY KEY,lo DECIMAL(20,2),hi DOUBLE)" |> ignore
                     runDefault store "INSERT INTO mixed_decimal_bounds VALUES(1,9007199254740993.00,9007199254740994e0)" |> ignore

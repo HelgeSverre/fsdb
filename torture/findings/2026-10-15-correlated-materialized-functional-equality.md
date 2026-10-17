@@ -169,6 +169,12 @@ Finite DOUBLE equality uses matching lower and upper cuts from this same
 lookup, including DECIMAL keys that round to the same DOUBLE near 2⁵³. The
 1,000-row profile drops from 3,008 to seven residual calls across four
 outer rows.
+Positive `IN` lists with finite DOUBLE members union the same rounded cuts
+with exact cuts for DECIMAL members. MySQL's wide-DECIMAL oracle confirms
+that `IN (DOUBLE 2⁵³, DECIMAL 2⁵³+1)` includes both rounded keys and the
+exact member, regardless of list order; NULL adds no matches.
+The 1,000-row `IN (o.f,NULL)` profile drops from 3,008 to seven residual
+calls across four outer rows.
 Non-finite DOUBLE and string bounds, or a non-DECIMAL row result, retain the
 scan.
 
