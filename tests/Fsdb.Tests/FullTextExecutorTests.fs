@@ -497,6 +497,18 @@ let tests =
               Expect.equal (search "中㎞") [ "1" ] "square kilometer keeps its own posting"
               Expect.equal (search "中㏎") [ "2" ] "square uppercase kilometer keeps its own posting"
 
+          testCase "general Unicode enclosed-number ngrams retain their written symbols"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE enclosed_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO enclosed_docs VALUES(1,'中①文'),(2,'中⓵文'),(3,'中Ⓐ文'),(4,'中ⓐ文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM enclosed_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "①") [ "1" ] "circled one keeps its own posting"
+              Expect.equal (search "⓵") [ "2" ] "double-circled one keeps its own posting"
+              Expect.equal (search "Ⓐ") [ "3"; "4" ] "circled letter case remains insensitive"
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()
