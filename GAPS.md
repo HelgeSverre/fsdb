@@ -1061,6 +1061,10 @@ U+2300–U+2AFF blocks at sizes 1 and 2; U+2800–U+28FF was not sampled.
 The [Glagolitic and Coptic block probe](torture/findings/2026-10-17-general-ci-glagolitic-coptic.md)
 preserves MySQL's distinct U+2C00–U+2CFF weights; its expanded ngram lane
 matches at sizes 1 and 2.
+The [adjacent U+2D00–U+2DFF probe](torture/findings/2026-10-17-general-ci-2d00-boolean-boundary.md)
+matches at size 1 but has 152 Boolean-mode membership or relevance differences
+at size 2, concentrated in 38 characters outside MySQL's Unicode 5.0 Boolean
+word table. Natural language and query expansion match in that corpus.
 The [Bopomofo and Kanbun probe](torture/findings/2026-10-17-general-ci-bopomofo-weights.md)
 preserves distinct U+3100–U+31BF primary weights; the extension-block ngram
 lane matches MySQL at sizes 1–10 (288 searches per size), as does the
