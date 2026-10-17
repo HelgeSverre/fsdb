@@ -235,6 +235,24 @@ def main():
                     mysql_distance,
                     point_distance(fsdb_connection, coordinates, ring),
                 )
+        polar_grid_differences = []
+        for latitude in (85.99999, 86, 86.00001, 87, 87.99999, 88, 88.00001):
+            for longitude in (0.99999, 1, 1.00001, 2, 2.99999, 3, 3.00001):
+                coordinates = f"{latitude} {longitude}"
+                mysql_position = point_result(mysql_connection, coordinates, polar_combined)
+                fsdb_position = point_result(fsdb_connection, coordinates, polar_combined)
+                if mysql_position != fsdb_position:
+                    polar_grid_differences.append((coordinates, mysql_position, fsdb_position))
+        print("polar combined-grid differences", len(polar_grid_differences), polar_grid_differences)
+        polar_corner_differences = []
+        for latitude in (85.9999, 85.99999, 86, 86.00001, 86.0001):
+            for offset in (0.000001, 0.000002, 0.000005, 0.00001, 0.00002, 0.00005, 0.0001):
+                coordinates = f"{latitude} {1 + offset}"
+                mysql_position = point_result(mysql_connection, coordinates, polar_combined)
+                fsdb_position = point_result(fsdb_connection, coordinates, polar_combined)
+                if mysql_position != fsdb_position:
+                    polar_corner_differences.append((coordinates, mysql_position, fsdb_position))
+        print("polar corner differences", len(polar_corner_differences), polar_corner_differences)
         exterior = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
         edge_probes = [
             ("0 -0.00000000001", "near west edge"),

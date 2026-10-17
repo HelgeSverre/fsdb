@@ -213,6 +213,17 @@ point against one standalone-hole ring direction. Distance therefore has a
 separate ring-order sensitivity and cannot be used to infer the missing
 containment or intersection decision.
 
+A 49-point grid around the combined polar polygon found only the known
+`POINT(86 1.00001)` disagreement. A finer 35-point corner grid found four
+disagreements, all at latitude 86 and longitudes `1.000001`, `1.000002`,
+`1.000005`, and `1.00001`. MySQL calls each outside and disjoint; fsdb calls
+each inside and intersecting. The adjacent sampled longitudes `1.00002`
+through `1.0001`, and latitudes `85.9999`, `85.99999`, `86.00001`, and
+`86.0001`, agree. This confines the sampled divergence to a narrow polar
+corner band, but the standalone/combined relation contradiction above still
+precludes a simple hole-membership or tolerance patch. The maintained
+`geographic-edge-oracle.py` reports both grids for future strategy work.
+
 ## Near-machine-precision hole-edge offsets
 
 A separate MySQL 8.4.11 probe placed `LINESTRING(1.5 y,3.0 y)` beside the
