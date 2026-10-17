@@ -15873,7 +15873,7 @@ and private tryMaterializedCorrelatedLookup
                     | _ -> false) expression)
                 && isStatementStableExpr store registry dbName innerScope expression
 
-            let buildExpressionLookup expression rowKey probeKey =
+            let buildExpressionLookupWithKeys expression rowKeys probeKey =
                 let rowsByKey = Dictionary<Value, ResizeArray<Value[]>>()
                 let mutable compatible = true
                 for row in rows do
@@ -15881,11 +15881,12 @@ and private tryMaterializedCorrelatedLookup
                         match evalExpr (rowContext row) expression with
                         | Ok VNull -> ()
                         | Ok value ->
-                            match rowKey value with
-                            | Some key ->
-                                match rowsByKey.TryGetValue key with
-                                | true, matches -> matches.Add row
-                                | _ -> rowsByKey.[key] <- ResizeArray [ row ]
+                            match rowKeys value with
+                            | Some keys ->
+                                for key in keys do
+                                    match rowsByKey.TryGetValue key with
+                                    | true, matches -> matches.Add row
+                                    | _ -> rowsByKey.[key] <- ResizeArray [ row ]
                             | None -> compatible <- false
                         | Error _ -> compatible <- false
                 if not compatible then None
@@ -15900,6 +15901,10 @@ and private tryMaterializedCorrelatedLookup
                                 | true, matches -> Some(List.ofSeq matches)
                                 | _ -> Some [])
                         | _ -> None)
+
+            let buildExpressionLookup expression rowKey probeKey =
+                buildExpressionLookupWithKeys expression
+                    (rowKey >> Option.map List.singleton) probeKey
 
             let unionExpressionLookupCandidates lookup values =
                 values
@@ -15988,8 +15993,14 @@ and private tryMaterializedCorrelatedLookup
                             // Only integer row results enter this lookup. A fractional
                             // or out-of-range DECIMAL has no matching integer key.
                             | VDecimal number -> Some(VDecimal number)
+                            | VDouble number when System.Double.IsFinite number -> Some(VDouble number)
                             | value -> integerKey value
-                        buildExpressionLookup expression integerKey boundKey)
+                        // Numeric comparison with a DOUBLE bound rounds even
+                        // distinct wide integer rows to the same key.
+                        let rowKeys value =
+                            integerKey value
+                            |> Option.map (fun exact -> [ exact; VDouble(Value.toDouble value) ])
+                        buildExpressionLookupWithKeys expression rowKeys boundKey)
 
             let integerExpressionCandidates predicate =
                 let indexable indexed =
@@ -16010,6 +16021,7 @@ and private tryMaterializedCorrelatedLookup
 
                 let acceptsBound = function
                     | VNull | VInt _ | VUInt _ | VDecimal _ -> true
+                    | VDouble number -> System.Double.IsFinite number
                     | _ -> false
                 expressionEqualityCandidates indexable integerExpressionLookup (fun _ -> true) acceptsBound predicate
 

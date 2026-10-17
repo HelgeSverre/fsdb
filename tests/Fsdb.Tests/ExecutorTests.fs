@@ -13005,6 +13005,21 @@ let tests =
                         | other -> failtestf "expected decimal-bound integer expression result, got %A" other
                         Expect.isLessThan calls 80 "decimal bounds narrow integer expression candidates"
 
+                    for predicate in
+                        [ "ABS(d.k)+0=CAST(o.x AS DOUBLE)"
+                          "ABS(d.k)+0 IN (CAST(o.x AS DOUBLE),NULL)" ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                            + "FROM abs_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            Expect.equal (rows |> List.map (fun row -> row.[1]))
+                                ([ 2; 0; 0; 0; 1 ] |> List.map (string >> Some)) predicate
+                        | other -> failtestf "expected double-bound integer expression result, got %A" other
+                        Expect.isLessThan calls 80 "double bounds narrow integer expression candidates"
+
                     runDefault store "CREATE TABLE wide_unsigned_rows(id INT PRIMARY KEY,k BIGINT UNSIGNED)" |> ignore
                     runDefault store
                         "INSERT INTO wide_unsigned_rows VALUES(1,9223372036854775807),(2,9223372036854775808),(3,18446744073709551615)"
@@ -13030,6 +13045,16 @@ let tests =
                             Expect.equal (rows |> List.map (fun row -> row.[1]))
                                 ([ 1; 1; 1; 0; 0; 0 ] |> List.map (string >> Some)) predicate
                         | other -> failtestf "expected wide unsigned decimal-bound matches, got %A" other
+                    match run store registry
+                        ("SELECT o.id,(SELECT COUNT(*) FROM "
+                         + "(SELECT DISTINCT id,k FROM wide_unsigned_rows) d "
+                         + "WHERE COALESCE(d.k,0)=CAST(o.x AS DOUBLE)) "
+                         + "FROM wide_decimal_bounds o ORDER BY o.id") with
+                    | ResultSet(_, rows) ->
+                        Expect.equal (rows |> List.map (fun row -> row.[1]))
+                            ([ 2; 2; 1; 2; 0; 1 ] |> List.map (string >> Some))
+                            "wide integer expression bounds compare in the rounded DOUBLE domain"
+                    | other -> failtestf "expected wide unsigned DOUBLE-bound matches, got %A" other
 
                 testCase "materialized correlated BIT_COUNT uses an integer expression key"
                 <| fun _ ->

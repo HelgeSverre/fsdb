@@ -78,6 +78,10 @@ def main():
                              ((1, 0), (2, 0), (3, 0), (4, 0), (5, 0))),
                             ("ABS(d.k)+0 IN (CAST(o.x AS DECIMAL(20,0)),CAST(o.x AS DECIMAL(20,0))+0.5)",
                              ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0=CAST(o.x AS DOUBLE)",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0 IN (CAST(o.x AS DOUBLE),NULL)",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
                         ]:
                             cursor.execute(
                                 prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
@@ -175,6 +179,13 @@ def main():
                             f"WHERE {predicate}) FROM wide_decimal_bounds o ORDER BY o.id"
                         )
                         assert cursor.fetchall() == ((1, 1), (2, 1), (3, 1), (4, 0), (5, 0), (6, 0)), predicate
+                    cursor.execute(
+                        "SELECT o.id,(SELECT COUNT(*) FROM "
+                        "(SELECT DISTINCT id,k FROM wide_unsigned_rows) d "
+                        "WHERE COALESCE(d.k,0)=CAST(o.x AS DOUBLE)) "
+                        "FROM wide_decimal_bounds o ORDER BY o.id"
+                    )
+                    assert cursor.fetchall() == ((1, 2), (2, 2), (3, 1), (4, 2), (5, 0), (6, 1))
                 print(f"MySQL {version}: indexed, pass-through, materialized, signed-boundary, and wide unsigned integer expression cases match")
             finally:
                 if connection:

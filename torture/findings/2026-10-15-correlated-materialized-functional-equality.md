@@ -43,8 +43,10 @@ equality key. An evaluation error or a noninteger row result falls back to the
 normal scan. Exact DECIMAL outer bounds now also use this key: integral values
 within the signed or unsigned 64-bit domain normalize to the corresponding
 integer key, while fractional and out-of-range values have no integer match.
-DOUBLE and string bounds still scan. The lookup also participates in complete
-OR-branch unions.
+Finite DOUBLE bounds use a second key in the approximate comparison domain;
+this preserves matches when adjacent large integers round to the same DOUBLE.
+String bounds still scan. The lookup also participates in complete OR-branch
+unions.
 
 The same [profile](../scripts/correlated-materialized-functional-profile.fsx)
 now reports **6 residual calls** for `ABS(d.k)+0=o.x`, down from 4,004.
@@ -67,6 +69,9 @@ The new DECIMAL-bound regression reduces a 4,014-call scan to fewer than 80
 residual calls and checks integral, fractional, and mixed members. A separate
 wide unsigned oracle and regression cover 2⁶³, `BIGINT UNSIGNED` maximum, and
 the first out-of-range DECIMAL value.
+The finite DOUBLE-bound regression likewise reduces 4,014 residual calls to
+fewer than 80. The wide unsigned oracle checks rounded equality at 2⁶³ and
+2⁶⁴, where exact integer equality would miss MySQL's DOUBLE-domain matches.
 
 ### Integer `BIT_COUNT` results
 

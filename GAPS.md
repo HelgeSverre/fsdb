@@ -349,7 +349,9 @@ OR branches.
 Positive [`IN` over stable integer expressions](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-integer-expression-lookup)
 now unions exact integer and audited DECIMAL-bound candidates from that same
 key, including fractional DECIMAL misses, NULL, duplicates, and complete OR
-branches; DOUBLE and string bounds retain the scan.
+branches. Finite DOUBLE bounds use a second key in the approximate comparison
+domain, including large integers that round to the same DOUBLE; string bounds
+retain the scan.
 The [matched in-memory timing](benchmarks/results/2026-10-15-materialized-integer-expression-lookup.md)
 confirms a repeated-query speedup for this shape. [Text expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-text-expression-lookup)
 use the effective comparison collation and reduce the audited `LOWER(d.k)=o.x`
