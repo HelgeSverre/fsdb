@@ -503,6 +503,21 @@ let private termScoresWithin (candidateIds: Set<'id> option) (view: ReadView<'id
 
 let private termScores view term = termScoresWithin None view term
 
+/// Short Boolean terms can reach historical postings, but not larger ngrams
+/// whose collation keys happen to contract to the same spelling.
+let private booleanPostingRows (view: ReadView<'id>) (token: Token) =
+    view.Postings
+    |> Map.tryFind token.Key
+    |> Option.map (fun rows ->
+        if view.Collation.Name <> "utf8mb4_general_ci" then rows
+        else
+            let length = runeLength token.Text
+            rows
+            |> Map.filter (fun id _ ->
+                match view.Documents.[id].Rules.Tokenizer with
+                | Words _ -> true
+                | Ngrams size -> length >= size))
+
 let private exactPhraseMatches collation (doc: Token[]) (words: Token[]) =
     if words.Length = 0 then
         false
@@ -527,8 +542,7 @@ let private phraseCandidates (view: ReadView<'id>) (words: Token[]) =
     |> Array.filter (isBooleanSearchable view.Rules)
     |> Array.distinctBy _.Key
     |> Array.map (fun word ->
-        view.Postings
-        |> Map.tryFind word.Key
+        booleanPostingRows view word
         |> Option.map (Map.keys >> Set.ofSeq)
         |> Option.defaultValue Set.empty)
     |> Array.sortBy _.Count
@@ -1026,7 +1040,13 @@ let rec private evalTerm
         // Rejected words can still occupy positions inside a longer phrase.
         Map.empty
     | BWord(term, false) ->
-        termScoresWithin candidateIds view term.Key
+        match booleanPostingRows view term with
+        | None -> Map.empty
+        | Some rows ->
+            let weight = idf view rows.Count
+            rows
+            |> restrictScores candidateIds
+            |> Map.map (fun _ frequency -> float frequency * weight * weight)
     | BWord(term, true) ->
         // Prefix wildcards bypass stopword and minimum-length rules.
         let rows =
@@ -1047,8 +1067,7 @@ let rec private evalTerm
             |> Array.filter (isBooleanSearchable view.Rules)
             |> Array.distinctBy _.Key
             |> Array.choose (fun word ->
-                view.Postings
-                |> Map.tryFind word.Key
+                booleanPostingRows view word
                 |> Option.map (fun rows ->
                     let weight = idf view rows.Count
                     rows, weight * weight))
@@ -1203,7 +1222,7 @@ let internal tryFlatBooleanScoresDictionaryInView
     let scoreTerms terms =
         let postingFor (term: Token, prefix) =
             if prefix then Map.tryFind term.Key view.PrefixPostings
-            elif isExactLookup view.Rules term then Map.tryFind term.Key view.Postings
+            elif isExactLookup view.Rules term then booleanPostingRows view term
             else None
 
         let postings =

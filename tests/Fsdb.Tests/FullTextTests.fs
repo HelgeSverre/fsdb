@@ -522,6 +522,16 @@ let tests =
               Expect.equal (booleanScores replaced "生*" |> ids) [ 3 ] "replacement clears the old generation"
               Expect.equal (naturalScores replaced "中文检" |> ids) [ 1 ] "replacement uses the current generation"
 
+          testCase "Boolean short ngrams do not reach collapsed current-size postings"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index = buildIndexWithTokenizer (Ngrams 2) collation [ 1, "中⵿文" ]
+              let ids scores = scores |> Map.keys |> Seq.toList
+              Expect.equal (booleanScores index "中ⴧ" |> ids) [] "MySQL rejects a truncated Boolean term"
+              Expect.equal (booleanScores index "\"中ⴧ\"" |> ids) [] "quoted terms have the same boundary"
+              let historical = buildIndexWithTokenizer (Ngrams 1) collation [ 2, "中文" ] |> withTokenizer (Ngrams 2)
+              Expect.equal (booleanScores historical "中" |> ids) [ 2 ] "earlier one-character postings remain reachable"
+
           testCase "full-text terms follow collation case and accent sensitivity"
           <| fun _ ->
               let aiCi = tryFind "utf8mb4_0900_ai_ci" |> Option.get
