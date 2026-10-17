@@ -252,6 +252,20 @@ let private foldGeneralHalfwidthMarks (value: string) =
             | _ -> result.Append(c) |> ignore
         result.ToString()
 
+// ICU composes kana plus U+3099/U+309A before primary comparison. MySQL's
+// general_ci keeps the written base and combining mark as separate weights.
+let private foldGeneralKanaMarks (value: string) =
+    if not (value |> Seq.exists (fun c -> c = '\uE0E0' || c = '\u3099' || c = '\u309a')) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            match c with
+            | '\uE0E0' -> result.Append("\uE0E0\uE0E0") |> ignore
+            | '\u3099' -> result.Append("\uE0E0\uE0E1") |> ignore
+            | '\u309a' -> result.Append("\uE0E0\uE0E2") |> ignore
+            | _ -> result.Append(c) |> ignore
+        result.ToString()
+
 // MySQL's general_ci gives these spaces and format characters separate,
 // positional weights. ICU ignores some and equates others at primary strength.
 let private foldGeneralFormatControls (value: string) =
@@ -466,6 +480,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             value.Replace("ß", "s").Replace("ẞ", "s")
             |> foldLegacySupplementary |> foldGeneralUnicodeJamo
             |> foldGeneralHalfwidthMarks |> foldGeneralFormatControls
+            |> foldGeneralKanaMarks
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->

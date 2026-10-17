@@ -1509,6 +1509,18 @@ let tests =
                         Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the distinction"
                     Expect.isFalse (col.Equals "\u200d" "\uE0D0\uE0D6") "literal marker cannot alias a control"
 
+                testCase "utf8mb4_general_ci keeps decomposed kana distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in
+                        [ "ガ", "カ\u3099"
+                          "パ", "ハ\u309a"
+                          "ガラス", "カ\u3099ラス"
+                          "パピ", "ハ\u309aピ" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the decomposed spelling"
+                    Expect.isFalse (col.Equals "\u3099" "\uE0E0\uE0E1") "literal marker cannot alias the combining mark"
+
                 testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
                     [ "utf8mb4_0900_ai_ci", true
