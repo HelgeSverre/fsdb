@@ -1469,6 +1469,11 @@ The [correlated planner baseline](benchmarks/results/b9a6895-quick.md) covers
 nested derived tables, chained CTEs, source filters, and range predicates.
 Equality probes retain a small fixed setup cost; the filtered and range shapes
 already avoid the scan cliff on the recorded corpus.
+The [materialized cross-collation equality audit](torture/findings/2026-10-17-materialized-correlated-collation.md)
+also checks the effective comparison collation before narrowing text equality
+candidates. When the outer expression selects a different collation than the
+materialized column, the full predicate evaluates the rows instead of trusting
+an incompatible hash key.
 The [October 14 repeat check](benchmarks/results/2026-10-14-correlated-quick-check.md)
 finds the bounded derived and CTE equality queries around four times MySQL's
 whole-query latency in its stable quick-run pair; a point-lookup control also

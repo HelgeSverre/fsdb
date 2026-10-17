@@ -14695,9 +14695,6 @@ and private tryEqualityPredicate columnName boundValue = function
         |> Option.filter (fun (_, value) -> comparison = Eq || value <> VNull)
     | _ -> None
 
-and private tryCorrelatedEqualityPredicate source context =
-    tryEqualityPredicate (tryCorrelatedInnerColumn source) (tryCorrelatedOuterValue source context)
-
 and private tryLiteralEqualityPredicate source =
     let literalValue = function
         | LiteralValue value -> Some value
@@ -14705,9 +14702,21 @@ and private tryLiteralEqualityPredicate source =
 
     tryEqualityPredicate (tryCorrelatedInnerColumn source) literalValue
 
+and private tryCorrelatedProbeEqualityBound source context = function
+    | BinOp((Eq | NullSafeEq as comparison), left, right) ->
+        let bind indexed bound =
+            Option.map2
+                (fun name value -> name, bound, value)
+                (tryCorrelatedInnerColumn source indexed)
+                (tryCorrelatedProbeValue source context bound)
+        bind left right
+        |> Option.orElseWith (fun () -> bind right left)
+        |> Option.filter (fun (_, _, value) -> comparison = Eq || value <> VNull)
+    | _ -> None
+
 and private tryCorrelatedProbeEqualityPredicate source context expression =
-    tryCorrelatedEqualityPredicate source context expression
-    |> Option.orElseWith (fun () -> tryLiteralEqualityPredicate source expression)
+    tryCorrelatedProbeEqualityBound source context expression
+    |> Option.map (fun (name, _, value) -> name, value)
 
 and private tryCorrelatedNullTestPredicate source outer expression =
     let bind indexed bound =
@@ -15342,15 +15351,24 @@ and private compatibleCorrelatedMembershipBound context (column: ColumnDef) doma
     match value, domain with
     | VNull, _ -> true
     | VString _, TextMembership stored ->
-        comparisonCollation
-            context
-            "="
-            (Col column.Name)
-            (Some column)
-            expression
-            (tryColumnDefForExpr context expression)
-        |> Result.toOption
-        |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)
+        let boundColumn = tryColumnDefForExpr context expression
+        let sameDeclaredCollation =
+            match column.Collation, boundColumn with
+            | Some name, Some bound ->
+                column.Charset = bound.Charset
+                && (bound.Collation |> Option.exists (equalsIgnoreCase name))
+                && equalsIgnoreCase name stored.Name
+            | _ -> false
+        sameDeclaredCollation
+        || (comparisonCollation
+                context
+                "="
+                (Col column.Name)
+                (Some column)
+                expression
+                boundColumn
+            |> Result.toOption
+            |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name))
     | _, TextMembership _ -> false
     | _ -> equalityMembershipKey domain value |> Option.isSome
 
@@ -16115,7 +16133,19 @@ and private tryMaterializedCorrelatedLookup
                 |> intersectSharedRows
 
             let equalityCandidates predicate =
-                let equalities = correlatedProbeEqualities probeSource predicate (Some context) |> Option.defaultValue []
+                let equalities =
+                    predicate
+                    |> optionalConjuncts
+                    |> List.choose (tryCorrelatedProbeEqualityBound probeSource context)
+                    |> List.choose (fun (name, expression, value) ->
+                        resolveColumn columns name
+                        |> Result.toOption
+                        |> Option.bind (fun index ->
+                            let column = columns.[index]
+                            match equalityMembershipDomain store column with
+                            | Some(TextMembership _ as domain)
+                                when not (compatibleCorrelatedMembershipBound context column domain expression value) -> None
+                            | _ -> Some(name, value)))
 
                 // One statement-local key covers every usable equality.
                 let probes =
