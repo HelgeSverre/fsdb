@@ -509,6 +509,19 @@ let tests =
               Expect.equal (search "⓵") [ "2" ] "double-circled one keeps its own posting"
               Expect.equal (search "Ⓐ") [ "3"; "4" ] "circled letter case remains insensitive"
 
+          testCase "general Unicode CJK symbol ngrams retain their written marks"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE symbol_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO symbol_docs VALUES(1,'中〒文'),(2,'中〶文'),(3,'中〝文'),(4,'中〞文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM symbol_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "〒") [ "1" ] "postal mark keeps its own posting"
+              Expect.equal (search "〶") [ "2" ] "circled postal mark keeps its own posting"
+              Expect.equal (search "〝") [ "3" ] "opening quote keeps its own posting"
+              Expect.equal (search "〞") [ "4" ] "closing quote keeps its own posting"
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()

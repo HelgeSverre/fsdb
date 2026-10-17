@@ -1554,6 +1554,14 @@ let tests =
                     Expect.isTrue (col.Equals "Ⓐ" "ⓐ") "circled letters share MySQL's case-insensitive weight"
                     Expect.isFalse (col.Equals "①" "\uE0B3\uEE00") "literal marker cannot alias an enclosed number"
 
+                testCase "utf8mb4_general_ci keeps CJK symbols and marks distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in [ "〒", "〶"; "〝", "〞"; "〪", "〫"; "〱", "〲" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the written symbol"
+                    Expect.isFalse (col.Equals "〒" "\uE0B4\uEF12") "literal marker cannot alias a CJK symbol"
+
                 testCase "utf8mb4_general_ci retains decomposed combining accents"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get

@@ -1030,6 +1030,9 @@ full-text behavior remains to audit.
 The [enclosed-alphanumeric probe](torture/findings/2026-10-17-general-ci-enclosed-alphanumerics.md)
 preserves U+2460–U+24FF written weights while retaining MySQL's circled-letter
 case pairs; its expanded ngram lane matches at sizes 1 and 2.
+The [CJK-symbol probe](torture/findings/2026-10-17-general-ci-cjk-symbol-weights.md)
+preserves MySQL's distinct U+3000–U+303F weights; its expanded ngram lane
+matches at sizes 1 and 2.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
