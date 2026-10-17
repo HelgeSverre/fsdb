@@ -3941,6 +3941,13 @@ let private executeParsedWithTemporaryActionCore (action: TemporaryAction option
     let implicitCommit = causesImplicitCommit stmt && (not usesTemporary || changesView)
 
     let statementAccesses session =
+        let createdTemporaryTargets =
+            if action = Some CreateTemporary then
+                temporaryTargets dbName action stmt
+                |> List.map (fun (db, table) -> CatalogOverlay.tableKey db table)
+                |> Set.ofList
+            else
+                Set.empty
         let permanentViewTargets =
             match stmt with
             | CreateView view -> [ view.Name ]
@@ -3956,6 +3963,8 @@ let private executeParsedWithTemporaryActionCore (action: TemporaryAction option
             temporaryCatalog
             dbName
             stmt
+        |> List.filter (fun access ->
+            not (Set.contains (CatalogOverlay.tableKey access.Database access.Table) createdTemporaryTargets))
 
     let executed, result =
         if mixesTemporaryAndPermanentRenames dbName beforeKeys stmt then
