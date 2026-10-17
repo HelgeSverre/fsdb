@@ -1926,7 +1926,10 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                     Expression.exists (function
                                         | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _ -> true
                                         | _ -> false)
-                                let canInlineLateral (body: SelectStmt) =
+                                let precedingSources index =
+                                    FromTable nested.UpdateFrom
+                                    :: (nested.UpdateJoins |> List.take index |> List.map _.Table)
+                                let tryLateralBareRewrites preceding (body: SelectStmt) =
                                     let localSources =
                                         (body.From |> Option.toList) @ (body.Joins |> List.map _.Table)
                                     let rebindingNames =
@@ -1938,17 +1941,55 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                         |> List.collect FromItem.leaves
                                         |> List.choose FromItem.tryQualifier
                                         |> List.exists (fun name -> Set.contains (name.ToLowerInvariant()) rebindingNames)
-                                    let mutable hasUnscopedReference = false
+                                    let bareReferences = ResizeArray<string>()
+                                    let mutable hasUnsupportedReference = false
                                     Expression.iterStatement
                                         (function
-                                        | Col _ | Star _ -> hasUnscopedReference <- true
-                                        | expression when hasSubquery expression -> hasUnscopedReference <- true
+                                        | Col column -> bareReferences.Add(column.ToLowerInvariant())
+                                        | Star _ -> hasUnsupportedReference <- true
+                                        | expression when hasSubquery expression -> hasUnsupportedReference <- true
                                         | _ -> ())
                                         (Select body)
-                                    body.Ctes.IsEmpty
-                                    && (localSources |> List.forall (function FromTable _ -> true | _ -> false))
-                                    && not shadowsRebindingName
-                                    && not hasUnscopedReference
+                                    let localColumns =
+                                        localSources
+                                        |> List.map (function
+                                            | FromTable table ->
+                                                InformationSchema.relationColumns
+                                                    store.Catalog
+                                                    (table.Database |> Option.defaultValue view.Schema)
+                                                    table.Table
+                                                |> Option.map (List.map _.ToLowerInvariant() >> Set.ofList)
+                                            | _ -> None)
+                                        |> tryAllSome
+                                    let precedingColumns =
+                                        preceding
+                                        |> List.map (fun source ->
+                                            match FromItem.tryQualifier source, sourceColumnNames source with
+                                            | Some name, Some columns ->
+                                                Some(name, columns |> List.map _.ToLowerInvariant() |> Set.ofList)
+                                            | _ -> None)
+                                        |> tryAllSome
+                                    let ownerOf name =
+                                        localColumns
+                                        |> Option.bind (fun columns ->
+                                            match columns |> List.filter (Set.contains name) |> List.length with
+                                            | 1 -> Some None
+                                            | 0 ->
+                                                precedingColumns
+                                                |> Option.bind (fun sources ->
+                                                    match sources |> List.filter (snd >> Set.contains name) with
+                                                    | [ (owner, _) ] -> Some(Some owner)
+                                                    | _ -> None)
+                                            | _ -> None)
+                                    if not body.Ctes.IsEmpty || shadowsRebindingName || hasUnsupportedReference then
+                                        None
+                                    else
+                                        bareReferences
+                                        |> Seq.distinct
+                                        |> Seq.map (fun name -> ownerOf name |> Option.map (fun owner -> name, owner))
+                                        |> Seq.toList
+                                        |> tryAllSome
+                                        |> Option.map (List.choose (function name, Some owner -> Some(name, owner) | _ -> None) >> Map.ofList)
                                 let needsScopedRewrite =
                                     not nested.UpdateJoins.IsEmpty
                                     && ((nested.Expressions |> Map.exists (fun _ expression -> hasSubquery expression))
@@ -1958,15 +1999,17 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                     (joinedQualifiers
                                      |> List.exists Option.isNone)
                                     || (nested.UpdateJoins
-                                        |> List.exists (fun join ->
+                                        |> List.mapi (fun index join ->
                                             match join.Table with
                                             | FromTable _ | FromSubquery _ -> false
                                             | FromJsonTable(expression, _, _, _) ->
                                                 // Bare and scoped names need the original inner join scope.
                                                 hasSubquery expression
                                                 || Expression.exists (function Col _ -> true | _ -> false) expression
-                                            | FromLateral(PlainSelect body, _) -> not (canInlineLateral body)
-                                            | _ -> true))
+                                            | FromLateral(PlainSelect body, _) ->
+                                                tryLateralBareRewrites (precedingSources index) body |> Option.isNone
+                                            | _ -> true)
+                                        |> List.exists id)
                                     || not nested.SharedCteAliases.IsEmpty
                                     || needsScopedRewrite
 
@@ -1986,7 +2029,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                         | _ -> None
                                     let qualify = Expression.rewrite rewriteInnerReference
 
-                                    let renameJoinedSource = function
+                                    let renameJoinedSource preceding = function
                                         | FromTable table ->
                                             let name = table.Alias |> Option.defaultValue table.Table
                                             match Map.tryFind (name.ToLowerInvariant()) renamedJoinAliases with
@@ -2005,7 +2048,19 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                             let renamed =
                                                 Map.tryFind (alias.ToLowerInvariant()) renamedJoinAliases
                                                 |> Option.defaultValue alias
-                                            FromLateral(PlainSelect(Expression.rewriteSelectExpressions rewriteInnerReference body), renamed)
+                                            let bareRewrites =
+                                                tryLateralBareRewrites preceding body
+                                                |> Option.defaultWith (fun () -> invalidOp "Unsafe LATERAL view-source rewrite")
+                                            let rewriteQualifiedReference = function
+                                                | Col column ->
+                                                    Map.tryFind (column.ToLowerInvariant()) bareRewrites
+                                                    |> Option.map (fun owner -> QualifiedCol(remapQualifier owner, column))
+                                                | QualifiedCol(source, column) ->
+                                                    let rebound = remapQualifier source
+                                                    if equalsIgnoreCase rebound source then None
+                                                    else Some(QualifiedCol(rebound, column))
+                                                | _ -> None
+                                            FromLateral(PlainSelect(Expression.rewriteSelectExpressions rewriteQualifiedReference body), renamed)
                                         | source -> source
 
                                     let targets =
@@ -2034,9 +2089,9 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                                     Alias = Some qualifier }
                                           JoinedSources =
                                             nested.UpdateJoins
-                                            |> List.map (fun join ->
+                                            |> List.mapi (fun index join ->
                                                 { Join.mapConditions qualify join with
-                                                    Table = renameJoinedSource join.Table })
+                                                    Table = renameJoinedSource (precedingSources index) join.Table })
                                           Qualifier = qualifier
                                           Columns = nested.OrderedColumns
                                           Expressions = nested.Expressions |> Map.map (fun _ expression -> qualify expression)

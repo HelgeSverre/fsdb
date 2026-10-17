@@ -1105,6 +1105,84 @@ let tests =
                   [ [ Some "1"; Some "7" ]; [ Some "2"; Some "0" ] ]
                   "the accepted value survives both rejected writes"
 
+          testCase "joined outer views retain bare local columns in inner LATERAL sources"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for sql in
+                  [ "CREATE TABLE nested_lateral_bare_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE nested_lateral_bare_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO nested_lateral_bare_target VALUES(1,0)"
+                    "INSERT INTO nested_lateral_bare_aux VALUES(1,7)"
+                    "CREATE VIEW nested_lateral_bare_inner AS SELECT t.id,t.n,d.aux FROM nested_lateral_bare_target t JOIN LATERAL (SELECT aux FROM nested_lateral_bare_aux a WHERE a.id=t.id) d ON d.aux>0 WHERE t.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_lateral_bare_outer AS SELECT v.id,v.n,v.aux,q.mark FROM nested_lateral_bare_inner v JOIN (SELECT 1 AS mark) q ON q.mark=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_lateral_bare_outer'")
+                  [ [ Some "YES" ] ]
+                  "a bare local LATERAL column does not make the outer view read-only"
+              Expect.equal
+                  (run store "UPDATE nested_lateral_bare_outer SET n=7 WHERE id=1")
+                  (Affected 1UL)
+                  "the outer layer updates its target"
+
+              match run store "UPDATE nested_lateral_bare_outer SET n=10 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_lateral_bare_target")
+                  [ [ Some "1"; Some "7" ] ]
+                  "the rejected write preserves the accepted value"
+
+              for sql in
+                  [ "CREATE TABLE nested_lateral_bare_shadow(id INT PRIMARY KEY,aux INT,n INT)"
+                    "INSERT INTO nested_lateral_bare_shadow VALUES(1,7,-1)"
+                    "CREATE VIEW nested_lateral_shadow_inner AS SELECT t.id,t.n,d.aux FROM nested_lateral_bare_target t JOIN LATERAL (SELECT a.aux FROM nested_lateral_bare_shadow a WHERE a.id=t.id AND n>=0) d ON d.aux>0 WHERE t.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_lateral_shadow_outer AS SELECT v.id,v.n,v.aux,q.mark FROM nested_lateral_shadow_inner v JOIN (SELECT 1 AS mark) q ON q.mark=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_lateral_shadow_outer'")
+                  [ [ Some "YES" ] ]
+                  "the local column shadows the preceding target column"
+              Expect.equal
+                  (run store "UPDATE nested_lateral_shadow_outer SET n=8 WHERE id=1")
+                  (Affected 0UL)
+                  "the local negative value excludes the row despite the target's positive value"
+
+          testCase "joined outer views rebind bare outer columns in inner LATERAL sources"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for sql in
+                  [ "CREATE TABLE nested_lateral_outer_bare_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE nested_lateral_outer_bare_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO nested_lateral_outer_bare_target VALUES(1,0)"
+                    "INSERT INTO nested_lateral_outer_bare_aux VALUES(1,7)"
+                    "CREATE VIEW nested_lateral_outer_bare_inner AS SELECT t.id,t.n,d.aux FROM nested_lateral_outer_bare_target t JOIN LATERAL (SELECT a.aux FROM nested_lateral_outer_bare_aux a WHERE a.id=t.id AND n>=0) d ON d.aux>0 WHERE t.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_lateral_outer_bare_outer AS SELECT v.id,v.n,v.aux,q.mark FROM nested_lateral_outer_bare_inner v JOIN (SELECT 1 AS mark) q ON q.mark=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_lateral_outer_bare_outer'")
+                  [ [ Some "YES" ] ]
+                  "the bare outer target reference is rebound under the joined layer"
+              Expect.equal
+                  (run store "UPDATE nested_lateral_outer_bare_outer SET n=7 WHERE id=1")
+                  (Affected 1UL)
+                  "the outer layer updates the target"
+
+              match run store "UPDATE nested_lateral_outer_bare_outer SET n=10 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_lateral_outer_bare_target")
+                  [ [ Some "1"; Some "7" ] ]
+                  "the rejected write preserves the accepted value"
+
           testCase "layered JSON_TABLE chains retain writable target grants across source orders"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

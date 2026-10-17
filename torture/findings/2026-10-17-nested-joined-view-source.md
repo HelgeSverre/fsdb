@@ -54,7 +54,15 @@ outer view writable, update one row, reject inner and outer CHECK OPTION
 violations with 1369, and retain the accepted value. Revoking the inner
 definer's SELECT on the dependent source or the outer definer's UPDATE on
 the inner view yields 1356 in both engines. Inner LATERAL bodies
-with bare references, subqueries requiring scoped qualifier rewriting, or
-local aliases that shadow the expanded view alias remain read-only rather
+can also retain bare columns that resolve to exactly one local table or one
+preceding source with known columns. A two-LATERAL chain with an inner alias
+reused by the outer join, a local bare-column source, and a bare reference to
+the preceding target all retain writable metadata and update one row in the
+MySQL 8.4.11 oracle.
+When both the local source and preceding target expose the bare name, the
+local column takes precedence and both engines update zero rows in the
+audited case.
+Ambiguous bare references, subqueries requiring scoped qualifier rewriting,
+and local aliases that shadow the expanded view alias remain read-only rather
 than risking a wrong write. Additional layered source orders and security
 context combinations still need differential coverage.
