@@ -4284,10 +4284,14 @@ let acquireTransactionWriteTargets
     | Some _ -> withWriteLocksFor timeout store dbName tableName rowIds keys ignore
     | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
 
-/// Active numeric/date ordered PRIMARY claims that another transaction holds.
+type OrderedPrimaryKeyPart =
+    | OrderedNumber of decimal
+    | OrderedText of string
+
+/// Active numeric, date, or text ordered PRIMARY claims that another transaction holds.
 /// Ordered limited writes use these pending keys before their snapshot can see
 /// the inserted row; idle weak-cache entries never become candidate claims.
-let activePrimaryOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (keyTypes: ColumnType list) : (decimal list * string) list =
+let activePrimaryOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (keyTypes: ColumnType list) : (OrderedPrimaryKeyPart list * string) list =
     let tableKey = lockNamespaceKey dbName tableName
     let prefix = "PRIMARY\u0000"
     let ownOwner = store.TransactionLocks |> Option.map _.Owner
@@ -4297,11 +4301,14 @@ let activePrimaryOrderedKeyClaims (store: Store) (dbName: string) (tableName: st
             match keyType with
             | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ -> Some 'I'
             | TDate -> Some 'T'
+            | TChar _ | TVarchar _ -> Some 'S'
             | _ -> None
         match expectedTag with
+        | Some 'S' when value.Length > 1 && value.[0] = 'S' ->
+            Some(OrderedText(value.Substring(1)))
         | Some tag when value.Length > 1 && value.[0] = tag ->
             match Decimal.TryParse(value.Substring(1), NumberStyles.Integer, CultureInfo.InvariantCulture) with
-            | true, ordered -> Some ordered
+            | true, ordered -> Some(OrderedNumber ordered)
             | _ -> None
         | _ -> None
 

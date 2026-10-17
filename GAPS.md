@@ -1640,7 +1640,8 @@ implementation effort:
    first candidate stops matching, moves behind another candidate, or is
    deleted](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
    with and without a secondary predicate index, plus pending inserts across
-   integer, valid `DATE`, and audited two-part integer primary-key order
+   integer, valid `DATE`, [text](torture/findings/2026-10-16-limited-ordered-write-rebase.md#text-primary-keys),
+   and audited two-part integer primary-key order
    frontiers, plus audited joined UPDATE and DELETE statements with named
    physical targets,
    [audited single-table updatable-view UPDATE and DELETE statements and joined-view

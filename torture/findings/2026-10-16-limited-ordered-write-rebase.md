@@ -79,6 +79,21 @@ and non-crossing inserts, affected counts, and final rows. They also cover
 mixed ASC/DESC and DESC/ASC directions. In those mixed-order cases MySQL waits
 for a pending inserted key even when it sorts beyond the first visible row;
 fsdb now claims all active primary keys for that shape before rebasing. The
-24-case composite audit uses two `INT` key columns. Text, zero-date, wider
+24-case composite audit uses two `INT` key columns. Zero-date, wider
 tuples, non-primary ordering expressions, and different predicates remain
 outside it.
+
+## Text primary keys
+
+Pending `VARCHAR` PRIMARY inserts can also cross an ordered write's `LIMIT 1`
+frontier. With visible keys `b` and `d`, an uncommitted `a` insert makes an
+ascending UPDATE or DELETE wait and then select `a`; an uncommitted `z`
+insert does the same in descending order. Inserts beyond the frontier do not
+delay the write. MySQL 8.4.11 confirms the wait, affected count, and final
+rows for both verbs under `utf8mb4_bin` and `utf8mb4_0900_ai_ci`.
+
+The scheduler now decodes pending text PRIMARY claims and compares the
+column's collation key with visible rows at the frontier. Equal primary
+weights conservatively wait, preserving full-order tie behavior. The focused
+transaction regression covers all 16 audited cases. Wider text tuples,
+other collations and order expressions remain to audit.

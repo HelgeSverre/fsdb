@@ -29829,22 +29829,36 @@ let transactionWriteTargets
                     primaryColumns
                     |> List.map (fun name -> table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name))
                 let directions = orderedColumns |> List.map snd
+                let comparePart left right =
+                    match left, right with
+                    | OrderedNumber a, OrderedNumber b -> Operators.compare a b
+                    | OrderedText a, OrderedText b -> System.String.CompareOrdinal(a, b)
+                    | _ -> 0
                 let rec compareOrdered left right directions =
                     match left, right, directions with
                     | a :: restA, b :: restB, direction :: restDirections ->
-                        let order = Operators.compare a b
+                        let order = comparePart a b
                         if order = 0 then compareOrdered restA restB restDirections
                         elif direction = Asc then order
                         else -order
                     | _ -> 0
-                let orderedValue = function
-                    | VInt integer -> Some(decimal integer)
+                let orderedValue (column: ColumnDef) value =
+                    match value with
+                    | VInt integer -> Some(OrderedNumber(decimal integer))
                     | VUInt integer
-                    | VBit(_, integer) -> Some(decimal integer)
-                    | VDate date -> Some(decimal date.DayNumber)
+                    | VBit(_, integer) -> Some(OrderedNumber(decimal integer))
+                    | VDate date -> Some(OrderedNumber(decimal date.DayNumber))
+                    | VString text when (match column.Type with TChar _ | TVarchar _ -> true | _ -> false) ->
+                        Some(OrderedText((column.Collation |> Collation.findOrDefault).KeyOf text))
+                    | VEncodedString(charset, bytes)
+                        when (match column.Type with TChar _ | TVarchar _ -> true | _ -> false) ->
+                        let text = Charset.decodeBytes charset bytes
+                        Some(OrderedText((column.Collation |> Collation.findOrDefault).KeyOf text))
                     | _ -> None
                 let storedKey (row: Value[]) =
-                    let values = columnIndices |> List.choose (fun index -> orderedValue row.[index])
+                    let values =
+                        columnIndices
+                        |> List.choose (fun index -> orderedValue table.Columns.[index] row.[index])
                     if values.Length = columnIndices.Length then Some values else None
                 let pending =
                     Storage.activePrimaryOrderedKeyClaims
@@ -29870,7 +29884,7 @@ let transactionWriteTargets
                         let columns = table.Columns
                         let ctxFor =
                             contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None
-                        let matched = ResizeArray<decimal list>()
+                        let matched = ResizeArray<OrderedPrimaryKeyPart list>()
                         let mutable valid = true
 
                         Diagnostics.suppress (fun () ->
