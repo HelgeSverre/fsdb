@@ -18754,13 +18754,12 @@ and private validateOnlyFullGroupBy
 
     let resolveGroupExprs () = select.GroupBy |> traverse (resolveGroupByRef columnIndex select.Projections)
 
-    let expandDetermined equalities keys initial =
+    let expandDetermined dependencies keys initial =
         let rec expand determined =
             let throughEqualities =
-                equalities
-                |> List.fold (fun found (left, right) ->
-                    if Set.contains left found then Set.add right found
-                    elif Set.contains right found then Set.add left found
+                dependencies
+                |> List.fold (fun found (source, target, required) ->
+                    if Set.contains source found && Set.isSubset required found then Set.add target found
                     else found) determined
 
             let throughKeys =
@@ -18851,9 +18850,61 @@ and private validateOnlyFullGroupBy
     else
         resolveGroupExprs ()
         |> Result.bind (fun groupExprs ->
-            let equalities =
-                (select.Where |> Option.map (fun expr -> equalityPairs expr []) |> Option.defaultValue [])
-                @ (select.Joins |> List.collect (fun join -> equalityPairs join.On []))
+            let bothWays (left, right) =
+                [ left, right, Set.empty; right, left, Set.empty ]
+
+            let whereDependencies =
+                select.Where
+                |> Option.map (fun expr -> equalityPairs expr [] |> List.collect bothWays)
+                |> Option.defaultValue []
+
+            let joinDependencies =
+                select.Joins
+                |> List.collect (fun join ->
+                    let equalities = equalityPairs join.On []
+
+                    match join.Kind with
+                    | LeftJoin | NaturalLeftJoin | RightJoin | NaturalRightJoin ->
+                        let rightPositions =
+                            FromItem.leaves join.Table
+                            |> List.choose (fun source ->
+                                FromItem.tryQualifier source
+                                |> Option.bind (fun qualifier -> Map.tryFind (qualifier.ToLowerInvariant()) qualifiers))
+                            |> List.collect (fun (sourceColumns, offset) ->
+                                [ offset .. offset + sourceColumns.Length - 1 ])
+                            |> Set.ofList
+
+                        let preserved position =
+                            if join.Kind = LeftJoin || join.Kind = NaturalLeftJoin then
+                                not (Set.contains position rightPositions)
+                            else
+                                Set.contains position rightPositions
+
+                        let onReferences = expressionColumns join.On
+                        let resolvedReferences = onReferences |> List.choose tryColumnPosition
+                        let onScope =
+                            { Qualifiers = qualifiers |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+                              Columns = columns |> List.map (_.Name >> fun name -> name.ToLowerInvariant()) |> Set.ofList }
+
+                        // An unknown source boundary or unresolved ON reference cannot
+                        // establish a dependency across the nullable side.
+                        if Set.isEmpty rightPositions
+                           || resolvedReferences.Length <> onReferences.Length
+                           || not (isStatementStableExpr store registry dbName onScope join.On) then
+                            []
+                        else
+                            // Every preserved-side ON input must be fixed: another
+                            // input can decide whether a row is null-complemented.
+                            let required = resolvedReferences |> List.filter preserved |> Set.ofList
+
+                            equalities
+                            |> List.collect (fun (left, right) ->
+                                match preserved left, preserved right with
+                                | true, false -> [ left, right, required ]
+                                | false, true -> [ right, left, required ]
+                                | false, false -> bothWays (left, right)
+                                | true, true -> [])
+                    | _ -> equalities |> List.collect bothWays)
 
             let initial =
                 groupExprs
@@ -18864,7 +18915,7 @@ and private validateOnlyFullGroupBy
                     |> Option.map (fun expr -> singletonColumns expr grouped)
                     |> Option.defaultValue grouped
 
-            let determined = expandDetermined equalities uniqueKeys initial
+            let determined = expandDetermined (whereDependencies @ joinDependencies) uniqueKeys initial
 
             select.Projections
             |> List.mapi (fun index { Expression = expr } -> groupingError "SELECT list" (index + 1) groupExprs determined expr)

@@ -15,7 +15,41 @@ let private newStore () = create ()
 let tests =
     testList
         "JOIN"
-        [ testCase "INNER JOIN matches rows across two aliased instances of the same table"
+        [ testCase "outer-join grouping only propagates dependencies toward the nullable side"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE fd_parent (id INT PRIMARY KEY, grp INT, label VARCHAR(20))" |> ignore
+              runDefault store "CREATE TABLE fd_child (grp INT NOT NULL UNIQUE, label VARCHAR(20))" |> ignore
+              runDefault store "CREATE TABLE fd_empty_child (parent_id INT)" |> ignore
+              runDefault store "INSERT INTO fd_parent VALUES (1,7,'a'),(2,7,'b')" |> ignore
+              runDefault store "INSERT INTO fd_child VALUES (7,'hit')" |> ignore
+
+              let rejected =
+                  [ "SELECT c.parent_id,p.label,COUNT(*) FROM fd_parent p LEFT JOIN fd_empty_child c ON c.parent_id=p.id GROUP BY c.parent_id"
+                    "SELECT c.parent_id,p.label,COUNT(*) FROM fd_empty_child c RIGHT JOIN fd_parent p ON c.parent_id=p.id GROUP BY c.parent_id"
+                    "SELECT c.grp,p.label,COUNT(*) FROM fd_parent p LEFT JOIN fd_child c ON p.grp=c.grp GROUP BY c.grp"
+                    "SELECT p.grp,c.label,COUNT(*) FROM fd_parent p LEFT JOIN fd_child c ON p.grp=c.grp AND p.id=1 GROUP BY p.grp"
+                    "SELECT c.grp,p.label,COUNT(*) FROM fd_child c RIGHT JOIN fd_parent p ON p.grp=c.grp GROUP BY c.grp"
+                    "SELECT p.grp,c.label,COUNT(*) FROM fd_child c RIGHT JOIN fd_parent p ON p.grp=c.grp AND p.id=1 GROUP BY p.grp" ]
+
+              for sql in rejected do
+                  match runDefault store sql with
+                  | Err(1055, _) -> ()
+                  | other -> failtestf "expected ONLY_FULL_GROUP_BY error for %s, got %A" sql other
+
+              match runDefault store "SELECT p.grp,c.label,COUNT(*) FROM fd_parent p LEFT JOIN fd_child c ON p.grp=c.grp GROUP BY p.grp" with
+              | ResultSet(_, [ [ Some "7"; Some "hit"; Some "2" ] ]) -> ()
+              | other -> failtestf "preserved-side group should determine unique child label, got %A" other
+
+              match runDefault store "SELECT p.id,c.label,COUNT(*) FROM fd_parent p LEFT JOIN fd_child c ON p.grp=c.grp GROUP BY p.id ORDER BY p.id" with
+              | ResultSet(_, [ [ Some "1"; Some "hit"; Some "1" ]; [ Some "2"; Some "hit"; Some "1" ] ]) -> ()
+              | other -> failtestf "a preserved primary key should determine its joined child, got %A" other
+
+              match runDefault store "SELECT p.grp,c.label,COUNT(*) FROM fd_child c RIGHT JOIN fd_parent p ON p.grp=c.grp GROUP BY p.grp" with
+              | ResultSet(_, [ [ Some "7"; Some "hit"; Some "2" ] ]) -> ()
+              | other -> failtestf "RIGHT JOIN should preserve the same dependency direction, got %A" other
+
+          testCase "INNER JOIN matches rows across two aliased instances of the same table"
           <| fun _ ->
               let store = newStore ()
               runDefault store "CREATE TABLE crud (id INT, name VARCHAR(10), qty INT)" |> ignore
