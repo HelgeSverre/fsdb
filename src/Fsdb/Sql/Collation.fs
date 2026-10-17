@@ -245,7 +245,7 @@ let private generalSyntheticPair c =
     match c with
     | '\uE0C0' | '\uE0D0' | '\uE0E0' | '\uE300' | '\uE0F0' | '\uE600'
     | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5'
-    | '\uE0B6' | '\uE0B7' | '\uE0B8' | '\uE0B9' | '\uE0BA' as marker ->
+    | '\uE0B6' | '\uE0B7' | '\uE0B8' | '\uE0B9' | '\uE0BA' | '\uE0BB' as marker ->
         pair marker marker
     // Halfwidth voicing and decomposed kana marks have their own positional weights.
     | '\uff9e' -> pair '\uE0C0' '\uE0C1'
@@ -297,6 +297,10 @@ let private generalSyntheticPair c =
     // The older Bopomofo block also has one weight per written code point.
     | c when c >= '\u3100' && c <= '\u318F' ->
         pair '\uE0BA' (char (0xF500 + int c - 0x3100))
+    // MySQL retains the written weights of later combining marks; ICU
+    // merges some of them before full-text postings are built.
+    | c when c >= '\u1AB0' && c <= '\u1AFF' ->
+        pair '\uE0BB' (char (0xF600 + int c - 0x1AB0))
     // Letterlike symbols, number forms, and arrows retain their code-point
     // weights, except lowercase Roman numerals share uppercase weights.
     | c when c >= '\u2100' && c <= '\u21ff' ->

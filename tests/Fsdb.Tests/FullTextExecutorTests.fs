@@ -584,6 +584,17 @@ let tests =
               Expect.equal (search "ㄜ") [ "1" ] "the older letter keeps its own posting"
               Expect.equal (search "ㄮ") [ "2" ] "the extended base letter keeps its own posting"
 
+          testCase "general Unicode extended combining-mark ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE extended_mark_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO extended_mark_docs VALUES(1,'中᪰文'),(2,'中᪱文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM extended_mark_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "᪰") [ "1" ] "the first mark keeps its own posting"
+              Expect.equal (search "᪱") [ "2" ] "the next mark keeps its own posting"
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()

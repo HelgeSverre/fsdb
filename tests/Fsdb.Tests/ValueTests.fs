@@ -1603,6 +1603,19 @@ let tests =
                     Expect.isFalse (col.Equals "ㄜ" "\uE0BA\uF51C")
                         "a literal marker cannot alias a Bopomofo letter"
 
+                testCase "utf8mb4_general_ci keeps extended combining-mark weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let marks = [ 0x1AB0 .. 0x1AFF ] |> List.map (char >> string)
+                    Expect.equal (marks |> List.map col.KeyOf |> Set.ofList |> Set.count) 80
+                        "MySQL assigns each extended combining-mark point its written primary weight"
+                    for left, right in marks |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "the block follows MySQL's codepoint-ordered weights"
+                    Expect.isFalse (col.Equals "᪰" "᪱") "neighboring marks have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "᪰" "\uE0BB\uF600")
+                        "a literal marker cannot alias an extended combining mark"
+
                 testCase "utf8mb4_general_ci keeps letterlike symbols at their written weights"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
