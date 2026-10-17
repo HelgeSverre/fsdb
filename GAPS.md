@@ -292,6 +292,10 @@ near `2^53` remain a narrow row-membership divergence.
 Other approximate numeric combinations, text, and functional-expression
 bounds retain their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
+[Side-effecting correlated function calls](torture/findings/2026-10-17-correlated-function-stability.md)
+remain row-by-row: stored SQL functions and unannotated custom scalars do not
+become index probe keys, while known-pure built-ins and deterministic
+extensions retain their compatible indexed paths.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
 multi-column `COUNT(DISTINCT ...)`, the `GROUP_CONCAT` byte ceiling,

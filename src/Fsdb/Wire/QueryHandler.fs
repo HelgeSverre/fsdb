@@ -847,6 +847,9 @@ let private buildRegistryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "CURRENT_ROLE" (fun _ -> VString currentRole)
     |> Functions.registerScalar "USER" (fun _ -> VString(loginUser + "@" + clientHost))
     |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(loginUser + "@" + clientHost))
+    |> Functions.markScalarsStable
+        [ "AES_ENCRYPT"; "AES_DECRYPT"; "DATE_FORMAT"; "DAYNAME"; "MONTHNAME"
+          "TIMESTAMP"; "FROM_UNIXTIME"; "CONVERT_TZ"; "WEEK"; "ST_BUFFER_STRATEGY" ]
 
 let private registryFor (session: Session) : Functions.Registry =
     let inputs =

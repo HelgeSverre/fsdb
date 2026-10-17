@@ -2281,7 +2281,10 @@ let tests =
                   touches <- touches + 1
                   List.head values
 
-              let registry = registerScalar "TOUCH" touch builtins
+              let registry =
+                  builtins
+                  |> registerScalar "TOUCH" touch
+                  |> registerExtension (ScalarFunction.create "TOUCH" (fun _ values -> touch values))
               let store = newStore ()
               runDefault store "CREATE TABLE outer_rows (id INT)" |> ignore
               runDefault store "CREATE TABLE inner_rows (id INT)" |> ignore
