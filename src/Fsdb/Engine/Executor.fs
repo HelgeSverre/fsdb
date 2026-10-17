@@ -5474,6 +5474,12 @@ let private isIntegerColumn column = column |> Option.exists (_.Type >> isIntege
 let private compareWithColumnDomain
     (leftExpr: Expr) (leftColumn: ColumnDef option) left
     (rightExpr: Expr) (rightColumn: ColumnDef option) right =
+    match left, right with
+    | VDouble _, VString text
+    | VString text, VDouble _ ->
+        let _, truncated = Value.coerceLeadingDouble text
+        if truncated then Diagnostics.numericConversion "DOUBLE" text
+    | _ -> ()
     // MySQL keeps an integer column exact against a constant DOUBLE
     // expression, but compares it approximately with a row-derived DOUBLE.
     let rowDependent expression =

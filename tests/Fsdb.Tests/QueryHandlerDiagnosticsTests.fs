@@ -1629,6 +1629,27 @@ let tests =
               let session, _ = handle session "SELECT 1"
               Expect.isEmpty session.Diagnostics "ordinary statements replace the diagnostics area"
 
+          testCase "indexed and scanned DOUBLE string comparisons retain MySQL warning counts"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE double_warning_rows(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))"
+              let session, _ = handle session "INSERT INTO double_warning_rows VALUES(1,12.5),(2,0.0),(3,1.7976931348623157e308)"
+              for hint, text, expected, warningCount in
+                  [ "", "12.5x", "1", 1
+                    "", "1e309", "0", 0
+                    "", "Infinity", "1", 1
+                    "IGNORE INDEX(ix_k)", "12.5x", "1", 3
+                    "IGNORE INDEX(ix_k)", "1e309", "1", 3
+                    "IGNORE INDEX(ix_k)", "Infinity", "1", 3 ] do
+                  let sql =
+                      "SELECT COUNT(*) FROM double_warning_rows " + hint + " WHERE k='" + text + "'"
+                  let current, result = handle session sql
+                  match result with
+                  | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected text
+                  | other -> failtestf "expected scanned DOUBLE count for %s, got %A" text other
+                  Expect.equal (current.Diagnostics |> List.map _.Code) (List.replicate warningCount 1292)
+                      (text + " warns once per evaluated candidate")
+
           testCase "non-strict omitted columns report their implicit defaults"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -362,6 +362,10 @@ range bounds still scan.
 also use fully numeric finite correlated string bounds for equality,
 narrow ranges, and [positive `IN` lists](torture/findings/2026-10-17-correlated-physical-double-string.md#correlated-positive-in-bounds),
 leaving the original predicate to decide row membership.
+The [indexed malformed and overflowing string comparison follow-up](torture/findings/2026-10-17-correlated-physical-double-string.md#numeric-conversion-warnings-and-indexed-malformed-bounds)
+also matches audited plan-dependent warning counts and maximum-DOUBLE row
+membership for equality; ambiguous overflow text and non-finite ranges retain
+the conservative scan path.
 
 ## 3. Built-in functions
 
