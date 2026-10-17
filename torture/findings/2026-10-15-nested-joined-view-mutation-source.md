@@ -88,4 +88,20 @@ updates one to three physical rows accordingly: the view's target always,
 and no matching view row, MySQL updates only `z`. The focused transaction
 regression checks the same affected counts and stored rows. Fsdb already
 matched these cases; no executor change was needed. Other wider outer-join
-trees and concurrent multi-target writes remain unaudited.
+trees remain unaudited.
+
+## Contended multi-target outer writes
+
+The four-source `x LEFT JOIN y RIGHT JOIN v LEFT JOIN z` UPDATE also writes
+correctly after a concurrent owner holds `v`'s physical target `t` or either
+outer physical target `x` or `z`. MySQL 8.4.11 waits in all three cases, then reports
+three affected rows and increments the owner's committed value from 10 to 11
+while changing the other two targets from 0 to 1.
+
+Fsdb initially handled the view-target contention but returned 1205 when the
+owner held `x`: pre-write target discovery claimed only the view's physical
+table even though the statement assigned `x` and `z` too. It now combines the
+view target with every assigned outer physical target in table order before
+rebasing the transaction snapshot. The focused regression checks both owner
+positions, wait behavior, affected counts, commits, and final rows. Other
+multi-target outer-join shapes remain to audit.

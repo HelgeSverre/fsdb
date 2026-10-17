@@ -875,7 +875,9 @@ after a preceding LEFT JOIN, including when its companion row is absent.
 An audited fourth physical source after that view can be optional under
 `LEFT JOIN`, or preserve its own row under `RIGHT JOIN` when the view is absent;
 both retain MySQL's matched-target affected counts.
-Other wider outer-join trees, multi-target writes, and broader security-layer
+[Contended writes across the view and outer physical targets](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#contended-multi-target-outer-writes)
+now claim every assigned table before rebasing the four-source outer join.
+Other wider outer-join trees, multi-target shapes, and broader security-layer
 combinations remain open.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
 before a local upload or server-side file read; ordinary inserts remain

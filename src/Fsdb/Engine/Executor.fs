@@ -30246,6 +30246,18 @@ let transactionWriteTargets
         |> Result.toOption
         |> Option.bind (insertTargets tableName columns)
 
+    let combineTargets (targets: (string * string * WriteLockTargets) list) : (string * string * WriteLockTargets) list =
+        targets
+        |> List.groupBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+        |> List.map (fun (_, grouped) ->
+            let database, table, _ = List.head grouped
+            database,
+            table,
+            { RowIds = grouped |> List.collect (fun (_, _, target) -> target.RowIds) |> List.distinct
+              Keys = grouped |> List.collect (fun (_, _, target) -> target.Keys) |> List.distinct })
+        // Every writer claims tables in the same order, regardless of join order.
+        |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+
     let joinedTargets (from: TableRef) (joins: Join list) (names: string list) predicate =
         let joinedTables =
             joins
@@ -30264,15 +30276,7 @@ let transactionWriteTargets
             |> function Some target -> Ok target | None -> Error())
         |> Result.toOption
         |> Option.defaultValue []
-        |> List.groupBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
-        |> List.map (fun (_, grouped) ->
-            let database, table, _ = List.head grouped
-            database,
-            table,
-            { RowIds = grouped |> List.collect (fun (_, _, target) -> target.RowIds) |> List.distinct
-              Keys = grouped |> List.collect (fun (_, _, target) -> target.Keys) |> List.distinct })
-        // Every writer claims tables in the same order, regardless of join order.
-        |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+        |> combineTargets
 
     match statement with
     | Update update when update.Joins.IsEmpty ->
@@ -30308,7 +30312,14 @@ let transactionWriteTargets
         let viewTargets =
             tryUpdatableView store viewDatabase update.From.Table
             |> Option.bind (fun view ->
-                update.Assignments
+                let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
+                let viewAssignments =
+                    update.Assignments
+                    |> List.filter (fun assignment ->
+                        match assignment.Table with
+                        | Some owner -> equalsIgnoreCase owner viewQualifier
+                        | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+                viewAssignments
                 |> traverse (fun assignment ->
                     Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
                     |> function Some target -> Ok target | None -> Error())
@@ -30316,7 +30327,6 @@ let transactionWriteTargets
                 |> Option.bind (function
                     | [] -> None
                     | first :: rest when rest |> List.forall (fun target -> viewTargetKey target = viewTargetKey first) ->
-                        let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
                         let physicalEquality (qualifier: string) (name: string) (literal: Expr) =
                             Map.tryFind (name.ToLowerInvariant()) view.Targets
                             |> Option.filter (fun column ->
@@ -30344,10 +30354,37 @@ let transactionWriteTargets
                               Partitions = []
                               IndexHints = [] }
                             physicalPredicate
+                        |> Option.map (fun target -> view, target)
                     | _ -> None))
 
         match viewTargets with
-        | Some target -> [ target ]
+        | Some(view, target) ->
+            let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
+            let outerTables =
+                update.Joins
+                |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
+                |> List.choose (function FromTable table -> Some table | _ -> None)
+                |> List.choose (fun table ->
+                    physicalFastPathTable store dbName table
+                    |> Option.map (fun physical -> table, physical))
+            let externalNames =
+                update.Assignments
+                |> List.choose (fun assignment ->
+                    match assignment.Table with
+                    | Some owner when not (equalsIgnoreCase owner viewQualifier) -> Some owner
+                    | Some _ -> None
+                    | None ->
+                        let owners =
+                            outerTables
+                            |> List.filter (fun (_, table) ->
+                                table.Columns |> List.exists (fun column -> equalsIgnoreCase column.Name assignment.Column))
+                        if Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets then None
+                        else
+                            match owners with
+                            | [ (table, _) ] -> Some(table.Alias |> Option.defaultValue table.Table)
+                            | _ -> None)
+            target :: joinedTargets update.From update.Joins externalNames None
+            |> combineTargets
         | None ->
             let projectedNames body =
                 let projections =

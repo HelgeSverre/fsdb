@@ -2604,6 +2604,36 @@ let tests =
                       Expect.equal rows (if hasLast then [ [ Some "1" ] ] else [])
                           "the final target follows its optional join"
                   | result -> failtestf "expected optional target rows, got %A" result
+              for heldTable in [ "tx_read_view_target"; "tx_read_view_outer"; "tx_read_view_last" ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, held = handle owner (sprintf "UPDATE %s SET n=10 WHERE id=1" heldTable)
+                  Expect.equal held (Affected 1UL) "owner holds one outer-join target"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter extendedRightPreserving)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "outer joined writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.isTrue blocked (heldTable + " blocks the outer joined write")
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "outer joined writer resumes"
+                  let waiter, result = waiting.Result
+                  Expect.equal result (Affected 3UL) "all three matched targets update after the wait"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) (heldTable + " outer joined writer commits")
+                  for table in [ "tx_read_view_outer"; "tx_read_view_target"; "tx_read_view_last" ] do
+                      let expected = if table = heldTable then "11" else "1"
+                      match handle session (sprintf "SELECT n FROM %s WHERE id=1" table) |> snd with
+                      | ResultSet(_, [ [ Some actual ] ]) ->
+                          Expect.equal actual expected (heldTable + " rebases " + table)
+                      | result -> failtestf "expected committed row from %s, got %A" table result
               handle session "DELETE FROM tx_read_view_last" |> ignore
               handle session "INSERT INTO tx_read_view_last VALUES(99,0)" |> ignore
               handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
