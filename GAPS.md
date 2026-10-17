@@ -1640,8 +1640,9 @@ implementation effort:
    first candidate stops matching, moves behind another candidate, or is
    deleted](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
    with and without a secondary predicate index, plus pending inserts across
-   integer and valid `DATE` primary-key order frontiers, plus audited joined
-   UPDATE and DELETE statements with named physical targets,
+   integer, valid `DATE`, and audited two-part integer primary-key order
+   frontiers, plus audited joined UPDATE and DELETE statements with named
+   physical targets,
    [audited single-table updatable-view UPDATE and DELETE statements and joined-view
    UPDATE statements with one writable physical target](torture/findings/2026-10-15-view-write-rebase.md),
    and joined UPDATEs with uniquely owned bare assignments, including
@@ -1663,9 +1664,11 @@ implementation effort:
    do likewise, including uniquely owned bare assignments. Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.
-   [Pending integer PRIMARY-key inserts](torture/findings/2026-10-16-limited-ordered-write-rebase.md#pending-inserted-candidates)
-   now delay ordered limited writes when their key crosses the result frontier;
-   unrelated inserts beyond the frontier remain concurrent.
+   [Pending PRIMARY-key inserts](torture/findings/2026-10-16-limited-ordered-write-rebase.md#pending-inserted-candidates)
+   now delay ordered limited writes when their key crosses an audited uniform
+   order frontier. [Mixed-direction composite ordering](torture/findings/2026-10-16-limited-ordered-write-rebase.md#composite-primary-keys)
+   waits on all active primary claims as observed in the native oracle;
+   unrelated inserts beyond uniform-order frontiers remain concurrent.
    Broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in

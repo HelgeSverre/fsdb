@@ -2183,6 +2183,62 @@ let tests =
                   | ResultSet(_, rows) -> Expect.equal rows expected statement
                   | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
 
+          testCase "limited ordered write respects composite primary-key insert frontiers"
+          <| fun _ ->
+              let baseKeys = [ 1, 1; 1, 3; 2, 1 ]
+              for verb, firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit in
+                  [ for verb in [ "UPDATE"; "DELETE" ] do
+                        for firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit in
+                            [ "ASC", "ASC", (1, 0), true, [ 1, 0 ], 1
+                              "ASC", "ASC", (3, 1), false, [ 1, 1 ], 1
+                              "DESC", "DESC", (3, 1), true, [ 3, 1 ], 1
+                              "DESC", "DESC", (1, 0), false, [ 2, 1 ], 1
+                              "ASC", "DESC", (1, 4), true, [ 1, 4 ], 1
+                              "ASC", "DESC", (2, 0), true, [ 1, 3 ], 1
+                              "DESC", "ASC", (2, 0), true, [ 2, 0 ], 1
+                              "DESC", "ASC", (1, 4), true, [ 2, 1 ], 1
+                              "ASC", "ASC", (1, 2), true, [ 1, 1; 1, 2 ], 2
+                              "ASC", "ASC", (3, 1), false, [ 1, 1; 1, 3 ], 2
+                              "DESC", "DESC", (2, 2), true, [ 2, 2; 2, 1 ], 2
+                              "DESC", "DESC", (1, 0), false, [ 2, 1; 1, 3 ], 2 ] do
+                            yield verb, firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_composite_insert_candidate(a INT,b INT,n INT,PRIMARY KEY(a,b))" |> ignore
+                  handle setup "INSERT INTO tx_composite_insert_candidate VALUES(1,1,0),(1,3,0),(2,1,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let a, b = insertedKey
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_composite_insert_candidate VALUES(%d,%d,0)" a b)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a composite key"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  let action =
+                      if verb = "UPDATE" then "UPDATE tx_composite_insert_candidate SET n=n+1"
+                      else "DELETE FROM tx_composite_insert_candidate"
+                  let statement = action + " WHERE n>=0 ORDER BY a " + firstDirection + ",b " + secondDirection + sprintf " LIMIT %d" limit
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait (statement + " wait behavior")
+                  Expect.equal result (Affected(uint64 limit)) "the composite frontier fills the result"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                  let expected =
+                      insertedKey :: baseKeys
+                      |> List.sort
+                      |> List.filter (fun key -> verb = "UPDATE" || not (List.contains key changedKeys))
+                      |> List.map (fun (a, b) ->
+                          [ Some(string a); Some(string b); Some(if List.contains (a, b) changedKeys then "1" else "0") ])
+                  match handle setup "SELECT a,b,n FROM tx_composite_insert_candidate ORDER BY a,b" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expected statement
+                  | actual -> failtestf "expected composite rows after %s, got %A" statement actual
+
           testCase "an autocommit full-scan delete rechecks the row after a competing commit"
           <| fun _ ->
               for predicate, affected, remaining in

@@ -46,7 +46,7 @@ when fewer rows currently match than the limit. An insert after the frontier
 does not delay the write. MySQL 8.4.11 and `TransactionTests` agree across 36
 UPDATE/DELETE cases covering `LIMIT 1` and `LIMIT 2`, ASC and DESC, INT and
 BIGINT UNSIGNED, and both wait and no-wait outcomes. The integer audit is
-scoped to single-column PRIMARY ordering; other order expressions and key
+scoped to the audited primary-key orderings; other order expressions and key
 types need separate audits.
 
 ## DATE primary keys
@@ -60,5 +60,25 @@ affected count, and final rows for both verbs in all eight combinations.
 
 The scheduler now reads the stored day number from an active `DATE` PRIMARY
 claim and compares it with visible candidate dates at the `LIMIT` frontier.
-The focused transaction regression covers the eight cases. Zero dates,
-composite keys, and other order expressions remain outside this audit.
+The focused transaction regression covers the eight cases. Zero dates and
+other order expressions remain outside this DATE audit.
+
+## Composite primary keys
+
+An uncommitted insert into `PRIMARY KEY(a,b)` can cross the result frontier of
+`UPDATE` or `DELETE ... WHERE n>=0 ORDER BY a,b LIMIT 1/2`. MySQL 8.4.11 waits
+for that insert and reselects the first row after it commits. A pending tuple
+beyond the frontier does not delay uniform ASC/ASC or DESC/DESC ordering. The
+original fsdb scheduler read only single-column claims, so a crossing tuple
+completed early and changed the wrong row.
+
+The scheduler now decodes each length-prefixed PRIMARY component and compares
+the complete tuple with the visible frontier. The native oracle and focused
+transaction regression cover both verbs, both uniform directions, crossing
+and non-crossing inserts, affected counts, and final rows. They also cover
+mixed ASC/DESC and DESC/ASC directions. In those mixed-order cases MySQL waits
+for a pending inserted key even when it sorts beyond the first visible row;
+fsdb now claims all active primary keys for that shape before rebasing. The
+24-case composite audit uses two `INT` key columns. Text, zero-date, wider
+tuples, non-primary ordering expressions, and different predicates remain
+outside it.

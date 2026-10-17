@@ -4284,36 +4284,46 @@ let acquireTransactionWriteTargets
     | Some _ -> withWriteLocksFor timeout store dbName tableName rowIds keys ignore
     | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
 
-/// Active single-column ordered PRIMARY claims that another transaction holds.
+/// Active numeric/date ordered PRIMARY claims that another transaction holds.
 /// Ordered limited writes use these pending keys before their snapshot can see
 /// the inserted row; idle weak-cache entries never become candidate claims.
-let activePrimaryOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (keyType: ColumnType) : (decimal * string) list =
+let activePrimaryOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (keyTypes: ColumnType list) : (decimal list * string) list =
     let tableKey = lockNamespaceKey dbName tableName
     let prefix = "PRIMARY\u0000"
     let ownOwner = store.TransactionLocks |> Option.map _.Owner
+
+    let orderedValue keyType (value: string) =
+        let expectedTag =
+            match keyType with
+            | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ -> Some 'I'
+            | TDate -> Some 'T'
+            | _ -> None
+        match expectedTag with
+        | Some tag when value.Length > 1 && value.[0] = tag ->
+            match Decimal.TryParse(value.Substring(1), NumberStyles.Integer, CultureInfo.InvariantCulture) with
+            | true, ordered -> Some ordered
+            | _ -> None
+        | _ -> None
 
     let tryOrderedKey (key: string) =
         if not (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) then None
         else
             let encoded = key.Substring(prefix.Length)
-            let separator = encoded.IndexOf(':')
-            if separator <= 0 then None
-            else
-                match Int32.TryParse(encoded.Substring(0, separator)) with
-                | true, length when encoded.Length = separator + 1 + length && length > 1 ->
-                    let value = encoded.Substring(separator + 1, length)
-                    let expectedTag =
-                        match keyType with
-                        | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ -> Some 'I'
-                        | TDate -> Some 'T'
+            let rec read offset remaining acc =
+                match remaining with
+                | [] when offset = encoded.Length -> Some(List.rev acc)
+                | keyType :: rest ->
+                    let separator = encoded.IndexOf(':', offset)
+                    if separator <= offset then None
+                    else
+                        match Int32.TryParse(encoded.Substring(offset, separator - offset)) with
+                        | true, length when length > 1 && length <= encoded.Length - separator - 1 ->
+                            let value = encoded.Substring(separator + 1, length)
+                            orderedValue keyType value
+                            |> Option.bind (fun ordered -> read (separator + 1 + length) rest (ordered :: acc))
                         | _ -> None
-                    match expectedTag with
-                    | Some tag when value.[0] = tag ->
-                        match Decimal.TryParse(value.Substring(1), NumberStyles.Integer, CultureInfo.InvariantCulture) with
-                        | true, ordered -> Some ordered
-                        | _ -> None
-                    | _ -> None
                 | _ -> None
+            read 0 keyTypes []
 
     match store.KeyLocks.TryGetValue tableKey with
     | false, _ -> []

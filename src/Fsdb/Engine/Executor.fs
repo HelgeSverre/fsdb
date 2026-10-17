@@ -29809,71 +29809,90 @@ let transactionWriteTargets
     let pendingOrderedInsertKeys (tableRef: TableRef) where orderBy limit =
         let database = tableRef.Database |> Option.defaultValue dbName
         let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
-        let orderedPrimary =
-            match orderBy with
-            | [ (Col name, direction) ] -> Some(name, direction)
-            | [ (QualifiedCol(owner, name), direction) ] when equalsIgnoreCase owner qualifier ->
-                Some(name, direction)
-            | _ -> None
-
-        match limit, orderedPrimary, physicalFastPathTable store dbName tableRef with
-        | Some limitExpr, Some(name, direction), Some table
-            when rowCount limitExpr > 0
-                 && (match Storage.primaryKeyColumns table with
-                     | [ primary ] -> equalsIgnoreCase primary name
-                     | _ -> false) ->
-            let columnIndex =
-                table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name)
-            let pending =
-                Storage.activePrimaryOrderedKeyClaims store database tableRef.Table table.Columns.[columnIndex].Type
-            if pending.IsEmpty then []
+        match limit, physicalFastPathTable store dbName tableRef with
+        | Some limitExpr, Some table when rowCount limitExpr > 0 ->
+            let primaryColumns = Storage.primaryKeyColumns table
+            let orderedColumns =
+                orderBy
+                |> List.choose (fun (expression, direction) ->
+                    match expression with
+                    | Col name -> Some(name, direction)
+                    | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some(name, direction)
+                    | _ -> None)
+            if primaryColumns.IsEmpty
+               || orderedColumns.Length <> primaryColumns.Length
+               || orderBy.Length <> primaryColumns.Length
+               || not (List.forall2 (fun primary (name, _) -> equalsIgnoreCase primary name) primaryColumns orderedColumns) then
+                []
             else
-                let allKeys = pending |> List.map snd
-                let hasRuntimeEffects =
-                    where
-                    |> Option.exists (Expression.exists (function
-                        | FuncCall _ | UserVariable _ | AssignUserVariable _ | SystemVariable _
-                        | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _
-                        | MatchAgainst _ | WindowOver _ | Placeholder _ -> true
-                        | _ -> false))
-
-                if hasRuntimeEffects then allKeys
+                let columnIndices =
+                    primaryColumns
+                    |> List.map (fun name -> table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name))
+                let directions = orderedColumns |> List.map snd
+                let rec compareOrdered left right directions =
+                    match left, right, directions with
+                    | a :: restA, b :: restB, direction :: restDirections ->
+                        let order = Operators.compare a b
+                        if order = 0 then compareOrdered restA restB restDirections
+                        elif direction = Asc then order
+                        else -order
+                    | _ -> 0
+                let orderedValue = function
+                    | VInt integer -> Some(decimal integer)
+                    | VUInt integer
+                    | VBit(_, integer) -> Some(decimal integer)
+                    | VDate date -> Some(decimal date.DayNumber)
+                    | _ -> None
+                let storedKey (row: Value[]) =
+                    let values = columnIndices |> List.choose (fun index -> orderedValue row.[index])
+                    if values.Length = columnIndices.Length then Some values else None
+                let pending =
+                    Storage.activePrimaryOrderedKeyClaims
+                        store database tableRef.Table (columnIndices |> List.map (fun index -> table.Columns.[index].Type))
+                if pending.IsEmpty then []
                 else
-                    let columns = table.Columns
-                    let ctxFor =
-                        contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None
-                    let matched = ResizeArray<decimal>()
-                    let mutable valid = true
+                    let allKeys = pending |> List.map snd
+                    let mixedDirections =
+                        match directions with
+                        | first :: rest -> rest |> List.exists (fun direction -> direction <> first)
+                        | [] -> false
+                    let hasRuntimeEffects =
+                        where
+                        |> Option.exists (Expression.exists (function
+                            | FuncCall _ | UserVariable _ | AssignUserVariable _ | SystemVariable _
+                            | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _
+                            | MatchAgainst _ | WindowOver _ | Placeholder _ -> true
+                            | _ -> false))
 
-                    Diagnostics.suppress (fun () ->
-                        for _, row in table.RowsArray.Indexed do
-                            if valid then
-                                match row.[columnIndex] with
-                                | (VInt _ | VUInt _ | VBit _ | VDate _) as key ->
-                                    match whereMatches ctxFor where row with
-                                    | Ok true ->
-                                        match key with
-                                        | VInt integer -> matched.Add(decimal integer)
-                                        | VUInt integer
-                                        | VBit(_, integer) -> matched.Add(decimal integer)
-                                        | VDate date -> matched.Add(decimal date.DayNumber)
-                                        | _ -> ()
-                                    | Ok false -> ()
-                                    | Error _ -> valid <- false
-                                | _ -> valid <- false)
-
-                    let count = rowCount limitExpr
-                    if not valid || matched.Count < count then allKeys
+                    // The audited mixed-direction order waits even beyond the visible frontier.
+                    if mixedDirections || hasRuntimeEffects then allKeys
                     else
-                        let ordered = matched |> Seq.sort |> Seq.toArray
-                        let frontier =
-                            if direction = Asc then ordered.[count - 1]
-                            else ordered.[ordered.Length - count]
-                        pending
-                        |> List.choose (fun (key, claim) ->
-                            if (direction = Asc && key < frontier)
-                               || (direction = Desc && key > frontier) then Some claim
-                            else None)
+                        let columns = table.Columns
+                        let ctxFor =
+                            contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None
+                        let matched = ResizeArray<decimal list>()
+                        let mutable valid = true
+
+                        Diagnostics.suppress (fun () ->
+                            for _, row in table.RowsArray.Indexed do
+                                if valid then
+                                    match storedKey row with
+                                    | Some key ->
+                                        match whereMatches ctxFor where row with
+                                        | Ok true -> matched.Add key
+                                        | Ok false -> ()
+                                        | Error _ -> valid <- false
+                                    | _ -> valid <- false)
+
+                        let count = rowCount limitExpr
+                        if not valid || matched.Count < count then allKeys
+                        else
+                            let ordered = matched |> Seq.sortWith (fun left right -> compareOrdered left right directions) |> Seq.toArray
+                            let frontier = ordered.[count - 1]
+                            pending
+                            |> List.choose (fun (key, claim) ->
+                                if compareOrdered key frontier directions < 0 then Some claim
+                                else None)
         | _ -> []
 
     let joinedTargets (from: TableRef) (joins: Join list) (names: string list) predicate =
