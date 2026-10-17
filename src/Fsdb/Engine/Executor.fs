@@ -29811,7 +29811,6 @@ let transactionWriteTargets
         let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
         match limit, physicalFastPathTable store dbName tableRef with
         | Some limitExpr, Some table when rowCount limitExpr > 0 ->
-            let primaryColumns = Storage.primaryKeyColumns table
             let orderedColumns =
                 orderBy
                 |> List.choose (fun (expression, direction) ->
@@ -29819,18 +29818,35 @@ let transactionWriteTargets
                     | Col name -> Some(name, direction)
                     | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some(name, direction)
                     | _ -> None)
-            if primaryColumns.IsEmpty
-               || orderedColumns.Length <> primaryColumns.Length
-               || orderBy.Length <> primaryColumns.Length
-               || not (List.forall2 (fun primary (name, _) -> equalsIgnoreCase primary name) primaryColumns orderedColumns) then
+            let orderedIndex =
+                if orderedColumns.IsEmpty || orderedColumns.Length <> orderBy.Length then None
+                else
+                    Storage.orderedIndexKeyColumns table
+                    |> List.tryFind (fun (_, indexColumns) ->
+                        indexColumns.Length >= orderedColumns.Length
+                        && List.forall2
+                            (fun indexColumn (orderedColumn, _) -> equalsIgnoreCase indexColumn orderedColumn)
+                            (indexColumns |> List.take orderedColumns.Length)
+                            orderedColumns)
+            if orderedIndex.IsNone then
                 []
             else
+                let indexName, indexColumns = Option.get orderedIndex
                 let columnIndices =
-                    primaryColumns
+                    orderedColumns |> List.map fst
                     |> List.map (fun name -> table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name))
+                let keyTypes =
+                    indexColumns
+                    |> List.map (fun name ->
+                        table.Columns
+                        |> List.find (fun column -> equalsIgnoreCase column.Name name)
+                        |> fun column -> column.Type)
                 let directions = orderedColumns |> List.map snd
                 let comparePart left right =
                     match left, right with
+                    | OrderedNull, OrderedNull -> 0
+                    | OrderedNull, _ -> -1
+                    | _, OrderedNull -> 1
                     | OrderedNumber a, OrderedNumber b -> Operators.compare a b
                     | OrderedText a, OrderedText b -> System.String.CompareOrdinal(a, b)
                     | _ -> 0
@@ -29844,6 +29860,7 @@ let transactionWriteTargets
                     | _ -> 0
                 let orderedValue (column: ColumnDef) value =
                     match value with
+                    | VNull -> Some OrderedNull
                     | VInt integer -> Some(OrderedNumber(decimal integer))
                     | VUInt integer
                     | VBit(_, integer) -> Some(OrderedNumber(decimal integer))
@@ -29861,8 +29878,8 @@ let transactionWriteTargets
                         |> List.choose (fun index -> orderedValue table.Columns.[index] row.[index])
                     if values.Length = columnIndices.Length then Some values else None
                 let pending =
-                    Storage.activePrimaryOrderedKeyClaims
-                        store database tableRef.Table (columnIndices |> List.map (fun index -> table.Columns.[index].Type))
+                    Storage.activeOrderedKeyClaims store database tableRef.Table indexName keyTypes
+                    |> List.map (fun (key, claim) -> key |> List.take columnIndices.Length, claim)
                 if pending.IsEmpty then []
                 else
                     let allKeys = pending |> List.map snd
@@ -29884,7 +29901,7 @@ let transactionWriteTargets
                         let columns = table.Columns
                         let ctxFor =
                             contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None
-                        let matched = ResizeArray<OrderedPrimaryKeyPart list>()
+                        let matched = ResizeArray<OrderedIndexKeyPart list>()
                         let mutable valid = true
 
                         Diagnostics.suppress (fun () ->

@@ -1669,7 +1669,10 @@ implementation effort:
    now delay ordered limited writes when their key crosses an audited uniform
    order frontier. [Mixed-direction composite ordering](torture/findings/2026-10-16-limited-ordered-write-rebase.md#composite-primary-keys)
    waits on all active primary claims as observed in the native oracle;
-   unrelated inserts beyond uniform-order frontiers remain concurrent.
+   [audited secondary-index orderings](torture/findings/2026-10-16-limited-ordered-write-rebase.md#secondary-index-ordered-frontiers)
+   also wait for crossing pending inserts without serializing equal-key
+   inserts, while unrelated inserts beyond uniform-order frontiers remain
+   concurrent.
    Broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in

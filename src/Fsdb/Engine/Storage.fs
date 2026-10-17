@@ -2826,6 +2826,21 @@ let private rangeKeyGroups (table: Table) : IndexKeyGroup list =
 let private orderedKeyGroups (table: Table) : IndexKeyGroup list =
     indexKeyGroups table |> List.filter supportsOrderedAccess
 
+let private insertOrderKeyGroups (table: Table) : IndexKeyGroup list =
+    let supportedColumn index =
+        match table.Columns.[index].Type with
+        | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _
+        | TDate | TChar _ | TVarchar _ -> true
+        | _ -> false
+    orderedKeyGroups table
+    |> visibleGroups
+    |> List.filter (fun group -> indexesWholeColumns group && List.forall supportedColumn group.Indices)
+
+let orderedIndexKeyColumns (table: Table) : (string * string list) list =
+    insertOrderKeyGroups table
+    |> List.map (fun group ->
+        group.Name, group.Indices |> List.map (fun index -> table.Columns.[index].Name))
+
 type private FullTextKeyGroup =
     { Name: string
       Indices: int list
@@ -3154,10 +3169,28 @@ let tryInsertLockTargets
 
                                 encodeUniqueKey table.Columns group candidate
                                 |> Option.map (fun key -> group.Name, key, group.Name + "\u0000" + key)))
-                    |> Result.map (List.choose id))
+                    |> Result.map (fun uniqueKeys ->
+                        let orderedKeys =
+                            insertOrderKeyGroups table
+                            |> List.filter (fun group -> not (group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
+                            |> List.choose (fun group ->
+                                group.Indices
+                                |> traverse keyValue
+                                |> Result.toOption
+                                |> Option.bind (fun values ->
+                                    let resolved = values |> List.choose id
+                                    if resolved.Length <> values.Length then None
+                                    else
+                                        let encoded = encodeEqualityValues table.Columns group.Indices resolved
+                                        // Each pending insertion needs its own observation claim.
+                                        // Equal non-unique index values must not serialize writers.
+                                        Some("ORDERED\u0000" + group.Name + "\u0000" + encoded
+                                             + "\u0000" + Guid.NewGuid().ToString("N"))))
+                        List.choose id uniqueKeys, orderedKeys))
                 |> Result.toOption
-                |> Option.map (fun encodedKeys ->
-                    let encodedKeys = encodedKeys |> List.concat |> List.distinct
+                |> Option.map (fun encodedRows ->
+                    let encodedKeys = encodedRows |> List.collect fst |> List.distinct
+                    let orderedKeys = encodedRows |> List.collect snd
 
                     let rowIds =
                         encodedKeys
@@ -3168,7 +3201,7 @@ let tryInsertLockTargets
                         |> List.distinct
 
                     { RowIds = rowIds
-                      Keys = encodedKeys |> List.map (fun (_, _, lockKey) -> lockKey) }))
+                      Keys = (encodedKeys |> List.map (fun (_, _, lockKey) -> lockKey)) @ orderedKeys }))
 
     match store.Databases.TryGetValue dbName with
     | true, slot -> tryGetTable dbName slot.Value tableName |> Result.toOption |> Option.bind findInTable
@@ -4284,16 +4317,18 @@ let acquireTransactionWriteTargets
     | Some _ -> withWriteLocksFor timeout store dbName tableName rowIds keys ignore
     | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
 
-type OrderedPrimaryKeyPart =
+type OrderedIndexKeyPart =
+    | OrderedNull
     | OrderedNumber of decimal
     | OrderedText of string
 
-/// Active numeric, date, or text ordered PRIMARY claims that another transaction holds.
+/// Active numeric, date, or text ordered index claims that another transaction holds.
 /// Ordered limited writes use these pending keys before their snapshot can see
 /// the inserted row; idle weak-cache entries never become candidate claims.
-let activePrimaryOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (keyTypes: ColumnType list) : (OrderedPrimaryKeyPart list * string) list =
+let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (indexName: string) (keyTypes: ColumnType list) : (OrderedIndexKeyPart list * string) list =
     let tableKey = lockNamespaceKey dbName tableName
-    let prefix = "PRIMARY\u0000"
+    let primary = indexName.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
+    let prefix = if primary then "PRIMARY\u0000" else "ORDERED\u0000" + indexName + "\u0000"
     let ownOwner = store.TransactionLocks |> Option.map _.Owner
 
     let orderedValue keyType (value: string) =
@@ -4304,6 +4339,7 @@ let activePrimaryOrderedKeyClaims (store: Store) (dbName: string) (tableName: st
             | TChar _ | TVarchar _ -> Some 'S'
             | _ -> None
         match expectedTag with
+        | _ when value = "N" -> Some OrderedNull
         | Some 'S' when value.Length > 1 && value.[0] = 'S' ->
             Some(OrderedText(value.Substring(1)))
         | Some tag when value.Length > 1 && value.[0] = tag ->
@@ -4319,12 +4355,14 @@ let activePrimaryOrderedKeyClaims (store: Store) (dbName: string) (tableName: st
             let rec read offset remaining acc =
                 match remaining with
                 | [] when offset = encoded.Length -> Some(List.rev acc)
+                | [] when not primary && offset < encoded.Length && encoded.[offset] = '\u0000' ->
+                    Some(List.rev acc)
                 | keyType :: rest ->
                     let separator = encoded.IndexOf(':', offset)
                     if separator <= offset then None
                     else
                         match Int32.TryParse(encoded.Substring(offset, separator - offset)) with
-                        | true, length when length > 1 && length <= encoded.Length - separator - 1 ->
+                        | true, length when length >= 1 && length <= encoded.Length - separator - 1 ->
                             let value = encoded.Substring(separator + 1, length)
                             orderedValue keyType value
                             |> Option.bind (fun ordered -> read (separator + 1 + length) rest (ordered :: acc))

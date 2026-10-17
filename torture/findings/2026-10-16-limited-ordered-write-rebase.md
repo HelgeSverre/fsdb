@@ -99,7 +99,8 @@ under `utf8mb4_0900_ai_ci`, reversing the corresponding wait decision.
 The scheduler now decodes pending text PRIMARY claims and compares the
 column's collation key with visible rows at the frontier. Equal primary
 weights conservatively wait, preserving full-order tie behavior. The focused
-transaction regression covers all 40 audited cases. Other composite text
+transaction regression covers all 44 audited cases, including an empty
+primary-key string that precedes the first visible row. Other composite text
 shapes, collations, and order expressions remain to audit.
 
 ## Composite text and integer primary keys
@@ -120,3 +121,31 @@ for an uncommitted `(b,2)` insert even when that tuple sorts beyond the first
 visible candidate; after commit, both engines update or delete the same first
 row. This confirms the scheduler's conservative mixed-direction wait for the
 audited two-column shape. Wider tuples and other collations remain open.
+
+## Secondary-index ordered frontiers
+
+An ordered limited write can also need to wait for an uncommitted insert whose
+ordering column is a secondary B-tree key rather than the primary key. With
+visible `(id,rank_value)` rows `(1,1)` and `(2,2)`, an owner inserts `(0,0)`
+and a second transaction runs `UPDATE ... ORDER BY rank_value ASC LIMIT 1`.
+MySQL 8.4.11 waits, then updates row 0 after the owner commits. Before the
+fix, fsdb completed early and updated row 1. An inserted `(3,3)` sorts beyond
+the ascending frontier, so MySQL does not wait and updates row 1.
+
+Fsdb now records a separate ordered observation claim for each prepared
+insert into a visible, whole-column B-tree index. The limited-write scheduler
+compares active index claims with its visible frontier and rebases after a
+crossing insert commits. The native oracle and focused regression cover ten
+UPDATE/DELETE cases: both ASC/DESC directions, crossing and non-crossing
+inserts, a pending NULL ordering value, affected counts, and final rows.
+Distinct primary-key inserts with
+the same non-unique secondary value remain independent on both engines; the
+observation claims do not serialize them.
+
+An in-memory A/B/A check with 1,000 sequential inserts into a table with one
+secondary index measured warm trials around 186–205 ms on the previous and
+current revisions. The spread does not establish a precise cost difference;
+the maintained [insert profile](../scripts/ordered-secondary-insert-profile.fsx)
+allows a larger follow-up. Expressions, invisible or prefix indexes, other
+order terms, and insert values unknown until later preparation remain outside
+this audit.

@@ -291,6 +291,41 @@ def main():
                     finally:
                         waiter.close()
 
+                waiter = connect(socket)
+                try:
+                    with owner.cursor() as cursor:
+                        cursor.execute("DROP TABLE IF EXISTS target")
+                        cursor.execute("CREATE TABLE target(id INT PRIMARY KEY,rank_value INT,KEY ix_rank(rank_value))")
+                        cursor.execute("BEGIN")
+                        cursor.execute("INSERT INTO target VALUES(1,0)")
+                    with waiter.cursor() as cursor:
+                        cursor.execute("USE probe")
+                        cursor.execute("BEGIN")
+                    started = threading.Event()
+                    outcome = {}
+
+                    def equal_secondary_insert():
+                        try:
+                            with waiter.cursor() as cursor:
+                                started.set()
+                                cursor.execute("INSERT INTO target VALUES(2,0)")
+                                outcome["affected"] = cursor.rowcount
+                                cursor.execute("COMMIT")
+                        except Exception as error:
+                            outcome["error"] = error
+
+                    thread = threading.Thread(target=equal_secondary_insert, daemon=True)
+                    thread.start()
+                    assert started.wait(2), "equal secondary insert starts"
+                    thread.join(0.2)
+                    waited = thread.is_alive()
+                    owner.commit()
+                    thread.join(5)
+                    assert not waited, "non-unique secondary keys do not serialize distinct inserts"
+                    assert outcome == {"affected": 1}, outcome
+                finally:
+                    waiter.close()
+
                 composite_cases = (
                     ("ASC", "ASC", (1, 0), True, ((1, 0),), 1),
                     ("ASC", "ASC", (3, 1), False, ((1, 1),), 1),
@@ -360,6 +395,7 @@ def main():
                         waiter.close()
 
                 text_cases = (
+                    ("ASC", "", True, ("",), 1, None),
                     ("ASC", "a", True, ("a",), 1, None),
                     ("ASC", "z", False, ("b",), 1, None),
                     ("DESC", "z", True, ("z",), 1, None),
@@ -507,11 +543,67 @@ def main():
                     finally:
                         waiter.close()
 
+                secondary_cases = (
+                    ("ASC", 0, 0, True, 0), ("ASC", 3, 3, False, 1),
+                    ("DESC", 3, 3, True, 3), ("DESC", 0, 0, False, 2),
+                    ("ASC", 0, None, True, 0),
+                )
+                for verb, (direction, inserted_id, inserted_rank, should_wait, changed_id) in itertools.product(
+                    ("UPDATE", "DELETE"), secondary_cases
+                ):
+                    waiter = connect(socket)
+                    try:
+                        with owner.cursor() as cursor:
+                            cursor.execute("DROP TABLE IF EXISTS target")
+                            cursor.execute("CREATE TABLE target(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))")
+                            cursor.execute("INSERT INTO target VALUES(1,1,0),(2,2,0)")
+                            cursor.execute("BEGIN")
+                            cursor.execute("INSERT INTO target VALUES(%s,%s,0)", (inserted_id, inserted_rank))
+                        with waiter.cursor() as cursor:
+                            cursor.execute("USE probe")
+                            cursor.execute("BEGIN")
+                        started = threading.Event()
+                        outcome = {}
+
+                        def waiting_after_secondary_insert():
+                            try:
+                                with waiter.cursor() as cursor:
+                                    started.set()
+                                    action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
+                                    cursor.execute(f"{action} WHERE n>=0 ORDER BY rank_value {direction} LIMIT 1")
+                                    outcome["affected"] = cursor.rowcount
+                                    cursor.execute("COMMIT")
+                            except Exception as error:
+                                outcome["error"] = error
+
+                        thread = threading.Thread(target=waiting_after_secondary_insert, daemon=True)
+                        thread.start()
+                        assert started.wait(2), "secondary ordered writer starts"
+                        thread.join(0.2)
+                        waited = thread.is_alive()
+                        owner.commit()
+                        thread.join(5)
+                        assert not thread.is_alive(), "secondary ordered writer resumes"
+                        with owner.cursor() as cursor:
+                            cursor.execute("SELECT id,rank_value,n FROM target ORDER BY id")
+                            final_rows = cursor.fetchall()
+                        ranks = {1: 1, 2: 2, inserted_id: inserted_rank}
+                        expected_rows = tuple(
+                            (row_id, ranks[row_id], int(row_id == changed_id))
+                            for row_id in sorted((1, 2, inserted_id))
+                            if verb == "UPDATE" or row_id != changed_id
+                        )
+                        assert waited == should_wait, (verb, direction, inserted_id, waited)
+                        assert outcome == {"affected": 1}, outcome
+                        assert final_rows == expected_rows, (verb, direction, inserted_id, final_rows)
+                    finally:
+                        waiter.close()
+
                 print(f"MySQL {version}: {cases} ordered LIMIT 1/2 writes reselected after updates/deletes; "
-                      f"{len(insert_cases) * 4} integer, {len(date_cases) * 2} DATE, and "
-                      f"{len(composite_cases) * 2} composite, {text_case_count} text, and "
-                      f"{composite_text_count} composite text "
-                      "pending-insert cases covered ordered frontiers")
+                      f"{len(insert_cases) * 4} integer, {len(date_cases) * 2} DATE, "
+                      f"{len(composite_cases) * 2} composite, {text_case_count} text, "
+                      f"{composite_text_count} composite text, and {len(secondary_cases) * 2} secondary-order "
+                      "pending-insert cases covered ordered frontiers; equal secondary inserts stayed independent")
             finally:
                 if owner is not None:
                     owner.close()
