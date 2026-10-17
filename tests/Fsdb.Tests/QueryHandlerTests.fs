@@ -14497,6 +14497,48 @@ let tests =
               let _, _ = handle holder "ROLLBACK"
               ()
 
+          testCase "locking reads include tables inside grouped join operands"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+
+              for table in [ "group_lock_a"; "group_lock_b"; "group_lock_c" ] do
+                  let setup, _ = handle setup ($"CREATE TABLE {table} (id INT PRIMARY KEY)")
+                  handle setup ($"INSERT INTO {table} VALUES (1)") |> ignore
+
+              let grouped =
+                  "SELECT b.id FROM group_lock_a a JOIN "
+                  + "(group_lock_b b JOIN group_lock_c c ON b.id=c.id) ON a.id=b.id"
+
+              let holder, _ = handle (create 2 store) "BEGIN"
+              let holder, allLocked = handle holder (grouped + " FOR UPDATE")
+              Expect.equal allLocked (ResultSet([ "id" ], [ [ Some "1" ] ])) "the grouped join returns its row"
+
+              let contender, _ = handle (create 3 store) "BEGIN"
+
+              for table in [ "group_lock_a"; "group_lock_b"; "group_lock_c" ] do
+                  match handle contender ($"SELECT id FROM {table} FOR UPDATE NOWAIT") |> snd with
+                  | Err(3572, _) -> ()
+                  | other -> failtestf "expected %s to be locked, got %A" table other
+
+              handle holder "ROLLBACK" |> ignore
+              handle contender "ROLLBACK" |> ignore
+
+              let holder, _ = handle holder "BEGIN"
+              let holder, onlyB = handle holder (grouped + " FOR UPDATE OF b")
+              Expect.equal onlyB (ResultSet([ "id" ], [ [ Some "1" ] ])) "OF b resolves inside the grouped join"
+
+              let contender, _ = handle contender "BEGIN"
+
+              for table in [ "group_lock_a"; "group_lock_b"; "group_lock_c" ] do
+                  match handle contender ($"SELECT id FROM {table} FOR UPDATE NOWAIT") |> snd with
+                  | Err(3572, _) when table = "group_lock_b" -> ()
+                  | ResultSet(_, [ [ Some "1" ] ]) when table <> "group_lock_b" -> ()
+                  | other -> failtestf "unexpected OF b lock result for %s: %A" table other
+
+              handle holder "ROLLBACK" |> ignore
+              handle contender "ROLLBACK" |> ignore
+
           testCase "multiple locking clauses preserve source-specific strengths"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
