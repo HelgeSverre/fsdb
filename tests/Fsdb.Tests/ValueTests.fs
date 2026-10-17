@@ -1545,6 +1545,15 @@ let tests =
                         Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the written symbol"
                     Expect.isFalse (col.Equals "㎞" "\uE0B2\uED9E") "literal marker cannot alias a square unit"
 
+                testCase "utf8mb4_general_ci keeps enclosed numbers distinct but folds circled letter case"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in [ "①", "⓵"; "②", "⓶"; "①", "1"; "ⓐ", "⒜" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the written symbol"
+                    Expect.isTrue (col.Equals "Ⓐ" "ⓐ") "circled letters share MySQL's case-insensitive weight"
+                    Expect.isFalse (col.Equals "①" "\uE0B3\uEE00") "literal marker cannot alias an enclosed number"
+
                 testCase "utf8mb4_general_ci retains decomposed combining accents"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
