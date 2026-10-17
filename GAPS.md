@@ -1052,6 +1052,9 @@ matches at sizes 1 and 2.
 The [vertical and small-form punctuation probe](torture/findings/2026-10-17-general-ci-vertical-small-forms.md)
 preserves distinct U+FE10–U+FE6F weights; its expanded two-column ngram lane
 matches MySQL at sizes 1 and 2.
+The [punctuation and script-number probe](torture/findings/2026-10-17-general-ci-punctuation-script-numbers.md)
+preserves distinct dash, quote, superscript, and subscript weights that ICU
+otherwise merges; the U+2000–U+20FF ngram lane matches at sizes 1 and 2.
 The [Bopomofo and Kanbun probe](torture/findings/2026-10-17-general-ci-bopomofo-weights.md)
 preserves distinct U+3100–U+31BF primary weights; the extension-block ngram
 lane matches MySQL at sizes 1–10 (288 searches per size), as does the

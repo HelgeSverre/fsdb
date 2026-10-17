@@ -1576,6 +1576,18 @@ let tests =
                     Expect.isFalse (col.Equals "︐" "\uE0B8\uF300")
                         "a literal marker cannot alias vertical punctuation"
 
+                testCase "utf8mb4_general_ci keeps punctuation and script number weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let forms = [ 0x2010 .. 0x201F ] @ [ 0x2070 .. 0x208F ] @ [ 0x2099 ]
+                                |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> Set.ofList |> Set.count) 49
+                        "MySQL gives each written form its own primary weight"
+                    for left, right in [ "‐", "‑"; "‘", "’"; "“", "”"; "⁰", "₀"; "ⁿ", "ₙ" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isFalse (col.Equals "‐" "\uE0BC\uF820")
+                        "a literal marker cannot alias punctuation"
+
                 testCase "utf8mb4_general_ci keeps Bopomofo extension weights distinct"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
