@@ -1472,6 +1472,16 @@ let tests =
                     Expect.isFalse (col.Equals "𠮷" "生") "supplementary fallback stays distinct from BMP Han"
                     Expect.isFalse (col.Equals "𠮷" "\uE090\uE091") "literal marker cannot alias the fallback"
 
+                testCase "utf8mb4_general_ci keeps conjoining and compatibility Jamo distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    Expect.isFalse (col.Equals "하" "하") "conjoining Jamo do not compose into a syllable"
+                    Expect.isFalse (col.Equals "하" "ㅎㅏ") "compatibility Jamo retain distinct weights"
+                    Expect.isFalse (col.Equals "ᄂ" "ㄴ") "compatibility consonants retain distinct weights"
+                    Expect.isFalse (col.Equals "ᆯ" "ㄹ") "trailing and compatibility consonants differ"
+                    Expect.notEqual (col.KeyOf "하") (col.KeyOf "ㅎㅏ") "index keys preserve the distinction"
+                    Expect.notEqual (col.HashOf "하") (col.HashOf "ㅎㅏ") "hash keys preserve the distinction"
+
                 testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
                     [ "utf8mb4_0900_ai_ci", true

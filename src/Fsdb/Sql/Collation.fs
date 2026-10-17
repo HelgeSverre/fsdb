@@ -204,15 +204,13 @@ let private foldUnicode520MongolianSeparator (value: string) =
             | c -> result.Append(c) |> ignore
         result.ToString()
 
-// ICU composes conjoining Hangul Jamo into syllables. MySQL's legacy Unicode
-// collations keep their primary weights separate, while compatibility Jamo
-// share those weights.
-let private foldLegacyUnicodeJamo (value: string) =
+// ICU composes conjoining Hangul Jamo into syllables. MySQL's older Unicode
+// collations retain their individual weights; each collation decides whether
+// compatibility Jamo share them.
+let private foldUnicodeJamo compatibility (value: string) =
     let isJamo c = c >= '\u1100' && c <= '\u11ff'
-    let isCompatibility c =
-        (c >= '\u3130' && c <= '\u318f') || (c >= '\uffa0' && c <= '\uffdc')
     let marker = '\uE0B0'
-    if not (value |> Seq.exists (fun c -> c = marker || isJamo c || isCompatibility c)) then value
+    if not (value |> Seq.exists (fun c -> c = marker || isJamo c || (compatibility c |> Option.isSome))) then value
     else
         let result = StringBuilder(value.Length)
         let appendJamo c =
@@ -220,13 +218,25 @@ let private foldLegacyUnicodeJamo (value: string) =
         for c in value do
             if c = marker then result.Append(marker).Append(marker) |> ignore
             elif isJamo c then appendJamo c
-            elif isCompatibility c then
-                let decomposed = (string c).Normalize(NormalizationForm.FormKD)
-                if not (String.IsNullOrEmpty decomposed) && (decomposed |> Seq.forall isJamo) then
-                    for jamo in decomposed do appendJamo jamo
-                else result.Append(c) |> ignore
-            else result.Append(c) |> ignore
+            else
+                match compatibility c with
+                | Some decomposed -> for jamo in decomposed do appendJamo jamo
+                | None -> result.Append(c) |> ignore
         result.ToString()
+
+let private foldLegacyUnicodeJamo (value: string) =
+    let compatibility c =
+        if (c >= '\u3130' && c <= '\u318f') || (c >= '\uffa0' && c <= '\uffdc') then
+            let decomposed = (string c).Normalize(NormalizationForm.FormKD)
+            if not (String.IsNullOrEmpty decomposed)
+               && (decomposed |> Seq.forall (fun jamo -> jamo >= '\u1100' && jamo <= '\u11ff')) then
+                Some decomposed
+            else None
+        else None
+    foldUnicodeJamo compatibility value
+
+// general_ci leaves compatibility Jamo distinct from conjoining Jamo.
+let private foldGeneralUnicodeJamo (value: string) = foldUnicodeJamo (fun _ -> None) value
 
 // MySQL's legacy UCA keeps some enclosed Korean/ideograph forms distinct,
 // while expanding enclosed kana and square unit forms that ICU keeps apart.
@@ -413,7 +423,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
     let foldText (value: string) =
         match name with
         | "utf8mb4_general_ci" ->
-            value.Replace("ß", "s").Replace("ẞ", "s") |> foldLegacySupplementary
+            value.Replace("ß", "s").Replace("ẞ", "s")
+            |> foldLegacySupplementary |> foldGeneralUnicodeJamo
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->
