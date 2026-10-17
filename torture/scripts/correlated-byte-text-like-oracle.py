@@ -65,6 +65,16 @@ def main():
                             + " WHERE c.code LIKE p.p OR c.id=1) FROM patterns p ORDER BY p.id"
                         )
                         assert cursor.fetchall() == ((1, 2), (2, 2), (3, 1))
+                        cursor.execute(
+                            "SELECT p.id,(SELECT COUNT(*) FROM " + source
+                            + " WHERE c.code NOT LIKE p.p) FROM patterns p ORDER BY p.id"
+                        )
+                        assert cursor.fetchall() == ((1, 3), (2, 4), (3, 0))
+                        cursor.execute(
+                            "SELECT p.id,(SELECT COUNT(*) FROM " + source
+                            + " WHERE c.code NOT LIKE p.p OR c.id=1) FROM patterns p ORDER BY p.id"
+                        )
+                        assert cursor.fetchall() == ((1, 4), (2, 4), (3, 1))
                 print(f"MySQL {version}: text patterns against byte keys agree across three sources")
             finally:
                 if connection:

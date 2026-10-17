@@ -15463,6 +15463,12 @@ and private tryProjectedPhysicalRangeRows store registry dbName projection bound
     tryProjectedPhysicalRangeCandidates CostedRead store projection bounds
     |> Option.bind (projectPhysicalLookupRows store registry dbName projection)
 
+and private tryCorrelatedNullLikeColumn probeSource context = function
+    | Like(indexed, pattern, _, _)
+    | Not(Like(indexed, pattern, _, _)) when tryCorrelatedProbeValue probeSource context pattern = Some VNull ->
+        tryCorrelatedInnerColumn probeSource indexed
+    | _ -> None
+
 and private tryProjectedPhysicalCorrelatedLikeCandidates
     policy store (projection: PhysicalProjection) probeSource context whereExpr =
     if not (storedRowsMatchReadRows store projection.PhysicalTable.Columns) then
@@ -15471,13 +15477,9 @@ and private tryProjectedPhysicalCorrelatedLikeCandidates
         let rejectsEveryRow =
             whereExpr
             |> optionalConjuncts
-            |> List.exists (function
-                | Like(indexed, pattern, _, _) ->
-                    tryCorrelatedInnerColumn probeSource indexed
-                    |> Option.bind (tryPhysicalProjectionColumn projection)
-                    |> Option.isSome
-                    && tryCorrelatedProbeValue probeSource context pattern = Some VNull
-                | _ -> false)
+            |> List.exists (tryCorrelatedNullLikeColumn probeSource context
+                            >> Option.bind (tryPhysicalProjectionColumn projection)
+                            >> Option.isSome)
 
         if rejectsEveryRow then Some []
         else
@@ -16265,13 +16267,9 @@ and private tryMaterializedCorrelatedLookup
                 let nullLikeRejects =
                     predicate
                     |> optionalConjuncts
-                    |> List.exists (function
-                        | Like(indexed, patternExpr, _, _) ->
-                            tryCorrelatedInnerColumn probeSource indexed
-                            |> Option.bind (resolveColumn columns >> Result.toOption)
-                            |> Option.isSome
-                            && tryCorrelatedProbeValue probeSource context patternExpr = Some VNull
-                        | _ -> false)
+                    |> List.exists (tryCorrelatedNullLikeColumn probeSource context
+                                    >> Option.bind (resolveColumn columns >> Result.toOption)
+                                    >> Option.isSome)
 
                 let usesStoredCollation (bound: RangeLookupBounds<string, Expr * Value>) =
                     match resolveColumn columns bound.Column with

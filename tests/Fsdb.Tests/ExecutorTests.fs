@@ -12826,6 +12826,27 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "an OR branch can match beside a NULL pattern, got %A" other
 
+                    for prefix, source in
+                        [ "", "like_codes c"
+                          "", "(SELECT id,code FROM like_codes) c"
+                          "", "(SELECT DISTINCT id,code FROM like_codes) c"
+                          "WITH codes AS (SELECT DISTINCT id,code FROM like_codes) ", "codes c" ] do
+                        calls <- 0
+                        match run store registry
+                            (prefix + "SELECT (SELECT COUNT(*) FROM " + source
+                             + " WHERE TOUCH(c.id)=c.id AND c.code NOT LIKE p.p) "
+                             + "FROM like_patterns p WHERE p.id=3") with
+                        | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                        | other -> failtestf "NULL NOT LIKE should match no rows, got %A" other
+                        Expect.isLessThan calls 60 "NULL NOT LIKE skips correlated residual rows"
+
+                        match run store registry
+                            (prefix + "SELECT (SELECT COUNT(*) FROM " + source
+                             + " WHERE c.code NOT LIKE p.p OR c.id=1) "
+                             + "FROM like_patterns p WHERE p.id=3") with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | other -> failtestf "a NOT LIKE OR branch can match beside NULL, got %A" other
+
                     calls <- 0
                     match run store registry
                         ("SELECT p.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,code FROM like_codes) c "

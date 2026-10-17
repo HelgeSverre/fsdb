@@ -1609,8 +1609,9 @@ WAL workload reaches about 2.65× the FSDB wire rate through the embedded API.
 That comparison does not isolate a server function or scheduling lock.
 
 An [audited correlated binary LIKE prefix](torture/findings/2026-10-15-correlated-like-prefix-audit.md)
-already uses the indexed range path for actual rows. A NULL outer pattern now
-supplies an empty candidate set in both metadata validation and execution.
+already uses the indexed range path for actual rows. A NULL outer pattern for
+`LIKE` or `NOT LIKE` now supplies an empty candidate set in both metadata
+validation and execution.
 
 Shared statement setup, computed scan predicates, phrase/proximity matching,
 and broader join-shaped full-text plans remain input-sensitive. Immutable
