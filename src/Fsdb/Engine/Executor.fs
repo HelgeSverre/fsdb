@@ -1841,6 +1841,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             (table.Database |> Option.defaultValue view.Schema)
                             table.Table
                     | FromSubquery(body, _) -> derivedColumnNames body
+                    | FromLateral(body, _) -> derivedColumnNames body
                     | FromJsonTable(_, _, columns, _) -> Some(JsonTableColumn.names columns)
                     | _ -> None
 

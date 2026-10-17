@@ -59,7 +59,11 @@ preceding source with known columns. A two-LATERAL chain with an inner alias
 reused by the outer join, a local bare-column source, and a bare reference to
 the preceding target all retain writable metadata and update one row in the
 MySQL 8.4.11 oracle.
-When both the local source and preceding target expose the bare name, the
+The same oracle now covers a bare `aux` in a second LATERAL body that resolves
+to the first LATERAL output. Its inner alias collides with the outer join's
+alias; both engines still report the outer view writable, update one row,
+and reject the outer CHECK OPTION violation with 1369. When both the local
+source and preceding target expose the bare name, the
 local column takes precedence and both engines update zero rows in the
 audited case.
 Ambiguous bare references, subqueries requiring scoped qualifier rewriting,
