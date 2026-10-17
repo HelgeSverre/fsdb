@@ -15971,8 +15971,12 @@ and private tryMaterializedCorrelatedLookup
                             | _ -> None
                         buildExpressionLookup expression rowKey decimalKey)
 
+                let indexable indexed =
+                    rowLocalExpression indexed
+                    && Option.isNone (tryCorrelatedInnerColumn probeSource indexed)
+
                 let candidate indexed bound =
-                    if not (rowLocalExpression indexed) || Option.isSome (tryCorrelatedInnerColumn probeSource indexed) then
+                    if not (indexable indexed) then
                         None
                     else
                         tryCorrelatedProbeValue probeSource context bound
@@ -15982,11 +15986,29 @@ and private tryMaterializedCorrelatedLookup
                                 decimalLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
                             | _ -> None)
 
+                let inCandidate indexed bounds =
+                    if not (indexable indexed) then
+                        None
+                    else
+                        let boundValue = function
+                            | Cast(LiteralValue VNull, _) -> Some VNull
+                            | expression -> tryCorrelatedProbeValue probeSource context expression
+                        bounds
+                        |> List.map boundValue
+                        |> tryAllSome
+                        |> Option.bind (fun values ->
+                            if values |> List.forall (function VNull | VDecimal _ | VInt _ | VUInt _ -> true | _ -> false) then
+                                decimalLookup indexed
+                                |> Option.bind (fun lookup -> unionExpressionLookupCandidates lookup values)
+                            else
+                                None)
+
                 predicate
                 |> optionalConjuncts
                 |> List.choose (function
                     | BinOp(Eq, left, right) ->
                         candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | In(indexed, bounds) -> inCandidate indexed bounds
                     | _ -> None)
                 |> intersectSharedRows
 

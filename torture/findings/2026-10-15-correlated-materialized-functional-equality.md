@@ -126,6 +126,16 @@ and executor regression cover decimal and integer bounds, reversed equality,
 arithmetic, NULL, a complete OR branch, and DOUBLE fallback. Floating-point
 expression keys remained open at this point.
 
+Positive `IN` lists now union candidates from the same DECIMAL key when every
+outer member is an exact DECIMAL, signed or unsigned integer, or NULL. Duplicate
+members share row identities, NULL contributes no WHERE-true candidates, and a
+complete OR branch can still match. A DOUBLE member keeps the scan because it
+changes the comparison domain. The native oracle confirms five `IN` forms,
+including outer arithmetic, duplicates, NULL, OR, and DOUBLE fallback. The
+focused four-bound `d.k+0.00 IN (o.x,o.x+1.00)` regression initially made
+5,010 residual calls and now stays below 80; the maintained profile records
+nine calls.
+
 ## Statement-local finite DOUBLE expression lookup
 
 Finite DOUBLE results now get a statement-local key when the outer bound is

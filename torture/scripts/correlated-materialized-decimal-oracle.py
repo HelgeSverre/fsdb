@@ -64,6 +64,11 @@ def main():
                         ("d.k+0.00=o.i", (0, 0, 0, 0)),
                         ("d.k+0.00=o.f", (1, 0, 0, 1)),
                         ("d.k+0.00=o.x OR d.id=12", (2, 1, 1, 2)),
+                        ("d.k+0.00 IN (o.x,o.x+1.00)", (2, 0, 0, 2)),
+                        ("d.k+0.00 IN (o.x,NULL)", (1, 0, 0, 1)),
+                        ("d.k+0.00 IN (o.x,o.x)", (1, 0, 0, 1)),
+                        ("d.k+0.00 IN (o.x,NULL) OR d.id=12", (2, 1, 1, 2)),
+                        ("d.k+0.00 IN (o.f,NULL)", (1, 0, 0, 1)),
                     ]
                     for predicate, expected in cases:
                         query = (

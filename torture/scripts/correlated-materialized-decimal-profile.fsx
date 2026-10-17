@@ -19,3 +19,16 @@ for expression,bound in ["d.k","o.x";"d.k+0.00","o.x";"d.k+0.00","o.i"] do
     calls <- 0
     let sql = "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM inner_rows) d WHERE TOUCH(d.id)=d.id AND " + expression + "=" + bound + ") FROM outer_bounds o ORDER BY o.id"
     printfn "%s=%s: %A calls=%d" expression bound (connection.QueryValues(sql,[])) calls
+calls <- 0
+let inSql =
+    "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM inner_rows) d "
+    + "WHERE TOUCH(d.id)=d.id AND d.k+0.00 IN (o.x,o.x+1.00)) "
+    + "FROM outer_bounds o ORDER BY o.id"
+let inResult = connection.QueryValues(inSql, [])
+match inResult with
+| Ok(_, [ [ Some(Value.VInt 1L); Some(Value.VInt 2L) ]
+          [ Some(Value.VInt 2L); Some(Value.VInt 0L) ]
+          [ Some(Value.VInt 3L); Some(Value.VInt 0L) ]
+          [ Some(Value.VInt 4L); Some(Value.VInt 2L) ] ]) ->
+    printfn "d.k+0.00 IN (o.x,o.x+1.00): expected rows; residual calls=%d" calls
+| _ -> failwithf "Unexpected decimal IN result: %A" inResult
