@@ -1529,6 +1529,15 @@ let tests =
                         Expect.notEqual (col.KeyOf radical) (col.KeyOf ideograph) "index keys preserve the radical"
                     Expect.isFalse (col.Equals "⽇" "\uE0F0\uE1C7") "literal marker cannot alias a radical"
 
+                testCase "utf8mb4_general_ci retains decomposed combining accents"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in [ "e\u0301", "e"; "e\u0301", "é"; "\u0301日", "日" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the combining accent"
+                    Expect.isTrue (col.Equals "é" "e") "precomposed acute remains MySQL accent-insensitive"
+                    Expect.isFalse (col.Equals "\u0301" "\uE300\uE401") "literal marker cannot alias an accent"
+
                 testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
                     [ "utf8mb4_0900_ai_ci", true

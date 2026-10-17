@@ -266,6 +266,22 @@ let private foldGeneralKanaMarks (value: string) =
             | _ -> result.Append(c) |> ignore
         result.ToString()
 
+// ICU ignores most decomposed accents at primary strength. MySQL general_ci
+// retains their written weights; U+0345 has its own Greek-iota mapping, and
+// U+034F is already preserved by the format-control fold.
+let private foldGeneralCombiningAccents (value: string) =
+    let hasOwnWeight c = c >= '\u0300' && c <= '\u036f' && c <> '\u0345' && c <> '\u034f'
+    let marker = '\uE300'
+    if not (value |> Seq.exists (fun c -> c = marker || hasOwnWeight c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif hasOwnWeight c then
+                result.Append(marker).Append(char (0xE400 + int c - 0x0300)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
 // ICU folds CJK radicals onto their compatibility ideographs. MySQL general_ci
 // assigns each defined radical its own primary weight.
 let private foldGeneralCjkRadicals (value: string) =
@@ -498,7 +514,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             value.Replace("ß", "s").Replace("ẞ", "s")
             |> foldLegacySupplementary |> foldGeneralUnicodeJamo
             |> foldGeneralHalfwidthMarks |> foldGeneralFormatControls
-            |> foldGeneralKanaMarks |> foldGeneralCjkRadicals
+            |> foldGeneralKanaMarks |> foldGeneralCombiningAccents
+            |> foldGeneralCjkRadicals
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->
