@@ -1090,7 +1090,10 @@ retain the UCA 5.2 split between primary-ignorable U+FE20–U+FE26 and
 distinct U+FE27–U+FE2F weights. The [extended mark block](torture/findings/2026-10-18-unicode-520-extended-combining-marks.md)
 also keeps the 80 distinct U+1AB0–U+1AFF implicit weights. The half-mark
 two-column ngram probe matches MySQL at sizes 1 and 2; the extended-mark
-probe matches at sizes 1–10. Other Unicode 5.2 blocks remain to audit.
+probe matches at sizes 1–10. The [supplemental mark block](torture/findings/2026-10-18-unicode-520-supplemental-combining-marks.md)
+retains its ignorable, explicit, and implicit weight classes, including
+U+1DCA's equivalence to U+036C; its expanded ngram probe also matches at
+sizes 1–10. Other Unicode 5.2 blocks remain to audit.
 [General Unicode variation selectors](torture/findings/2026-10-17-general-ci-variation-selectors.md)
 now retain their distinct written weights across U+FE00–U+FE0F, including
 U+FE0F, in equality keys and ngram postings. The two-column corpus matches

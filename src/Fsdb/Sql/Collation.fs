@@ -220,18 +220,27 @@ let private foldUnicode520CombiningHalfMarks (value: string) =
         result.ToString()
 
 // MySQL's UCA 5.2 table assigns individual implicit primary weights across
-// U+1AB0–U+1AFF, including positions assigned after Unicode 5.2. ICU ignores
-// many of these newer combining marks. Escape the marker in literal input so
-// a real private-use character cannot alias a generated weight.
+// U+1AB0–U+1AFF and U+1DE7–U+1DFC, including positions assigned after Unicode
+// 5.2. ICU ignores or merges some of these newer combining marks. U+1DCA has
+// U+036C's MySQL primary weight, while U+1DE3 has a distinct weight that ICU
+// merges with it. Escape the marker so literal private-use text cannot alias
+// a generated weight.
 let private foldUnicode520ExtendedCombiningMarks (value: string) =
     let marker = '\uE0AE'
-    if not (value |> Seq.exists (fun c -> c = marker || (c >= '\u1AB0' && c <= '\u1AFF'))) then value
+    let needsFold c =
+        (c >= '\u1AB0' && c <= '\u1AFF')
+        || (c >= '\u1DE7' && c <= '\u1DFC') || c = '\u1DCA' || c = '\u1DE3'
+    if not (value |> Seq.exists (fun c -> c = marker || needsFold c)) then value
     else
         let result = StringBuilder(value.Length)
         for c in value do
             if c = marker then result.Append(marker).Append(marker) |> ignore
             elif c >= '\u1AB0' && c <= '\u1AFF' then
                 result.Append(marker).Append(char (0xE400 + int c - 0x1AB0)) |> ignore
+            elif c >= '\u1DE7' && c <= '\u1DFC' then
+                result.Append(marker).Append(char (0xE480 + int c - 0x1DE7)) |> ignore
+            elif c = '\u1DCA' then result.Append('\u036C') |> ignore
+            elif c = '\u1DE3' then result.Append(marker).Append('\uE4A0') |> ignore
             else result.Append(c) |> ignore
         result.ToString()
 

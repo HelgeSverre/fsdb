@@ -184,13 +184,17 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
         documents += [(prefix + char + '文', '') for char in ("𠀀", "😀", "丽", "並")]
     if legacy_range == (0xAC00, 0xAD00):
         documents += [(prefix + char + '文', '') for char in ("가", "ㄱㅏ", "각")]
+    if legacy_range == (0x1DC0, 0x1E00):
+        documents += [(prefix + '\u036c' + '文', '')]
     terms = ([prefix + char for char in legacy_chars]
              if legacy_chars is not None else TERMS)
     if legacy_range is not None:
         terms += [f'"{prefix + char}"' for char in legacy_chars]
-    if legacy_range in ((0xFE20, 0xFE30), (0x1AB0, 0x1B00)):
+    if legacy_range in ((0xFE20, 0xFE30), (0x1AB0, 0x1B00), (0x1DC0, 0x1E00)):
         terms += [prefix + char + '文' for char in legacy_chars]
         terms += [char + prefix for char in legacy_chars]
+    if legacy_range == (0x1DC0, 0x1E00):
+        terms += [prefix + '\u036c', '\u036c' + prefix, prefix + '\u036c' + '文']
     if legacy_range == (0xAC00, 0xAD00):
         terms += [prefix + char for char in ("가", "각", "가", "ㄱㅏ", "각")]
     modes = MODES
