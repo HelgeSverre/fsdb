@@ -8,9 +8,10 @@ constructs 1,024 such rows; the previous index reached depth 1,024.
 
 The index now uses AVL balancing. The same regression checks that construction
 and deletion keep depth at most 32, that spatial lookup still finds retained
-rows, and that an earlier immutable root remains unchanged. The existing
-exhaustive bounds-scan comparison covers `MBRINTERSECTS`, `MBRWITHIN`, and
-`MBRCONTAINS` candidate correctness. `just check` passed 3,707 tests.
+rows, and that an earlier immutable root remains unchanged. The exhaustive
+bounds-scan comparison covers `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS`
+candidate correctness after insertion, deletion, and replacement with wider
+bounds. `just check` passed 3,707 tests.
 
 This is an internal resource-bound fix, not a MySQL spatial semantics claim.
 The geographic topology differences recorded elsewhere remain open.

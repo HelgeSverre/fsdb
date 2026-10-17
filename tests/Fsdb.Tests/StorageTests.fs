@@ -980,16 +980,36 @@ let tests =
                             && candidate.MinY <= query.MinY
                             && candidate.MaxY >= query.MaxY
 
-                    for _ in 1 .. 100 do
-                        let query = randomBounds ()
+                    let verify label entries index =
+                        for _ in 1 .. 100 do
+                            let query = randomBounds ()
 
-                        for relation in [ SpatialIndex.Intersects; SpatialIndex.Within; SpatialIndex.Contains ] do
-                            let expected =
-                                entries
-                                |> List.choose (fun (id, candidate) -> if matches relation query candidate then Some id else None)
-                                |> Set.ofList
+                            for relation in [ SpatialIndex.Intersects; SpatialIndex.Within; SpatialIndex.Contains ] do
+                                let expected =
+                                    entries
+                                    |> List.choose (fun (id, candidate) -> if matches relation query candidate then Some id else None)
+                                    |> Set.ofList
 
-                            Expect.equal (SpatialIndex.search relation query index) expected "indexed bounds match the scan"
+                                Expect.equal (SpatialIndex.search relation query index) expected (label + " indexed bounds match the scan")
+
+                    verify "inserted" entries index
+
+                    let retained = entries |> List.filter (fun (id, _) -> id % 3 <> 0)
+                    let reduced =
+                        [ 3 .. 3 .. 500 ]
+                        |> List.fold (fun current id -> SpatialIndex.remove id current) index
+                    verify "after deletion" retained reduced
+
+                    let replaced =
+                        retained
+                        |> List.map (fun (id, bounds) ->
+                            if id % 5 = 0 then id, { bounds with MaxX = bounds.MaxX + 25.0 }
+                            else id, bounds)
+                    let updated =
+                        replaced
+                        |> List.fold (fun current (id, bounds) ->
+                            if id % 5 = 0 then SpatialIndex.add id bounds current else current) reduced
+                    verify "after replacement" replaced updated
 
                 testCase "stored spatial indexes follow row mutations incrementally"
                 <| fun _ ->
