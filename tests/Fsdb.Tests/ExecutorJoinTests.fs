@@ -75,6 +75,27 @@ let tests =
                   | Err(1055, _) -> ()
                   | other -> failtestf "nullable key should not overdetermine %s, got %A" sql other
 
+          testCase "USING and NATURAL outer joins expose their key equalities to grouping validation"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE fd_parent (id INT PRIMARY KEY, label VARCHAR(20))" |> ignore
+              runDefault store "CREATE TABLE fd_child (id INT NOT NULL UNIQUE, tag VARCHAR(20))" |> ignore
+              runDefault store "INSERT INTO fd_parent VALUES (1,'a'),(2,'b')" |> ignore
+              runDefault store "INSERT INTO fd_child VALUES (1,'hit')" |> ignore
+
+              for sql in
+                  [ "SELECT p.id,c.tag,COUNT(*) FROM fd_parent p LEFT JOIN fd_child c USING(id) GROUP BY p.id ORDER BY p.id"
+                    "SELECT id,c.tag,COUNT(*) FROM fd_parent p LEFT JOIN fd_child c USING(id) GROUP BY id ORDER BY id"
+                    "SELECT p.id,c.tag,COUNT(*) FROM fd_parent p NATURAL LEFT JOIN fd_child c GROUP BY p.id ORDER BY p.id"
+                    "SELECT p.id,c.tag,COUNT(*) FROM fd_child c RIGHT JOIN fd_parent p USING(id) GROUP BY p.id ORDER BY p.id" ] do
+                  match runDefault store sql with
+                  | ResultSet(_, [ [ Some "1"; Some "hit"; Some "1" ]; [ Some "2"; None; Some "1" ] ]) -> ()
+                  | other -> failtestf "joined key should determine the unique child for %s, got %A" sql other
+
+              match runDefault store "SELECT c.id,p.label,COUNT(*) FROM fd_parent p LEFT JOIN fd_child c USING(id) GROUP BY c.id" with
+              | Err(1055, _) -> ()
+              | other -> failtestf "nullable-side key must not determine the parent, got %A" other
+
           testCase "INNER JOIN matches rows across two aliased instances of the same table"
           <| fun _ ->
               let store = newStore ()

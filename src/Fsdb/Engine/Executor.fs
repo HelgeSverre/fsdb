@@ -18866,10 +18866,36 @@ and private validateOnlyFullGroupBy
                 |> Option.map (fun expr -> equalityPairs expr [] |> List.collect bothWays)
                 |> Option.defaultValue []
 
-            let joinFacts =
+            let sourceBindings source =
+                FromItem.leaves source
+                |> List.choose (fun leaf ->
+                    FromItem.tryQualifier leaf
+                    |> Option.bind (fun qualifier ->
+                        qualifiers
+                        |> Map.tryFind (qualifier.ToLowerInvariant())
+                        |> Option.map (fun (sourceColumns, _) -> qualifier, sourceColumns)))
+
+            let initialSources = select.From |> Option.toList |> List.collect sourceBindings
+
+            let effectiveJoins, _ =
                 select.Joins
-                |> List.map (fun join ->
-                    let equalities = equalityPairs join.On []
+                |> List.mapFold (fun (leftOperand, precedingSources) join ->
+                    let rightSources = sourceBindings join.Table
+                    let effectiveOn =
+                        resolvedJoinCondition precedingSources rightSources leftOperand join
+                        |> Result.toOption
+                        |> Option.defaultValue join.On
+                    let nextOperand =
+                        match leftOperand with
+                        | Some left -> Some(FromJoinGroup(left, [ join ]))
+                        | None -> Some join.Table
+                    (join, effectiveOn), (nextOperand, precedingSources @ rightSources))
+                    (select.From, initialSources)
+
+            let joinFacts =
+                effectiveJoins
+                |> List.map (fun (join, effectiveOn) ->
+                    let equalities = equalityPairs effectiveOn []
 
                     match join.Kind with
                     | LeftJoin | NaturalLeftJoin | RightJoin | NaturalRightJoin ->
@@ -18888,7 +18914,7 @@ and private validateOnlyFullGroupBy
                             else
                                 Set.contains position rightPositions
 
-                        let onReferences = expressionColumns join.On
+                        let onReferences = expressionColumns effectiveOn
                         let resolvedReferences = onReferences |> List.choose tryColumnPosition
                         let onScope =
                             { Qualifiers = qualifiers |> Map.toSeq |> Seq.map fst |> Set.ofSeq
@@ -18898,7 +18924,7 @@ and private validateOnlyFullGroupBy
                         // establish a dependency across the nullable side.
                         if Set.isEmpty rightPositions
                            || resolvedReferences.Length <> onReferences.Length
-                           || not (isStatementStableExpr store registry dbName onScope join.On) then
+                           || not (isStatementStableExpr store registry dbName onScope effectiveOn) then
                             [], []
                         else
                             // Every preserved-side ON input must be fixed: another
