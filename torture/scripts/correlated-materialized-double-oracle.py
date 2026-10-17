@@ -119,6 +119,20 @@ def main():
                         assert actual == expected, (predicate, actual, expected)
                         if "o.s" in predicate:
                             assert cursor._result.warning_count == 0, predicate
+                    outside_range_cases = [
+                        ("d.k+0e0 NOT BETWEEN o.x-490e0 AND o.x+490e0", (25, 1003, 0, 24, 23, 1001)),
+                        ("d.k+0e0 NOT BETWEEN o.s-490e0 AND o.s+490e0", (25, 1003, 0, 24, 23, 1001)),
+                        ("d.k+0e0 NOT BETWEEN o.s AND 490e0", (525, 1003, 12, 500, 512, 1003)),
+                    ]
+                    for predicate, expected in outside_range_cases:
+                        cursor.execute(
+                            "SELECT o.id,(SELECT COUNT(*) FROM "
+                            "(SELECT DISTINCT id,k FROM inner_rows) d "
+                            f"WHERE {predicate}) FROM outer_bounds o ORDER BY o.id"
+                        )
+                        actual = tuple(count for _, count in cursor.fetchall())
+                        assert actual == expected, (predicate, actual, expected)
+                        assert cursor._result.warning_count == 0, predicate
                     cursor.execute("INSERT INTO outer_bounds VALUES(7,NULL,NULL,NULL,'12.5x')")
                     for predicate in ("d.k+0e0=o.s", "d.k+0e0 BETWEEN o.s AND o.s", "d.k+0e0 IN (o.s,o.x)"):
                         cursor.execute(
@@ -146,7 +160,8 @@ def main():
                         "FROM outer_bounds WHERE id=6"
                     )
                     assert cursor.fetchone() == (1, 1, 0, 0)
-                    print(f"MySQL {version}: {len(cases)} DOUBLE equalities, {len(in_cases)} IN forms, and {len(range_cases)} ranges match")
+                    print(f"MySQL {version}: {len(cases)} DOUBLE equalities, {len(in_cases)} IN forms, "
+                          f"{len(range_cases)} ranges, and {len(outside_range_cases)} outside ranges match")
             finally:
                 if connection:
                     connection.close()

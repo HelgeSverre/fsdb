@@ -132,6 +132,14 @@ CLR direct cast rounded to 2⁵³+2, while MySQL rounded to 2⁵³. Parsing the
 exact decimal digits now gives the matching single rounding for numeric
 comparisons and range bounds.
 
+The same ordered lookup covers the complement of a wide correlated
+`NOT BETWEEN` interval. Native MySQL 8.4.11 and the Fsdb regression agree on
+numeric and clean-string outer bounds, including a NULL lower bound that still
+permits the decisive `> upper` branch. For three outer rows with a narrow
+complement, the regression evaluates fewer than 120 residual rows across a
+1,004-row materialized source. This uses the existing two-range candidate
+union; no new executor path was needed.
+
 ## Fully numeric string bounds
 
 A correlated DOUBLE expression can also use its statement-local equality or

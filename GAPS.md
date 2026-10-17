@@ -357,7 +357,10 @@ BETWEEN, including complete OR branches; the narrow 1,000-row profile uses
 11 residual calls across four outer rows. The audited decimal-to-DOUBLE
 halfway bound at 2⁵³+1 also follows MySQL's single rounding. Fully numeric
 finite string bounds use the same cuts; malformed strings and non-finite
-range bounds still scan.
+range bounds still scan. The audited [materialized DOUBLE `NOT BETWEEN`
+complement](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-ranges)
+uses the existing two-range union and preserves decisive comparisons with a
+NULL opposite bound.
 
 ## 3. Built-in functions
 

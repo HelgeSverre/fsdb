@@ -13125,6 +13125,32 @@ let tests =
                         if predicate = "d.k+0e0 BETWEEN o.s AND o.s" then
                             Expect.isLessThan calls 80 "clean numeric string range must bound residual work"
 
+                    for predicate in
+                        [ "d.k+0e0 NOT BETWEEN o.x-490e0 AND o.x+490e0"
+                          "d.k+0e0 NOT BETWEEN o.s-490e0 AND o.s+490e0" ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                            + "FROM double_bounds o WHERE o.id IN (1,4,5) ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual [ Some 25; Some 24; Some 23 ] predicate
+                        | other -> failtestf "expected materialized DOUBLE outside-range matches for %s, got %A" predicate other
+                        Expect.isLessThan calls 120 (predicate + " must probe only outside-range candidates")
+
+                    let nullBoundPredicate = "d.k+0e0 NOT BETWEEN o.s AND 490e0"
+                    let nullBoundSql =
+                        "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
+                        + "WHERE " + nullBoundPredicate + ") FROM double_bounds o ORDER BY o.id"
+                    match run store registry nullBoundSql with
+                    | ResultSet(_, rows) ->
+                        let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                        Expect.equal actual [ Some 525; Some 1003; Some 12; Some 500; Some 512; Some 1003 ]
+                            "NULL lower bound retains a decisive greater-than comparison"
+                    | other -> failtestf "expected materialized DOUBLE nullable-bound matches, got %A" other
+
                     runDefault store "INSERT INTO double_bounds VALUES(7,NULL,NULL,NULL,'12.5x')" |> ignore
                     for predicate in [ "d.k+0e0=o.s"; "d.k+0e0 BETWEEN o.s AND o.s"; "d.k+0e0 IN (o.s,o.x)" ] do
                         calls <- 0
