@@ -8378,6 +8378,36 @@ let tests =
                         |> explainRow
                     Expect.equal groupedPlan.AccessType (Some "index") "the date key serves CAST grouping"
 
+                testCase "correlated functional predicates filter two-row equality candidates"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE paired_names (id INT PRIMARY KEY, grp INT, name VARCHAR(30), KEY ix_grp(grp), KEY ix_lower ((LOWER(name))))"
+                    |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO paired_names VALUES (1, 1, 'A'), (2, 1, 'B'), (3, 2, 'A'), (4, 2, 'A')"
+                    |> ignore
+
+                    let actual =
+                        runDefault
+                            store
+                            "SELECT o.id, (SELECT COUNT(*) FROM paired_names i WHERE i.grp = o.grp AND LOWER(i.name) = LOWER(o.name)) AS matches FROM paired_names o ORDER BY o.id"
+
+                    Expect.equal
+                        actual
+                        (ResultSet(
+                            [ "id"; "matches" ],
+                            [ [ Some "1"; Some "1" ]
+                              [ Some "2"; Some "1" ]
+                              [ Some "3"; Some "2" ]
+                              [ Some "4"; Some "2" ] ]
+                        ))
+                        "the residual functional predicate still filters the ordinary index pair"
+
                 testCase "functional equality and range probes use expression indexes"
                 <| fun _ ->
                     let mutable calls = 0
