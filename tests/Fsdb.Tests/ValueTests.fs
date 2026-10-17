@@ -1562,6 +1562,20 @@ let tests =
                         Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the written symbol"
                     Expect.isFalse (col.Equals "〒" "\uE0B4\uEF12") "literal marker cannot alias a CJK symbol"
 
+                testCase "utf8mb4_general_ci keeps vertical and small punctuation weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let forms = [ 0xFE10 .. 0xFE6F ] |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> Set.ofList |> Set.count) 96
+                        "every vertical and small-form code point has its own MySQL weight"
+                    for left, right in forms |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "vertical and small-form weights follow codepoint order"
+                    for left, right in [ "︐", "﹐"; "︕", "﹗"; "︠", "︡"; "﹛", "﹜" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isFalse (col.Equals "︐" "\uE0B8\uF300")
+                        "a literal marker cannot alias vertical punctuation"
+
                 testCase "utf8mb4_general_ci keeps letterlike symbols at their written weights"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get

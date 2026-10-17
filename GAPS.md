@@ -1044,6 +1044,9 @@ case pairs; its expanded ngram lane matches at sizes 1 and 2.
 The [CJK-symbol probe](torture/findings/2026-10-17-general-ci-cjk-symbol-weights.md)
 preserves MySQL's distinct U+3000–U+303F weights; its expanded ngram lane
 matches at sizes 1 and 2.
+The [vertical and small-form punctuation probe](torture/findings/2026-10-17-general-ci-vertical-small-forms.md)
+preserves distinct U+FE10–U+FE6F weights; its expanded two-column ngram lane
+matches MySQL at sizes 1 and 2.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
