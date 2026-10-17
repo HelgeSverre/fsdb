@@ -958,7 +958,12 @@ and assignments.
 |---|---|---|---|---|
 | MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, indexed `IN`, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; implicit relevance ordering can drive either side of a qualified two-table inner join when the other side is an exact unique probe; [equality chains](torture/findings/2026-10-07-fulltext-join-bounds.md) propagate compatible equality, range, and literal `IN` bounds across inner/cross joins without shrinking the relevance corpus; mixed comparison domains and broader join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
 | Transaction relevance | MySQL uses an approximate global table-row estimate for ranking | visibility cases agree; fsdb uses the committed corpus count rather than estimates that remain changed after rollback until ANALYZE ([controlled oracle](torture/findings/2026-10-07-fulltext-transaction-visibility.md#relevance-and-implementation-boundary)); follows the deliberate statistics policy in section 16 | high (relevance correctness) | deliberate divergence |
-| CJK | ngram and mecab parsers, WITH PARSER clause | ngram DDL, search modes, stopword and phrase boundaries, mutation, startup token sizes, and preserved postings across WAL/snapshot recovery are implemented; common metadata-only MODIFY/CHANGE column definitions also preserve historical postings ([recovery oracle](torture/findings/2026-10-07-ngram-startup-sizing.md)); [multi-column searches and relevance at startup sizes 1–10](torture/findings/2026-10-07-ngram-fulltext.md) match the audited default-collation MySQL corpus, including Unicode formatting and zero-width controls, combining-mark boundaries, decomposed and voiced kana, width and script variants, compatibility ideographs, ideographic variation selectors, CJK punctuation presentation forms, and numeric symbols, within score tolerance; [legacy `utf8mb4_unicode_ci` ideographic-comma equality and ngram membership](torture/findings/2026-10-15-legacy-ngram-punctuation.md) now match the audited MySQL cases, while exact legacy weight bytes, broader legacy-collation behavior, and MeCab remain open | medium (for CJK) | partial |
+| CJK | ngram and mecab parsers, WITH PARSER clause | ngram DDL, search modes, stopword and phrase boundaries, mutation, startup token sizes, and preserved postings across WAL/snapshot recovery are implemented; common metadata-only MODIFY/CHANGE column definitions also preserve historical postings ([recovery oracle](torture/findings/2026-10-07-ngram-startup-sizing.md)); [multi-column searches and relevance at startup sizes 1–10](torture/findings/2026-10-07-ngram-fulltext.md) match the audited default-collation MySQL corpus, including Unicode formatting and zero-width controls, combining-mark boundaries, decomposed and voiced kana, width and script variants, compatibility ideographs, ideographic variation selectors, CJK punctuation presentation forms, and numeric symbols, within score tolerance; [legacy `utf8mb4_unicode_ci` punctuation](torture/findings/2026-10-15-legacy-ngram-punctuation.md), [enclosed CJK forms](torture/findings/2026-10-17-enclosed-cjk-legacy-ngram.md), and [U+2100–U+21FF letterlike symbols](torture/findings/2026-10-17-letterlike-legacy-ngram.md), and [U+3000–U+31FF kana and Bopomofo forms](torture/findings/2026-10-17-kana-extension-legacy-ngram.md) match their audited MySQL ngram and equality cases; [later compatibility ideographs and sampled supplementary scalars](torture/findings/2026-10-17-compatibility-ideograph-audit.md) now match their audited native-MySQL cases; exact legacy weight bytes, broader legacy-collation behavior, and MeCab remain open | medium (for CJK) | partial |
+
+The [Boolean query Unicode character-table gap](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md)
+is closed for audited cases: Boolean word and phrase boundaries now use
+MySQL 8.4's historical Unicode 5.0-draft character set, while natural and
+query-expansion indexing continue to find later-assigned characters.
 
 The [legacy vertical-punctuation follow-up](torture/findings/2026-10-15-legacy-ngram-punctuation.md#vertical-punctuation-block-follow-up)
 also distinguishes all U+FE10–U+FE19 forms under `utf8mb4_unicode_ci` and
@@ -973,15 +978,18 @@ token sizes and three search modes for the audited presentation ranges. An
 [expanded CJK punctuation and kana corpus](torture/findings/2026-10-15-cjk-kana-quote-ngram.md)
 now covers small/full-size kana equality, distinct CJK double-quote forms, and
 unbalanced ngram Boolean parentheses: 936 queries per startup token size from 1 to
-10 match MySQL in membership and relevance. Exact legacy weight bytes, broader
+10 match MySQL in membership and relevance. The [enclosed CJK legacy range](torture/findings/2026-10-17-enclosed-cjk-legacy-ngram.md)
+adds U+3200–U+33FF cross-form equality and 1,533 ngram queries per token
+size, matching MySQL across sizes 1–10. Exact legacy weight bytes, broader
 collation behavior, and MeCab remain open.
 The [legacy CJK radical corpus](torture/findings/2026-10-17-cjk-radical-ngram.md)
 also matches MySQL for 1,635 searches at each token size from 1 through 10,
 including cross-equivalence between Kangxi radicals and NFKC Han forms.
-The [Unicode 5.2 legacy-collation probe](torture/findings/2026-10-17-unicode-520-ngram.md)
-now matches the audited spacing, format-control, and Korean Jamo ngram cases.
-The full two-column corpus matches at token sizes 1–10. Broader collation
-behavior and MeCab remain open.
+The [legacy Unicode collation probe](torture/findings/2026-10-17-unicode-520-ngram.md)
+now matches the audited spacing, format-control, and Korean Jamo ngram cases
+under both `utf8mb4_unicode_ci` and `utf8mb4_unicode_520_ci`. The full
+two-column corpus matches at token sizes 1–10 for each collation. Broader
+collation behavior and MeCab remain open.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

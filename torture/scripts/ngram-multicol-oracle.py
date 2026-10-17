@@ -172,14 +172,20 @@ def scores_agree(expected, actual):
     )
 
 
-def verify(size, legacy_punctuation=False, legacy_radicals=False, collation_override=None):
+def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None, collation_override=None):
     prefix = '中' * (size - 1)
     legacy_chars = (LEGACY_RADICALS if legacy_radicals else
-                    LEGACY_PUNCTUATION if legacy_punctuation else None)
+                    LEGACY_PUNCTUATION if legacy_punctuation else
+                    [chr(code) for code in range(*legacy_range) if chr(code).isprintable()]
+                    if legacy_range is not None else None)
     documents = ([(prefix + char + '文', '') for char in legacy_chars]
                  if legacy_chars is not None else DOCUMENTS)
+    if legacy_range == (0x2F800, 0x2F900):
+        documents += [(prefix + char + '文', '') for char in ("𠀀", "😀", "丽", "並")]
     terms = ([prefix + char for char in legacy_chars]
              if legacy_chars is not None else TERMS)
+    if legacy_range is not None:
+        terms += [f'"{prefix + char}"' for char in legacy_chars]
     modes = MODES
     collation = collation_override or ("utf8mb4_unicode_ci" if legacy_chars is not None else None)
     with tempfile.TemporaryDirectory(prefix=f"fsdb-ngram-{size}-") as directory:
@@ -271,7 +277,17 @@ if __name__ == "__main__":
     corpus = parser.add_mutually_exclusive_group()
     corpus.add_argument("--legacy-punctuation", action="store_true")
     corpus.add_argument("--legacy-radicals", action="store_true")
+    corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
     parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci"))
     args = parser.parse_args()
+    legacy_range = None
+    if args.legacy_range:
+        try:
+            legacy_range = tuple(int(value, 16) for value in args.legacy_range.split(":"))
+            if len(legacy_range) != 2 or not 0 <= legacy_range[0] < legacy_range[1] <= 0x110000:
+                raise ValueError
+        except ValueError:
+            parser.error("--legacy-range requires hexadecimal START:END")
     sizes = args.sizes or list(range(1, 11))
-    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals, args.collation) for size in sizes) else 0)
+    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals,
+                                     legacy_range, args.collation) for size in sizes) else 0)

@@ -1448,18 +1448,19 @@ let tests =
                             Expect.isFalse (col.Equals "生\u180e" "生") "Mongolian vowel separator remains weighted"
                             Expect.isFalse (col.Equals "\u180e" "\uE0A0\uE0A1") "literal marker cannot alias separator"
 
-                testCase "Unicode 5.2 keeps Hangul Jamo distinct from composed syllables"
-                <| fun _ ->
-                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_520_ci" |> Option.get
-                    Expect.isFalse (col.Equals "하" "하") "leading and vowel Jamo do not compose into a syllable"
-                    Expect.isFalse (col.Equals "늘" "늘") "trailing Jamo remains a separate weight"
-                    Expect.isFalse (col.Equals "하늘" "하늘") "Jamo sequence differs from composed Hangul"
-                    Expect.isTrue (col.Equals "하" "ㅎㅏ") "compatibility Jamo share leading and vowel weights"
-                    Expect.equal (col.KeyOf "하") (col.KeyOf "ㅎㅏ") "compatibility Jamo share index keys"
-                    Expect.equal (col.HashOf "하") (col.HashOf "ㅎㅏ") "compatibility Jamo share hash keys"
-                    Expect.isTrue (col.Equals "ᄂ" "ㄴ") "compatibility consonant shares leading weight"
-                    Expect.isFalse (col.Equals "ᆯ" "ㄹ") "trailing and leading consonants differ"
-                    Expect.isFalse (col.Equals "ᄒ" "\uE0B0\uE512") "literal marker cannot alias a Jamo key"
+                testTheory "legacy Unicode collations keep Hangul Jamo distinct from syllables"
+                    [ "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci" ]
+                    <| fun name ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.isFalse (col.Equals "하" "하") "leading and vowel Jamo do not compose into a syllable"
+                        Expect.isFalse (col.Equals "늘" "늘") "trailing Jamo remains a separate weight"
+                        Expect.isFalse (col.Equals "하늘" "하늘") "Jamo sequence differs from composed Hangul"
+                        Expect.isTrue (col.Equals "하" "ㅎㅏ") "compatibility Jamo share leading and vowel weights"
+                        Expect.equal (col.KeyOf "하") (col.KeyOf "ㅎㅏ") "compatibility Jamo share index keys"
+                        Expect.equal (col.HashOf "하") (col.HashOf "ㅎㅏ") "compatibility Jamo share hash keys"
+                        Expect.isTrue (col.Equals "ᄂ" "ㄴ") "compatibility consonant shares leading weight"
+                        Expect.isFalse (col.Equals "ᆯ" "ㄹ") "trailing and leading consonants differ"
+                        Expect.isFalse (col.Equals "ᄒ" "\uE0B0\uE512") "literal marker cannot alias a Jamo key"
 
                 testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
@@ -1544,6 +1545,69 @@ let tests =
                     for left, right in forms |> List.pairwise do
                         Expect.isLessThan (col.ComparePrimary left right) 0 "vertical forms follow their implicit-weight order"
                     Expect.isFalse (col.Equals "︒" "\uE011\uE013") "a literal private-use marker cannot alias a vertical form"
+
+                testCase "legacy enclosed CJK implicit weights stay distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in
+                        [ "㉆", "㊥"; "㉆", "文"; "㉊", "㉚"; "㉊", "30"
+                          "㉋", "㊵"; "㉌", "㊿"; "㈎", "(가)"
+                          "㉮", "가"; "㉼", "참고" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
+                    Expect.isTrue (col.Equals "㊥" "中") "circled centre retains its MySQL expansion"
+                    Expect.isTrue (col.Equals "㋐" "ア") "enclosed katakana expands to its base character"
+                    Expect.isTrue (col.Equals "㌀" "アパート") "square unit forms expand under legacy UCA"
+                    for left, right in [ "㊥", "中"; "㋐", "ア"; "㌀", "アパート" ] do
+                        Expect.equal (col.KeyOf left) (col.KeyOf right) (left + " shares an index key with " + right)
+                        Expect.equal (col.HashOf left) (col.HashOf right) (left + " shares a hash with " + right)
+                    for left, right in [ "㉊", "㉋"; "㉋", "㉌" ] do
+                        Expect.isLessThan (col.ComparePrimary left right) 0 "implicit weights follow codepoint order"
+                    Expect.isFalse (col.Equals "㉆" "\uE030\uE146") "literal private-use text cannot alias an enclosed ideograph"
+
+                testCase "legacy letterlike and number forms retain MySQL distinctions"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in
+                        [ "ℼ", "π"; "ℼ", "ℿ"; "ℏ", "ℎ"; "℁", "⅍"
+                          "Ⅎ", "ⅎ"; "Ↄ", "ↄ"; "⅐", "1⁄7"
+                          "⅑", "1⁄9"; "⅒", "1⁄10"; "↉", "0⁄3" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
+                    Expect.isTrue (col.Equals "ℋ" "ℌ") "the equal script-H group remains folded"
+                    for left, right in [ "℁", "a/s"; "ℏ", "ħ"; "ℿ", "Π" ] do
+                        Expect.isTrue (col.Equals left right) (left + " retains its MySQL expansion")
+                    Expect.isFalse (col.Equals "ℼ" "\uE040\uE23C") "literal marker cannot alias pi symbol"
+
+                testCase "legacy kana extensions and ligatures expand before kana folding"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in [ "ゟ", "より"; "ヿ", "コト"; "ゟ", "ヨリ"
+                                         "ㇰ", "ク"; "ㇵ", "ハ"; "ㇿ", "ロ" ] do
+                        Expect.isTrue (col.Equals left right) (left + " matches " + right)
+                        Expect.equal (col.KeyOf left) (col.KeyOf right) (left + " shares its index key")
+
+                testCase "legacy Bopomofo forms keep MySQL primary weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    Expect.isTrue (col.Equals "ㄍ" "ㆣ") "the older velar forms remain equal"
+                    for left, right in [ "ㄮ", "ㄜ"; "ㆻ", "ㄍ"; "ㆻ", "ㆣ" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
+                    Expect.isFalse (col.Equals "ㄮ" "\uE060\uE061") "the marker cannot alias a Bopomofo form"
+
+                testCase "legacy compatibility ideographs preserve measured UCA classes"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in [ "郞", "郞"; "並", "並"; "丽", "丽" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct key")
+                    for left, right in [ "逸", "逸"; "艹", "艹"
+                                         "丽", "丸"; "丽", "𠀀"; "丽", "😀" ] do
+                        Expect.isTrue (col.Equals left right) (left + " matches " + right)
+                        Expect.equal (col.KeyOf left) (col.KeyOf right) (left + " shares a key")
+                    Expect.isFalse (col.Equals "並" "\uE070\uE370") "BMP marker cannot alias a compatibility form"
+                    Expect.isFalse (col.Equals "丽" "\uE090\uE091") "supplementary marker cannot alias source text"
 
                 testTheory
                     "MySQL 8.4 hiragana and katakana equality follows collation sensitivity"

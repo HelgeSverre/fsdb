@@ -204,9 +204,10 @@ let private foldUnicode520MongolianSeparator (value: string) =
             | c -> result.Append(c) |> ignore
         result.ToString()
 
-// ICU composes conjoining Hangul Jamo into syllables. MySQL's UCA 5.2 keeps
-// their primary weights separate, while compatibility Jamo share those weights.
-let private foldUnicode520Jamo (value: string) =
+// ICU composes conjoining Hangul Jamo into syllables. MySQL's legacy Unicode
+// collations keep their primary weights separate, while compatibility Jamo
+// share those weights.
+let private foldLegacyUnicodeJamo (value: string) =
     let isJamo c = c >= '\u1100' && c <= '\u11ff'
     let isCompatibility c =
         (c >= '\u3130' && c <= '\u318f') || (c >= '\uffa0' && c <= '\uffdc')
@@ -225,6 +226,112 @@ let private foldUnicode520Jamo (value: string) =
                     for jamo in decomposed do appendJamo jamo
                 else result.Append(c) |> ignore
             else result.Append(c) |> ignore
+        result.ToString()
+
+// MySQL's legacy UCA keeps some enclosed Korean/ideograph forms distinct,
+// while expanding enclosed kana and square unit forms that ICU keeps apart.
+let private foldLegacyEnclosedCjk (value: string) =
+    let isDistinct c =
+        (c >= '\u320E' && c <= '\u321F')
+        || (c >= '\u3244' && c <= '\u324F')
+        || (c >= '\u326E' && c <= '\u327E')
+        || c = '\u32FF'
+    let isExpansion c =
+        (c >= '\u32D0' && c <= '\u32FE')
+        || (c >= '\u3300' && c <= '\u3357')
+    if not (value |> Seq.exists (fun c -> c = '\uE030' || isDistinct c || isExpansion c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = '\uE030' then result.Append("\uE030\uE030") |> ignore
+            elif isDistinct c then
+                result.Append('\uE030').Append(char (0xE100 + int c - 0x3200)) |> ignore
+            elif isExpansion c then
+                result.Append((string c).Normalize(NormalizationForm.FormKC)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
+// ICU merges a few letterlike/number forms that MySQL's UCA 4.0 assigns
+// distinct primary weights. Escape the marker so literal private-use text
+// cannot share one of these synthetic keys.
+let private foldLegacyLetterlikeForms (value: string) =
+    let isDistinct = function
+        | '\u210F' | '\u2132' | '\u213C' | '\u214D' | '\u214E'
+        | '\u2150' | '\u2151' | '\u2152'
+        | '\u2183' | '\u2184' | '\u2189' -> true
+        | _ -> false
+    if not (value |> Seq.exists (fun c -> c = '\uE040' || c = '\u0127' || isDistinct c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = '\uE040' then result.Append("\uE040\uE040") |> ignore
+            elif c = '\u0127' then result.Append("\uE040\uE20F") |> ignore
+            elif isDistinct c then
+                result.Append('\uE040').Append(char (0xE200 + int c - 0x2100)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
+// UCA 4.0 expands kana ligatures and folds the small katakana extension
+// before ordinary kana and accent folding.
+let private foldLegacyKanaForms (value: string) =
+    let ordinary = "クシストヌハヒフヘホムラリルレロ"
+    if not (value |> Seq.exists (fun c -> c = 'ゟ' || c = 'ヿ' || (c >= '\u31F0' && c <= '\u31FF'))) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            match c with
+            | 'ゟ' -> result.Append("より") |> ignore
+            | 'ヿ' -> result.Append("コト") |> ignore
+            | c when c >= '\u31F0' && c <= '\u31FF' -> result.Append(ordinary.[int c - 0x31F0]) |> ignore
+            | c -> result.Append(c) |> ignore
+        result.ToString()
+
+// ICU merges these Bopomofo forms with older letters; MySQL's legacy
+// collation keeps them at distinct primary weights.
+let private foldLegacyBopomofoForms (value: string) =
+    if not (value |> Seq.exists (fun c -> c = '\uE060' || c = 'ㄮ' || c = 'ㆻ')) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            match c with
+            | '\uE060' -> result.Append("\uE060\uE060") |> ignore
+            | 'ㄮ' -> result.Append("\uE060\uE061") |> ignore
+            | 'ㆻ' -> result.Append("\uE060\uE062") |> ignore
+            | c -> result.Append(c) |> ignore
+        result.ToString()
+
+// Later BMP compatibility ideographs receive implicit primary weights in
+// MySQL's legacy UCA rather than the NFKC weights used by ICU.
+let private foldLegacyCompatibilityIdeographs (value: string) =
+    let isDistinct c =
+        c = '\uFA2E' || c = '\uFA2F'
+        || (c >= '\uFA6B' && c <= '\uFA6D')
+        || (c >= '\uFA70' && c <= '\uFAD9')
+    if not (value |> Seq.exists (fun c -> c = '\uE070' || isDistinct c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = '\uE070' then result.Append("\uE070\uE070") |> ignore
+            elif isDistinct c then
+                result.Append('\uE070').Append(char (0xE300 + int c - 0xFA00)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
+// MySQL's UCA 4.0 utf8mb4 collation gives every supplementary scalar the
+// same fallback primary weight, including emoji and CJK extensions.
+let private foldLegacySupplementary (value: string) =
+    if not (value |> Seq.exists (fun c -> c = '\uE090' || Char.IsHighSurrogate c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        let mutable index = 0
+        while index < value.Length do
+            let c = value.[index]
+            if c = '\uE090' then result.Append("\uE090\uE090") |> ignore
+            elif Char.IsHighSurrogate c && index + 1 < value.Length && Char.IsLowSurrogate value.[index + 1] then
+                result.Append("\uE090\uE091") |> ignore
+                index <- index + 1
+            else result.Append(c) |> ignore
+            index <- index + 1
         result.ToString()
 
 // UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
@@ -310,8 +417,14 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->
             value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
-            |> foldCjkQuoteForms |> foldUnicode520MongolianSeparator |> foldUnicode520Jamo
-        | "utf8mb4_unicode_ci" -> value |> foldCjkPunctuationForms false |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
+            |> foldCjkQuoteForms |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
+        | "utf8mb4_unicode_ci" ->
+            value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
+                  |> foldLegacyKanaForms |> foldLegacyBopomofoForms
+                  |> foldLegacyCompatibilityIdeographs
+                  |> foldLegacySupplementary
+                  |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
+                  |> foldLegacyUnicodeJamo
         | _ -> value
 
     let primaryText (s: string) = trim s |> foldText
