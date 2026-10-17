@@ -189,6 +189,18 @@ together; changing only the side calculation inside fsdb's angle sum would
 still be a different algorithm. The standalone-hole/combined-polygon results
 below also require validating polygon composition after a ring-level port.
 
+The [winding base implementation](https://codebrowser.dev/boost/boost/libs/geometry/include/boost/geometry/strategies/spherical/point_in_poly_winding.hpp.html)
+checks aligned endpoints and meridian segments before counting crossings.
+It gives a crossing at an endpoint a signed count of one, an interior
+longitude crossing a signed count of two, and keeps separate ordinary and
+antipodal counts for pole-wrap decisions. Its aligned-endpoint side check
+constructs a short east/west segment before applying the geographic azimuth
+strategy. A direct port therefore needs those count and touch states as well
+as the side formula; merely replacing fsdb's sampled arc angles with one
+side test would miss the endpoint and pole cases. This is the upstream Boost
+implementation, not yet a proof of which branch of MySQL's full polygon
+relation produces the observed near-polar combined-ring result.
+
 The maintained 412-line oracle now records `ST_Distance` alongside each
 mismatch's relation and intersection geometry. MySQL and fsdb return zero
 distance for all 12 mismatches. In the near-polar case, MySQL still reports
