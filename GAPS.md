@@ -877,7 +877,9 @@ An audited fourth physical source after that view can be optional under
 both retain MySQL's matched-target affected counts. A [fifth right-preserving
 physical source](torture/findings/2026-10-15-nested-joined-view-mutation-source.md)
 also keeps the view and optional targets writable when matched, or updates
-itself alone without a view match.
+itself alone without a view match. A fully matched five-source chain also
+rejects a `CASCADED CHECK OPTION` violation atomically across all four
+physical targets.
 [Contended writes across the view and outer physical targets](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#contended-multi-target-outer-writes)
 now claim every assigned table before rebasing the audited four- and
 five-source outer joins.

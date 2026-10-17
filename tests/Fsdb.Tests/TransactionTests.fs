@@ -2624,6 +2624,31 @@ let tests =
                           "the final target follows its optional join"
                   | result -> failtestf "expected optional target rows, got %A" result
               handle session "CREATE TABLE tx_read_view_fifth(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "DELETE FROM tx_read_view_other" |> ignore
+              handle session "DELETE FROM tx_read_view_last" |> ignore
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+              handle session "INSERT INTO tx_read_view_fifth VALUES(1,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let rejectedFiveSource =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_three_checked v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "RIGHT JOIN tx_read_view_fifth w ON w.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2,z.n=z.n+1,w.n=w.n+1 WHERE w.id=1"
+              match handle session rejectedFiveSource |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected five-source CHECK OPTION rejection, got %A" result
+              for table, column, expected in
+                  [ "tx_read_view_outer", "n", "0"
+                    "tx_read_view_target", "id", "1"
+                    "tx_read_view_last", "n", "0"
+                    "tx_read_view_fifth", "n", "0" ] do
+                  match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + "." + column + " survives five-source CHECK OPTION")
+                  | result -> failtestf "expected unchanged %s.%s, got %A" table column result
               let fiveSource rowId =
                   "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
                   + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "

@@ -516,6 +516,27 @@ def main():
 
                     cursor.execute("CREATE TABLE w(id INT PRIMARY KEY,n INT)")
                     five_source = extended_source + " RIGHT JOIN w ON w.id=v.id"
+                    cursor.execute("DELETE FROM y")
+                    cursor.execute("DELETE FROM z")
+                    cursor.execute("INSERT INTO y VALUES(1)")
+                    cursor.execute("INSERT INTO z VALUES(1,0)")
+                    cursor.execute("INSERT INTO w VALUES(1,0)")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    try:
+                        cursor.execute(
+                            "UPDATE x LEFT JOIN y ON y.id=x.id "
+                            "RIGHT JOIN checked v ON v.id=y.id "
+                            "LEFT JOIN z ON z.id=v.id RIGHT JOIN w ON w.id=v.id "
+                            "SET x.n=x.n+1,v.id=2,z.n=z.n+1,w.n=w.n+1 WHERE w.id=1"
+                        )
+                        raise AssertionError("five-source CHECK OPTION accepted a disappearing view row")
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                    for table, column, expected in (("x", "n", 0), ("t", "id", 1),
+                                                     ("z", "n", 0), ("w", "n", 0)):
+                        cursor.execute(f"SELECT {column} FROM {table} WHERE id=1")
+                        assert cursor.fetchone() == (expected,), (table, column)
                     for has_y, has_z in itertools.product((True, False), repeat=2):
                         cursor.execute("DELETE FROM y")
                         cursor.execute("DELETE FROM z")
@@ -702,7 +723,7 @@ def main():
                     "four- and five-source outer chains updated only matched physical targets; "
                     "contended view and outer targets waited and rebased all assignments; "
                     "a bare outer-only column waited and rebased its physical target; "
-                    "four-source CHECK OPTION rejected atomically"
+                    "four- and five-source CHECK OPTION rejected atomically"
                 )
             finally:
                 for connection in connections:

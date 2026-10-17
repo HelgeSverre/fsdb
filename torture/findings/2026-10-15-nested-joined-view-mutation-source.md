@@ -98,6 +98,12 @@ engines update that row alone. The native oracle and focused transaction
 regression check affected counts and all final rows. Wider join trees and
 additional view-security layers remain unaudited.
 
+The five-source chain also keeps `CASCADED CHECK OPTION` atomic across its
+four writable physical targets. When the view assignment would move its row
+outside the view, MySQL 8.4.11 and fsdb return 1369 and leave the view target
+and all three outer targets unchanged. The native oracle and focused
+transaction regression cover this fully matched case.
+
 ## Contended multi-target outer writes
 
 The four-source `x LEFT JOIN y RIGHT JOIN v LEFT JOIN z` UPDATE also writes
