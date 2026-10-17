@@ -131,7 +131,25 @@ def main():
                 assert run(connection, "INSERT INTO insert_on_checked(id,n) VALUES(2,7)") == 1
                 assert run(connection, "SELECT id,n FROM insert_target ORDER BY id") == ((1, 6), (2, 7))
 
-                print(f"MySQL {version}: {len(SHAPES)} composed join-view shapes matched the expected write contract")
+                for sql in [
+                    "CREATE TABLE alias_target(id INT PRIMARY KEY,n INT)",
+                    "CREATE TABLE alias_companion(id INT PRIMARY KEY,v INT)",
+                    "CREATE TABLE alias_extra(id INT PRIMARY KEY,z INT)",
+                    "INSERT INTO alias_target VALUES(1,10)",
+                    "INSERT INTO alias_companion VALUES(1,1)",
+                    "INSERT INTO alias_extra VALUES(1,1)",
+                    "CREATE VIEW alias_inner AS SELECT t.id,t.n,a.v FROM alias_target t JOIN alias_companion a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION",
+                    "CREATE VIEW alias_outer AS SELECT iv.id,iv.n,iv.v FROM alias_inner iv JOIN alias_extra a ON a.id=iv.id",
+                ]:
+                    run(connection, sql)
+                assert run(connection, "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='alias_outer'") == (("YES",),)
+                assert run(connection, "UPDATE alias_outer SET n=11 WHERE id=1") == 1
+                assert run(connection, "UPDATE alias_outer SET v=2 WHERE id=1") == 1
+                assert_error(connection, "UPDATE alias_outer SET v=12 WHERE id=1", 1369)
+                assert run(connection, "SELECT n FROM alias_target") == ((11,),)
+                assert run(connection, "SELECT v FROM alias_companion") == ((2,),)
+
+                print(f"MySQL {version}: {len(SHAPES)} composed join-view shapes and one private-alias layer matched the expected write contract")
             finally:
                 if connection:
                     connection.close()

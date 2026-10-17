@@ -1900,6 +1900,28 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                     |> List.choose FromItem.tryQualifier
                                     |> List.map _.ToLowerInvariant()
                                     |> Set.ofList
+                                // Inner view aliases are private to that view. Give any
+                                // that collide with the outer FROM fresh physical names
+                                // before the joined sources are inlined.
+                                let renamedJoinAliases =
+                                    let mutable reserved =
+                                        Set.union outerQualifiers
+                                            (joinedQualifiers |> List.choose id |> List.map _.ToLowerInvariant() |> Set.ofList)
+                                    let mutable nextName = 0
+                                    let rec availableName number =
+                                        let candidate = sprintf "__fsdb_join_%d" number
+                                        if Set.contains (candidate.ToLowerInvariant()) reserved then
+                                            availableName (number + 1)
+                                        else candidate, number
+                                    joinedQualifiers
+                                    |> List.choose (function
+                                        | Some name when Set.contains (name.ToLowerInvariant()) outerQualifiers ->
+                                            let replacement, number = availableName (nextName + 1)
+                                            nextName <- number
+                                            reserved <- Set.add (replacement.ToLowerInvariant()) reserved
+                                            Some(name.ToLowerInvariant(), replacement)
+                                        | _ -> None)
+                                    |> Map.ofList
                                 let hasSubquery =
                                     Expression.exists (function
                                         | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _ -> true
@@ -1911,9 +1933,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                         || (nested.UpdateJoins |> List.exists (_.On >> hasSubquery)))
                                 let cannotInlineJoins =
                                     (joinedQualifiers
-                                     |> List.exists (function
-                                         | None -> true
-                                         | Some name -> Set.contains (name.ToLowerInvariant()) outerQualifiers))
+                                     |> List.exists Option.isNone)
                                     || (nested.UpdateJoins
                                         |> List.exists (fun join ->
                                             match join.Table with
@@ -1925,15 +1945,30 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 if cannotInlineJoins then
                                     None
                                 else
+                                    let remapQualifier name =
+                                        if equalsIgnoreCase name baseQualifier then qualifier
+                                        else Map.tryFind (name.ToLowerInvariant()) renamedJoinAliases |> Option.defaultValue name
+
                                     let qualify =
                                         Expression.rewrite (function
                                             | Col column -> Some(QualifiedCol(qualifier, column))
-                                            | QualifiedCol(source, column) when equalsIgnoreCase source baseQualifier ->
-                                                Some(QualifiedCol(qualifier, column))
+                                            | QualifiedCol(source, column) ->
+                                                let renamed = remapQualifier source
+                                                if equalsIgnoreCase renamed source then None
+                                                else Some(QualifiedCol(renamed, column))
                                             | _ -> None)
 
-                                    let remapQualifier name =
-                                        if equalsIgnoreCase name baseQualifier then qualifier else name
+                                    let renameJoinedSource = function
+                                        | FromTable table ->
+                                            let name = table.Alias |> Option.defaultValue table.Table
+                                            match Map.tryFind (name.ToLowerInvariant()) renamedJoinAliases with
+                                            | Some renamed -> FromTable { table with Alias = Some renamed }
+                                            | None -> FromTable table
+                                        | FromSubquery(body, alias) ->
+                                            match Map.tryFind (alias.ToLowerInvariant()) renamedJoinAliases with
+                                            | Some renamed -> FromSubquery(body, renamed)
+                                            | None -> FromSubquery(body, alias)
+                                        | source -> source
 
                                     let targets =
                                         nested.Targets
@@ -1959,7 +1994,11 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                             FromTable
                                                 { nested.UpdateFrom with
                                                     Alias = Some qualifier }
-                                          JoinedSources = nested.UpdateJoins |> List.map (Join.mapConditions qualify)
+                                          JoinedSources =
+                                            nested.UpdateJoins
+                                            |> List.map (fun join ->
+                                                { Join.mapConditions qualify join with
+                                                    Table = renameJoinedSource join.Table })
                                           Qualifier = qualifier
                                           Columns = nested.OrderedColumns
                                           Expressions = nested.Expressions |> Map.map (fun _ expression -> qualify expression)

@@ -641,6 +641,36 @@ let tests =
               | other -> failtestf "expected CHECK OPTION rejection through derived layers, got %A" other
               Expect.equal (rows store "SELECT n FROM layered_target WHERE id=1") [ [ Some "11" ] ] "derived-layer rejection is atomic"
 
+          testCase "joined view layers keep their inner aliases private"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE alias_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE alias_companion(id INT PRIMARY KEY,v INT)"
+                    "CREATE TABLE alias_extra(id INT PRIMARY KEY,z INT)"
+                    "INSERT INTO alias_target VALUES(1,10)"
+                    "INSERT INTO alias_companion VALUES(1,1)"
+                    "INSERT INTO alias_extra VALUES(1,1)" ] do
+                  expectOk (run store sql) sql
+
+              expectOk
+                  (run store "CREATE VIEW alias_inner AS SELECT t.id,t.n,a.v FROM alias_target t JOIN alias_companion a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create inner joined view"
+              expectOk
+                  (run store "CREATE VIEW alias_outer AS SELECT iv.id,iv.n,iv.v FROM alias_inner iv JOIN alias_extra a ON a.id=iv.id")
+                  "create outer view reusing the hidden inner alias"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_schema='fsdb' AND table_name='alias_outer'")
+                  [ [ Some "YES" ] ]
+                  "MySQL 8.4 reports the outer view as updatable"
+              expectOk (run store "UPDATE alias_outer SET n=11 WHERE id=1") "update through alias collision"
+              expectOk (run store "UPDATE alias_outer SET v=2 WHERE id=1") "update the inner joined component"
+              match run store "UPDATE alias_outer SET v=12 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected inner CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM alias_target") [ [ Some "11" ] ] "the physical target changes"
+              Expect.equal (rows store "SELECT v FROM alias_companion") [ [ Some "2" ] ] "the rejected component write is atomic"
+
           testCase "a derived source can precede a joined writable view"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

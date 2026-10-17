@@ -26,7 +26,10 @@ newly inserted inner join cannot make the key ambiguous.
 
 The expansion is currently restricted to one joined inner view as the first
 outer source, or as the first writable source after one leading read-only
-source. Conflicting inner/outer aliases, an inner LATERAL or JSON_TABLE join,
+source. Inner join aliases that collide with outer aliases are renamed while
+inlining; a MySQL 8.4.11 oracle confirms that the outer view remains updatable,
+can write either joined component, and enforces the inner CHECK OPTION after
+the rename. An inner LATERAL or JSON_TABLE join,
 inner subqueries requiring scoped qualifier rewriting, and a LATERAL source
 whose local aliases shadow the expanded view alias remain read-only rather
 than risking a wrong write. Additional layered source orders and further
