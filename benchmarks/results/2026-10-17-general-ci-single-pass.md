@@ -17,5 +17,8 @@ baseline/baseline/candidate run produced:
 
 The checksum was 9,180,000 in every run. The result isolates key generation;
 it is not an end-to-end full-text throughput claim. A separate key-digest
-comparison matched the baseline for every BMP character, targeted private-use
-marker pairs, and 50,000 deterministic mixed strings.
+comparison using [`general-ci-key-equivalence.fsx`](../scripts/general-ci-key-equivalence.fsx)
+matched the baseline for every BMP character, targeted private-use marker
+pairs, and 50,000 deterministic mixed strings. Both Release assemblies returned
+`DAEA538291E380210E85DAD04622C1A6F68A56FEE3F24FE51825CAE3F5BB7CAC`
+on this host.
