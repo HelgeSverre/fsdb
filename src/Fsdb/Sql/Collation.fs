@@ -310,6 +310,15 @@ let private generalCjkRadicalWeight c =
 let private foldGeneralCjkRadicals (value: string) =
     foldEscapedGeneralWeights '\uE0F0' generalCjkRadicalWeight value
 
+// MySQL general_ci assigns F900-FAFF their written code-point weights.
+// ICU compatibility decomposition otherwise merges these with unified Han.
+let private generalCompatibilityIdeographWeight c =
+    if c >= '\uf900' && c <= '\ufaff' then
+        ValueSome(char (0xEA00 + int c - 0xF900))
+    else ValueNone
+let private foldGeneralCompatibilityIdeographs (value: string) =
+    foldEscapedGeneralWeights '\uE0B1' generalCompatibilityIdeographWeight value
+
 // MySQL's general_ci gives these spaces and format characters separate,
 // positional weights. ICU ignores some and equates others at primary strength.
 let private generalFormatControlWeight = function
@@ -516,6 +525,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             |> foldGeneralHalfwidthMarks |> foldGeneralFormatControls
             |> foldGeneralKanaMarks |> foldGeneralCombiningAccents
             |> foldGeneralCjkRadicals |> foldGeneralKanaWeights
+            |> foldGeneralCompatibilityIdeographs
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->

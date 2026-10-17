@@ -1017,6 +1017,12 @@ The [kana-weight probe](torture/findings/2026-10-17-general-ci-kana-weights.md)
 also preserves assigned fullwidth and halfwidth kana weights; the two-column
 general-collation ngram corpus now has only four size-1 relevance differences,
 with sizes 2–10 matching all audited searches.
+The [compatibility-ideograph probe](torture/findings/2026-10-17-general-ci-compatibility-ideographs.md)
+separates U+F900–U+FAFF from unified Han in `utf8mb4_general_ci`. The maintained
+two-column corpus now matches MySQL 8.4.11 in membership and relevance for
+387 searches at each ngram size 1–10; the expanded size-1 range also matches
+across 2,832 searches. Other characters, collations, and search shapes remain
+outside these audits.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
