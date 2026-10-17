@@ -159,6 +159,18 @@ matches. The focused regression covers both sides of each boundary, including
 the earlier three-row `LIMIT 2` mismatch. Other predicates, index plans, and
 page layouts still need separate evidence.
 
+An indexed primary-key filter can also exclude a pending insert whose
+secondary ordering key falls before the selected frontier. With visible
+`(id,rank_value)` rows `(1,1),(2,2),(3,3)`, a pending `(4,0)` sorts first,
+but `WHERE id<=2 ORDER BY rank_value LIMIT 2` cannot select it. MySQL 8.4.11
+does not wait for that insert for either UPDATE or DELETE. Fsdb previously
+waited because the secondary-key claim lacked the pending row's primary key.
+The claim now carries its known primary-key components; the scheduler can
+discard a pending claim when an exact numeric indexed conjunct proves it
+cannot match. The native oracle and focused transaction regression pin the
+wait, affected count, and final rows for both verbs. Predicates that cannot
+be proven false from those keys remain conservative.
+
 An in-memory A/B/A check with 1,000 sequential inserts into a table with one
 secondary index measured warm trials around 186–205 ms on the previous and
 current revisions. The spread does not establish a precise cost difference;

@@ -2507,6 +2507,44 @@ let tests =
                       Expect.equal rows expected "short-table writer retains the selected frontier"
                   | other -> failtestf "expected secondary short-table rows, got %A" other
 
+          testCase "indexed filter excludes pending secondary key before the ordered frontier"
+          <| fun _ ->
+              for verb in [ "UPDATE"; "DELETE" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_filtered_frontier(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  handle setup "INSERT INTO tx_filtered_frontier VALUES(1,1,0),(2,2,0),(3,3,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted = handle owner "INSERT INTO tx_filtered_frontier VALUES(4,0,0)"
+                  Expect.equal inserted (Affected 1UL) "owner inserts before the ordering frontier"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let statement =
+                              (if verb = "UPDATE" then "UPDATE tx_filtered_frontier SET n=n+1"
+                               else "DELETE FROM tx_filtered_frontier")
+                              + " WHERE id<=2 ORDER BY rank_value ASC LIMIT 2"
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "filtered writer starts"
+                  let completedBeforeCommit = waiting.Wait(TimeSpan.FromMilliseconds 100.0)
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the excluded insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "filtered writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.isTrue completedBeforeCommit "MySQL does not wait for the excluded insert"
+                  Expect.equal result (Affected 2UL) "two filtered rows change"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "filtered writer commits"
+                  match handle setup "SELECT id,n FROM tx_filtered_frontier ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          if verb = "UPDATE" then
+                              [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ];
+                                [ Some "3"; Some "0" ]; [ Some "4"; Some "0" ] ]
+                          else [ [ Some "3"; Some "0" ]; [ Some "4"; Some "0" ] ]
+                      Expect.equal rows expected "the indexed filter selects only its matching rows"
+                  | other -> failtestf "expected filtered frontier rows, got %A" other
+
           testCase "equal non-unique secondary keys do not serialize inserts"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

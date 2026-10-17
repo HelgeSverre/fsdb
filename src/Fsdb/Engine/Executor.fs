@@ -29841,6 +29841,17 @@ let transactionWriteTargets
                         table.Columns
                         |> List.find (fun column -> equalsIgnoreCase column.Name name)
                         |> fun column -> column.Type)
+                let primaryColumns =
+                    Storage.orderedIndexKeyColumns table
+                    |> List.tryPick (fun (name, names) ->
+                        if equalsIgnoreCase name "PRIMARY" then Some names else None)
+                    |> Option.defaultValue []
+                let primaryKeyTypes =
+                    primaryColumns
+                    |> List.map (fun name ->
+                        table.Columns
+                        |> List.find (fun column -> equalsIgnoreCase column.Name name)
+                        |> fun column -> column.Type)
                 let directions = orderedColumns |> List.map snd
                 let comparePart left right =
                     match left, right with
@@ -29878,11 +29889,11 @@ let transactionWriteTargets
                         |> List.choose (fun index -> orderedValue table.Columns.[index] row.[index])
                     if values.Length = columnIndices.Length then Some values else None
                 let pending =
-                    Storage.activeOrderedKeyClaims store database tableRef.Table indexName keyTypes
-                    |> List.map (fun (key, claim) -> key |> List.take columnIndices.Length, claim)
+                    Storage.activeOrderedKeyClaims store database tableRef.Table indexName keyTypes primaryKeyTypes
+                    |> List.map (fun (key, primaryKey, claim) ->
+                        key |> List.take columnIndices.Length, primaryKey, claim)
                 if pending.IsEmpty then []
                 else
-                    let allKeys = pending |> List.map snd
                     let mixedDirections =
                         match directions with
                         | first :: rest -> rest |> List.exists (fun direction -> direction <> first)
@@ -29903,6 +29914,56 @@ let transactionWriteTargets
                             | Col name | QualifiedCol(_, name) ->
                                 indexedNames |> List.exists (equalsIgnoreCase name)
                             | _ -> false))
+
+                    let numericKeyFor name ordered primary =
+                        let lookup names keys =
+                            List.zip names keys
+                            |> List.tryPick (fun (column, key) ->
+                                if equalsIgnoreCase name column then
+                                    match key with OrderedNumber number -> Some(VDecimal number) | _ -> None
+                                else None)
+                        lookup (orderedColumns |> List.map fst) ordered
+                        |> Option.orElseWith (fun () ->
+                            primary |> Option.bind (lookup primaryColumns))
+
+                    let comparisonIsFalse operation comparison =
+                        match operation with
+                        | Eq -> comparison <> 0
+                        | Neq -> comparison = 0
+                        | Lt -> comparison >= 0
+                        | Lte -> comparison > 0
+                        | Gt -> comparison <= 0
+                        | Gte -> comparison < 0
+                        | _ -> false
+
+                    let excludesPending ordered primary =
+                        let numericLiteral = function
+                            | LiteralValue(VInt _ | VUInt _ | VDecimal _ as value) -> Some value
+                            | _ -> None
+                        let columnName = function
+                            | Col name -> Some name
+                            | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some name
+                            | _ -> None
+                        where
+                        |> optionalConjuncts
+                        |> List.exists (function
+                            | BinOp(operation, left, right) ->
+                                let excludes column literal reverse =
+                                    match columnName column, numericLiteral literal with
+                                    | Some name, Some bound ->
+                                        numericKeyFor name ordered primary
+                                        |> Option.exists (fun key ->
+                                            let comparison = Value.compare key bound
+                                            comparisonIsFalse operation (if reverse then -comparison else comparison))
+                                    | _ -> false
+                                excludes left right false || excludes right left true
+                            | _ -> false)
+
+                    let pending =
+                        if hasIndexedFilter then
+                            pending |> List.filter (fun (ordered, primary, _) -> not (excludesPending ordered primary))
+                        else pending
+                    let allKeys = pending |> List.map (fun (_, _, claim) -> claim)
 
                     // The audited mixed-direction order waits even beyond the visible frontier.
                     if mixedDirections || hasRuntimeEffects then allKeys
@@ -29935,7 +29996,7 @@ let transactionWriteTargets
                             let ordered = matched |> Seq.sortWith (fun left right -> compareOrdered left right directions) |> Seq.toArray
                             let frontier = ordered.[count - 1]
                             pending
-                            |> List.choose (fun (key, claim) ->
+                            |> List.choose (fun (key, _, claim) ->
                                 if compareOrdered key frontier directions < 0 then Some claim
                                 else None)
         | _ -> []

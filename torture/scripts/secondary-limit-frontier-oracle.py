@@ -51,10 +51,14 @@ def main():
                     *[(3, size) for size in (3, 4, 5, 6, 8)],
                     *[(4, size) for size in (4, 5, 6, 7, 8, 9)],
                 )
-                cases = [(limit, size, "n>=0", size < 2 * limit) for limit, size in base_cases]
-                cases += [(2, 3, "", True), (2, 3, "id<=2", False),
-                          (2, 3, "rank_value<=2", False)]
-                for limit, size, predicate, should_wait in cases:
+                cases = [(limit, size, "n>=0", size < 2 * limit, size + 1, "UPDATE")
+                         for limit, size in base_cases]
+                cases += [(2, 3, "", True, 4, "UPDATE"),
+                          (2, 3, "id<=2", False, 4, "UPDATE"),
+                          (2, 3, "rank_value<=2", False, 4, "UPDATE"),
+                          (2, 3, "id<=2", False, 0, "UPDATE"),
+                          (2, 3, "id<=2", False, 0, "DELETE")]
+                for limit, size, predicate, should_wait, inserted_rank, verb in cases:
                     waiter = connect(socket)
                     try:
                         with owner.cursor() as cursor:
@@ -62,7 +66,7 @@ def main():
                             cursor.execute("CREATE TABLE target(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))")
                             cursor.executemany("INSERT INTO target VALUES(%s,%s,0)", [(i, i) for i in range(1, size + 1)])
                             cursor.execute("BEGIN")
-                            cursor.execute("INSERT INTO target VALUES(%s,%s,0)", (size + 1, size + 1))
+                            cursor.execute("INSERT INTO target VALUES(%s,%s,0)", (size + 1, inserted_rank))
                         with waiter.cursor() as cursor:
                             cursor.execute("USE probe")
                             cursor.execute("BEGIN")
@@ -74,7 +78,8 @@ def main():
                                 with waiter.cursor() as cursor:
                                     started.set()
                                     where = f" WHERE {predicate}" if predicate else ""
-                                    cursor.execute(f"UPDATE target SET n=n+1{where} ORDER BY rank_value ASC LIMIT {limit}")
+                                    command = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
+                                    cursor.execute(f"{command}{where} ORDER BY rank_value ASC LIMIT {limit}")
                                     result["affected"] = cursor.rowcount
                                     cursor.execute("COMMIT")
                             except Exception as error:
@@ -93,9 +98,11 @@ def main():
                         with owner.cursor() as cursor:
                             cursor.execute("SELECT id,n FROM target ORDER BY id")
                             final_rows = cursor.fetchall()
-                        expected_rows = tuple((i, int(i <= limit)) for i in range(1, size + 2))
+                        expected_rows = (tuple((i, int(i <= limit)) for i in range(1, size + 2))
+                                         if verb == "UPDATE" else
+                                         tuple((i, 0) for i in range(limit + 1, size + 2)))
                         assert final_rows == expected_rows, (limit, size, predicate, final_rows)
-                        print(f"MySQL {version}: limit={limit} visible_rows={size} predicate={predicate or 'none'} beyond_frontier_wait={waited}", flush=True)
+                        print(f"MySQL {version}: {verb} limit={limit} visible_rows={size} predicate={predicate or 'none'} inserted_rank={inserted_rank} wait={waited}", flush=True)
                     finally:
                         waiter.close()
             finally:
