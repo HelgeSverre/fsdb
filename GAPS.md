@@ -1637,9 +1637,10 @@ implementation effort:
 
 2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements,
    plus [ordered `LIMIT 1` and `LIMIT 2` UPDATE and DELETE re-selection after a contended
-   first candidate stops matching or moves behind another candidate](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
-   with and without a secondary predicate index,
-   plus audited joined UPDATE and DELETE statements with named physical targets,
+   first candidate stops matching, moves behind another candidate, or is
+   deleted](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
+   with and without a secondary predicate index, plus audited joined UPDATE
+   and DELETE statements with named physical targets,
    [audited single-table updatable-view UPDATE and DELETE statements and joined-view
    UPDATE statements with one writable physical target](torture/findings/2026-10-15-view-write-rebase.md),
    and joined UPDATEs with uniquely owned bare assignments, including
@@ -1661,6 +1662,8 @@ implementation effort:
    do likewise, including uniquely owned bare assignments. Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.
+   A [pending earlier insert](torture/findings/2026-10-16-limited-ordered-write-rebase.md#open-inserted-candidate-gap)
+   still evades the ordered write's snapshot and changes the wrong row.
    Broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in

@@ -2034,6 +2034,52 @@ let tests =
                       | ResultSet(_, rows) -> Expect.equal rows expectedRows (statement + $" (indexed={indexed})")
                       | actual -> failtestf "expected a result set after %s, got %A" statement actual
 
+          testCase "limited ordered writes reselect after a contended first row is deleted"
+          <| fun _ ->
+              for limit in [ 1; 2 ] do
+                  for indexed in [ false; true ] do
+                      for verb in [ "UPDATE"; "DELETE" ] do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          let index = if indexed then ", KEY ix_n(n)" else ""
+                          handle setup ("CREATE TABLE tx_limited_deleted_candidate (id INT PRIMARY KEY,n INT" + index + ")")
+                          |> ignore
+                          let rows =
+                              [ 1 .. limit + 1 ]
+                              |> List.map (fun id -> sprintf "(%d,0)" id)
+                              |> String.concat ","
+                          handle setup ("INSERT INTO tx_limited_deleted_candidate VALUES " + rows) |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let owner, deleted = handle owner "DELETE FROM tx_limited_deleted_candidate WHERE id=1"
+                          Expect.equal deleted (Affected 1UL) "the owner deletes the first candidate"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          let action =
+                              if verb = "UPDATE" then "UPDATE tx_limited_deleted_candidate SET n=n+1"
+                              else "DELETE FROM tx_limited_deleted_candidate"
+                          let statement = sprintf "%s WHERE n>=0 ORDER BY id LIMIT %d" action limit
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes"
+                          let waiter, result = waiting.Result
+                          Expect.isTrue blocked "limited writer waits for the deleted candidate"
+                          Expect.equal result (Affected(uint64 limit)) "limited writer fills the vacated result slot"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                          let expectedRows =
+                              if verb = "UPDATE" then
+                                  [ 2 .. limit + 1 ]
+                                  |> List.map (fun id -> [ Some(string id); Some "1" ])
+                              else []
+                          match handle setup "SELECT id,n FROM tx_limited_deleted_candidate ORDER BY id" |> snd with
+                          | ResultSet(_, actual) ->
+                              Expect.equal actual expectedRows (statement + $" (indexed={indexed})")
+                          | actual -> failtestf "expected a result set after %s, got %A" statement actual
+
           testCase "an autocommit full-scan delete rechecks the row after a competing commit"
           <| fun _ ->
               for predicate, affected, remaining in

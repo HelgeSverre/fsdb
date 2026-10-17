@@ -25,7 +25,21 @@ write verb, predicate-versus-sort-key change, and index presence at both
 `LIMIT 1` and `LIMIT 2`. For the latter, a third row fills the vacated result
 slot: when the owner makes row 1 fail the predicate, the waiting write changes
 rows 2 and 3; when row 1 moves behind both in sort order, it again changes
-rows 2 and 3. MySQL 8.4.11 and the matching `TransactionTests` cases agree
-on all 16 combinations. No engine change was required. This closes these
-scheduling audits; it does not measure write throughput or establish parity
-for other limited mutation shapes.
+rows 2 and 3. A further eight cases delete the first candidate in the owner
+transaction; the waiting UPDATE or DELETE fills the vacated result slot at
+`LIMIT 1` or `LIMIT 2`, with and without a secondary predicate index. MySQL
+8.4.11 and the matching `TransactionTests` cases agree on all 24 combinations.
+No engine change was required for these row-change audits.
+
+## Open inserted-candidate gap
+
+The same oracle pins a different outcome when the owner inserts an earlier
+primary-key candidate. Starting with `(1,0),(2,0)`, the owner inserts `(0,0)`
+without committing. A second transaction runs
+`UPDATE target SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 1`. MySQL waits for
+the insert, then changes row 0, leaving `(0,1),(1,0),(2,0)`. A focused fsdb
+reproduction completed before the owner committed and changed row 1 instead,
+leaving `(0,0),(1,1),(2,0)` after both commits. Its row-only preclaim cannot
+see the pending row in its snapshot. This is an open insertion-gap scheduling
+issue; claiming every insert on the table would be a broad contention tradeoff,
+so the fix needs an ordered-key or gap-aware claim.
