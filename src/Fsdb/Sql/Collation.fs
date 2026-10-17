@@ -252,6 +252,32 @@ let private foldGeneralHalfwidthMarks (value: string) =
             | _ -> result.Append(c) |> ignore
         result.ToString()
 
+// MySQL's general_ci gives these spaces and format characters separate,
+// positional weights. ICU ignores some and equates others at primary strength.
+let private foldGeneralFormatControls (value: string) =
+    let syntheticWeight = function
+        | '\u034f' -> Some '\uE0D1'
+        | '\u00a0' -> Some '\uE0D2'
+        | '\u180e' -> Some '\uE0D3'
+        | '\u200b' -> Some '\uE0D4'
+        | '\u200c' -> Some '\uE0D5'
+        | '\u200d' -> Some '\uE0D6'
+        | '\u2060' -> Some '\uE0D7'
+        | '\u3000' -> Some '\uE0D8'
+        | '\ufe0f' -> Some '\uE0D9'
+        | _ -> None
+    let marker = '\uE0D0'
+    if not (value |> Seq.exists (fun c -> c = marker || (syntheticWeight c |> Option.isSome))) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            else
+                match syntheticWeight c with
+                | Some weight -> result.Append(marker).Append(weight) |> ignore
+                | None -> result.Append(c) |> ignore
+        result.ToString()
+
 // MySQL's legacy UCA keeps some enclosed Korean/ideograph forms distinct,
 // while expanding enclosed kana and square unit forms that ICU keeps apart.
 let private foldLegacyEnclosedCjk (value: string) =
@@ -439,7 +465,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_general_ci" ->
             value.Replace("ß", "s").Replace("ẞ", "s")
             |> foldLegacySupplementary |> foldGeneralUnicodeJamo
-            |> foldGeneralHalfwidthMarks
+            |> foldGeneralHalfwidthMarks |> foldGeneralFormatControls
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->

@@ -1000,6 +1000,10 @@ The [halfwidth voicing-mark probe](torture/findings/2026-10-17-general-ci-halfwi
 keeps mark positions in `utf8mb4_general_ci` keys; the audited two-column
 ngram corpus now matches MySQL at token sizes 6–10, while smaller sizes retain
 other collation and relevance differences.
+The [format-control probe](torture/findings/2026-10-17-general-ci-format-controls.md)
+also keeps nine audited format/space characters distinct. The corpus now
+matches at token sizes 5–10; smaller sizes and broader collation behavior
+remain open.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
