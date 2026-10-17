@@ -522,6 +522,24 @@ let tests =
               Expect.equal (search "〝") [ "3" ] "opening quote keeps its own posting"
               Expect.equal (search "〞") [ "4" ] "closing quote keeps its own posting"
 
+          testCase "general Unicode letterlike ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE letterlike_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO letterlike_docs VALUES(1,'中℁文'),(2,'中⅍文'),(3,'中ℂ文'),(4,'中ℭ文'),(5,'中Ⅎ文'),(6,'中ⅎ文'),(7,'中Ↄ文'),(8,'中ↄ文'),(9,'中Ⅰ文'),(10,'中ⅰ文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM letterlike_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "℁") [ "1" ] "care-of sign keeps its own posting"
+              Expect.equal (search "⅍") [ "2" ] "aktieselskab sign keeps its own posting"
+              Expect.equal (search "ℂ") [ "3" ] "double-struck C keeps its own posting"
+              Expect.equal (search "ℭ") [ "4" ] "black-letter C keeps its own posting"
+              Expect.equal (search "Ⅎ") [ "5" ] "turned capital F keeps its own posting"
+              Expect.equal (search "ⅎ") [ "6" ] "turned small F keeps its own posting"
+              Expect.equal (search "Ↄ") [ "7" ] "reversed capital C keeps its own posting"
+              Expect.equal (search "ↄ") [ "8" ] "reversed small C keeps its own posting"
+              Expect.equal (search "Ⅰ") [ "9"; "10" ] "Roman numeral case shares postings"
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()
