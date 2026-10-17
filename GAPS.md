@@ -358,6 +358,9 @@ BETWEEN, including complete OR branches; the narrow 1,000-row profile uses
 halfway bound at 2⁵³+1 also follows MySQL's single rounding. Fully numeric
 finite string bounds use the same cuts; malformed strings and non-finite
 range bounds still scan.
+[Indexed physical and pass-through DOUBLE columns](torture/findings/2026-10-17-correlated-physical-double-string.md)
+also use fully numeric finite correlated string bounds for equality and
+narrow ranges, leaving the original predicate to decide row membership.
 
 ## 3. Built-in functions
 
