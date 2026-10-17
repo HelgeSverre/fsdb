@@ -40,3 +40,8 @@ the lower ratio here mainly reflects a faster MySQL host control. These short
 trials confirm that WAL work is material but cannot alone explain the weak
 worker-scaling slope shared by both fsdb modes. They do not identify a safe
 queue or publication-policy change.
+
+A [same-run handler-stage profile](2026-10-17-keyless-write-handler-stage-profile.md)
+separates parse, post-parse execution, and durable acknowledgement time. It
+finds material growth outside acknowledgement at eight writers as well as in
+the acknowledgement itself.

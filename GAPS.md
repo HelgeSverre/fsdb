@@ -642,6 +642,9 @@ scaling gap.
 A [current-head repeat](benchmarks/results/2026-10-17-keyless-write-scaling-checkpoint.md)
 measures 0.39× and 0.25× at one and eight writers. Its in-memory control has
 the same weak worker-scaling slope, so WAL work alone is not the full cause.
+A [same-run stage profile](benchmarks/results/2026-10-17-keyless-write-handler-stage-profile.md)
+locates eight-writer growth in both durable acknowledgement and execution work
+outside that acknowledgement; it does not yet isolate the latter's cause.
 
 ## 8. Persistence and durability
 
