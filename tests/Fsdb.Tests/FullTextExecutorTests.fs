@@ -496,7 +496,7 @@ let tests =
           <| fun _ ->
               let store = create ()
               run store "CREATE TABLE kana_quote_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
-              run store "INSERT INTO kana_quote_docs VALUES(1,'中＂文'),(2,'中〝文'),(3,'中〞文'),(4,'中〟文'),(5,'中ｧ文'),(6,'中ｱ文'),(7,'中ァ文'),(8,'中ア文')" |> ignore
+              run store "INSERT INTO kana_quote_docs VALUES(1,'中＂文'),(2,'中〝文'),(3,'中〞文'),(4,'中〟文'),(5,'中ｧ文'),(6,'中ｱ文'),(7,'中ァ文'),(8,'中ア文'),(9,'中‘文'),(10,'中’文'),(11,'中‚文'),(12,'中‛文'),(13,'中“文'),(14,'中”文'),(15,'中„文'),(16,'中‟文')" |> ignore
               let search term =
                   let sql = $"SELECT id FROM kana_quote_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
                   ids (run store sql)
@@ -506,6 +506,8 @@ let tests =
               Expect.equal (search "中〟") [ "4" ] "the low CJK quote keeps its own posting"
               Expect.equal (search "中ｧ") [ "5"; "6"; "7"; "8" ] "small and regular kana share a posting"
               Expect.equal (search "中ア") [ "5"; "6"; "7"; "8" ] "fullwidth kana finds the same corpus"
+              for id, quote in List.zip [ 9..16 ] [ "‘"; "’"; "‚"; "‛"; "“"; "”"; "„"; "‟" ] do
+                  Expect.equal (search ("中" + quote)) [ string id ] "each curly quote keeps its own posting"
 
           testCase "single-character ngram scores count repeated query tokens"
           <| fun _ ->

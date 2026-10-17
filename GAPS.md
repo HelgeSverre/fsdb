@@ -991,7 +991,10 @@ under both `utf8mb4_unicode_ci` and `utf8mb4_unicode_520_ci`. The full
 two-column corpus matches at token sizes 1–10 for each collation. Broader
 compatibility-ideograph searches under `utf8mb4_unicode_ci` and the full
 two-column corpus under `utf8mb4_0900_as_cs` also match the audited MySQL
-membership and relevance. Broader collation behavior and MeCab remain open.
+membership and relevance. [Curly quote forms in U+2000–U+206F](torture/findings/2026-10-17-general-punctuation-ngram.md)
+now have distinct legacy ngram keys; 426 searches per token size from 1
+through 10 match MySQL in membership and relevance. Broader collation
+behavior and MeCab remain open.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

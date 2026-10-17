@@ -172,11 +172,14 @@ let private foldSmallKana (value: string) =
             result.Append(regular value.[index]) |> ignore
         result.ToString()
 
-// ICU folds the three CJK double-quote marks into the ordinary quote. MySQL
-// keeps them at distinct primary weights in its Unicode collations.
-let private foldCjkQuoteForms (value: string) =
+// ICU folds curly and CJK quote forms into ordinary quotes. MySQL keeps each
+// form at a distinct primary weight in its Unicode collations.
+let private foldUnicodeQuoteForms (value: string) =
     let mutable first = 0
-    while first < value.Length && value.[first] <> '\uE020' && (value.[first] < '\u301D' || value.[first] > '\u301F') do
+    while first < value.Length
+          && value.[first] <> '\uE020'
+          && (value.[first] < '\u2018' || value.[first] > '\u201F')
+          && (value.[first] < '\u301D' || value.[first] > '\u301F') do
         first <- first + 1
 
     if first = value.Length then value
@@ -189,6 +192,14 @@ let private foldCjkQuoteForms (value: string) =
             | '\u301D' -> result.Append("\uE020\uE021") |> ignore
             | '\u301E' -> result.Append("\uE020\uE022") |> ignore
             | '\u301F' -> result.Append("\uE020\uE023") |> ignore
+            | '\u2018' -> result.Append("\uE020\uE024") |> ignore
+            | '\u2019' -> result.Append("\uE020\uE025") |> ignore
+            | '\u201A' -> result.Append("\uE020\uE026") |> ignore
+            | '\u201B' -> result.Append("\uE020\uE027") |> ignore
+            | '\u201C' -> result.Append("\uE020\uE028") |> ignore
+            | '\u201D' -> result.Append("\uE020\uE029") |> ignore
+            | '\u201E' -> result.Append("\uE020\uE02A") |> ignore
+            | '\u201F' -> result.Append("\uE020\uE02B") |> ignore
             | c -> result.Append(c) |> ignore
         result.ToString()
 
@@ -417,13 +428,13 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->
             value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
-            |> foldCjkQuoteForms |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
+            |> foldUnicodeQuoteForms |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
         | "utf8mb4_unicode_ci" ->
             value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms
                   |> foldLegacyCompatibilityIdeographs
                   |> foldLegacySupplementary
-                  |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
+                  |> foldKanaVariants |> foldSmallKana |> foldUnicodeQuoteForms
                   |> foldLegacyUnicodeJamo
         | _ -> value
 
