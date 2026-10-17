@@ -149,7 +149,21 @@ def main():
                 assert run(connection, "SELECT n FROM alias_target") == ((11,),)
                 assert run(connection, "SELECT v FROM alias_companion") == ((2,),)
 
-                print(f"MySQL {version}: {len(SHAPES)} composed join-view shapes and one private-alias layer matched the expected write contract")
+                for sql in [
+                    "CREATE TABLE two_source_target(id INT PRIMARY KEY,n INT)",
+                    "CREATE TABLE two_source_aux(id INT PRIMARY KEY,v INT)",
+                    "INSERT INTO two_source_target VALUES(1,10)",
+                    "INSERT INTO two_source_aux VALUES(1,1)",
+                    "CREATE VIEW two_source_inner AS SELECT t.id,t.n,a.v FROM two_source_target t JOIN two_source_aux a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION",
+                    "CREATE VIEW two_source_outer AS SELECT iv.id,iv.n,x.k AS xk,y.k AS yk FROM (SELECT 1 AS k) x JOIN (SELECT 1 AS k) y ON y.k=x.k JOIN two_source_inner iv ON iv.id=x.k AND iv.id=y.k WITH CASCADED CHECK OPTION",
+                ]:
+                    run(connection, sql)
+                assert run(connection, "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='two_source_outer'") == (("YES",),)
+                assert run(connection, "UPDATE two_source_outer SET n=11 WHERE id=1") == 1
+                assert_error(connection, "UPDATE two_source_outer SET n=0 WHERE id=1", 1369)
+                assert run(connection, "SELECT n FROM two_source_target") == ((11,),)
+
+                print(f"MySQL {version}: {len(SHAPES)} composed join-view shapes, private aliases, and two leading sources matched the expected write contract")
             finally:
                 if connection:
                     connection.close()

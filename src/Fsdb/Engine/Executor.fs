@@ -2163,8 +2163,9 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                         |> List.choose id
                     match positions, source with
                     | [], _
-                    | [ 0 ], FromTable _
-                    | [ 1 ], (FromSubquery _ | FromLateral _ | FromJsonTable _) -> false
+                    | [ 0 ], FromTable _ -> false
+                    | [ position ], (FromSubquery _ | FromLateral _ | FromJsonTable _)
+                        when InformationSchema.tryLeadingReadOnlyWritableTarget source select.Joins = Some position -> false
                     | _ -> true
 
                 if sources.Length <> sourceItems.Length || unsafeNestedShadow || unsupportedJoinedSourcePosition then
@@ -2345,6 +2346,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 | Some leadingCount when leadingCount >= 2 && leadingCount < sources.Length ->
                                     match sources.[leadingCount].Reference with
                                     | FromTable physical ->
+                                        let nestedJoins = sources.[leadingCount].JoinedSources
                                         let leadingDerived = sources |> List.take leadingCount
                                         let columnsOf qualifier =
                                             sources
@@ -2438,7 +2440,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                             let conditions = usingConditions |> List.choose id
                                             Some(
                                                 physical,
-                                                reorder rewriteSources conditions rewrittenJoins,
+                                                nestedJoins @ reorder rewriteSources conditions rewrittenJoins,
                                                 physical,
                                                 reorder id conditions authorizationJoins
                                             )

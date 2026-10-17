@@ -690,6 +690,31 @@ let tests =
               | other -> failtestf "expected CHECK OPTION rejection, got %A" other
               Expect.equal (rows store "SELECT n FROM using_target WHERE id=1") [ [ Some "11" ] ] "rejected write is atomic"
 
+          testCase "two read-only sources can precede a joined writable view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE two_source_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE two_source_aux(id INT PRIMARY KEY,v INT)"
+                    "INSERT INTO two_source_target VALUES(1,10)"
+                    "INSERT INTO two_source_aux VALUES(1,1)" ] do
+                  expectOk (run store sql) sql
+              expectOk
+                  (run store "CREATE VIEW two_source_inner AS SELECT t.id,t.n,a.v FROM two_source_target t JOIN two_source_aux a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create inner joined view"
+              expectOk
+                  (run store "CREATE VIEW two_source_outer AS SELECT iv.id,iv.n,x.k AS xk,y.k AS yk FROM (SELECT 1 AS k) x JOIN (SELECT 1 AS k) y ON y.k=x.k JOIN two_source_inner iv ON iv.id=x.k AND iv.id=y.k WITH CASCADED CHECK OPTION")
+                  "create outer view after two read-only sources"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_schema='fsdb' AND table_name='two_source_outer'")
+                  [ [ Some "YES" ] ]
+                  "MySQL 8.4 reports the outer view as updatable"
+              expectOk (run store "UPDATE two_source_outer SET n=11 WHERE id=1") "update the nested physical target"
+              match run store "UPDATE two_source_outer SET n=0 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM two_source_target") [ [ Some "11" ] ] "the rejected write is atomic"
+
           testCase "an unchecked outer join enforces only the inner view check"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

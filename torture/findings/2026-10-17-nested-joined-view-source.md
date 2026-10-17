@@ -24,12 +24,15 @@ derived source precedes the target, it moves the physical source first and
 turns the original USING or NATURAL key into a qualified ON comparison so the
 newly inserted inner join cannot make the key ambiguous.
 
-The expansion is currently restricted to one joined inner view as the first
-outer source, or as the first writable source after one leading read-only
-source. Inner join aliases that collide with outer aliases are renamed while
-inlining; a MySQL 8.4.11 oracle confirms that the outer view remains updatable,
-can write either joined component, and enforces the inner CHECK OPTION after
-the rename. An inner LATERAL or JSON_TABLE join,
+The expansion allows one joined inner view as the first outer source or as
+the first writable source after read-only derived sources. A MySQL 8.4.11
+oracle covers two leading derived sources: the outer view is updatable,
+updates the nested physical target, and rejects a CHECK OPTION violation.
+The physical target and its inner joins move before the derived sources so
+their conditions remain bound. Inner join aliases that collide with outer
+aliases are renamed while inlining; a MySQL 8.4.11 oracle confirms that the
+outer view remains updatable, can write either joined component, and enforces
+the inner CHECK OPTION after the rename. An inner LATERAL or JSON_TABLE join,
 inner subqueries requiring scoped qualifier rewriting, and a LATERAL source
 whose local aliases shadow the expanded view alias remain read-only rather
 than risking a wrong write. Additional layered source orders and further
