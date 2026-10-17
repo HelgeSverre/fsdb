@@ -1590,6 +1590,18 @@ let tests =
                         Expect.isFalse (col.Equals left right) (left + " differs from " + right)
                     Expect.isFalse (col.Equals "❶" "\uE0B7\uF276") "literal marker cannot alias a dingbat"
 
+                testCase "Japanese kana-sensitive collation distinguishes hiragana from katakana"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_ja_0900_as_cs_ks" |> Option.get
+                    for left, right in [ "こ", "コ"; "は", "ハ"; "ぱ", "パ" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "ngram keys retain kana script"
+                    Expect.isTrue (col.Equals "カ" "ｶ") "unvoiced katakana width still folds"
+                    Expect.equal (col.KeyOf "カ") (col.KeyOf "ｶ") "equivalent width forms share the same key"
+                    Expect.isTrue (col.Equals "が" "か\u3099") "decomposed hiragana voicing composes before script marking"
+                    Expect.equal (col.KeyOf "ぱ") (col.KeyOf "は\u309A") "decomposed semi-voicing shares the kana key"
+                    Expect.isFalse (col.Equals "こ" "こ\uE0B8") "a literal marker cannot alias hiragana"
+
                 testCase "utf8mb4_general_ci retains decomposed combining accents"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
