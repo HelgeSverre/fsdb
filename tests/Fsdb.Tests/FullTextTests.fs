@@ -275,6 +275,20 @@ let tests =
               Expect.equal (radicalScores |> Map.keys |> Seq.toList) [ 1 ] "radical query has its own posting"
               closeTo 0.3624762296676636 radicalScores.[1] "radical relevance matches MySQL"
 
+          testCase "general Unicode size-2 ngrams retain a decomposed accent"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index =
+                  buildIndexWithDocumentSettings rules collation
+                      [ 1, rules, [ "生e\u0301日"; "组合" ]
+                        2, rules, [ "生日快乐"; "祝福" ]
+                        3, rules, [ "日本語日本語"; "東京" ]
+                        4, rules, [ "中文中文"; "学校" ] ]
+              for query, expected in [ "日", []; "生 日", []; "\u0301日", [ 1 ]; "生e\u0301日", [ 1 ] ] do
+                  for scores in [ naturalScores index query; booleanScores index query; expansionScores index query ] do
+                      Expect.equal (scores |> Map.keys |> Seq.toList) expected (sprintf "MySQL search for %A" query)
+
           testCase "boolean ngram terms retain Unicode number characters"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }

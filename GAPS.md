@@ -1010,6 +1010,9 @@ keeps combining voicing marks distinct from precomposed kana under
 The [radical-weight probe](torture/findings/2026-10-17-general-ci-radical-weights.md)
 also preserves the distinct primary weights of assigned CJK radicals; the
 audited general-collation corpus now matches at ngram sizes 3–10.
+The [combining-accent probe](torture/findings/2026-10-17-general-ci-combining-accents.md)
+keeps decomposed accents in positional keys and removes the audited size-2
+short Boolean false positives; kana forms and query expansion remain open.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
