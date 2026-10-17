@@ -996,6 +996,10 @@ broader `general_ci` ngram and relevance differences remain.
 The [general-collation Jamo probe](torture/findings/2026-10-17-general-ci-jamo-ngram.md)
 also preserves conjoining Jamo's distinct weights without equating
 compatibility Jamo, resolving the audited size-5 Boolean short-term mismatch.
+The [halfwidth voicing-mark probe](torture/findings/2026-10-17-general-ci-halfwidth-marks.md)
+keeps mark positions in `utf8mb4_general_ci` keys; the audited two-column
+ngram corpus now matches MySQL at token sizes 6–10, while smaller sizes retain
+other collation and relevance differences.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

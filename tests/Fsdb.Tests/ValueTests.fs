@@ -1482,6 +1482,14 @@ let tests =
                     Expect.notEqual (col.KeyOf "하") (col.KeyOf "ㅎㅏ") "index keys preserve the distinction"
                     Expect.notEqual (col.HashOf "하") (col.HashOf "ㅎㅏ") "hash keys preserve the distinction"
 
+                testCase "utf8mb4_general_ci keeps halfwidth voicing marks in sequence keys"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in [ "ﾟﾋ", "ﾋﾟ"; "ﾞﾋ", "ﾋﾞ"; "ﾊﾟ", "ﾊ"; "ﾊﾞ", "ﾊﾟ"; "ﾟ", "゚" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the voicing mark"
+                    Expect.isFalse (col.Equals "ﾟ" "\uE0C0\uE0C2") "literal marker cannot alias the mark key"
+
                 testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
                     [ "utf8mb4_0900_ai_ci", true
