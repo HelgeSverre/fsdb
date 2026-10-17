@@ -874,9 +874,13 @@ changes atomically. A later right-preserving joined view also stays writable
 after a preceding LEFT JOIN, including when its companion row is absent.
 An audited fourth physical source after that view can be optional under
 `LEFT JOIN`, or preserve its own row under `RIGHT JOIN` when the view is absent;
-both retain MySQL's matched-target affected counts.
+both retain MySQL's matched-target affected counts. A [fifth right-preserving
+physical source](torture/findings/2026-10-15-nested-joined-view-mutation-source.md)
+also keeps the view and optional targets writable when matched, or updates
+itself alone without a view match.
 [Contended writes across the view and outer physical targets](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#contended-multi-target-outer-writes)
-now claim every assigned table before rebasing the four-source outer join.
+now claim every assigned table before rebasing the audited four- and
+five-source outer joins.
 Other wider outer-join trees, multi-target shapes, and broader security-layer
 combinations remain open.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288

@@ -514,6 +514,86 @@ def main():
                         cursor.execute("SELECT n FROM z WHERE id=1")
                         assert cursor.fetchall() == (((1,),) if has_z else ()), (has_y, has_z)
 
+                    cursor.execute("CREATE TABLE w(id INT PRIMARY KEY,n INT)")
+                    five_source = extended_source + " RIGHT JOIN w ON w.id=v.id"
+                    for has_y, has_z in itertools.product((True, False), repeat=2):
+                        cursor.execute("DELETE FROM y")
+                        cursor.execute("DELETE FROM z")
+                        cursor.execute("DELETE FROM w")
+                        if has_y:
+                            cursor.execute("INSERT INTO y VALUES(1)")
+                        if has_z:
+                            cursor.execute("INSERT INTO z VALUES(1,0)")
+                        cursor.execute("INSERT INTO w VALUES(1,0)")
+                        cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                        cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                        cursor.execute(
+                            "UPDATE " + five_source
+                            + " SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1,w.n=w.n+1 WHERE w.id=1"
+                        )
+                        assert cursor.rowcount == 2 + int(has_y) + int(has_z), (has_y, has_z, cursor.rowcount)
+                        for table, expected in (("x", int(has_y)), ("t", 1), ("w", 1)):
+                            cursor.execute(f"SELECT n FROM {table} WHERE id=1")
+                            assert cursor.fetchone() == (expected,), (has_y, has_z, table)
+                        cursor.execute("SELECT n FROM z WHERE id=1")
+                        assert cursor.fetchall() == (((1,),) if has_z else ()), (has_y, has_z)
+
+                    cursor.execute("DELETE FROM w")
+                    cursor.execute("INSERT INTO w VALUES(99,0)")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE " + five_source
+                        + " SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1,w.n=w.n+1 WHERE w.id=99"
+                    )
+                    assert cursor.rowcount == 1, "the fifth right join preserves w alone"
+                    for table, row_id, expected in (("x", 1, 0), ("t", 1, 0), ("w", 99, 1)):
+                        cursor.execute(f"SELECT n FROM {table} WHERE id={row_id}")
+                        assert cursor.fetchone() == (expected,), table
+
+                    cursor.execute("DELETE FROM y")
+                    cursor.execute("DELETE FROM z")
+                    cursor.execute("DELETE FROM w")
+                    cursor.execute("INSERT INTO y VALUES(1)")
+                    cursor.execute("INSERT INTO z VALUES(1,0)")
+                    cursor.execute("INSERT INTO w VALUES(1,0)")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    with owner.cursor() as owner_cursor:
+                        owner_cursor.execute("BEGIN")
+                        owner_cursor.execute("UPDATE w SET n=10 WHERE id=1")
+                    started = threading.Event()
+                    finished = threading.Event()
+                    outcome = {}
+
+                    def waiting_five_source_update():
+                        try:
+                            with waiter.cursor() as waiting_cursor:
+                                waiting_cursor.execute("BEGIN")
+                                started.set()
+                                waiting_cursor.execute(
+                                    "UPDATE " + five_source
+                                    + " SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1,w.n=w.n+1 WHERE w.id=1"
+                                )
+                                outcome["affected"] = waiting_cursor.rowcount
+                                waiting_cursor.execute("COMMIT")
+                        except Exception as error:
+                            outcome["error"] = error
+                        finally:
+                            finished.set()
+
+                    thread = threading.Thread(target=waiting_five_source_update, daemon=True)
+                    thread.start()
+                    assert started.wait(2), "five-source writer starts"
+                    assert not finished.wait(0.2), "fifth target blocks the joined write"
+                    owner.commit()
+                    assert finished.wait(5), "five-source writer resumes"
+                    thread.join()
+                    assert outcome == {"affected": 4}, outcome
+                    for table, expected in (("x", 1), ("t", 1), ("z", 1), ("w", 11)):
+                        cursor.execute(f"SELECT n FROM {table} WHERE id=1")
+                        assert cursor.fetchone() == (expected,), table
+
                     for held_target in ("t", "x", "z"):
                         cursor.execute("DELETE FROM y")
                         cursor.execute("DELETE FROM z")
@@ -619,8 +699,8 @@ def main():
                     "third-position read grants were enforced; "
                     "two-target writes rebased and kept caller/definer grants separate; "
                     "disjoint rows did not wait; three-source outer joins preserved both left- and right-hand targets; "
-                    "four-source right/left and right/right chains updated only matched physical targets; "
-                    "contended view and outer targets waited and rebased all three assignments; "
+                    "four- and five-source outer chains updated only matched physical targets; "
+                    "contended view and outer targets waited and rebased all assignments; "
                     "a bare outer-only column waited and rebased its physical target; "
                     "four-source CHECK OPTION rejected atomically"
                 )

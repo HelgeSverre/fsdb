@@ -2623,6 +2623,89 @@ let tests =
                       Expect.equal rows (if hasLast then [ [ Some "1" ] ] else [])
                           "the final target follows its optional join"
                   | result -> failtestf "expected optional target rows, got %A" result
+              handle session "CREATE TABLE tx_read_view_fifth(id INT PRIMARY KEY,n INT)" |> ignore
+              let fiveSource rowId =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "RIGHT JOIN tx_read_view_fifth w ON w.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1,w.n=w.n+1 "
+                  + sprintf "WHERE w.id=%d" rowId
+              for hasIntermediate, hasLast in [ true, true; true, false; false, true; false, false ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  handle session "DELETE FROM tx_read_view_fifth" |> ignore
+                  if hasIntermediate then
+                      handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  if hasLast then
+                      handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  handle session "INSERT INTO tx_read_view_fifth VALUES(1,0)" |> ignore
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let expectedCount = 2 + countIf hasIntermediate + countIf hasLast
+                  Expect.equal (handle session (fiveSource 1) |> snd) (Affected(uint64 expectedCount))
+                      "the fifth right join updates its matched physical targets"
+                  for table, expected in
+                      [ "tx_read_view_outer", countIf hasIntermediate
+                        "tx_read_view_target", 1
+                        "tx_read_view_fifth", 1 ] do
+                      match handle session (sprintf "SELECT n FROM %s WHERE id=1" table) |> snd with
+                      | ResultSet(_, [ [ Some actual ] ]) ->
+                          Expect.equal actual (string expected) (table + " follows the five-source join")
+                      | result -> failtestf "expected five-source result for %s, got %A" table result
+                  match handle session "SELECT n FROM tx_read_view_last WHERE id=1" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows (if hasLast then [ [ Some "1" ] ] else [])
+                          "the optional target remains nullable in the five-source join"
+                  | result -> failtestf "expected optional five-source rows, got %A" result
+              handle session "DELETE FROM tx_read_view_fifth" |> ignore
+              handle session "INSERT INTO tx_read_view_fifth VALUES(99,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              Expect.equal (handle session (fiveSource 99) |> snd) (Affected 1UL)
+                  "the fifth right join preserves its row without a view match"
+              for table, rowId, expected in
+                  [ "tx_read_view_outer", 1, "0"
+                    "tx_read_view_target", 1, "0"
+                    "tx_read_view_fifth", 99, "1" ] do
+                  match handle session (sprintf "SELECT n FROM %s WHERE id=%d" table rowId) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + " preserves unmatched five-source writes")
+                  | result -> failtestf "expected unmatched five-source row from %s, got %A" table result
+              handle session "DELETE FROM tx_read_view_other" |> ignore
+              handle session "DELETE FROM tx_read_view_last" |> ignore
+              handle session "DELETE FROM tx_read_view_fifth" |> ignore
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+              handle session "INSERT INTO tx_read_view_fifth VALUES(1,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, held = handle owner "UPDATE tx_read_view_fifth SET n=10 WHERE id=1"
+              Expect.equal held (Affected 1UL) "owner holds the fifth target"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              use fifthStarted = new Threading.ManualResetEventSlim(false)
+              let fifthWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      fifthStarted.Set()
+                      handle waiter (fiveSource 1))
+              Expect.isTrue (fifthStarted.Wait(TimeSpan.FromSeconds 1.0)) "five-source writer starts"
+              Expect.isFalse (fifthWaiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  "the fifth target blocks the joined write"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "fifth target owner commits"
+              Expect.isTrue (fifthWaiting.Wait(TimeSpan.FromSeconds 5.0)) "five-source writer resumes"
+              let waiter, result = fifthWaiting.Result
+              Expect.equal result (Affected 4UL) "all four physical targets update after the fifth-target wait"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "five-source writer commits"
+              for table, expected in
+                  [ "tx_read_view_outer", "1"
+                    "tx_read_view_target", "1"
+                    "tx_read_view_last", "1"
+                    "tx_read_view_fifth", "11" ] do
+                  match handle session (sprintf "SELECT n FROM %s WHERE id=1" table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + " rebases after the fifth-target wait")
+                  | result -> failtestf "expected rebased five-source row from %s, got %A" table result
               for heldTable in [ "tx_read_view_target"; "tx_read_view_outer"; "tx_read_view_last" ] do
                   handle session "DELETE FROM tx_read_view_other" |> ignore
                   handle session "DELETE FROM tx_read_view_last" |> ignore

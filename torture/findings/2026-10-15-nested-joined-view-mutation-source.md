@@ -87,8 +87,16 @@ updates one to three physical rows accordingly: the view's target always,
 `x` only when `y` matches, and `z` only when it matches. With `RIGHT JOIN z`
 and no matching view row, MySQL updates only `z`. The focused transaction
 regression checks the same affected counts and stored rows. Fsdb already
-matched these cases; no executor change was needed. Other wider outer-join
-trees remain unaudited.
+matched these cases; no executor change was needed.
+
+The chain can also end with a fifth, right-preserving physical table `w`:
+`x LEFT JOIN y RIGHT JOIN v LEFT JOIN z RIGHT JOIN w`. MySQL 8.4.11 and fsdb
+agree for all four presence combinations of `y` and `z`: `w` and the view's
+physical target update, `x` updates only when `y` matches, and `z` updates
+only when its optional row exists. With only an unmatched `w` row, both
+engines update that row alone. The native oracle and focused transaction
+regression check affected counts and all final rows. Wider join trees and
+additional view-security layers remain unaudited.
 
 ## Contended multi-target outer writes
 
@@ -116,3 +124,9 @@ The same four-source right/left chain preserves statement atomicity when its
 joined view has `CASCADED CHECK OPTION`: assigning an `id` that removes the
 view row yields MySQL error 1369, and neither outer physical target changes.
 Fsdb matches the error and all three unchanged rows in the focused regression.
+
+In the five-source chain, an owner holding `w.n=10` makes the four-target
+joined UPDATE wait. After the owner commits, MySQL and fsdb each report four
+affected rows: `w.n` becomes 11, while `x.n`, the view target's `n`, and
+`z.n` become 1. This confirms that the additional right-preserving target
+participates in the same pre-write claim and rebase path.
