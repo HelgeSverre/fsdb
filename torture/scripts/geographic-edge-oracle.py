@@ -147,9 +147,13 @@ def main():
                 cursor.execute(
                     f"SELECT ST_Within(ST_StartPoint({shape}),{area}),"
                     f"ST_Within(ST_EndPoint({shape}),{area}),"
-                    f"ST_AsText(ST_Intersection({shape},{area}))"
+                    f"ST_AsText(ST_Intersection({shape},{area})),"
+                    f"ST_Distance({shape},{area})"
                 )
-                print("MySQL intersection", cursor.fetchone())
+                print("MySQL endpoint/intersection/distance", cursor.fetchone())
+            with fsdb_connection.cursor() as cursor:
+                cursor.execute(f"SELECT ST_Distance({shape},{area})")
+                print("fsdb distance", cursor.fetchone())
         hole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,3 1,3 3,1 3,1 1))"
         point_count = 0
         point_mismatches = []

@@ -169,6 +169,27 @@ corpus. A local coordinate exception would fit the sample but would not
 explain MySQL's overlay and relation behavior, so the point remains an
 explicit open spatial edge case.
 
+## Geographic strategy follow-up
+
+The [MySQL 8.4.11 intersects functor](https://dev.mysql.com/doc/dev/mysql-server/8.4.11/intersects__functor_8h_source.html)
+declares Boost's `geographic_winding` strategy for point/area relations and
+`geographic_segments` for line/area relations. The
+[Boost geographic winding implementation](https://codebrowser.dev/boost/boost/libs/geometry/include/boost/geometry/strategies/geographic/point_in_poly_winding.hpp.html)
+uses a longitude-crossing winding counter with an Andoyer-azimuth geographic
+side strategy, rather than the sampled spherical-angle sum in fsdb's
+`geographicRingContains`. This difference is a plausible cause of the
+latitude-sensitive point result, but the current evidence does not prove it
+explains the line relations too.
+
+The maintained 412-line oracle now records `ST_Distance` alongside each
+mismatch's relation and intersection geometry. MySQL and fsdb return zero
+distance for all 12 mismatches. In the near-polar case, MySQL still reports
+`ST_Intersects=0` while returning both zero distance and an intersection
+point. Distance and overlay output therefore cannot safely substitute for
+MySQL's relation strategy. The next candidate fix should reproduce the
+geographic winding and segment-relation decisions, then pass the entire
+line/point corpus; changing only a tolerance or sampled step is unsupported.
+
 ## Near-machine-precision hole-edge offsets
 
 A separate MySQL 8.4.11 probe placed `LINESTRING(1.5 y,3.0 y)` beside the
