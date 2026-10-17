@@ -15864,6 +15864,40 @@ and private tryMaterializedCorrelatedLookup
                     let seen = HashSet<Value[]>(HashIdentity.Reference)
                     groups |> List.collect id |> List.filter seen.Add)
 
+            let expressionEqualityCandidates indexable lookup acceptsEqualityBound acceptsInBound predicate =
+                let candidate indexed bound =
+                    if not (indexable indexed) then None
+                    else
+                        tryCorrelatedProbeValue probeSource context bound
+                        |> Option.bind (fun value ->
+                            if acceptsEqualityBound value then
+                                lookup indexed |> Option.bind (fun keyLookup -> keyLookup [ value ])
+                            else None)
+
+                let inCandidate indexed bounds =
+                    if not (indexable indexed) then None
+                    else
+                        let boundValue = function
+                            | Cast(LiteralValue VNull, _) -> Some VNull
+                            | expression -> tryCorrelatedProbeValue probeSource context expression
+                        bounds
+                        |> List.map boundValue
+                        |> tryAllSome
+                        |> Option.bind (fun values ->
+                            if values |> List.forall acceptsInBound then
+                                lookup indexed
+                                |> Option.bind (fun keyLookup -> unionExpressionLookupCandidates keyLookup values)
+                            else None)
+
+                predicate
+                |> optionalConjuncts
+                |> List.choose (function
+                    | BinOp(Eq, left, right) ->
+                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | In(indexed, bounds) -> inCandidate indexed bounds
+                    | _ -> None)
+                |> intersectSharedRows
+
             // Integer arithmetic needs an exact result domain before its
             // signed and unsigned values can share one equality key.
             let rec integerKeyExpression = function
@@ -15916,40 +15950,10 @@ and private tryMaterializedCorrelatedLookup
                     hasInnerColumn && not alreadyIndexed
                     && integerKeyExpression indexed && rowLocalExpression indexed
 
-                let candidate indexed bound =
-                    if indexable indexed then
-                        tryCorrelatedProbeValue probeSource context bound
-                        |> Option.bind (fun value ->
-                            integerExpressionLookup indexed
-                            |> Option.bind (fun lookup -> lookup [ value ]))
-                    else
-                        None
-
-                let inCandidate indexed bounds =
-                    if not (indexable indexed) then
-                        None
-                    else
-                        let boundValue = function
-                            | Cast(LiteralValue VNull, _) -> Some VNull
-                            | expression -> tryCorrelatedProbeValue probeSource context expression
-                        bounds
-                        |> List.map boundValue
-                        |> tryAllSome
-                        |> Option.bind (fun values ->
-                            if values |> List.forall (function VNull | VInt _ | VUInt _ -> true | _ -> false) then
-                                integerExpressionLookup indexed
-                                |> Option.bind (fun lookup -> unionExpressionLookupCandidates lookup values)
-                            else
-                                None)
-
-                predicate
-                |> optionalConjuncts
-                |> List.choose (function
-                    | BinOp(Eq, left, right) ->
-                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
-                    | In(indexed, bounds) -> inCandidate indexed bounds
-                    | _ -> None)
-                |> intersectSharedRows
+                let acceptsBound = function
+                    | VNull | VInt _ | VUInt _ -> true
+                    | _ -> false
+                expressionEqualityCandidates indexable integerExpressionLookup (fun _ -> true) acceptsBound predicate
 
             // Decimal results compare exactly with decimal and integer bounds.
             // Strings and DOUBLE bounds can compare through other coercion
@@ -15975,42 +15979,10 @@ and private tryMaterializedCorrelatedLookup
                     rowLocalExpression indexed
                     && Option.isNone (tryCorrelatedInnerColumn probeSource indexed)
 
-                let candidate indexed bound =
-                    if not (indexable indexed) then
-                        None
-                    else
-                        tryCorrelatedProbeValue probeSource context bound
-                        |> Option.bind (fun value ->
-                            match value with
-                            | VNull | VDecimal _ | VInt _ | VUInt _ ->
-                                decimalLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
-                            | _ -> None)
-
-                let inCandidate indexed bounds =
-                    if not (indexable indexed) then
-                        None
-                    else
-                        let boundValue = function
-                            | Cast(LiteralValue VNull, _) -> Some VNull
-                            | expression -> tryCorrelatedProbeValue probeSource context expression
-                        bounds
-                        |> List.map boundValue
-                        |> tryAllSome
-                        |> Option.bind (fun values ->
-                            if values |> List.forall (function VNull | VDecimal _ | VInt _ | VUInt _ -> true | _ -> false) then
-                                decimalLookup indexed
-                                |> Option.bind (fun lookup -> unionExpressionLookupCandidates lookup values)
-                            else
-                                None)
-
-                predicate
-                |> optionalConjuncts
-                |> List.choose (function
-                    | BinOp(Eq, left, right) ->
-                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
-                    | In(indexed, bounds) -> inCandidate indexed bounds
-                    | _ -> None)
-                |> intersectSharedRows
+                let acceptsBound = function
+                    | VNull | VDecimal _ | VInt _ | VUInt _ -> true
+                    | _ -> false
+                expressionEqualityCandidates indexable decimalLookup acceptsBound acceptsBound predicate
 
             let finiteNumericDouble = function
                 | VDouble number when System.Double.IsFinite number -> Some number
@@ -16048,43 +16020,8 @@ and private tryMaterializedCorrelatedLookup
                     getMemoized lookups expression (fun () ->
                         buildExpressionLookup expression doubleKey probeKey)
 
-                let candidate indexed bound =
-                    if not (rowLocalExpression indexed) then
-                        None
-                    else
-                        tryCorrelatedProbeValue probeSource context bound
-                        |> Option.bind (fun value ->
-                            match value with
-                            | VNull -> doubleLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
-                            | _ when probeKey value |> Option.isSome ->
-                                doubleLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
-                            | _ -> None)
-
-                let inCandidate indexed bounds =
-                    if not (rowLocalExpression indexed) then
-                        None
-                    else
-                        let boundValue = function
-                            | Cast(LiteralValue VNull, _) -> Some VNull
-                            | expression -> tryCorrelatedProbeValue probeSource context expression
-                        bounds
-                        |> List.map boundValue
-                        |> tryAllSome
-                        |> Option.bind (fun values ->
-                            if values |> List.forall (fun value -> value = VNull || (probeKey value |> Option.isSome)) then
-                                doubleLookup indexed
-                                |> Option.bind (fun lookup -> unionExpressionLookupCandidates lookup values)
-                            else
-                                None)
-
-                predicate
-                |> optionalConjuncts
-                |> List.choose (function
-                    | BinOp(Eq, left, right) ->
-                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
-                    | In(indexed, bounds) -> inCandidate indexed bounds
-                    | _ -> None)
-                |> intersectSharedRows
+                let acceptsBound value = value = VNull || (probeKey value |> Option.isSome)
+                expressionEqualityCandidates rowLocalExpression doubleLookup acceptsBound acceptsBound predicate
 
             let doubleRangeCandidates predicate =
                 let rangeLookup expression =
