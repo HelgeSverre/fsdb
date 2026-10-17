@@ -180,6 +180,14 @@ side strategy, rather than the sampled spherical-angle sum in fsdb's
 `geographicRingContains`. This difference is a plausible cause of the
 latitude-sensitive point result, but the current evidence does not prove it
 explains the line relations too.
+The winding counter treats segments crossing the query longitude and its
+antimeridian separately, and the geographic side test compares the Andoyer
+azimuth from a segment start to the query with the azimuth along the segment.
+That side test is applied at a crossing, not at each sampled arc point. A
+replacement therefore needs the crossing/count state and azimuth side rule
+together; changing only the side calculation inside fsdb's angle sum would
+still be a different algorithm. The standalone-hole/combined-polygon results
+below also require validating polygon composition after a ring-level port.
 
 The maintained 412-line oracle now records `ST_Distance` alongside each
 mismatch's relation and intersection geometry. MySQL and fsdb return zero
