@@ -859,7 +859,10 @@ CHECK OPTION, and wait under contention. The [nested mutation oracle](torture/sc
 also covers a writable view in the second or third position of an inner UPDATE
 join; its physical row is claimed before the statement, and outer-table read
 grants still apply. Uniquely owned bare view-target assignments also work;
-ambiguous bare columns return 1052. Wider join shapes, multi-target writes, and
+ambiguous bare columns return 1052. [Audited two-target UPDATEs](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#a-physical-target-beside-the-writable-view)
+write a separate physical join source beside the view, wait and rebase under
+contention, enforce CHECK OPTION atomically, and keep caller and layered
+definer grants separate. Wider join shapes, other multi-target writes, and
 broader security-layer combinations remain open.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
 before a local upload or server-side file read; ordinary inserts remain

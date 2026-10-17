@@ -138,6 +138,112 @@ def main():
                 with reader.cursor() as cursor:
                     cursor.execute("ALTER TABLE x ADD COLUMN n INT DEFAULT 0")
                     for source in (
+                        "x JOIN v ON x.id=v.id",
+                        "v JOIN x ON x.id=v.id",
+                        "x JOIN y ON y.id=x.id JOIN v ON v.id=y.id",
+                    ):
+                        cursor.execute("UPDATE x SET n=0")
+                        cursor.execute("UPDATE t SET n=2 WHERE id=1")
+                        cursor.execute("UPDATE " + source + " SET x.n=x.n+1 WHERE v.id=1")
+                        assert cursor.rowcount == 1, source
+                        cursor.execute("SELECT n FROM x WHERE id=1")
+                        assert cursor.fetchone() == (1,), source
+                        cursor.execute("SELECT n FROM t WHERE id=1")
+                        assert cursor.fetchone() == (2,), source
+                        cursor.execute("UPDATE " + source + " SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1")
+                        assert cursor.rowcount == 2, source
+                        cursor.execute("SELECT n FROM x WHERE id=1")
+                        assert cursor.fetchone() == (2,), source
+                        cursor.execute("SELECT n FROM t WHERE id=1")
+                        assert cursor.fetchone() == (3,), source
+                    with owner.cursor() as owner_cursor:
+                        owner_cursor.execute("BEGIN")
+                        owner_cursor.execute("UPDATE t SET n=n+1 WHERE id=1")
+                    multi_started = threading.Event()
+                    multi_finished = threading.Event()
+                    multi_outcome = {}
+
+                    def waiting_multi_target():
+                        try:
+                            with waiter.cursor() as waiting_cursor:
+                                waiting_cursor.execute("BEGIN")
+                                multi_started.set()
+                                waiting_cursor.execute(
+                                    "UPDATE x JOIN v ON x.id=v.id "
+                                    "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+                                )
+                                multi_outcome["affected"] = waiting_cursor.rowcount
+                                waiting_cursor.execute("COMMIT")
+                        except Exception as error:
+                            multi_outcome["error"] = error
+                        finally:
+                            multi_finished.set()
+
+                    multi_thread = threading.Thread(target=waiting_multi_target, daemon=True)
+                    multi_thread.start()
+                    assert multi_started.wait(2), "multi-target UPDATE did not start"
+                    assert not multi_finished.wait(0.2), "multi-target UPDATE did not wait"
+                    owner.commit()
+                    assert multi_finished.wait(5), "multi-target UPDATE did not resume"
+                    multi_thread.join()
+                    assert multi_outcome == {"affected": 2}, multi_outcome
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (3,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (5,)
+                    try:
+                        cursor.execute(
+                            "UPDATE x JOIN checked ON x.id=checked.id "
+                            "SET x.n=x.n+1,checked.id=2 WHERE checked.id=1"
+                        )
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error.args
+                    else:
+                        raise AssertionError("multi-target CHECK OPTION should reject the write")
+                    cursor.execute("SELECT id,n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (1, 3)
+                    cursor.execute("SELECT id,n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (1, 5)
+                    cursor.execute("CREATE USER 'limited_view_definer'@'localhost'")
+                    cursor.execute("GRANT SELECT,UPDATE ON probe.t TO 'limited_view_definer'@'localhost'")
+                    cursor.execute("GRANT SELECT ON probe.l TO 'limited_view_definer'@'localhost'")
+                    cursor.execute(
+                        "CREATE DEFINER='limited_view_definer'@'localhost' SQL SECURITY DEFINER "
+                        "VIEW limited_v AS SELECT t.id,t.n FROM t JOIN l ON l.id=t.id"
+                    )
+                    cursor.execute(
+                        "UPDATE x JOIN limited_v ON x.id=limited_v.id "
+                        "SET x.n=x.n+1,limited_v.n=limited_v.n+1 WHERE limited_v.id=1"
+                    )
+                    assert cursor.rowcount == 2
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (4,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (6,)
+                    cursor.execute("ALTER TABLE x ADD COLUMN who VARCHAR(100)")
+                    cursor.execute(
+                        "UPDATE x JOIN limited_v ON x.id=limited_v.id "
+                        "SET x.who=CURRENT_USER(),limited_v.n=limited_v.n+1 WHERE limited_v.id=1"
+                    )
+                    cursor.execute("SELECT who FROM x WHERE id=1")
+                    assert cursor.fetchone() == ("root@localhost",)
+                    cursor.execute("UPDATE t SET n=6 WHERE id=1")
+                    cursor.execute("CREATE USER 'outer_view_definer'@'localhost'")
+                    cursor.execute("GRANT SELECT,UPDATE ON probe.limited_v TO 'outer_view_definer'@'localhost'")
+                    cursor.execute(
+                        "CREATE DEFINER='outer_view_definer'@'localhost' SQL SECURITY DEFINER "
+                        "VIEW outer_v AS SELECT id,n FROM limited_v"
+                    )
+                    cursor.execute(
+                        "UPDATE x JOIN outer_v ON x.id=outer_v.id "
+                        "SET x.n=x.n+1,outer_v.n=outer_v.n+1 WHERE outer_v.id=1"
+                    )
+                    assert cursor.rowcount == 2
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (5,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (7,)
+                    for source in (
                         "v JOIN x ON x.id=v.id",
                         "x JOIN v ON x.id=v.id",
                         "x JOIN y ON y.id=x.id JOIN v ON v.id=y.id",
@@ -174,6 +280,15 @@ def main():
                 with writer.cursor() as cursor:
                     cursor.execute(restricted)
                     assert cursor.rowcount == 1
+                    try:
+                        cursor.execute(
+                            "UPDATE x JOIN v ON x.id=v.id "
+                            "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+                        )
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1143, error.args
+                    else:
+                        raise AssertionError("outer physical target requires UPDATE privilege")
 
                 with owner.cursor() as cursor:
                     cursor.execute("INSERT INTO t VALUES(2,0)")
@@ -212,6 +327,7 @@ def main():
                     f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
                     "nested CHECK OPTION returned 1369; shared bare n returned 1052; "
                     "third-position read grants were enforced; "
+                    "two-target writes rebased and kept caller/definer grants separate; "
                     "disjoint rows did not wait"
                 )
             finally:

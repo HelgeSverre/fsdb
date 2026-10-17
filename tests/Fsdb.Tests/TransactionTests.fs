@@ -2434,6 +2434,125 @@ let tests =
                       | Err(1052, _) -> ()
                       | result -> failtestf "expected ambiguous bare n error 1052, got %A" result
 
+          testCase "joined view can supply read rows while another source is updated"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              handle session "CREATE TABLE tx_read_view_target(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "CREATE TABLE tx_read_view_link(id INT PRIMARY KEY)" |> ignore
+              handle session "CREATE TABLE tx_read_view_outer(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "CREATE TABLE tx_read_view_other(id INT PRIMARY KEY)" |> ignore
+              handle session "INSERT INTO tx_read_view_target VALUES(1,10)" |> ignore
+              handle session "INSERT INTO tx_read_view_link VALUES(1)" |> ignore
+              handle session "INSERT INTO tx_read_view_outer VALUES(1,0)" |> ignore
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session
+                  "CREATE VIEW tx_read_joined_view AS SELECT t.id,t.n FROM tx_read_view_target t JOIN tx_read_view_link l ON l.id=t.id"
+              |> ignore
+              for source in
+                  [ "tx_read_view_outer x JOIN tx_read_joined_view v ON x.id=v.id"
+                    "tx_read_joined_view v JOIN tx_read_view_outer x ON x.id=v.id"
+                    "tx_read_view_outer x JOIN tx_read_view_other y ON y.id=x.id JOIN tx_read_joined_view v ON v.id=y.id" ] do
+                  handle session "UPDATE tx_read_view_outer SET n=0" |> ignore
+                  let sql = "UPDATE " + source + " SET x.n=x.n+1 WHERE v.id=1"
+                  Expect.equal (handle session sql |> snd) (Affected 1UL) source
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected outer row update through joined view read, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "10" ] ]) -> ()
+                  | result -> failtestf "joined view source must remain read-only, got %A" result
+                  let multiSql = "UPDATE " + source + " SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+                  Expect.equal (handle session multiSql |> snd) (Affected 2UL) (source + " updates both targets")
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                  | result -> failtestf "expected physical outer row update, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "11" ] ]) -> ()
+                  | result -> failtestf "expected joined view target update, got %A" result
+                  handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              let owner, _ = handle (create 3 store) "BEGIN"
+              let owner, ownerResult = handle owner "UPDATE tx_read_view_target SET n=n+1 WHERE id=1"
+              Expect.equal ownerResult (Affected 1UL) "owner holds the view's physical row"
+              let waiter, _ = handle (create 4 store) "BEGIN"
+              let contended =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_joined_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter contended)
+              if waiting.Wait(TimeSpan.FromMilliseconds 100.0) then
+                  let _, result = waiting.Result
+                  failtestf "multi-target view write should wait, got %A" result
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "multi-target view write resumes"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 2UL) "both physical rows update after rebasing"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "waiter commits"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | result -> failtestf "expected rebased outer update, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "12" ] ]) -> ()
+              | result -> failtestf "expected rebased view target update, got %A" result
+              handle session
+                  "CREATE VIEW tx_read_checked AS SELECT t.id,t.n FROM tx_read_view_target t JOIN tx_read_view_link l ON l.id=t.id WITH CASCADED CHECK OPTION"
+              |> ignore
+              let rejected =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_checked v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2 WHERE v.id=1"
+              match handle session rejected |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected multi-target CHECK OPTION rejection, got %A" result
+              match handle session "SELECT id,n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "3" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve outer target, got %A" result
+              match handle session "SELECT id,n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "12" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve view target, got %A" result
+              handle session "CREATE USER tx_read_limited_definer" |> ignore
+              handle session "GRANT SELECT, UPDATE ON fsdb.tx_read_view_target TO tx_read_limited_definer" |> ignore
+              handle session "GRANT SELECT ON fsdb.tx_read_view_link TO tx_read_limited_definer" |> ignore
+              handle session
+                  "CREATE DEFINER='tx_read_limited_definer'@'%' SQL SECURITY DEFINER VIEW tx_read_limited_view AS SELECT t.id,t.n FROM tx_read_view_target t JOIN tx_read_view_link l ON l.id=t.id"
+              |> ignore
+              let limited =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_limited_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              Expect.equal (handle session limited |> snd) (Affected 2UL)
+                  "the caller updates the outer target even when the view definer lacks its grant"
+              handle session "ALTER TABLE tx_read_view_outer ADD COLUMN who VARCHAR(100)" |> ignore
+              let callerIdentity =
+                  match handle session "SELECT CURRENT_USER()" |> snd with
+                  | ResultSet(_, [ [ Some value ] ]) -> value
+                  | result -> failtestf "expected caller identity, got %A" result
+              let identityWrite =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_limited_view v ON x.id=v.id "
+                  + "SET x.who=CURRENT_USER(),v.n=v.n+1 WHERE v.id=1"
+              Expect.equal (handle session identityWrite |> snd) (Affected 2UL)
+                  "the outer assignment uses the caller identity"
+              match handle session "SELECT who FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some value ] ]) -> Expect.equal value callerIdentity "outer CURRENT_USER is the caller"
+              | result -> failtestf "expected outer CURRENT_USER value, got %A" result
+              handle session "CREATE USER tx_read_outer_definer" |> ignore
+              handle session "GRANT SELECT, UPDATE ON fsdb.tx_read_limited_view TO tx_read_outer_definer" |> ignore
+              handle session
+                  "CREATE DEFINER='tx_read_outer_definer'@'%' SQL SECURITY DEFINER VIEW tx_read_outer_view AS SELECT id,n FROM tx_read_limited_view"
+              |> ignore
+              let layered =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_outer_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              Expect.equal (handle session layered |> snd) (Affected 2UL)
+                  "layered view write retains the separate outer target"
+              handle session "CREATE USER tx_read_view_writer" |> ignore
+              handle session "GRANT SELECT, UPDATE ON fsdb.tx_read_joined_view TO tx_read_view_writer" |> ignore
+              handle session "GRANT SELECT ON fsdb.tx_read_view_outer TO tx_read_view_writer" |> ignore
+              let writer = { create 2 store with User = "tx_read_view_writer" }
+              let denied =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_joined_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              match handle writer denied |> snd with
+              | Err(1143, _) -> ()
+              | result -> failtestf "expected missing outer UPDATE column grant, got %A" result
+
           testCase "nested joined view update checks the caller's outer join reads"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

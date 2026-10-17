@@ -27040,6 +27040,27 @@ let rec executeAs
 
     let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement (originalUpdate: UpdateStmt option) =
         let targetKey = target.Database, target.Table, target.Qualifier
+        let writesView (update: UpdateStmt) (assignment: Assignment) =
+            let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
+            assignment.Table |> Option.forall (fun owner -> equalsIgnoreCase owner qualifier)
+        let viewAuthorizationStatement =
+            match statement, originalUpdate with
+            | Update rewritten, Some original ->
+                let assignments =
+                    List.zip original.Assignments rewritten.Assignments
+                    |> List.choose (fun (exposed, physical) ->
+                        if writesView original exposed then Some physical else None)
+                // The caller's original command checks other targets. A view
+                // definer authorizes only the component reached through it.
+                Update
+                    { rewritten with
+                        From = view.UpdateFrom
+                        Joins = view.UpdateJoins
+                        Assignments = assignments
+                        Where = view.Predicate
+                        OrderBy = []
+                        Limit = None }
+            | _ -> statement
         let writableAccessView database table =
             tryStoredView store database table
             |> Option.bind (fun stored ->
@@ -27065,11 +27086,11 @@ let rec executeAs
 
         let retarget (access: ViewAccess) =
             if access.Mode = OriginalWrite then
-                statement
+                viewAuthorizationStatement
             else
                 let qualified = SqlText.objectName (Some access.Database) access.Table
 
-                match statement with
+                match viewAuthorizationStatement with
                 | Insert(_, columns, rows, updates, ignore) -> Insert(qualified, exposedInsertColumns access columns, rows, updates, ignore)
                 | InsertSelect(_, columns, select, updates, ignore) -> InsertSelect(qualified, exposedInsertColumns access columns, select, updates, ignore)
                 | Replace(_, columns, rows) -> Replace(qualified, columns, rows)
@@ -27279,14 +27300,18 @@ let rec executeAs
 
                         let assignments =
                             original.Assignments
-                            |> List.map (fun (assignment: Assignment) ->
-                                match view.Targets |> Map.tryFind (assignment.Column.ToLowerInvariant()) with
-                                | Some target ->
-                                    { assignment with
-                                        Table = Some target.Qualifier
-                                        Column = target.ComponentColumn |> Option.defaultValue target.Column
-                                        Value = sourceExpression assignment.Value }
-                                | None -> assignment)
+                            |> List.choose (fun (assignment: Assignment) ->
+                                if not (writesView original assignment) then
+                                    None
+                                else
+                                    match view.Targets |> Map.tryFind (assignment.Column.ToLowerInvariant()) with
+                                    | Some target ->
+                                        Some
+                                            { assignment with
+                                                Table = Some target.Qualifier
+                                                Column = target.ComponentColumn |> Option.defaultValue target.Column
+                                                Value = sourceExpression assignment.Value }
+                                    | None -> Some assignment)
 
                         { update with
                             Assignments = assignments
@@ -27311,8 +27336,14 @@ let rec executeAs
                                     |> Result.mapError ViewGrantDenied)
                                 |> Result.bind (fun effective ->
                                     (match originalUpdate with
-                                     | Some original when original.Assignments.Length = authorizationUpdate.Assignments.Length ->
-                                         Ok(List.zip original.Assignments authorizationUpdate.Assignments)
+                                     | Some original ->
+                                         let exposedAssignments =
+                                             original.Assignments
+                                             |> List.filter (writesView original)
+                                         if exposedAssignments.Length = authorizationUpdate.Assignments.Length then
+                                             Ok(List.zip exposedAssignments authorizationUpdate.Assignments)
+                                         else
+                                             invalid ()
                                      | _ -> invalid ())
                                     |> Result.bind (traverse (fun (exposed, assignment) ->
                                         match Map.tryFind (exposed.Column.ToLowerInvariant()) view.Targets with
@@ -29044,6 +29075,9 @@ let rec executeAs
                 |> List.map (fun column -> column.Name.ToLowerInvariant())
                 |> Set.ofList
             let mutable ambiguousColumn = None
+            let callerCurrentUser =
+                Functions.lookup "CURRENT_USER" registry
+                |> Option.map (fun currentUser -> currentUser [])
             let qualifyView expression =
                 rewriteExprWith (function
                     | Col name -> Some(QualifiedCol(baseQualifier, name))
@@ -29051,6 +29085,8 @@ let rec executeAs
 
             let rewrite expression =
                 rewriteExprWith (function
+                    | FuncCall(name, []) when equalsIgnoreCase name "CURRENT_USER" ->
+                        callerCurrentUser |> Option.map Lit
                     | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier viewQualifier ->
                         Map.tryFind (name.ToLowerInvariant()) view.Expressions
                         |> Option.map qualifyView
@@ -29067,19 +29103,22 @@ let rec executeAs
                 updateStmt.Assignments
                 |> traverse (fun assignment ->
                     if assignment.Table |> Option.exists (fun qualifier -> not (equalsIgnoreCase qualifier viewQualifier)) then
-                        Error(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
+                        Ok(assignment, None)
                     elif assignment.Table.IsNone && Set.contains (assignment.Column.ToLowerInvariant()) joinedColumns then
                         Error(1052, sprintf "Column '%s' in field list is ambiguous" assignment.Column)
                     else
                         match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets with
-                        | Some target -> Ok(assignment, target)
+                        | Some target -> Ok(assignment, Some target)
                         | None -> Error(1054, sprintf "Unknown column '%s' in field list" assignment.Column))
             with
             | Error(code, message) -> ids, Err(code, message)
             | Ok assignments ->
                 let targets =
                     assignments
-                    |> List.map (fun (_, target) -> target.Database.ToLowerInvariant(), target.Table.ToLowerInvariant(), target.Qualifier.ToLowerInvariant())
+                    |> List.choose (fun (_, target) ->
+                        target
+                        |> Option.map (fun target ->
+                            target.Database.ToLowerInvariant(), target.Table.ToLowerInvariant(), target.Qualifier.ToLowerInvariant()))
                     |> List.distinct
 
                 if targets.Length > 1 then
@@ -29092,10 +29131,13 @@ let rec executeAs
                             Assignments =
                                 assignments
                                 |> List.map (fun (assignment, target) ->
-                                    { assignment with
-                                        Table = Some target.Qualifier
-                                        Column = target.Column
-                                        Value = rewrite assignment.Value })
+                                    match target with
+                                    | Some target ->
+                                        { assignment with
+                                            Table = Some target.Qualifier
+                                            Column = target.Column
+                                            Value = rewrite assignment.Value }
+                                    | None -> { assignment with Value = rewrite assignment.Value })
                             Where = combineViewPredicate (view.Predicate |> Option.map qualifyView) (updateStmt.Where |> Option.map rewrite)
                             OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                             Limit = updateStmt.Limit |> Option.map rewrite }
@@ -29103,7 +29145,7 @@ let rec executeAs
                     match ambiguousColumn with
                     | Some name -> ids, Err(1052, sprintf "Column '%s' in field list is ambiguous" name)
                     | None ->
-                        let target = assignments |> List.head |> snd
+                        let target = assignments |> List.choose snd |> List.head
                         executeViewWrite view target (Update rewritten) (Some updateStmt)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty && tryStoredView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome ->
