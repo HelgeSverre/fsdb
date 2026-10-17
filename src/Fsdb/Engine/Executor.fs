@@ -142,6 +142,10 @@ type private RangeLookupBounds<'column, 'bound> =
       Lower: ('bound * bool) option
       Upper: ('bound * bool) option }
 
+type private DecimalRangeCut =
+    | ExactDecimalCut of decimal
+    | ApproximateDoubleCut of double
+
 type private SpatialLookupPredicate =
     { Column: string
       Relation: SpatialIndex.Relation
@@ -6417,14 +6421,28 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             |> Result.bind (fun vlo ->
                 eval hi
                 |> Result.bind (fun vhi ->
+                    let numeric = function
+                        | VInt _ | VUInt _ | VDecimal _ | VBit _ -> true
+                        | VDouble number -> System.Double.IsFinite number
+                        | _ -> false
+                    // BETWEEN resolves one comparison domain for all three
+                    // operands. A DOUBLE bound makes numeric DECIMAL values
+                    // approximate even beside an exact DECIMAL bound.
+                    let approximate =
+                        [ ve; vlo; vhi ] |> List.forall (fun value -> value = VNull || numeric value)
+                        && [ ve; vlo; vhi ] |> List.exists (function VDouble _ -> true | _ -> false)
+                    let compareBound operation boundExpr boundValue =
+                        if approximate then
+                            Ok(Operators.compare (Value.toDouble ve) (Value.toDouble boundValue))
+                        else resolvedCompare ctx operation e ve boundExpr boundValue
                     let lower =
                         if ve = VNull || vlo = VNull then Ok None
-                        else resolvedCompare ctx ">=" e ve lo vlo |> Result.map (fun comparison -> Some(comparison >= 0))
+                        else compareBound ">=" lo vlo |> Result.map (fun comparison -> Some(comparison >= 0))
                     lower
                     |> Result.bind (fun lower ->
                         let upper =
                             if ve = VNull || vhi = VNull then Ok None
-                            else resolvedCompare ctx "<=" e ve hi vhi |> Result.map (fun comparison -> Some(comparison <= 0))
+                            else compareBound "<=" hi vhi |> Result.map (fun comparison -> Some(comparison <= 0))
                         upper
                         |> Result.map (fun upper ->
                             match lower, upper with
@@ -16062,7 +16080,13 @@ and private tryMaterializedCorrelatedLookup
                                 while lower < upper do
                                     let middle = lower + (upper - lower) / 2
                                     let key = fst entries.[middle]
-                                    if key < bound || (key = bound && not inclusive) then
+                                    // Decimal-to-DOUBLE conversion is monotone: equal rounded
+                                    // keys stay adjacent in this exact-decimal ordering.
+                                    let comparison =
+                                        match bound with
+                                        | ExactDecimalCut exact -> Operators.compare key exact
+                                        | ApproximateDoubleCut approximate -> Operators.compare (Value.toDouble (VDecimal key)) approximate
+                                    if comparison < 0 || (comparison = 0 && not inclusive) then
                                         lower <- middle + 1
                                     else
                                         upper <- middle
@@ -16071,8 +16095,10 @@ and private tryMaterializedCorrelatedLookup
                             Some(fun lower upper ->
                                 let convert = function
                                     | None -> Some None
+                                    | Some(VDouble number, inclusive) when System.Double.IsFinite number ->
+                                        Some(Some(ApproximateDoubleCut number, inclusive))
                                     | Some(value, inclusive) ->
-                                        decimalKey value |> Option.map (fun number -> Some(number, inclusive))
+                                        decimalKey value |> Option.map (fun number -> Some(ExactDecimalCut number, inclusive))
 
                                 let isNullBound = function Some(VNull, _) -> true | _ -> false
                                 match convert lower, convert upper with
@@ -16102,14 +16128,36 @@ and private tryMaterializedCorrelatedLookup
                     tryCorrelatedProbeValue probeSource context expression
                     |> Option.map (fun value -> expression, value)
 
-                predicate
-                |> optionalConjuncts
-                |> List.collect (rangePredicatesFor indexed bound)
-                |> List.choose (fun range ->
+                let lookupRange (range: RangeLookupBounds<Expr, Expr * Value>) =
                     rangeLookup range.Column
                     |> Option.bind (fun lookup ->
                         let value = Option.map (fun ((_, value), inclusive) -> value, inclusive)
-                        lookup (value range.Lower) (value range.Upper)))
+                        lookup (value range.Lower) (value range.Upper))
+
+                let candidates expression =
+                    let regular () = rangePredicatesFor indexed bound expression |> List.choose lookupRange
+                    match expression with
+                    | Between(indexedExpression, lowerExpression, upperExpression) ->
+                        match indexed indexedExpression, bound lowerExpression, bound upperExpression with
+                        | Some indexedExpression, Some(_, lower), Some(_, upper)
+                            when (match lower, upper with VDouble _, _ | _, VDouble _ -> true | _ -> false) ->
+                            let approximate = function
+                                | VInt _ | VUInt _ | VDecimal _ | VDouble _ | VBit _ as value -> finiteNumericDouble value
+                                | _ -> None
+                            if lower = VNull || upper = VNull then [ [] ]
+                            else
+                                match approximate lower, approximate upper with
+                                | Some lower, Some upper ->
+                                    rangeLookup indexedExpression
+                                    |> Option.bind (fun lookup -> lookup (Some(VDouble lower, true)) (Some(VDouble upper, true)))
+                                    |> Option.toList
+                                | _ -> []
+                        | _ -> regular ()
+                    | _ -> regular ()
+
+                predicate
+                |> optionalConjuncts
+                |> List.collect candidates
                 |> intersectSharedRows
 
             let doubleRangeCandidates predicate =

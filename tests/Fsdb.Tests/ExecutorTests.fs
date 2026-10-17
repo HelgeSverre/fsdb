@@ -13191,7 +13191,7 @@ let tests =
                     | ResultSet(_, [ [ Some "2" ] ]) -> ()
                     | other -> failtestf "expected accent-insensitive range candidates, got %A" other
 
-                testCase "materialized correlated decimal expressions key exact bounds only"
+                testCase "materialized correlated decimal expressions key exact and DOUBLE range bounds"
                 <| fun _ ->
                     let mutable calls = 0
                     let registry =
@@ -13227,7 +13227,7 @@ let tests =
                           "d.k+0.00>o.x+480.00", [ 9; 0; 0; 30 ], true
                           "d.k+0.00 BETWEEN o.x+480.00 AND o.x+481.00", [ 2; 0; 0; 1 ], true
                           "d.k+0.00>o.x+480.00 OR d.id=12", [ 10; 1; 1; 31 ], true
-                          "d.k+0.00>o.f+480e0", [ 9; 0; 0; 30 ], false ] do
+                          "d.k+0.00>o.f+480e0", [ 9; 0; 0; 30 ], true ] do
                         calls <- 0
                         let sql =
                             "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM decimal_rows) d "
@@ -13239,7 +13239,39 @@ let tests =
                             Expect.equal actual (expected |> List.map Some) predicate
                         | other -> failtestf "expected materialized decimal matches for %s, got %A" predicate other
                         if keyed then Expect.isLessThan calls 80 (predicate + " must bound residual work")
-                        else Expect.isGreaterThan calls 1000 "DOUBLE coercion must retain the scan"
+                        else Expect.isGreaterThan calls 1000 "DOUBLE equality and IN retain their scan"
+
+                    runDefault store "CREATE TABLE wide_decimal_bounds(id INT PRIMARY KEY,lo DOUBLE,hi DOUBLE)" |> ignore
+                    runDefault store "CREATE TABLE wide_decimal_rows(id INT PRIMARY KEY,k DECIMAL(20,2))" |> ignore
+                    runDefault store
+                        "INSERT INTO wide_decimal_bounds VALUES(1,9007199254740992e0,9007199254740992e0),(2,9007199254740994e0,9007199254740994e0)"
+                    |> ignore
+                    runDefault store
+                        "INSERT INTO wide_decimal_rows VALUES(1,9007199254740991.00),(2,9007199254740992.00),(3,9007199254740993.00),(4,9007199254740994.00)"
+                    |> ignore
+                    calls <- 0
+                    let wideSql =
+                        "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM wide_decimal_rows) d "
+                        + "WHERE TOUCH(d.id)=d.id AND d.k+0.00 BETWEEN o.lo AND o.hi) "
+                        + "FROM wide_decimal_bounds o ORDER BY o.id"
+                    match run store registry wideSql with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected MySQL's rounded DOUBLE cuts over wide DECIMAL rows, got %A" other
+                    Expect.isLessThan calls 8 "approximate cuts avoid unrelated wide DECIMAL rows"
+
+                    runDefault store "CREATE TABLE mixed_decimal_bounds(id INT PRIMARY KEY,lo DECIMAL(20,2),hi DOUBLE)" |> ignore
+                    runDefault store "INSERT INTO mixed_decimal_bounds VALUES(1,9007199254740993.00,9007199254740994e0)" |> ignore
+                    for predicate, expected in
+                        [ "d.k+0.00 BETWEEN o.lo AND o.hi", "3"
+                          "d.k+0.00>=o.lo AND d.k+0.00<=o.hi", "2" ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM wide_decimal_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") FROM mixed_decimal_bounds o"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal actual expected predicate
+                        | other -> failtestf "expected mixed DECIMAL/DOUBLE range result, got %A" other
+                        Expect.isLessThan calls 8 "mixed numeric bounds retain narrow candidates"
 
                 testCase "materialized correlated finite DOUBLE expressions key numeric bounds"
                 <| fun _ ->

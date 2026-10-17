@@ -359,8 +359,9 @@ reduce `d.k+0.00=o.x` from 5,005 to seven calls. Positive `IN` lists over
 exact DECIMAL and integer outer bounds now union candidates from that key;
 DOUBLE members retain the scan. [Ordered DECIMAL-expression ranges](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-ranges)
 also narrow correlated inequalities and `BETWEEN` with exact DECIMAL or
-integer bounds while preserving source order and residual comparison; DOUBLE
-bounds retain the scan. [Finite DOUBLE-domain keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-lookup)
+integer bounds, and now finite DOUBLE bounds, while preserving source order
+and residual comparison; strings and non-finite bounds retain the scan.
+[Finite DOUBLE-domain keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-lookup)
 now reduce `d.k+0e0=o.x` from 5,005 to seven calls too. DECIMAL and integer
 bounds and fully numeric finite strings use the same approximate comparison
 key; [positive `IN` lists](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#correlated-double-expression-in-candidates)

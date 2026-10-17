@@ -89,7 +89,37 @@ def main():
                         cursor.execute(query)
                         actual = tuple(count for _, count in cursor.fetchall())
                         assert actual == expected, (predicate, actual, expected)
-                    print(f"MySQL {version}: {len(cases)} decimal comparison cases match")
+                    for query in [
+                        "CREATE TABLE wide_bounds(id INT PRIMARY KEY,lo DOUBLE,hi DOUBLE)",
+                        "CREATE TABLE wide_rows(id INT PRIMARY KEY,k DECIMAL(20,2))",
+                        "INSERT INTO wide_bounds VALUES"
+                        "(1,9007199254740992e0,9007199254740992e0),"
+                        "(2,9007199254740994e0,9007199254740994e0)",
+                        "INSERT INTO wide_rows VALUES"
+                        "(1,9007199254740991.00),(2,9007199254740992.00),"
+                        "(3,9007199254740993.00),(4,9007199254740994.00)",
+                    ]:
+                        cursor.execute(query)
+                    cursor.execute(
+                        "SELECT o.id,(SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                        "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                        "WHERE d.k+0.00 BETWEEN o.lo AND o.hi) "
+                        "FROM wide_bounds o ORDER BY o.id"
+                    )
+                    assert cursor.fetchall() == ((1, "2,3"), (2, "4"))
+                    cursor.execute("CREATE TABLE mixed_bounds(id INT PRIMARY KEY,lo DECIMAL(20,2),hi DOUBLE)")
+                    cursor.execute("INSERT INTO mixed_bounds VALUES(1,9007199254740993.00,9007199254740994e0)")
+                    for predicate, expected in [
+                        ("d.k+0.00 BETWEEN o.lo AND o.hi", "2,3,4"),
+                        ("d.k+0.00>=o.lo AND d.k+0.00<=o.hi", "3,4"),
+                    ]:
+                        cursor.execute(
+                            "SELECT (SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                            "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                            f"WHERE {predicate}) FROM mixed_bounds o"
+                        )
+                        assert cursor.fetchone() == (expected,), (predicate, expected)
+                    print(f"MySQL {version}: {len(cases)} decimal comparison cases and wide DOUBLE cuts match")
             finally:
                 if connection:
                     connection.close()

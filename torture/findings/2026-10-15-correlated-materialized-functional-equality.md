@@ -161,16 +161,31 @@ The same stable, row-local DECIMAL expressions now build an ordered
 statement-local lookup for correlated inequalities and `BETWEEN`. DECIMAL
 and integer bounds use exact decimal ordering; NULL produces no matching
 candidates. Selected rows return in materialized-source order, and the
-original SQL predicate still decides membership. A non-DECIMAL row result
-or a bound outside the exact decimal/integer domain falls back to a scan,
-including DOUBLE bounds.
+original SQL predicate still decides membership. Finite DOUBLE bounds now
+use cuts over the same sorted decimal rows, comparing each key after MySQL's
+single-rounded DECIMAL-to-DOUBLE conversion. Rows that round to one DOUBLE
+key remain adjacent; the residual predicate makes the final comparison.
+Non-finite DOUBLE and string bounds, or a non-DECIMAL row result, retain the
+scan.
 
 The [MySQL 8.4.11 oracle](../scripts/correlated-materialized-decimal-oracle.py)
 checks strict and inclusive comparisons, `BETWEEN`, NULL, a complete OR
 branch, and a DOUBLE comparison. Before this range lookup, the selective
 `d.k+0.00>o.x+480.00` regression ran its `TOUCH` residual 5,010 times;
 the focused test now keeps it below 80 calls with the same `(9,0,0,30)`
-counts. Broader mixed numeric domains and volatile expressions remain scans.
+counts. The finite DOUBLE bound `d.k+0.00>o.f+480e0` fell from 3,008
+residual calls to 44 with the same counts. An added wide-DECIMAL
+oracle and regression show that both 2⁵³ and 2⁵³+1 fall into one DOUBLE
+cut, while 2⁵³+2 remains distinct. Broader mixed numeric domains and
+volatile expressions remain scans.
+
+For mixed DECIMAL/DOUBLE `BETWEEN`, MySQL selects one approximate domain for
+all three operands. At the same 2⁵³ boundary, `BETWEEN` includes IDs 2, 3,
+and 4, whereas separate `>=` and `<=` comparisons include only IDs 3 and 4.
+Fsdb now uses the shared approximate cuts for that `BETWEEN` and evaluates
+its residual in the same domain; separate conjuncts retain their individual
+comparison domains. The native oracle and focused regression pin both rows
+and narrow residual work.
 
 ## Statement-local finite DOUBLE expression lookup
 
