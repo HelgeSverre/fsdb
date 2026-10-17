@@ -219,17 +219,19 @@ let private foldUnicode520CombiningHalfMarks (value: string) =
             else result.Append(c) |> ignore
         result.ToString()
 
-// MySQL's UCA 5.2 table assigns individual implicit primary weights across
-// U+1AB0–U+1AFF and U+1DE7–U+1DFC, including positions assigned after Unicode
-// 5.2. ICU ignores or merges some of these newer combining marks. U+1DCA has
-// U+036C's MySQL primary weight, while U+1DE3 has a distinct weight that ICU
-// merges with it. Escape the marker so literal private-use text cannot alias
-// a generated weight.
-let private foldUnicode520ExtendedCombiningMarks (value: string) =
+// MySQL's UCA 4.0 and 5.2 tables retain implicit primary weights for marks
+// assigned later. UCA 4.0 gives all of U+1DC0–U+1DFF distinct weights; 5.2
+// assigns some explicit or ignorable weights instead. UCA 4.0 also keeps
+// U+20EB–U+20F0 distinct where 5.2 treats them as ignorable. In 5.2, U+1DCA
+// shares U+036C's weight while ICU merges it with the distinct U+1DE3.
+// Escape the marker so literal private-use text cannot alias a generated weight.
+let private foldLegacyExtendedCombiningMarks unicode520 (value: string) =
     let marker = '\uE0AE'
     let needsFold c =
         (c >= '\u1AB0' && c <= '\u1AFF')
-        || (c >= '\u1DE7' && c <= '\u1DFC') || c = '\u1DCA' || c = '\u1DE3'
+        || (if unicode520 then
+                (c >= '\u1DE7' && c <= '\u1DFC') || c = '\u1DCA' || c = '\u1DE3'
+            else (c >= '\u1DC0' && c <= '\u1DFF') || (c >= '\u20EB' && c <= '\u20F0'))
     if not (value |> Seq.exists (fun c -> c = marker || needsFold c)) then value
     else
         let result = StringBuilder(value.Length)
@@ -237,10 +239,14 @@ let private foldUnicode520ExtendedCombiningMarks (value: string) =
             if c = marker then result.Append(marker).Append(marker) |> ignore
             elif c >= '\u1AB0' && c <= '\u1AFF' then
                 result.Append(marker).Append(char (0xE400 + int c - 0x1AB0)) |> ignore
-            elif c >= '\u1DE7' && c <= '\u1DFC' then
+            elif not unicode520 && c >= '\u1DC0' && c <= '\u1DFF' then
+                result.Append(marker).Append(char (0xE500 + int c - 0x1DC0)) |> ignore
+            elif not unicode520 && c >= '\u20EB' && c <= '\u20F0' then
+                result.Append(marker).Append(char (0xE580 + int c - 0x20EB)) |> ignore
+            elif unicode520 && c >= '\u1DE7' && c <= '\u1DFC' then
                 result.Append(marker).Append(char (0xE480 + int c - 0x1DE7)) |> ignore
-            elif c = '\u1DCA' then result.Append('\u036C') |> ignore
-            elif c = '\u1DE3' then result.Append(marker).Append('\uE4A0') |> ignore
+            elif unicode520 && c = '\u1DCA' then result.Append('\u036C') |> ignore
+            elif unicode520 && c = '\u1DE3' then result.Append(marker).Append('\uE4A0') |> ignore
             else result.Append(c) |> ignore
         result.ToString()
 
@@ -582,13 +588,14 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             value |> foldCjkPunctuationForms true |> foldLegacyBopomofoForms
             |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
             |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
-            |> foldUnicode520ExtendedCombiningMarks
+            |> foldLegacyExtendedCombiningMarks true
             |> foldLegacyUnicodeJamo
         | "utf8mb4_unicode_ci" ->
             value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms
                   |> foldLegacyCompatibilityIdeographs
                   |> foldLegacySupplementary
+                  |> foldLegacyExtendedCombiningMarks false
                   |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
                   |> foldLegacyUnicodeJamo
         | _ -> value

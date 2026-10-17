@@ -1094,6 +1094,10 @@ probe matches at sizes 1–10. The [supplemental mark block](torture/findings/20
 retains its ignorable, explicit, and implicit weight classes, including
 U+1DCA's equivalence to U+036C; its expanded ngram probe also matches at
 sizes 1–10. Other Unicode 5.2 blocks remain to audit.
+For the older `utf8mb4_unicode_ci`, the [UCA 4.0 mark probe](torture/findings/2026-10-18-unicode-400-combining-marks.md)
+keeps U+1AB0–U+1AFF and U+1DC0–U+1DFF implicit weights distinct, and
+separates U+20EB–U+20F0 from the preceding ignorable marks. Its expanded
+ngram corpora match MySQL at sizes 1–10.
 [General Unicode variation selectors](torture/findings/2026-10-17-general-ci-variation-selectors.md)
 now retain their distinct written weights across U+FE00–U+FE0F, including
 U+FE0F, in equality keys and ngram postings. The two-column corpus matches
