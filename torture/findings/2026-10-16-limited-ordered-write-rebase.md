@@ -19,10 +19,13 @@ in the sort order. Starting from `(1,0),(2,1)`, the owner changes row 1 to
 `n=2`. A waiting `UPDATE ... SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 1`
 then changes row 2 to `n=11`; the analogous DELETE removes row 2.
 
-The [disposable MySQL oracle](../scripts/limited-ordered-write-rebase-oracle.py)
-asserts the wait, affected count, and final rows for all eight combinations
-of write verb, predicate-versus-sort-key change, and index presence. The
-matching `TransactionTests` case verifies Fsdb's wait and re-selection.
+The audit also covers `LIMIT 2` over three rows. The owner can make row 1
+stop matching, move it between rows 2 and 3, or move it behind both. After
+the owner commits, the waiting writer reselects two matching rows in the
+current order. The [disposable MySQL oracle](../scripts/limited-ordered-write-rebase-oracle.py)
+asserts the wait, affected count, and final rows for 24 combinations of
+write verb, limit, row-change scenario, and secondary-index presence. The
+matching `TransactionTests` cases verify Fsdb's wait and re-selection.
 No engine change was required. This closes these scheduling audits; it does
 not measure write throughput or establish parity for other limited mutation
 shapes.
