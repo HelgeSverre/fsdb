@@ -144,6 +144,7 @@ def main():
                         for predicate, expected in (
                             ("d.k=o.s", (1, 0, 0, 1, 1, 1)),
                             ("d.k BETWEEN o.s AND o.s", (1, 0, 0, 1, 1, 1)),
+                            ("d.k IN(o.s,o.s)", (1, 0, 0, 1, 1, 1)),
                         ):
                             cursor.execute(
                                 f"SELECT o.id,(SELECT COUNT(*) FROM {source} WHERE {predicate}) "
@@ -155,11 +156,12 @@ def main():
                             ("12.5x", 1), ("1e-500", 1), ("1e309", 0), (" 12.5 ", 1)
                         ):
                             cursor.execute("UPDATE outer_bounds SET s=%s WHERE id=7", (text,))
-                            cursor.execute(
-                                f"SELECT (SELECT COUNT(*) FROM {source} WHERE d.k=o.s) "
-                                "FROM outer_bounds o WHERE o.id=7"
-                            )
-                            assert cursor.fetchone()[0] == expected, (source, text)
+                            for predicate in ("d.k=o.s", "d.k IN(o.s,o.s)"):
+                                cursor.execute(
+                                    f"SELECT (SELECT COUNT(*) FROM {source} WHERE {predicate}) "
+                                    "FROM outer_bounds o WHERE o.id=7"
+                                )
+                                assert cursor.fetchone()[0] == expected, (source, text, predicate)
                     cursor.execute(
                         "SELECT x=i,x+0e0=i,9007199254740992e0=i,"
                         "9007199254740992e0+0e0=i "
