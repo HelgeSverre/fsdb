@@ -639,6 +639,9 @@ A [post-preview.11 durability-matched checkpoint](benchmarks/results/2026-10-15-
 again measures about 0.43× MySQL throughput at one writer and 0.27× at eight;
 the recent correctness and planning merges did not change the wire-write
 scaling gap.
+A [current-head repeat](benchmarks/results/2026-10-17-keyless-write-scaling-checkpoint.md)
+measures 0.39× and 0.25× at one and eight writers. Its in-memory control has
+the same weak worker-scaling slope, so WAL work alone is not the full cause.
 
 ## 8. Persistence and durability
 
