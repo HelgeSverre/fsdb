@@ -60,6 +60,9 @@ let trySemanticError (detail: string) =
         Some(1439, message)
     | "Incorrect arguments to NAME_CONST" as message -> Some(1210, message)
     | "Incorrect parameter count in the call to native function 'NAME_CONST'" as message -> Some(1582, message)
+    | message when message.StartsWith("Illegal double '", StringComparison.Ordinal)
+                   && message.EndsWith("' value found during parsing", StringComparison.Ordinal) ->
+        Some(1367, message)
     | message when
         [ "utf8mb3"; "utf8mb4"; "utf16"; "utf16le"; "utf32"; "sjis"; "cp932"; "big5"; "gbk"; "gb2312"; "euckr"; "ujis"; "gb18030" ]
         |> List.exists (fun charset -> message.StartsWith("Invalid " + charset + " character string: '", StringComparison.Ordinal)) ->
@@ -822,7 +825,10 @@ let private numericLiteralValue (nl: NumberLiteral) =
                 | true, d -> VDecimal d
                 | false, _ -> VDouble(float nl.String)
     elif nl.HasExponent then
-        VDouble(float nl.String)
+        let value = float nl.String
+        if Double.IsInfinity value then
+            raise (SemanticParseError(sprintf "Illegal double '%s' value found during parsing" nl.String))
+        VDouble value
     else
         match Decimal.TryParse(nl.String, NumberStyles.Float, CultureInfo.InvariantCulture) with
         | true, d -> VDecimal d

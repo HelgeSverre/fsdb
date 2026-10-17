@@ -52,7 +52,8 @@ let private sphericalPointDistance radius (firstLatitude, firstLongitude) (secon
         haversine latitudeDelta
         + cos firstLatitude * cos secondLatitude * haversine longitudeDelta
 
-    radius * 2.0 * asin (sqrt (min 1.0 centralHaversine))
+    let centralAngle = 2.0 * asin (sqrt (min 1.0 centralHaversine))
+    radius * centralAngle
 
 let internal minimumPointSetDistance pointDistance firstPoints secondPoints =
     let nearer current candidate =

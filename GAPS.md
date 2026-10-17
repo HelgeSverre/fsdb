@@ -414,6 +414,21 @@ limited derived sources and limited or `TEMPTABLE` views use the exposed alias.
 |---|---|---|
 | Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [edge audit](torture/findings/2026-10-14-geographic-edge-topology-audit.md#high-latitude-point-follow-up) retains one point mismatch across 189 near-hole points, no mismatch across four near-exterior controls, and 12 line mismatches across 412 cases, including a near-polar MySQL relation/intersection inconsistency; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
 
+The [geographic strategy follow-up](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
+confirms zero distance on both engines for every remaining line mismatch,
+including the MySQL case that reports no intersection. MySQL's point/area and
+line/area relations use distinct Boost geographic strategies; reproducing
+those decisions is the next spatial implementation step. The polar point
+audit also finds MySQL distance zero for standalone and combined rings even
+when its point relation reports disjointness, so distance is not a substitute
+for that strategy. A finer polar-corner grid confines the sampled point
+divergence to four same-latitude points within `0.00001` degrees of one hole
+corner; adjacent grid points agree.
+
+[`ST_DISTANCE_SPHERE` with a large finite radius](torture/findings/2026-10-17-spherical-radius-overflow.md)
+now retains finite and zero point-set distances and reports MySQL error 3049
+when the final distance overflows; the native oracle covers the numeric edge.
+
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 (`Use_leap_seconds = Y`) remain unsupported.
