@@ -32,8 +32,23 @@ The physical target and its inner joins move before the derived sources so
 their conditions remain bound. Inner join aliases that collide with outer
 aliases are renamed while inlining; a MySQL 8.4.11 oracle confirms that the
 outer view remains updatable, can write either joined component, and enforces
-the inner CHECK OPTION after the rename. An inner LATERAL or JSON_TABLE join,
-inner subqueries requiring scoped qualifier rewriting, and a LATERAL source
-whose local aliases shadow the expanded view alias remain read-only rather
-than risking a wrong write. Additional layered source orders and further
-security-context combinations still need differential coverage.
+the inner CHECK OPTION after the rename.
+
+An inner JSON_TABLE join whose source expression uses qualified columns can
+also be inlined into a joined outer view. The differential oracle uses
+`JSON_TABLE(JSON_ARRAY(t.id), '$[*]' ...)` and reuses the inner JSON_TABLE
+alias for an outer derived source. MySQL 8.4.11 and fsdb agree that the outer
+view is updatable, one row is updated, both inner and outer CHECK OPTION
+violations return 1369, and the accepted value remains committed. Revoking
+the inner definer's base-table SELECT or the outer definer's component-view
+UPDATE makes the layered write fail with 1356 in both engines. A second
+oracle composes an inner two-JSON_TABLE chain with a joined outer view and
+also agrees on writable metadata, one update, and error 1369. Bare
+columns or subqueries in the JSON_TABLE source still retain the read-only
+path because rebinding them requires the original inner join scope.
+
+An inner LATERAL join, inner subqueries requiring scoped qualifier rewriting,
+and a LATERAL source whose local aliases shadow the expanded view alias
+remain read-only rather than risking a wrong write. Additional layered source
+orders and further security-context combinations still need differential
+coverage.

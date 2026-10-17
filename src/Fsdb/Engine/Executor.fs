@@ -1938,6 +1938,10 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                         |> List.exists (fun join ->
                                             match join.Table with
                                             | FromTable _ | FromSubquery _ -> false
+                                            | FromJsonTable(expression, _, _, _) ->
+                                                // Bare and scoped names need the original inner join scope.
+                                                hasSubquery expression
+                                                || Expression.exists (function Col _ -> true | _ -> false) expression
                                             | _ -> true))
                                     || not nested.SharedCteAliases.IsEmpty
                                     || needsScopedRewrite
@@ -1968,6 +1972,11 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                             match Map.tryFind (alias.ToLowerInvariant()) renamedJoinAliases with
                                             | Some renamed -> FromSubquery(body, renamed)
                                             | None -> FromSubquery(body, alias)
+                                        | FromJsonTable(expression, path, columns, alias) ->
+                                            let renamed =
+                                                Map.tryFind (alias.ToLowerInvariant()) renamedJoinAliases
+                                                |> Option.defaultValue alias
+                                            FromJsonTable(qualify expression, path, columns, renamed)
                                         | source -> source
 
                                     let targets =

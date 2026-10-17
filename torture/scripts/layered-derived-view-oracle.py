@@ -174,6 +174,46 @@ def exercise(connection):
             results.append((f"{label} revoked {key} {grant}", outcome(connection, update)))
             if source == "target":
                 run(connection, f"GRANT {grant} ON probe.{source} TO {owner}")
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW json_joined_inner AS "
+        "SELECT t.id,t.n,j.x FROM target t JOIN "
+        "JSON_TABLE(JSON_ARRAY(t.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=t.id "
+        "WHERE t.n>=0 WITH CASCADED CHECK OPTION",
+        "GRANT SELECT,UPDATE ON probe.json_joined_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW json_joined_outer AS "
+        "SELECT v.id,v.n,v.x,j.k FROM json_joined_inner v "
+        "JOIN (SELECT 1 AS k) j ON j.k=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION",
+    ]:
+        run(connection, sql)
+    results.append(("joined JSON layer metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='json_joined_outer'")))
+    results.append(("joined JSON layer update", outcome(connection,
+                    "UPDATE json_joined_outer SET n=7 WHERE id=1")))
+    results.append(("joined JSON inner check", outcome(connection,
+                    "UPDATE json_joined_outer SET n=-1 WHERE id=1")))
+    results.append(("joined JSON outer check", outcome(connection,
+                    "UPDATE json_joined_outer SET n=10 WHERE id=1")))
+    run(connection, "REVOKE SELECT ON probe.target FROM inner_owner")
+    results.append(("joined JSON revoked target SELECT", outcome(connection,
+                    "UPDATE json_joined_outer SET n=7 WHERE id=1")))
+    run(connection, "GRANT SELECT ON probe.target TO inner_owner")
+    run(connection, "REVOKE UPDATE ON probe.json_joined_inner FROM outer_owner")
+    results.append(("joined JSON revoked component UPDATE", outcome(connection,
+                    "UPDATE json_joined_outer SET n=7 WHERE id=1")))
+    run(connection, "GRANT UPDATE ON probe.json_joined_inner TO outer_owner")
+    run(connection, "GRANT UPDATE ON probe.json_chain_inner TO outer_owner")
+    run(connection,
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW json_chain_joined_outer AS "
+        "SELECT v.id,v.n,v.x,v.y,j.k FROM json_chain_inner v "
+        "JOIN (SELECT 1 AS k) j ON j.k=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION")
+    results.append(("joined JSON chain metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='json_chain_joined_outer'")))
+    results.append(("joined JSON chain update", outcome(connection,
+                    "UPDATE json_chain_joined_outer SET n=8 WHERE id=1")))
+    results.append(("joined JSON chain check", outcome(connection,
+                    "UPDATE json_chain_joined_outer SET n=10 WHERE id=1")))
     results.append(("final rows", outcome(connection, "SELECT id,n FROM target ORDER BY id")))
     return results
 

@@ -1049,6 +1049,33 @@ let tests =
                   Expect.stringContains message "column 'id'" "the join key is denied first"
               | other -> failtestf "expected the inner view's effective invoker to lose its join grant, got %A" other
 
+          testCase "joined outer views inline a qualified inner JSON_TABLE source"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for sql in
+                  [ "CREATE TABLE nested_json_target(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO nested_json_target VALUES(1,0),(2,0)"
+                    "CREATE VIEW nested_json_inner AS SELECT a.id,a.n,j.x FROM nested_json_target a JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id WHERE a.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_json_outer AS SELECT v.id,v.n,v.x,j.k FROM nested_json_inner v JOIN (SELECT 1 AS k) j ON j.k=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_json_outer'")
+                  [ [ Some "YES" ] ]
+                  "the layered JSON_TABLE target remains updatable despite the private alias collision"
+              Expect.equal (run store "UPDATE nested_json_outer SET n=1 WHERE id=1") (Affected 1UL) "the joined layer updates the physical row"
+
+              for rejected in [ -1; 10 ] do
+                  match run store (sprintf "UPDATE nested_json_outer SET n=%d WHERE id=1" rejected) with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected CHECK OPTION rejection for %d, got %A" rejected other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_json_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
+                  "both rejected writes leave the accepted value intact"
+
           testCase "layered JSON_TABLE chains retain writable target grants across source orders"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
