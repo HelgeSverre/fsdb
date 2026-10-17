@@ -13,7 +13,7 @@ type private Entry<'id> =
 
 type private Node<'id> =
     { Entry: Entry<'id>
-      Priority: uint64
+      Height: int
       Left: Node<'id> option
       Right: Node<'id> option
       SubtreeMaxX: float }
@@ -31,9 +31,13 @@ let private maxX = function
     | Some node -> node.SubtreeMaxX
     | None -> System.Double.NegativeInfinity
 
-let private node entry priority left right =
+let private height = function
+    | Some node -> node.Height
+    | None -> 0
+
+let private node entry left right =
     { Entry = entry
-      Priority = priority
+      Height = 1 + max (height left) (height right)
       Left = left
       Right = right
       SubtreeMaxX = max entry.Bounds.MaxX (max (maxX left) (maxX right)) }
@@ -43,64 +47,76 @@ let private compareEntry (left: Entry<'id>) (right: Entry<'id>) =
     | 0 -> Operators.compare left.Id right.Id
     | comparison -> comparison
 
-let private priority id =
-    let mutable value = uint64 (uint32 (hash id)) + 0x9e3779b97f4a7c15UL
-    value <- (value ^^^ (value >>> 30)) * 0xbf58476d1ce4e5b9UL
-    value <- (value ^^^ (value >>> 27)) * 0x94d049bb133111ebUL
-    value ^^^ (value >>> 31)
-
 let private rotateRight root =
     match root.Left with
     | None -> root
     | Some pivot ->
-        let right = node root.Entry root.Priority pivot.Right root.Right
-        node pivot.Entry pivot.Priority pivot.Left (Some right)
+        let right = node root.Entry pivot.Right root.Right
+        node pivot.Entry pivot.Left (Some right)
 
 let private rotateLeft root =
     match root.Right with
     | None -> root
     | Some pivot ->
-        let left = node root.Entry root.Priority root.Left pivot.Left
-        node pivot.Entry pivot.Priority (Some left) pivot.Right
+        let left = node root.Entry root.Left pivot.Left
+        node pivot.Entry (Some left) pivot.Right
 
-let rec private insert (entry: Entry<'id>) entryPriority (root: Node<'id> option) =
+let private balance root =
+    let difference = height root.Left - height root.Right
+
+    if difference > 1 then
+        let left = root.Left.Value
+        let root =
+            if height left.Right > height left.Left then
+                node root.Entry (Some(rotateLeft left)) root.Right
+            else
+                root
+        rotateRight root
+    elif difference < -1 then
+        let right = root.Right.Value
+        let root =
+            if height right.Left > height right.Right then
+                node root.Entry root.Left (Some(rotateRight right))
+            else
+                root
+        rotateLeft root
+    else
+        root
+
+let rec private insert (entry: Entry<'id>) (root: Node<'id> option) =
     match root with
-    | None -> Some(node entry entryPriority None None)
+    | None -> Some(node entry None None)
     | Some current ->
         match compareEntry entry current.Entry with
-        | 0 -> Some(node entry current.Priority current.Left current.Right)
+        | 0 -> Some(node entry current.Left current.Right)
         | comparison when comparison < 0 ->
-            let updated = node current.Entry current.Priority (insert entry entryPriority current.Left) current.Right
-
-            match updated.Left with
-            | Some left when left.Priority > updated.Priority -> Some(rotateRight updated)
-            | _ -> Some updated
+            Some(balance (node current.Entry (insert entry current.Left) current.Right))
         | _ ->
-            let updated = node current.Entry current.Priority current.Left (insert entry entryPriority current.Right)
+            Some(balance (node current.Entry current.Left (insert entry current.Right)))
 
-            match updated.Right with
-            | Some right when right.Priority > updated.Priority -> Some(rotateLeft updated)
-            | _ -> Some updated
-
-let rec private merge left right =
-    match left, right with
-    | None, other
-    | other, None -> other
-    | Some left, Some right when left.Priority > right.Priority ->
-        Some(node left.Entry left.Priority left.Left (merge left.Right (Some right)))
-    | Some left, Some right ->
-        Some(node right.Entry right.Priority (merge (Some left) right.Left) right.Right)
+let rec private removeMinimum root =
+    match root.Left with
+    | None -> root.Entry, root.Right
+    | Some left ->
+        let minimum, remaining = removeMinimum left
+        minimum, Some(balance (node root.Entry remaining root.Right))
 
 let rec private delete (entry: Entry<'id>) (root: Node<'id> option) =
     match root with
     | None -> None
     | Some current ->
         match compareEntry entry current.Entry with
-        | 0 -> merge current.Left current.Right
+        | 0 ->
+            match current.Left, current.Right with
+            | None, other
+            | other, None -> other
+            | Some _, Some right ->
+                let successor, remaining = removeMinimum right
+                Some(balance (node successor current.Left remaining))
         | comparison when comparison < 0 ->
-            Some(node current.Entry current.Priority (delete entry current.Left) current.Right)
+            Some(balance (node current.Entry (delete entry current.Left) current.Right))
         | _ ->
-            Some(node current.Entry current.Priority current.Left (delete entry current.Right))
+            Some(balance (node current.Entry current.Left (delete entry current.Right)))
 
 let remove id (index: Index<'id>) =
     match Map.tryFind id index.Bounds with
@@ -115,7 +131,7 @@ let add id (bounds: GeometryBounds) (index: Index<'id>) =
     let entry = { Id = id; Bounds = bounds }
 
     { Bounds = Map.add id bounds index.Bounds
-      Root = insert entry (priority id) index.Root }
+      Root = insert entry index.Root }
 
 let private matches relation query candidate =
     match relation with
@@ -161,3 +177,15 @@ let search relation (bounds: GeometryBounds) (index: Index<'id>) =
     collect Set.empty index.Root
 
 let count (index: Index<'id>) = Map.count index.Bounds
+
+/// Diagnostic depth of the spatial search tree. Traversal stays iterative even
+/// when an existing index has a degenerate shape.
+let maximumDepth (index: Index<'id>) =
+    let rec visit maximum pending =
+        match pending with
+        | [] -> maximum
+        | (None, _) :: rest -> visit maximum rest
+        | (Some current, depth) :: rest ->
+            visit (max maximum depth) ((current.Left, depth + 1) :: (current.Right, depth + 1) :: rest)
+
+    visit 0 [ index.Root, 1 ]
