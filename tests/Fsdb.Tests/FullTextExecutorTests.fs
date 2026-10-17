@@ -461,6 +461,17 @@ let tests =
               Expect.equal (search "中並") [ "3" ] "second BMP form stays distinct from its base"
               Expect.equal (search "中丽") [ "5"; "6"; "7" ] "supplementary forms share MySQL's fallback key"
 
+          testCase "general Unicode ngrams share supplementary posting keys"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE general_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO general_docs VALUES(1,'中𠮷文'),(2,'中🙂文'),(3,'中𠀀文'),(4,'中生文')" |> ignore
+              let search term =
+                  let sql = $"SELECT id FROM general_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (search "中𠮷") [ "1"; "2"; "3" ] "supplementary query shares fallback postings"
+              Expect.equal (search "中生") [ "4" ] "BMP Han remains a distinct posting"
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()

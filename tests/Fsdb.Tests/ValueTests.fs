@@ -1462,6 +1462,16 @@ let tests =
                         Expect.isFalse (col.Equals "ᆯ" "ㄹ") "trailing and leading consonants differ"
                         Expect.isFalse (col.Equals "ᄒ" "\uE0B0\uE512") "literal marker cannot alias a Jamo key"
 
+                testCase "utf8mb4_general_ci shares the supplementary fallback weight"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for other in [ "🙂"; "𠀀"; "😀" ] do
+                        Expect.isTrue (col.Equals "𠮷" other) (other + " shares the fallback weight")
+                        Expect.equal (col.KeyOf "𠮷") (col.KeyOf other) (other + " shares the index key")
+                        Expect.equal (col.HashOf "𠮷") (col.HashOf other) (other + " shares the hash key")
+                    Expect.isFalse (col.Equals "𠮷" "生") "supplementary fallback stays distinct from BMP Han"
+                    Expect.isFalse (col.Equals "𠮷" "\uE090\uE091") "literal marker cannot alias the fallback"
+
                 testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
                     [ "utf8mb4_0900_ai_ci", true
