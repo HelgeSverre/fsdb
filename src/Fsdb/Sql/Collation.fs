@@ -238,113 +238,93 @@ let private foldLegacyUnicodeJamo (value: string) =
 // general_ci leaves compatibility Jamo distinct from conjoining Jamo.
 let private foldGeneralUnicodeJamo (value: string) = foldUnicodeJamo (fun _ -> None) value
 
-// ICU drops the halfwidth voicing marks from general_ci's primary key when
-// they join neighboring kana. MySQL gives each mark a positional weight.
-let private foldGeneralHalfwidthMarks (value: string) =
-    if not (value |> Seq.exists (fun c -> c = '\uE0C0' || c = '\uff9e' || c = '\uff9f')) then value
+// Keep the escape rule in one place: a literal marker must never alias a
+// synthetic primary weight, including when it precedes another private-use char.
+let private foldEscapedGeneralWeights (marker: char) (syntheticWeight: char -> char voption) (value: string) =
+    let mutable first = 0
+    while first < value.Length
+          && value.[first] <> marker
+          && (match syntheticWeight value.[first] with ValueNone -> true | ValueSome _ -> false) do
+        first <- first + 1
+    if first = value.Length then value
     else
         let result = StringBuilder(value.Length)
-        for c in value do
-            match c with
-            | '\uE0C0' -> result.Append("\uE0C0\uE0C0") |> ignore
-            | '\uff9e' -> result.Append("\uE0C0\uE0C1") |> ignore
-            | '\uff9f' -> result.Append("\uE0C0\uE0C2") |> ignore
-            | _ -> result.Append(c) |> ignore
+        result.Append(value, 0, first) |> ignore
+        for index in first .. value.Length - 1 do
+            let c = value.[index]
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            else
+                match syntheticWeight c with
+                | ValueSome weight -> result.Append(marker).Append(weight) |> ignore
+                | ValueNone -> result.Append(c) |> ignore
         result.ToString()
+
+// ICU drops the halfwidth voicing marks from general_ci's primary key when
+// they join neighboring kana. MySQL gives each mark a positional weight.
+let private generalHalfwidthMarkWeight = function
+    | '\uff9e' -> ValueSome '\uE0C1'
+    | '\uff9f' -> ValueSome '\uE0C2'
+    | _ -> ValueNone
+let private foldGeneralHalfwidthMarks (value: string) =
+    foldEscapedGeneralWeights '\uE0C0' generalHalfwidthMarkWeight value
 
 // ICU composes kana plus U+3099/U+309A before primary comparison. MySQL's
 // general_ci keeps the written base and combining mark as separate weights.
+let private generalKanaMarkWeight = function
+    | '\u3099' -> ValueSome '\uE0E1'
+    | '\u309a' -> ValueSome '\uE0E2'
+    | _ -> ValueNone
 let private foldGeneralKanaMarks (value: string) =
-    if not (value |> Seq.exists (fun c -> c = '\uE0E0' || c = '\u3099' || c = '\u309a')) then value
-    else
-        let result = StringBuilder(value.Length)
-        for c in value do
-            match c with
-            | '\uE0E0' -> result.Append("\uE0E0\uE0E0") |> ignore
-            | '\u3099' -> result.Append("\uE0E0\uE0E1") |> ignore
-            | '\u309a' -> result.Append("\uE0E0\uE0E2") |> ignore
-            | _ -> result.Append(c) |> ignore
-        result.ToString()
+    foldEscapedGeneralWeights '\uE0E0' generalKanaMarkWeight value
 
 // ICU ignores most decomposed accents at primary strength. MySQL general_ci
 // retains their written weights; U+0345 has its own Greek-iota mapping, and
 // U+034F is already preserved by the format-control fold.
+let private generalCombiningAccentWeight c =
+    if c >= '\u0300' && c <= '\u036f' && c <> '\u0345' && c <> '\u034f' then
+        ValueSome(char (0xE400 + int c - 0x0300))
+    else ValueNone
 let private foldGeneralCombiningAccents (value: string) =
-    let hasOwnWeight c = c >= '\u0300' && c <= '\u036f' && c <> '\u0345' && c <> '\u034f'
-    let marker = '\uE300'
-    if not (value |> Seq.exists (fun c -> c = marker || hasOwnWeight c)) then value
-    else
-        let result = StringBuilder(value.Length)
-        for c in value do
-            if c = marker then result.Append(marker).Append(marker) |> ignore
-            elif hasOwnWeight c then
-                result.Append(marker).Append(char (0xE400 + int c - 0x0300)) |> ignore
-            else result.Append(c) |> ignore
-        result.ToString()
+    foldEscapedGeneralWeights '\uE300' generalCombiningAccentWeight value
 
 // MySQL general_ci assigns literal weights to the assigned Hiragana,
 // Katakana, and halfwidth-kana characters. ICU drops voiced/small-kana
 // distinctions at primary strength even when it keeps scripts distinct.
+let private generalKanaWeight c =
+    if (c >= '\u3041' && c <= '\u3096') || (c >= '\u3099' && c <= '\u30ff') then
+        ValueSome(char (0xE700 + int c - 0x3040))
+    elif c >= '\uff61' && c <= '\uff9f' then
+        ValueSome(char (0xE900 + int c - 0xff61))
+    else ValueNone
 let private foldGeneralKanaWeights (value: string) =
-    let isFullwidth c =
-        (c >= '\u3041' && c <= '\u3096') || (c >= '\u3099' && c <= '\u30ff')
-    let isHalfwidth c = c >= '\uff61' && c <= '\uff9f'
-    let marker = '\uE600'
-    if not (value |> Seq.exists (fun c -> c = marker || isFullwidth c || isHalfwidth c)) then value
-    else
-        let result = StringBuilder(value.Length)
-        for c in value do
-            if c = marker then result.Append(marker).Append(marker) |> ignore
-            elif isFullwidth c then
-                result.Append(marker).Append(char (0xE700 + int c - 0x3040)) |> ignore
-            elif isHalfwidth c then
-                result.Append(marker).Append(char (0xE900 + int c - 0xff61)) |> ignore
-            else result.Append(c) |> ignore
-        result.ToString()
+    foldEscapedGeneralWeights '\uE600' generalKanaWeight value
 
 // ICU folds CJK radicals onto their compatibility ideographs. MySQL general_ci
 // assigns each defined radical its own primary weight.
+let private generalCjkRadicalWeight c =
+    if (c >= '\u2e80' && c <= '\u2e99')
+       || (c >= '\u2e9b' && c <= '\u2ef3')
+       || (c >= '\u2f00' && c <= '\u2fd5') then
+        ValueSome(char (0xE100 + int c - 0x2e80))
+    else ValueNone
 let private foldGeneralCjkRadicals (value: string) =
-    let isRadical c =
-        (c >= '\u2e80' && c <= '\u2e99')
-        || (c >= '\u2e9b' && c <= '\u2ef3')
-        || (c >= '\u2f00' && c <= '\u2fd5')
-    let marker = '\uE0F0'
-    if not (value |> Seq.exists (fun c -> c = marker || isRadical c)) then value
-    else
-        let result = StringBuilder(value.Length)
-        for c in value do
-            if c = marker then result.Append(marker).Append(marker) |> ignore
-            elif isRadical c then
-                result.Append(marker).Append(char (0xE100 + int c - 0x2e80)) |> ignore
-            else result.Append(c) |> ignore
-        result.ToString()
+    foldEscapedGeneralWeights '\uE0F0' generalCjkRadicalWeight value
 
 // MySQL's general_ci gives these spaces and format characters separate,
 // positional weights. ICU ignores some and equates others at primary strength.
+let private generalFormatControlWeight = function
+    | '\u034f' -> ValueSome '\uE0D1'
+    | '\u00a0' -> ValueSome '\uE0D2'
+    | '\u180e' -> ValueSome '\uE0D3'
+    | '\u200b' -> ValueSome '\uE0D4'
+    | '\u200c' -> ValueSome '\uE0D5'
+    | '\u200d' -> ValueSome '\uE0D6'
+    | '\u2060' -> ValueSome '\uE0D7'
+    | '\u3000' -> ValueSome '\uE0D8'
+    | '\ufe0f' -> ValueSome '\uE0D9'
+    | _ -> ValueNone
 let private foldGeneralFormatControls (value: string) =
-    let syntheticWeight = function
-        | '\u034f' -> Some '\uE0D1'
-        | '\u00a0' -> Some '\uE0D2'
-        | '\u180e' -> Some '\uE0D3'
-        | '\u200b' -> Some '\uE0D4'
-        | '\u200c' -> Some '\uE0D5'
-        | '\u200d' -> Some '\uE0D6'
-        | '\u2060' -> Some '\uE0D7'
-        | '\u3000' -> Some '\uE0D8'
-        | '\ufe0f' -> Some '\uE0D9'
-        | _ -> None
-    let marker = '\uE0D0'
-    if not (value |> Seq.exists (fun c -> c = marker || (syntheticWeight c |> Option.isSome))) then value
-    else
-        let result = StringBuilder(value.Length)
-        for c in value do
-            if c = marker then result.Append(marker).Append(marker) |> ignore
-            else
-                match syntheticWeight c with
-                | Some weight -> result.Append(marker).Append(weight) |> ignore
-                | None -> result.Append(c) |> ignore
-        result.ToString()
+    foldEscapedGeneralWeights '\uE0D0' generalFormatControlWeight value
 
 // MySQL's legacy UCA keeps some enclosed Korean/ideograph forms distinct,
 // while expanding enclosed kana and square unit forms that ICU keeps apart.
