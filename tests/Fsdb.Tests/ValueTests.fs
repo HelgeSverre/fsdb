@@ -1431,6 +1431,24 @@ let tests =
                         Expect.equal (col.Equals "a" "a ") expectedEqual (sprintf "%s: 'a' = 'a '" name)
 
                 testTheory
+                    "legacy Unicode PAD SPACE trims collation-equivalent trailing spaces"
+                    [ "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci" ]
+                    <| fun name ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        for suffix in [ " "; "\u00a0"; "\u2000"; "\u2001"; "\u2002"; "\u2003"
+                                        "\u2004"; "\u2005"; "\u2006"; "\u2007"; "\u2008"; "\u2009"
+                                        "\u200a"; "\u202f"; "\u205f"; "\u3000"; "\u200c" ] do
+                            let padded = "生" + suffix
+                            Expect.isTrue (col.Equals padded "生") (name + " trailing " + suffix)
+                            Expect.equal (col.KeyOf padded) (col.KeyOf "生") (name + " key " + suffix)
+                            Expect.equal (col.HashOf padded) (col.HashOf "生") (name + " hash " + suffix)
+                        Expect.isFalse (col.Equals "\u3000生" "生") (name + " leading ideographic space")
+                        Expect.isFalse (col.Equals "生\u1680" "生") (name + " ogham space remains weighted")
+                        if name = "utf8mb4_unicode_520_ci" then
+                            Expect.isFalse (col.Equals "生\u180e" "生") "Mongolian vowel separator remains weighted"
+                            Expect.isFalse (col.Equals "\u180e" "\uE0A0\uE0A1") "literal marker cannot alias separator"
+
+                testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
                     [ "utf8mb4_0900_ai_ci", true
                       "utf8mb4_0900_as_ci", true
