@@ -67,5 +67,10 @@ before the view's physical sources are expanded. A view predicate stays in
 that outer join's ON condition rather than filtering preserving rows in the
 global WHERE. A matching filtered view updates both targets; a filtered-out
 view row leaves its physical target unchanged. CHECK OPTION still rejects an
-invalid view assignment without changing the preserving table. Wider outer
-join trees still need a row-preservation audit.
+invalid view assignment without changing the preserving table. The audited
+three-source chains `x LEFT JOIN y LEFT JOIN v` and `x LEFT JOIN v LEFT JOIN y`
+also update both matching targets. When `y` is absent in the first chain,
+only `x` changes. The rewrite keeps the preceding `x LEFT JOIN y` operand
+grouped when moving `v` to a view-first RIGHT join, so null-extension and ON
+predicate scope survive. A three-source CHECK OPTION failure leaves both
+targets unchanged. Other wider outer-join trees still need an audit.

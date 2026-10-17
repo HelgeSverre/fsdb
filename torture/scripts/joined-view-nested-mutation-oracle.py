@@ -402,13 +402,57 @@ def main():
                 assert completed_before_owner_commit, disjoint_outcome
                 assert disjoint_outcome == {"affected": 1}, disjoint_outcome
 
+                with reader.cursor() as cursor:
+                    outer_sources = (
+                        "x LEFT JOIN y ON y.id=x.id LEFT JOIN v ON v.id=y.id",
+                        "x LEFT JOIN v ON v.id=x.id LEFT JOIN y ON y.id=v.id",
+                    )
+                    for source in outer_sources:
+                        cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                        cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                        cursor.execute(
+                            "UPDATE " + source
+                            + " SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+                        )
+                        assert cursor.rowcount == 2, source
+                        cursor.execute("SELECT n FROM x WHERE id=1")
+                        assert cursor.fetchone() == (1,), source
+                        cursor.execute("SELECT n FROM t WHERE id=1")
+                        assert cursor.fetchone() == (1,), source
+                    cursor.execute("DELETE FROM y WHERE id=1")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE x LEFT JOIN y ON y.id=x.id LEFT JOIN v ON v.id=y.id "
+                        "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+                    )
+                    assert cursor.rowcount == 1
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (0,)
+                    cursor.execute("INSERT INTO y VALUES(1)")
+                    try:
+                        cursor.execute(
+                            "UPDATE x LEFT JOIN y ON y.id=x.id LEFT JOIN checked v ON v.id=y.id "
+                            "SET x.n=x.n+1,v.id=2 WHERE x.id=1"
+                        )
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error.args
+                    else:
+                        raise AssertionError("three-source CHECK OPTION should reject id=2")
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute("SELECT id,n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (1, 0)
+
                 print(
                     f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
                     "two-source outer joins preserved physical writes beside missing or filtered view rows; "
                     "nested CHECK OPTION returned 1369; shared bare n returned 1052; "
                     "third-position read grants were enforced; "
                     "two-target writes rebased and kept caller/definer grants separate; "
-                    "disjoint rows did not wait"
+                    "disjoint rows did not wait; three-source outer joins preserved the first target"
                 )
             finally:
                 for connection in connections:

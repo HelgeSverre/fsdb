@@ -2506,6 +2506,53 @@ let tests =
               match handle session "SELECT n FROM tx_read_view_outer WHERE id=3" |> snd with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected preserving outer row update, got %A" result
+              for source in
+                  [ "tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id LEFT JOIN tx_read_joined_view v ON v.id=y.id"
+                    "tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id LEFT JOIN tx_read_view_other y ON y.id=v.id" ] do
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let sql = "UPDATE " + source + " SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+                  Expect.equal (handle session sql |> snd) (Affected 2UL)
+                      "three-source outer join updates both matched targets"
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected preserving target update, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected view target update, got %A" result
+              handle session "DELETE FROM tx_read_view_other WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let missingIntermediate =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "LEFT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+              Expect.equal (handle session missingIntermediate |> snd) (Affected 1UL)
+                  "a missing intermediate row keeps the first target writable"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected preserving target update, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing intermediate row must leave the view target untouched, got %A" result
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session
+                  ("CREATE VIEW tx_read_three_checked AS SELECT t.id,t.n FROM tx_read_view_target t "
+                   + "JOIN tx_read_view_link l ON l.id=t.id WITH CASCADED CHECK OPTION")
+              |> ignore
+              let rejectedThreeSource =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "LEFT JOIN tx_read_three_checked v ON v.id=y.id "
+                  + "SET x.n=x.n+1,v.id=2 WHERE x.id=1"
+              match handle session rejectedThreeSource |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected three-source CHECK OPTION rejection, got %A" result
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve the first target, got %A" result
+              match handle session "SELECT id,n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "0" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve the view target, got %A" result
               handle session
                   ("CREATE VIEW tx_read_filtered_view AS SELECT t.id,t.n FROM tx_read_view_target t "
                    + "JOIN tx_read_view_link l ON l.id=t.id WHERE t.n>0")

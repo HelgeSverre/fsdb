@@ -22999,7 +22999,7 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
 
     let rec move prior remaining =
         match remaining with
-        | [ { Kind = LeftJoin; Table = FromTable source; Using = [] } as join ] when List.isEmpty prior ->
+        | ({ Kind = LeftJoin; Table = FromTable source; Using = [] } as join) :: rest ->
             let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->
@@ -23011,10 +23011,15 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                         | Some owner -> equalsIgnoreCase owner qualifier
                         | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
                 if writesView then
+                    let preceding =
+                        match prior with
+                        | [] -> FromTable update.From
+                        | earlier -> FromJoinGroup(FromTable update.From, List.rev earlier)
                     { update with
                         From = source
-                        Joins = [ { join with Kind = RightJoin; Table = FromTable update.From } ] }
+                        Joins = { join with Kind = RightJoin; Table = preceding } :: rest }
                 else update
+            | None when isPhysical source -> move (join :: prior) rest
             | None -> update
         | ({ Kind = InnerJoin; Table = FromTable source; Using = [] } as join) :: rest ->
             let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
