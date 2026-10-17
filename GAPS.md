@@ -966,6 +966,9 @@ The [general Unicode letterlike-symbol audit](torture/findings/2026-10-17-genera
 matches MySQL's U+2100–U+21FF primary-weight classes in two-column
 ngram searches at token sizes 1–10. Broader collation and parser behavior
 remains open.
+A current-head rerun of the maintained two-column `utf8mb4_general_ci`
+corpus matches MySQL 8.4.11 in all 387 searches at each of sizes 1–5;
+the range-specific audits below retain their separate coverage boundaries.
 The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
 also matches MySQL's distinct U+2200–U+22FF primary weights in the same
 two-column ngram lane at token sizes 1–10.
@@ -1062,8 +1065,9 @@ The [punctuation and script-number probe](torture/findings/2026-10-17-general-ci
 preserves distinct dash, quote, superscript, and subscript weights that ICU
 otherwise merges; the U+2000–U+20FF ngram lane matches at sizes 1 and 2.
 The [adjacent symbol-block audit](torture/findings/2026-10-17-general-ci-adjacent-symbol-blocks.md)
-found no additional membership or relevance differences across seven
-U+2300–U+2AFF blocks at sizes 1 and 2; U+2800–U+28FF was not sampled.
+found no additional membership or relevance differences across eight
+U+2300–U+2AFF blocks at sizes 1 and 2. The U+2800–U+28FF block also matches
+at sizes 3–10, with literal, distinct MySQL weights throughout.
 The [Glagolitic and Coptic block probe](torture/findings/2026-10-17-general-ci-glagolitic-coptic.md)
 preserves MySQL's distinct U+2C00–U+2CFF weights; its expanded ngram lane
 matches at sizes 1 and 2.
