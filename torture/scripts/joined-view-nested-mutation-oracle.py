@@ -1,5 +1,6 @@
 """MySQL 8.4 oracle for an UPDATE through a view join followed by another join."""
 
+import itertools
 import pathlib
 import subprocess
 import tempfile
@@ -56,11 +57,22 @@ def main():
                 waiter.select_db("probe")
                 reader.select_db("probe")
 
-                for from_clause, assignment in (
-                    ("t JOIN l ON l.id=t.id", "v.n=v.n+1"),
-                    ("l JOIN t ON l.id=t.id", "v.n=v.n+1"),
-                    ("l JOIN t ON l.id=t.id", "n=n+1"),
+                for (from_clause, assignment), view_first in itertools.product(
+                    (
+                        ("t JOIN l ON l.id=t.id", "v.n=v.n+1"),
+                        ("l JOIN t ON l.id=t.id", "v.n=v.n+1"),
+                        ("l JOIN t ON l.id=t.id", "n=n+1"),
+                    ),
+                    (True, False),
                 ):
+                    joined_source = (
+                        "v JOIN x ON x.id=v.id" if view_first
+                        else "x JOIN v ON x.id=v.id"
+                    )
+                    checked_source = (
+                        "checked JOIN x ON x.id=checked.id" if view_first
+                        else "x JOIN checked ON x.id=checked.id"
+                    )
                     with owner.cursor() as cursor:
                         cursor.execute("UPDATE t SET n=0 WHERE id=1")
                         cursor.execute("DROP VIEW IF EXISTS v")
@@ -82,7 +94,7 @@ def main():
                                 cursor.execute("BEGIN")
                                 started.set()
                                 cursor.execute(
-                                    "UPDATE v JOIN x ON x.id=v.id "
+                                    "UPDATE " + joined_source + " "
                                     "SET " + assignment + " WHERE v.id=1"
                                 )
                                 outcome["affected"] = cursor.rowcount
@@ -111,7 +123,7 @@ def main():
                         )
                         try:
                             cursor.execute(
-                                "UPDATE checked JOIN x ON x.id=checked.id "
+                                "UPDATE " + checked_source + " "
                                 "SET checked.id=2 WHERE checked.id=1"
                             )
                         except pymysql.MySQLError as error:

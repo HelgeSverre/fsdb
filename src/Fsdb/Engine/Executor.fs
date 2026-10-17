@@ -22989,7 +22989,30 @@ let private rewriteViewExpression (view: UpdatableView) (expression: Expr) =
             | None -> Some(QualifiedCol("__fsdb_view", name))
         | _ -> None) expression
 
+let private writableViewFirst (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
+    match update.Joins with
+    | ({ Kind = InnerJoin; Table = FromTable right } as firstJoin) :: rest
+        when tryUpdatableView store (update.From.Database |> Option.defaultValue defaultDatabase) update.From.Table |> Option.isNone ->
+        match tryUpdatableView store (right.Database |> Option.defaultValue defaultDatabase) right.Table with
+        | Some view ->
+            let qualifier = right.Alias |> Option.defaultValue right.Table
+            let writesView =
+                update.Assignments
+                |> List.exists (fun assignment ->
+                    match assignment.Table with
+                    | Some owner -> equalsIgnoreCase owner qualifier
+                    | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+            if writesView then
+                // An inner join has the same matched rows in either source order.
+                // Put the writable view first for expansion and row claiming.
+                { update with From = right; Joins = { firstJoin with Table = FromTable update.From } :: rest }
+            else
+                update
+        | None -> update
+    | _ -> update
+
 let private targetsFirstJoinedView (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
+    let update = writableViewFirst store defaultDatabase update
     let database = update.From.Database |> Option.defaultValue defaultDatabase
     let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
 
@@ -28986,6 +29009,7 @@ let rec executeAs
     | Update updateStmt
         when not updateStmt.Joins.IsEmpty
              && targetsFirstJoinedView store dbName updateStmt ->
+        let updateStmt = writableViewFirst store dbName updateStmt
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
 
         match tryUpdatableView store viewDb updateStmt.From.Table with
@@ -30161,6 +30185,7 @@ let transactionWriteTargets
             | _ -> []
         | None -> targets update.From update.Where |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
+        let update = writableViewFirst store dbName update
         let viewDatabase = update.From.Database |> Option.defaultValue dbName
 
         let viewTargets =
