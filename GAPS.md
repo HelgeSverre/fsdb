@@ -343,7 +343,12 @@ reduces `ABS(d.k)+0=o.x` from 4,004 to six calls on the same profile.
 The [matched in-memory timing](benchmarks/results/2026-10-15-materialized-integer-expression-lookup.md)
 confirms a repeated-query speedup for this shape. [Text expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-text-expression-lookup)
 use the effective comparison collation and reduce the audited `LOWER(d.k)=o.x`
-profile from 4,004 to six residual calls. [Exact decimal expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-lookup)
+profile from 4,004 to six residual calls.
+Stable materialized [text-expression ranges](torture/findings/2026-10-17-correlated-materialized-text-range.md)
+now use ordered statement-local cuts under the effective comparison
+collation for inequalities and BETWEEN, including complete OR branches;
+the selective 1,004-row fixture reduces a residual from 6,030 calls to
+fewer than 80. [Exact decimal expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-lookup)
 reduce `d.k+0.00=o.x` from 5,005 to seven calls. [Finite DOUBLE-domain keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-lookup)
 now reduce `d.k+0e0=o.x` from 5,005 to seven calls too. DECIMAL and integer
 bounds use the same approximate comparison key, while string and non-finite
