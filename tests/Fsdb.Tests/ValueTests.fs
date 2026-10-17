@@ -1813,12 +1813,13 @@ let tests =
 
                 testCase "legacy Bopomofo forms keep MySQL primary weights"
                 <| fun _ ->
-                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
-                    Expect.isTrue (col.Equals "ㄍ" "ㆣ") "the older velar forms remain equal"
-                    for left, right in [ "ㄮ", "ㄜ"; "ㆻ", "ㄍ"; "ㆻ", "ㆣ" ] do
-                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
-                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
-                    Expect.isFalse (col.Equals "ㄮ" "\uE060\uE061") "the marker cannot alias a Bopomofo form"
+                    for name in [ "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci" ] do
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.isTrue (col.Equals "ㄍ" "ㆣ") (name + " keeps the older velar forms equal")
+                        for left, right in [ "ㄮ", "ㄜ"; "ㆻ", "ㄍ"; "ㆻ", "ㆣ" ] do
+                            Expect.isFalse (col.Equals left right) (name + ": " + left + " differs from " + right)
+                            Expect.notEqual (col.KeyOf left) (col.KeyOf right) (name + ": distinct index keys")
+                        Expect.isFalse (col.Equals "ㄮ" "\uE060\uE061") (name + " marker isolation")
 
                 testCase "legacy compatibility ideographs preserve measured UCA classes"
                 <| fun _ ->

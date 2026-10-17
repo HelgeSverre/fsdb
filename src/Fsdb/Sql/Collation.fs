@@ -394,8 +394,8 @@ let private foldLegacyKanaForms (value: string) =
             | c -> result.Append(c) |> ignore
         result.ToString()
 
-// ICU merges these Bopomofo forms with older letters; MySQL's legacy
-// collation keeps them at distinct primary weights.
+// ICU merges these Bopomofo forms with older letters; MySQL's Unicode 4.0
+// and 5.2 collations keep them at distinct primary weights.
 let private foldLegacyBopomofoForms (value: string) =
     if not (value |> Seq.exists (fun c -> c = '\uE060' || c = 'ㄮ' || c = 'ㆻ')) then value
     else
@@ -525,10 +525,13 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             |> foldLegacySupplementary |> foldGeneralUnicodeJamo
             |> foldGeneralSyntheticWeights
         | "utf8mb4_0900_ai_ci"
-        | "utf8mb4_0900_as_ci"
-        | "utf8mb4_unicode_520_ci" ->
+        | "utf8mb4_0900_as_ci" ->
             value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
             |> foldCjkQuoteForms |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
+        | "utf8mb4_unicode_520_ci" ->
+            value |> foldCjkPunctuationForms true |> foldLegacyBopomofoForms
+            |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
+            |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
         | "utf8mb4_unicode_ci" ->
             value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms

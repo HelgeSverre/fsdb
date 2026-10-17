@@ -449,6 +449,20 @@ let tests =
               Expect.equal (search "中ㄮ" "IN BOOLEAN MODE") [] "historical Boolean word table excludes ㄮ"
               Expect.equal (search "中ㆻ" "IN BOOLEAN MODE") [] "historical Boolean word table excludes ㆻ"
 
+          testCase "Unicode 520 ngrams keep Bopomofo extension postings distinct"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE unicode520_bopomofo(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_520_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO unicode520_bopomofo VALUES(1,'中ㄜ文'),(2,'中ㄮ文'),(3,'中ㄍ文'),(4,'中ㆣ文'),(5,'中ㆻ文')" |> ignore
+              let search term mode =
+                  let sql = $"SELECT id FROM unicode520_bopomofo WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                  ids (run store sql)
+              for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
+                  Expect.equal (search "中ㄜ" mode) [ "1" ] (mode + " preserves ㄜ")
+                  Expect.equal (search "中ㄍ" mode) [ "3"; "4" ] (mode + " preserves the older velar class")
+              Expect.equal (search "中ㄮ" "IN NATURAL LANGUAGE MODE") [ "2" ] "ㄮ has a distinct natural posting"
+              Expect.equal (search "中ㆻ" "IN NATURAL LANGUAGE MODE") [ "5" ] "ㆻ has a distinct natural posting"
+
           testCase "legacy Unicode ngrams keep later BMP ideographs distinct and share supplementary keys"
           <| fun _ ->
               let store = create ()
