@@ -2055,11 +2055,19 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
             match select.From with
             | Some source ->
                 let sourceAllowsUpdates = function
+                    | FromTable table when
+                        table.Database.IsNone
+                        && (select.Ctes |> List.exists (fun cte -> eqI cte.CteName table.Table)) -> true
                     | FromTable table -> sourceAllowsUpdates table
+                    // MySQL's view metadata treats a derived or CTE source as
+                    // updatable when the outer SELECT exposes its columns, even
+                    // when the source itself cannot accept a write.
+                    | FromSubquery _ -> true
                     | _ -> false
                 let sourceOrderAllowsUpdates =
                     match source, select.Joins with
                     | FromTable _, _ -> true
+                    | FromSubquery _, [] -> true
                     | (FromSubquery _ | FromLateral _ | FromJsonTable _), _ :: _ ->
                         tryLeadingReadOnlyWritableTarget source select.Joins |> Option.isSome
                     | _ -> false
@@ -2072,14 +2080,13 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                          || join.Kind = NaturalJoin)
                         && (match join.Table with FromTable _ | FromSubquery _ | FromLateral _ | FromJsonTable _ -> true | _ -> false))
                 let shapeAllowsUpdates =
-                    ((select.Joins.IsEmpty && match source with FromTable _ -> true | _ -> false)
-                     || (sourceOrderAllowsUpdates && joinsSupported && not select.Joins.IsEmpty))
+                    sourceOrderAllowsUpdates
+                    && joinsSupported
                     && not select.Distinct
                     && not select.CalculateFoundRows
                     && select.GroupBy.IsEmpty
                     && not select.Rollup
                     && select.Windows.IsEmpty
-                    && select.Ctes.IsEmpty
                     && select.Having.IsNone
                     && select.Limit.IsNone
                     && select.Offset.IsNone
@@ -2088,7 +2095,8 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                         |> List.exists (fun { Expression = expression } ->
                             match expression with
                             | Col _
-                            | QualifiedCol _ -> true
+                            | QualifiedCol _
+                            | Star _ -> true
                             | _ -> false))
 
                 if not shapeAllowsUpdates then
