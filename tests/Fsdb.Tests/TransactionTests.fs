@@ -2424,9 +2424,9 @@ let tests =
           <| fun _ ->
               let cases =
                   [ "ASC", 0, "0", true, [ 0; 1 ]
-                    "ASC", 4, "4", false, [ 1; 2 ]
+                    "ASC", 4, "4", true, [ 1; 2 ]
                     "DESC", 4, "4", true, [ 4; 3 ]
-                    "DESC", 0, "0", false, [ 3; 2 ]
+                    "DESC", 0, "0", true, [ 3; 2 ]
                     "ASC", 0, "NULL", true, [ 0; 1 ] ]
               for verb in [ "UPDATE"; "DELETE" ] do
                 for direction, insertedId, rankSql, shouldWait, changedIds in cases do
@@ -2465,6 +2465,47 @@ let tests =
                               [ Some(string id); Some(if List.contains id changedIds then "1" else "0") ])
                       Expect.equal rows expected "secondary LIMIT two write reselects after insert"
                   | other -> failtestf "expected secondary LIMIT two rows, got %A" other
+
+          testCase "limited secondary ordered write waits through MySQL's short-table frontier"
+          <| fun _ ->
+              let cases =
+                  [ 1, 1; 1, 2; 2, 3; 2, 4; 3, 5; 3, 6; 4, 7; 4, 8 ]
+                  |> List.map (fun (limit, visibleRows) -> limit, visibleRows, " WHERE n>=0", visibleRows < 2 * limit)
+              let cases = cases @ [ 2, 3, "", true; 2, 3, " WHERE id<=2", false; 2, 3, " WHERE rank_value<=2", false ]
+              for limit, visibleRows, predicate, shouldWait in cases do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_secondary_short(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  let rows =
+                      [ 1 .. visibleRows ]
+                      |> List.map (fun id -> sprintf "(%d,%d,0)" id id)
+                      |> String.concat ","
+                  handle setup ("INSERT INTO tx_secondary_short VALUES" + rows) |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_secondary_short VALUES(%d,%d,0)" (visibleRows + 1) (visibleRows + 1))
+                  Expect.equal inserted (Affected 1UL) "owner inserts beyond the visible frontier"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter (sprintf "UPDATE tx_secondary_short SET n=n+1%s ORDER BY rank_value ASC LIMIT %d" predicate limit))
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "secondary ordered writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "secondary ordered writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait "short-table wait matches MySQL"
+                  Expect.equal result (Affected(uint64 limit)) "writer changes limited rows"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                  match handle setup "SELECT id,n FROM tx_secondary_short ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          [ 1 .. visibleRows + 1 ]
+                          |> List.map (fun id -> [ Some(string id); Some(if id <= limit then "1" else "0") ])
+                      Expect.equal rows expected "short-table writer retains the selected frontier"
+                  | other -> failtestf "expected secondary short-table rows, got %A" other
 
           testCase "equal non-unique secondary keys do not serialize inserts"
           <| fun _ ->

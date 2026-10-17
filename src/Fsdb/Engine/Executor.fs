@@ -29894,6 +29894,15 @@ let transactionWriteTargets
                             | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _
                             | MatchAgainst _ | WindowOver _ | Placeholder _ -> true
                             | _ -> false))
+                    let indexedNames =
+                        (table.Columns |> List.filter _.PrimaryKey |> List.map _.Name)
+                        @ (Storage.orderedIndexKeyColumns table |> List.collect snd)
+                    let hasIndexedFilter =
+                        where
+                        |> Option.exists (Expression.exists (function
+                            | Col name | QualifiedCol(_, name) ->
+                                indexedNames |> List.exists (equalsIgnoreCase name)
+                            | _ -> false))
 
                     // The audited mixed-direction order waits even beyond the visible frontier.
                     if mixedDirections || hasRuntimeEffects then allKeys
@@ -29916,7 +29925,12 @@ let transactionWriteTargets
                                     | _ -> valid <- false)
 
                         let count = rowCount limitExpr
-                        if not valid || matched.Count < count then allKeys
+                        // InnoDB's audited secondary-index ordered write still
+                        // observes a pending insert past the selected frontier
+                        // while fewer than two LIMIT-sized visible matches exist.
+                        if not valid || matched.Count < count
+                           || (not (equalsIgnoreCase indexName "PRIMARY")
+                               && not hasIndexedFilter && matched.Count / 2 < count) then allKeys
                         else
                             let ordered = matched |> Seq.sortWith (fun left right -> compareOrdered left right directions) |> Seq.toArray
                             let frontier = ordered.[count - 1]

@@ -146,11 +146,18 @@ with three visible rows. Fsdb and MySQL both wait for an insert that enters
 the selected pair, then update or delete the same two rows. The final rows
 and affected counts also agree when the pending insert sorts beyond the
 pair. For this small-table shape, MySQL waits even for those beyond-frontier
-inserts, while fsdb completes before the owner commits. A separate 1,000-row
-MySQL case with an insert beyond the frontier completes without waiting.
-The wait difference is therefore recorded as an open scheduling divergence;
-the audited evidence does not support a global rule to wait for every
-secondary-key claim at `LIMIT 2`.
+inserts. A separate 1,000-row MySQL case with an insert beyond the frontier
+completes without waiting. The [short-table oracle](../scripts/secondary-limit-frontier-oracle.py)
+extends this boundary across `LIMIT 1`–`4`: when visible matches are fewer than
+twice the limit, the beyond-frontier insert makes MySQL wait; at or above that
+count it does not wait in the audited secondary-key layout. The same three-row
+`LIMIT 2` case waits without a WHERE filter, but does not wait with `id<=2` or
+`rank_value<=2`: those indexed filters exclude the pending row. Fsdb now
+observes pending secondary keys for the audited short-table scan shapes and
+retains its narrower frontier check for indexed filters or enough visible
+matches. The focused regression covers both sides of each boundary, including
+the earlier three-row `LIMIT 2` mismatch. Other predicates, index plans, and
+page layouts still need separate evidence.
 
 An in-memory A/B/A check with 1,000 sequential inserts into a table with one
 secondary index measured warm trials around 186–205 ms on the previous and
