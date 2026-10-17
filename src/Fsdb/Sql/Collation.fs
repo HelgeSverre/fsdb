@@ -177,6 +177,79 @@ let private markJapaneseHiragana (value: string) =
             if isHiragana c || c = marker then result.Append(marker) |> ignore
         result.ToString()
 
+// MySQL 8.4 Japanese UCA weights distinguish most compatibility ideographs
+// from their NFKC forms. These tables retain its measured weight classes.
+let private japaneseCompatEqual =
+    set [
+    0xF927; 0xF930; 0xF93D; 0xF93E; 0xF93F; 0xF94B; 0xF94D; 0xF964;
+    0xF96F; 0xF98B; 0xF98C; 0xF994; 0xF995; 0xF99B; 0xF9A1; 0xF9A5;
+    0xF9C8; 0xF9EF; 0xF9FA; 0xFA0D; 0xFA15; 0xFA20; 0xFA2E; 0xFA49;
+    0xFA5D; 0xFA5E; 0xFA66; 0xFA6C; 0xFA73; 0xFA79; 0xFA7B; 0xFA81;
+    0xFA82; 0xFA83; 0xFA8A; 0xFA8F; 0xFA98; 0xFA9D; 0xFAA1; 0xFAA2;
+    0xFAA4; 0xFAA9; 0xFAAB; 0xFAAC; 0xFAAE; 0xFAB1; 0xFAB5; 0xFAC4;
+    0xFAC5; 0xFAC6; 0xFAC9; 0xFACB; 0xFACD; 0xFACF; 0xFAD0; 0xFAD1;
+    0xFAD2; 0xFAD3; 0xFAD4; 0xFAD5; 0xFAD6; 0xFAD7; 0xFAD8; 0xFAD9; ]
+
+let private japaneseCompatAliases =
+    Map.ofList [
+    0xF908, 0xF907; 0xFACE, 0xF907; 0xF95C, 0xF914;
+    0xF9BF, 0xF914; 0xFA92, 0xF929; 0xFABD, 0xF95D;
+    0xF9AA, 0xF95F; 0xF9DB, 0xF961; 0xFA96, 0xF970;
+    0xFA57, 0xF996; 0xFAB0, 0xF996; 0xFA97, 0xF9CA;
+    0xFA7C, 0xFA10; 0xFA91, 0xFA12; 0xFAA0, 0xFA16;
+    0xFAA6, 0xFA17; 0xFAC8, 0xFA1C; 0xFABA, 0xFA22;
+    0xFA67, 0xFA25; 0xFA78, 0xFA36; 0xFA89, 0xFA3F;
+    0xFA8B, 0xFA40; 0xFA9A, 0xFA47; 0xFA9C, 0xFA48;
+    0xFAAD, 0xFA56; 0xFAB2, 0xFA5B; 0xFAB8, 0xFA61;
+    0xFABC, 0xFA62; 0xFABF, 0xFA63; 0xFAC1, 0xFA65;
+    0xFAC7, 0xFA68; 0xFACA, 0xFA69; 0xFACC, 0xFA6A; ]
+
+let private japaneseCompatSupplementaryAliases =
+    Map.ofList [
+    0x2F8B1, 0xF90D; 0x2F88E, 0xF928; 0x2F8D8, 0xF929;
+    0x2F9B4, 0xF936; 0x2F94F, 0xF93B; 0x2F86F, 0xF95F;
+    0x2F938, 0xF962; 0x2F82B, 0xF963; 0x2F8F5, 0xF970;
+    0x2F998, 0xF974; 0x2F902, 0xF9CA; 0x2F850, 0xFA00;
+    0x2F956, 0xFA1B; 0x2F805, 0xFA30; 0x2F80A, 0xFA31;
+    0x2F80E, 0xFA32; 0x2F826, 0xFA33; 0x2F827, 0xFA34;
+    0x2F82D, 0xFA35; 0x2F84C, 0xFA37; 0x2F878, 0xFA3C;
+    0x2F8A3, 0xFA3D; 0x2F8AB, 0xFA3F; 0x2F8B0, 0xFA40;
+    0x2F8C8, 0xFA41; 0x2F8CF, 0xFA43; 0x2F8E2, 0xFA44;
+    0x2F901, 0xFA45; 0x2F953, 0xFA50; 0x2F959, 0xFA54;
+    0x2F97A, 0xFA5B; 0x2F99F, 0xFA5F; 0x2F81B, 0xFA71;
+    0x2F825, 0xFA76; 0x2F828, 0xFA77; 0x2F847, 0xFA7A;
+    0x2F8A8, 0xFA87; 0x2F8D9, 0xFA93; 0x2F90B, 0xFA99;
+    0x2F914, 0xFA9B; 0x2F921, 0xFA9E; 0x2F940, 0xFAA8;
+    0x2F9D0, 0xFABE; 0x2F9D1, 0xFAC0; 0x2F9DF, 0xFAC2; ]
+
+let private foldJapaneseCompatibility (value: string) =
+    let marker = '\uE0B9'
+    let classKey codePoint =
+        let canonical = japaneseCompatAliases |> Map.tryFind codePoint |> Option.defaultValue codePoint
+        string marker + string (char (0xE500 + canonical - 0xF900))
+    let result = StringBuilder(value.Length)
+    let mutable index = 0
+    while index < value.Length do
+        let c = value.[index]
+        if c = marker then
+            result.Append(marker).Append(marker) |> ignore
+            index <- index + 1
+        elif c >= '\uF900' && c <= '\uFAFF'
+             && CharUnicodeInfo.GetUnicodeCategory(c) <> UnicodeCategory.OtherNotAssigned
+             && not (japaneseCompatEqual.Contains(int c)) then
+            result.Append(classKey (int c)) |> ignore
+            index <- index + 1
+        elif Char.IsHighSurrogate c && index + 1 < value.Length && Char.IsLowSurrogate value.[index + 1] then
+            let codePoint = Char.ConvertToUtf32(c, value.[index + 1])
+            match japaneseCompatSupplementaryAliases |> Map.tryFind codePoint with
+            | Some canonical -> result.Append(classKey canonical) |> ignore
+            | None -> result.Append(c).Append(value.[index + 1]) |> ignore
+            index <- index + 2
+        else
+            result.Append(c) |> ignore
+            index <- index + 1
+    result.ToString()
+
 let private foldSmallKana (value: string) =
     let regular = function
         | 'ァ' -> 'ア' | 'ィ' -> 'イ' | 'ゥ' -> 'ウ' | 'ェ' -> 'エ' | 'ォ' -> 'オ'
@@ -521,7 +594,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
 
     let foldText (value: string) =
         match name with
-        | "utf8mb4_ja_0900_as_cs_ks" -> markJapaneseHiragana value
+        | "utf8mb4_ja_0900_as_cs_ks" -> value |> markJapaneseHiragana |> foldJapaneseCompatibility
         | "utf8mb4_general_ci" ->
             value.Replace("ß", "s").Replace("ẞ", "s")
             |> foldLegacySupplementary |> foldGeneralUnicodeJamo
