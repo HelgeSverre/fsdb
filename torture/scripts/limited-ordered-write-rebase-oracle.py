@@ -168,19 +168,29 @@ def main():
                             finally:
                                 waiter.close()
 
-                for id_type, verb, (direction, inserted_id, should_wait, changed_id, initial_n) in itertools.product(
+                insert_cases = (
+                    ("ASC", 0, True, (0,), 0, (1, 2), 1),
+                    ("ASC", 100, False, (1,), 0, (1, 2), 1),
+                    ("DESC", 100, True, (100,), 0, (1, 2), 1),
+                    ("DESC", 0, False, (2,), 0, (1, 2), 1),
+                    ("ASC", 100, True, (100,), -1, (1, 2), 1),
+                    ("ASC", 0, True, (0, 1), 0, (1, 2, 3), 2),
+                    ("ASC", 100, False, (1, 2), 0, (1, 2, 3), 2),
+                    ("DESC", 100, True, (100, 3), 0, (1, 2, 3), 2),
+                    ("DESC", 0, False, (3, 2), 0, (1, 2, 3), 2),
+                )
+                for id_type, verb, (direction, inserted_id, should_wait, changed_ids, initial_n, base_ids, limit) in itertools.product(
                     ("INT", "BIGINT UNSIGNED"),
                     ("UPDATE", "DELETE"),
-                    (("ASC", 0, True, 0, 0), ("ASC", 100, False, 1, 0),
-                     ("DESC", 100, True, 100, 0), ("DESC", 0, False, 2, 0),
-                     ("ASC", 100, True, 100, -1)),
+                    insert_cases,
                 ):
                     waiter = connect(socket)
                     try:
                         with owner.cursor() as cursor:
                             cursor.execute("DROP TABLE IF EXISTS target")
                             cursor.execute(f"CREATE TABLE target(id {id_type} PRIMARY KEY,n INT)")
-                            cursor.execute(f"INSERT INTO target VALUES(1,{initial_n}),(2,{initial_n})")
+                            rows = ",".join(f"({id},{initial_n})" for id in base_ids)
+                            cursor.execute(f"INSERT INTO target VALUES{rows}")
                             cursor.execute("BEGIN")
                             cursor.execute(f"INSERT INTO target VALUES({inserted_id},0)")
                         with waiter.cursor() as cursor:
@@ -194,7 +204,7 @@ def main():
                                 with waiter.cursor() as cursor:
                                     started.set()
                                     action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
-                                    cursor.execute(f"{action} WHERE n>=0 ORDER BY id {direction} LIMIT 1")
+                                    cursor.execute(f"{action} WHERE n>=0 ORDER BY id {direction} LIMIT {limit}")
                                     outcome["affected"] = cursor.rowcount
                                     cursor.execute("COMMIT")
                             except Exception as error:
@@ -209,22 +219,22 @@ def main():
                             cursor.execute("COMMIT")
                         thread.join(5)
                         assert not thread.is_alive(), "writer did not complete after insert commit"
-                        assert outcome == {"affected": 1}, outcome
+                        assert outcome == {"affected": limit}, outcome
                         with owner.cursor() as cursor:
                             cursor.execute("SELECT id,n FROM target ORDER BY id")
                             inserted_result = cursor.fetchall()
                         assert waited == should_wait, (id_type, verb, direction, inserted_id, waited)
                         expected = tuple(
-                            (id, 1 if id == changed_id else 0 if id == inserted_id else initial_n)
-                            for id in sorted((1, 2, inserted_id))
-                            if verb == "UPDATE" or id != changed_id
+                            (id, 1 if id in changed_ids else 0 if id == inserted_id else initial_n)
+                            for id in sorted((*base_ids, inserted_id))
+                            if verb == "UPDATE" or id not in changed_ids
                         )
                         assert inserted_result == expected, (id_type, verb, direction, inserted_id, inserted_result)
                     finally:
                         waiter.close()
 
                 print(f"MySQL {version}: {cases} ordered LIMIT 1/2 writes reselected after updates/deletes; "
-                      "frontier-crossing inserts delayed the writer in both sort directions")
+                      f"{len(insert_cases) * 4} pending-insert cases covered ordered frontiers")
             finally:
                 if owner is not None:
                     owner.close()

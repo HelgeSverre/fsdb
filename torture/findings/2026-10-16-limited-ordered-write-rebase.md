@@ -43,7 +43,8 @@ leaving `(0,0),(1,1),(2,0)` after both commits. The ordered-write scheduler
 now inspects active integer PRIMARY-key claims before selecting its rows. It
 waits and rebases when a pending key crosses the `LIMIT` frontier, including
 when fewer rows currently match than the limit. An insert after the frontier
-does not delay the write. MySQL 8.4.11 and `TransactionTests` agree across 20
-UPDATE/DELETE cases covering ASC and DESC, INT and BIGINT UNSIGNED, and both
-wait and no-wait outcomes. This is scoped to single-column integer PRIMARY
-ordering; other order expressions and key types still need separate audits.
+does not delay the write. MySQL 8.4.11 and `TransactionTests` agree across 36
+UPDATE/DELETE cases covering `LIMIT 1` and `LIMIT 2`, ASC and DESC, INT and
+BIGINT UNSIGNED, and both wait and no-wait outcomes. This is scoped to
+single-column integer PRIMARY ordering; other order expressions and key types
+still need separate audits.

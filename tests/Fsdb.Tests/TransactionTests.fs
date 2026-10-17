@@ -2082,21 +2082,29 @@ let tests =
 
           testCase "limited ordered write waits only for inserts across its primary-key frontier"
           <| fun _ ->
-              for idType, verb, direction, insertedId, shouldWait, changedId, initialN in
+              for idType, verb, direction, insertedId, shouldWait, changedIds, initialN, baseIds, limit in
                   [ for idType in [ "INT"; "BIGINT UNSIGNED" ] do
                         for verb in [ "UPDATE"; "DELETE" ] do
-                            for direction, insertedId, shouldWait, changedId, initialN in
-                                [ "ASC", 0, true, 0, 0
-                                  "ASC", 100, false, 1, 0
-                                  "DESC", 100, true, 100, 0
-                                  "DESC", 0, false, 2, 0
-                                  "ASC", 100, true, 100, -1 ] do
-                                yield idType, verb, direction, insertedId, shouldWait, changedId, initialN ] do
+                            for direction, insertedId, shouldWait, changedIds, initialN, baseIds, limit in
+                                [ "ASC", 0, true, [ 0 ], 0, [ 1; 2 ], 1
+                                  "ASC", 100, false, [ 1 ], 0, [ 1; 2 ], 1
+                                  "DESC", 100, true, [ 100 ], 0, [ 1; 2 ], 1
+                                  "DESC", 0, false, [ 2 ], 0, [ 1; 2 ], 1
+                                  "ASC", 100, true, [ 100 ], -1, [ 1; 2 ], 1
+                                  "ASC", 0, true, [ 0; 1 ], 0, [ 1; 2; 3 ], 2
+                                  "ASC", 100, false, [ 1; 2 ], 0, [ 1; 2; 3 ], 2
+                                  "DESC", 100, true, [ 100; 3 ], 0, [ 1; 2; 3 ], 2
+                                  "DESC", 0, false, [ 3; 2 ], 0, [ 1; 2; 3 ], 2 ] do
+                                yield idType, verb, direction, insertedId, shouldWait, changedIds, initialN, baseIds, limit ] do
                   let store = Fsdb.Storage.create ()
                   let setup = create 1 store
                   handle setup (sprintf "CREATE TABLE tx_limited_insert_candidate (id %s PRIMARY KEY,n INT)" idType)
                   |> ignore
-                  handle setup (sprintf "INSERT INTO tx_limited_insert_candidate VALUES(1,%d),(2,%d)" initialN initialN)
+                  let initialRows =
+                      baseIds
+                      |> List.map (fun id -> sprintf "(%d,%d)" id initialN)
+                      |> String.concat ","
+                  handle setup ("INSERT INTO tx_limited_insert_candidate VALUES" + initialRows)
                   |> ignore
                   let owner, _ = handle (create 2 store) "BEGIN"
                   let owner, inserted =
@@ -2107,7 +2115,7 @@ let tests =
                   let action =
                       if verb = "UPDATE" then "UPDATE tx_limited_insert_candidate SET n=n+1"
                       else "DELETE FROM tx_limited_insert_candidate"
-                  let statement = sprintf "%s WHERE n>=0 ORDER BY id %s LIMIT 1" action direction
+                  let statement = sprintf "%s WHERE n>=0 ORDER BY id %s LIMIT %d" action direction limit
                   let waiting =
                       Threading.Tasks.Task.Run(fun () ->
                           started.Set()
@@ -2118,14 +2126,14 @@ let tests =
                   Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
                   let waiter, result = waiting.Result
                   Expect.equal blocked shouldWait (statement + " wait behavior")
-                  Expect.equal result (Affected 1UL) "limited writer changes one row"
+                  Expect.equal result (Affected(uint64 limit)) "limited writer fills the ordered result"
                   Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
                   let expectedRows =
-                      [ 1; 2; insertedId ]
+                      insertedId :: baseIds
                       |> List.sort
-                      |> List.filter (fun id -> verb = "UPDATE" || id <> changedId)
+                      |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
                       |> List.map (fun id ->
-                          let n = if id = changedId then 1 elif id = insertedId then 0 else initialN
+                          let n = if List.contains id changedIds then 1 elif id = insertedId then 0 else initialN
                           [ Some(string id); Some(string n) ])
                   match handle setup "SELECT id,n FROM tx_limited_insert_candidate ORDER BY id" |> snd with
                   | ResultSet(_, rows) -> Expect.equal rows expectedRows statement
