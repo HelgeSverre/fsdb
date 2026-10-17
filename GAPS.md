@@ -1678,6 +1678,9 @@ implementation effort:
    on the retained-WAL-stream branch found a clear one-writer regression from
    a 50 microsecond leader delay. Eight-writer controls drifted, so the
    candidate was reverted without a scheduling-policy change.
+   Its conditional 25 microsecond follow-up measured larger eight-writer
+   batches but no throughput gain against same-run MySQL controls; it too was
+   reverted.
    A [WAL queue and batch-stage profile](benchmarks/results/2026-10-15-wal-queue-stage-profile.md)
    found queue admission small relative to completion and measured per-batch
    file-open and flush costs. A retained-handle prototype removed the open

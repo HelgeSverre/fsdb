@@ -52,3 +52,36 @@ measure batch size and queue residence alongside the post-parse execution and
 acknowledgement stages. The [current-head checkpoint](2026-10-17-keyless-write-scaling-checkpoint.md)
 and [handler-stage profile](2026-10-17-keyless-write-handler-stage-profile.md)
 provide the preceding baseline.
+
+## Conditional 25 µs window and measured occupancy
+
+A follow-up on PR #146's WAL-stream-reuse head (`07e4c00e`) tested a shorter
+leader wait: after becoming leader, wait until a second write is queued or
+25 µs elapses, then drain normally. Temporary counters in `GroupCommit.Queue`
+recorded the number of writes and batches in each completed 20,000-write
+window, with batch-size buckets. They wrote one line per window to a local
+file. The counters and scheduling change were removed after measurement.
+
+The native macOS arm64 host ran WAL-backed fsdb and durable MySQL 8.4.11
+against fresh databases with 1,000 users, orders, and articles. Each A/B/A
+run had one eight-writer trial, two seconds of warmup, and seven measured
+seconds. The table reports the load harness's measured throughput and the
+mean writes per batch across each run's last three complete counter windows.
+Those counter windows are late-run samples, not exactly the measured phase;
+instrumentation and host-load drift limit the comparison.
+
+| Run | fsdb inserts/s | MySQL inserts/s | fsdb/MySQL | Late writes per batch |
+|---|---:|---:|---:|---:|
+| A1, no wait | 13,526 | 47,075 | 0.287× | 1.67 |
+| B, wait for second write or 25 µs | 12,848 | 45,296 | 0.284× | 1.98 |
+| A2, no wait | 12,482 | 42,802 | 0.292× | 1.75 |
+
+The wait increased late batch occupancy by roughly 13–18% versus the two
+controls, so the scheduler did collect more concurrent writes. It did not
+improve throughput relative to the same-run MySQL controls. Absolute rates
+declined throughout the A/B/A sequence in both engines, so the single-trial
+data cannot establish a precise candidate slowdown either. A preliminary
+unprofiled `Thread.Yield()` experiment likewise showed less than a 1% fsdb
+rate change with a similar MySQL-control shift. Neither scheduling change was
+retained. Future work should measure the remaining per-batch work and queue
+residence before adding a delay to the acknowledgement path.
