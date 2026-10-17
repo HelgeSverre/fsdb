@@ -435,9 +435,80 @@ def main():
                     finally:
                         waiter.close()
 
+                composite_text_cases = (
+                    ("ASC", "ASC", ("b", 0), True, (("b", 0),), 1, None),
+                    ("ASC", "ASC", ("b", 4), False, (("b", 1),), 1, None),
+                    ("ASC", "ASC", ("b", 2), True, (("b", 1), ("b", 2)), 2, None),
+                    ("ASC", "ASC", ("Ä", 0), False, (("b", 1),), 1, "utf8mb4_bin"),
+                    ("ASC", "ASC", ("Ä", 0), True, (("Ä", 0),), 1, "utf8mb4_0900_ai_ci"),
+                    ("DESC", "DESC", ("Ä", 0), True, (("Ä", 0),), 1, "utf8mb4_bin"),
+                    ("DESC", "DESC", ("Ä", 0), False, (("d", 1),), 1, "utf8mb4_0900_ai_ci"),
+                )
+                composite_text_count = 0
+                base_text_keys = (("b", 1), ("b", 3), ("d", 1))
+                for collation, verb, case in itertools.product(
+                    ("utf8mb4_bin", "utf8mb4_0900_ai_ci"), ("UPDATE", "DELETE"), composite_text_cases
+                ):
+                    first_direction, second_direction, inserted_key, should_wait, changed_keys, limit, case_collation = case
+                    if case_collation is not None and case_collation != collation:
+                        continue
+                    composite_text_count += 1
+                    waiter = connect(socket)
+                    try:
+                        with owner.cursor() as cursor:
+                            cursor.execute("DROP TABLE IF EXISTS target")
+                            cursor.execute(
+                                f"CREATE TABLE target(a VARCHAR(10) COLLATE {collation},b INT,n INT,PRIMARY KEY(a,b))"
+                            )
+                            rows = ",".join(f"('{a}',{b},0)" for a,b in base_text_keys)
+                            cursor.execute(f"INSERT INTO target VALUES{rows}")
+                            cursor.execute("BEGIN")
+                            cursor.execute(f"INSERT INTO target VALUES('{inserted_key[0]}',{inserted_key[1]},0)")
+                        with waiter.cursor() as cursor:
+                            cursor.execute("USE probe")
+                            cursor.execute("BEGIN")
+                        action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
+                        statement = f"{action} WHERE n>=0 ORDER BY a {first_direction},b {second_direction} LIMIT {limit}"
+                        started = threading.Event()
+                        outcome = {}
+
+                        def waiting_after_composite_text_insert():
+                            try:
+                                with waiter.cursor() as cursor:
+                                    started.set()
+                                    cursor.execute(statement)
+                                    outcome["affected"] = cursor.rowcount
+                                    cursor.execute("COMMIT")
+                            except Exception as error:
+                                outcome["error"] = error
+
+                        thread = threading.Thread(target=waiting_after_composite_text_insert, daemon=True)
+                        thread.start()
+                        assert started.wait(2), statement
+                        thread.join(0.2)
+                        waited = thread.is_alive()
+                        with owner.cursor() as cursor:
+                            cursor.execute("COMMIT")
+                        thread.join(5)
+                        assert not thread.is_alive(), statement
+                        assert outcome == {"affected": limit}, outcome
+                        with owner.cursor() as cursor:
+                            cursor.execute("SELECT a,b,n FROM target ORDER BY a,b")
+                            actual = cursor.fetchall()
+                        assert waited == should_wait, (statement, collation, inserted_key, waited)
+                        actual_keys = tuple((a,b) for a,b,_ in actual)
+                        assert set(actual_keys) == (
+                            set((*base_text_keys, inserted_key)) if verb == "UPDATE"
+                            else set((*base_text_keys, inserted_key)) - set(changed_keys)
+                        ), (statement, actual)
+                        assert all(n == (1 if (a,b) in changed_keys else 0) for a,b,n in actual), (statement, actual)
+                    finally:
+                        waiter.close()
+
                 print(f"MySQL {version}: {cases} ordered LIMIT 1/2 writes reselected after updates/deletes; "
                       f"{len(insert_cases) * 4} integer, {len(date_cases) * 2} DATE, and "
-                      f"{len(composite_cases) * 2} composite, and {text_case_count} text "
+                      f"{len(composite_cases) * 2} composite, {text_case_count} text, and "
+                      f"{composite_text_count} composite text "
                       "pending-insert cases covered ordered frontiers")
             finally:
                 if owner is not None:

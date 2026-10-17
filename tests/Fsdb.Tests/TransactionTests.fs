@@ -2296,6 +2296,70 @@ let tests =
                           | ResultSet(_, rows) -> Expect.equal rows expected statement
                           | actual -> failtestf "expected text rows after %s, got %A" statement actual
 
+          testCase "limited ordered write respects composite text primary-key insert frontiers"
+          <| fun _ ->
+              let baseKeys = [ "b", 1; "b", 3; "d", 1 ]
+              for collation in [ "utf8mb4_bin"; "utf8mb4_0900_ai_ci" ] do
+                  for verb in [ "UPDATE"; "DELETE" ] do
+                      let cases =
+                          [ "ASC", "ASC", ("b", 0), true, [ "b", 0 ], 1
+                            "ASC", "ASC", ("b", 4), false, [ "b", 1 ], 1
+                            "ASC", "ASC", ("b", 2), true, [ "b", 1; "b", 2 ], 2 ]
+                          @ if collation = "utf8mb4_bin" then
+                                [ "ASC", "ASC", ("Ä", 0), false, [ "b", 1 ], 1
+                                  "DESC", "DESC", ("Ä", 0), true, [ "Ä", 0 ], 1 ]
+                            else
+                                [ "ASC", "ASC", ("Ä", 0), true, [ "Ä", 0 ], 1
+                                  "DESC", "DESC", ("Ä", 0), false, [ "d", 1 ], 1 ]
+                      for firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit in cases do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          handle setup
+                              (sprintf "CREATE TABLE tx_text_pair_candidate(a VARCHAR(10) COLLATE %s,b INT,n INT,PRIMARY KEY(a,b))" collation)
+                          |> ignore
+                          handle setup "INSERT INTO tx_text_pair_candidate VALUES('b',1,0),('b',3,0),('d',1,0)" |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let a, b = insertedKey
+                          let owner, inserted =
+                              handle owner (sprintf "INSERT INTO tx_text_pair_candidate VALUES('%s',%d,0)" a b)
+                          Expect.equal inserted (Affected 1UL) "owner inserts a composite text key"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          let action =
+                              if verb = "UPDATE" then "UPDATE tx_text_pair_candidate SET n=n+1"
+                              else "DELETE FROM tx_text_pair_candidate"
+                          let statement =
+                              action + " WHERE n>=0 ORDER BY a " + firstDirection + ",b " + secondDirection
+                              + sprintf " LIMIT %d" limit
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                          let waiter, result = waiting.Result
+                          Expect.equal blocked shouldWait (statement + " wait behavior")
+                          Expect.equal result (Affected(uint64 limit)) "the composite text frontier fills the result"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                          let expected =
+                              insertedKey :: baseKeys
+                              |> List.filter (fun key -> verb = "UPDATE" || not (List.contains key changedKeys))
+                              |> List.map (fun (a, b) ->
+                                  (a, string b), (if List.contains (a, b) changedKeys then "1" else "0"))
+                              |> Map.ofList
+                          match handle setup "SELECT a,b,n FROM tx_text_pair_candidate ORDER BY a,b" |> snd with
+                          | ResultSet(_, rows) ->
+                              let actual =
+                                  rows
+                                  |> List.map (function
+                                      | [ Some a; Some b; Some n ] -> (a, b), n
+                                      | row -> failtestf "unexpected composite text row: %A" row)
+                                  |> Map.ofList
+                              Expect.equal actual expected statement
+                          | actual -> failtestf "expected composite text rows after %s, got %A" statement actual
+
           testCase "an autocommit full-scan delete rechecks the row after a competing commit"
           <| fun _ ->
               for predicate, affected, remaining in

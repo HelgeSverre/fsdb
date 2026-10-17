@@ -1641,7 +1641,7 @@ implementation effort:
    deleted](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
    with and without a secondary predicate index, plus pending inserts across
    integer, valid `DATE`, [text](torture/findings/2026-10-16-limited-ordered-write-rebase.md#text-primary-keys),
-   and audited two-part integer primary-key order
+   audited two-part integer, and [text-plus-integer](torture/findings/2026-10-16-limited-ordered-write-rebase.md#composite-text-and-integer-primary-keys) primary-key order
    frontiers, plus audited joined UPDATE and DELETE statements with named
    physical targets,
    [audited single-table updatable-view UPDATE and DELETE statements and joined-view

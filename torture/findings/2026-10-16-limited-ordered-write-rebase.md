@@ -99,5 +99,18 @@ under `utf8mb4_0900_ai_ci`, reversing the corresponding wait decision.
 The scheduler now decodes pending text PRIMARY claims and compares the
 column's collation key with visible rows at the frontier. Equal primary
 weights conservatively wait, preserving full-order tie behavior. The focused
-transaction regression covers all 40 audited cases. Wider text tuples,
-other collations and order expressions remain to audit.
+transaction regression covers all 40 audited cases. Other composite text
+shapes, collations, and order expressions remain to audit.
+
+## Composite text and integer primary keys
+
+A `VARCHAR` plus `INT` primary key also uses the pending-insert frontier.
+Starting with `(b,1)`, `(b,3)`, and `(d,1)`, MySQL 8.4.11 and fsdb agree
+when a pending `(b,0)` or `(b,2)` enters an ascending `LIMIT 1/2` result,
+while `(b,4)` leaves the first slot alone. Under `utf8mb4_bin`, a pending
+`(Ä,0)` falls after the visible text keys; under `utf8mb4_0900_ai_ci`, it
+falls before them. The corresponding ascending or descending UPDATE/DELETE
+waits, affected counts, and final rows agree in all 20 audited combinations.
+The [native oracle](../scripts/limited-ordered-write-rebase-oracle.py) and
+focused transaction regression cover both collations. Wider tuples, mixed
+sort directions with text components, and other collations remain to audit.
