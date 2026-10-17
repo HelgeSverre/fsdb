@@ -85,15 +85,19 @@ outside it.
 
 ## Text primary keys
 
-Pending `VARCHAR` PRIMARY inserts can also cross an ordered write's `LIMIT 1`
+Pending `VARCHAR` PRIMARY inserts can also cross an ordered write's `LIMIT 1/2`
 frontier. With visible keys `b` and `d`, an uncommitted `a` insert makes an
 ascending UPDATE or DELETE wait and then select `a`; an uncommitted `z`
 insert does the same in descending order. Inserts beyond the frontier do not
 delay the write. MySQL 8.4.11 confirms the wait, affected count, and final
 rows for both verbs under `utf8mb4_bin` and `utf8mb4_0900_ai_ci`.
+With ascending `LIMIT 2`, a pending `c` enters the first two rows while a
+pending `z` does not; descending writes follow the reversed frontier. A
+pending `Ä` falls after `b,d` under the binary collation but before them
+under `utf8mb4_0900_ai_ci`, reversing the corresponding wait decision.
 
 The scheduler now decodes pending text PRIMARY claims and compares the
 column's collation key with visible rows at the frontier. Equal primary
 weights conservatively wait, preserving full-order tie behavior. The focused
-transaction regression covers all 16 audited cases. Wider text tuples,
+transaction regression covers all 40 audited cases. Wider text tuples,
 other collations and order expressions remain to audit.

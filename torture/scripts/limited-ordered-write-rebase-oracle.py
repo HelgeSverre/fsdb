@@ -360,14 +360,26 @@ def main():
                         waiter.close()
 
                 text_cases = (
-                    ("ASC", "a", True, "a"),
-                    ("ASC", "z", False, "b"),
-                    ("DESC", "z", True, "z"),
-                    ("DESC", "a", False, "d"),
+                    ("ASC", "a", True, ("a",), 1, None),
+                    ("ASC", "z", False, ("b",), 1, None),
+                    ("DESC", "z", True, ("z",), 1, None),
+                    ("DESC", "a", False, ("d",), 1, None),
+                    ("ASC", "c", True, ("b", "c"), 2, None),
+                    ("ASC", "z", False, ("b", "d"), 2, None),
+                    ("DESC", "c", True, ("d", "c"), 2, None),
+                    ("DESC", "a", False, ("d", "b"), 2, None),
+                    ("ASC", "Ä", False, ("b", "d"), 2, "utf8mb4_bin"),
+                    ("DESC", "Ä", True, ("Ä", "d"), 2, "utf8mb4_bin"),
+                    ("ASC", "Ä", True, ("Ä", "b"), 2, "utf8mb4_0900_ai_ci"),
+                    ("DESC", "Ä", False, ("d", "b"), 2, "utf8mb4_0900_ai_ci"),
                 )
-                for collation, verb, (direction, inserted_id, should_wait, changed_id) in itertools.product(
+                text_case_count = 0
+                for collation, verb, (direction, inserted_id, should_wait, changed_ids, limit, case_collation) in itertools.product(
                     ("utf8mb4_bin", "utf8mb4_0900_ai_ci"), ("UPDATE", "DELETE"), text_cases
                 ):
+                    if case_collation is not None and case_collation != collation:
+                        continue
+                    text_case_count += 1
                     waiter = connect(socket)
                     try:
                         with owner.cursor() as cursor:
@@ -382,7 +394,7 @@ def main():
                             cursor.execute("USE probe")
                             cursor.execute("BEGIN")
                         action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
-                        statement = f"{action} WHERE n>=0 ORDER BY id {direction} LIMIT 1"
+                        statement = f"{action} WHERE n>=0 ORDER BY id {direction} LIMIT {limit}"
                         started = threading.Event()
                         outcome = {}
 
@@ -405,15 +417,19 @@ def main():
                             cursor.execute("COMMIT")
                         thread.join(5)
                         assert not thread.is_alive(), statement
-                        assert outcome == {"affected": 1}, outcome
+                        assert outcome == {"affected": limit}, outcome
                         with owner.cursor() as cursor:
                             cursor.execute("SELECT id,n FROM target ORDER BY id")
                             actual = cursor.fetchall()
                         assert waited == should_wait, (statement, collation, inserted_id, waited)
+                        expected_order = sorted(
+                            ("b", "d", inserted_id),
+                            key=lambda value: "a" if collation == "utf8mb4_0900_ai_ci" and value == "Ä" else value,
+                        )
                         expected = tuple(
-                            (id, 1 if id == changed_id else 0)
-                            for id in sorted(("b", "d", inserted_id))
-                            if verb == "UPDATE" or id != changed_id
+                            (id, 1 if id in changed_ids else 0)
+                            for id in expected_order
+                            if verb == "UPDATE" or id not in changed_ids
                         )
                         assert actual == expected, (statement, collation, inserted_id, actual, expected)
                     finally:
@@ -421,7 +437,7 @@ def main():
 
                 print(f"MySQL {version}: {cases} ordered LIMIT 1/2 writes reselected after updates/deletes; "
                       f"{len(insert_cases) * 4} integer, {len(date_cases) * 2} DATE, and "
-                      f"{len(composite_cases) * 2} composite, and {len(text_cases) * 4} text "
+                      f"{len(composite_cases) * 2} composite, and {text_case_count} text "
                       "pending-insert cases covered ordered frontiers")
             finally:
                 if owner is not None:

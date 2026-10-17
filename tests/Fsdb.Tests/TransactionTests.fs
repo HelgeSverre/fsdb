@@ -2243,11 +2243,22 @@ let tests =
           <| fun _ ->
               for collation in [ "utf8mb4_bin"; "utf8mb4_0900_ai_ci" ] do
                   for verb in [ "UPDATE"; "DELETE" ] do
-                      for direction, insertedId, shouldWait, changedId in
-                          [ "ASC", "a", true, "a"
-                            "ASC", "z", false, "b"
-                            "DESC", "z", true, "z"
-                            "DESC", "a", false, "d" ] do
+                      let cases =
+                          [ "ASC", "a", true, [ "a" ], 1
+                            "ASC", "z", false, [ "b" ], 1
+                            "DESC", "z", true, [ "z" ], 1
+                            "DESC", "a", false, [ "d" ], 1
+                            "ASC", "c", true, [ "b"; "c" ], 2
+                            "ASC", "z", false, [ "b"; "d" ], 2
+                            "DESC", "c", true, [ "d"; "c" ], 2
+                            "DESC", "a", false, [ "d"; "b" ], 2 ]
+                          @ if collation = "utf8mb4_bin" then
+                                [ "ASC", "Ä", false, [ "b"; "d" ], 2
+                                  "DESC", "Ä", true, [ "Ä"; "d" ], 2 ]
+                            else
+                                [ "ASC", "Ä", true, [ "Ä"; "b" ], 2
+                                  "DESC", "Ä", false, [ "d"; "b" ], 2 ]
+                      for direction, insertedId, shouldWait, changedIds, limit in cases do
                           let store = Fsdb.Storage.create ()
                           let setup = create 1 store
                           handle setup
@@ -2262,7 +2273,7 @@ let tests =
                           let action =
                               if verb = "UPDATE" then "UPDATE tx_text_insert_candidate SET n=n+1"
                               else "DELETE FROM tx_text_insert_candidate"
-                          let statement = action + " WHERE n>=0 ORDER BY id " + direction + " LIMIT 1"
+                          let statement = action + " WHERE n>=0 ORDER BY id " + direction + sprintf " LIMIT %d" limit
                           use started = new Threading.ManualResetEventSlim(false)
                           let waiting =
                               Threading.Tasks.Task.Run(fun () ->
@@ -2274,13 +2285,13 @@ let tests =
                           Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
                           let waiter, result = waiting.Result
                           Expect.equal blocked shouldWait (statement + " wait behavior")
-                          Expect.equal result (Affected 1UL) "the text frontier fills the result"
+                          Expect.equal result (Affected(uint64 limit)) "the text frontier fills the result"
                           Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
                           let expected =
                               insertedId :: [ "b"; "d" ]
-                              |> List.sort
-                              |> List.filter (fun id -> verb = "UPDATE" || id <> changedId)
-                              |> List.map (fun id -> [ Some id; Some(if id = changedId then "1" else "0") ])
+                              |> List.sortBy (fun id -> if collation = "utf8mb4_0900_ai_ci" && id = "Ä" then "a" else id)
+                              |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
+                              |> List.map (fun id -> [ Some id; Some(if List.contains id changedIds then "1" else "0") ])
                           match handle setup "SELECT id,n FROM tx_text_insert_candidate ORDER BY id" |> snd with
                           | ResultSet(_, rows) -> Expect.equal rows expected statement
                           | actual -> failtestf "expected text rows after %s, got %A" statement actual
