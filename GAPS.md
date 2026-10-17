@@ -343,6 +343,9 @@ reduces `ABS(d.k)+0=o.x` from 4,004 to six calls on the same profile.
 [Integer `BIT_COUNT` over stable materialized rows](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#integer-bit_count-results)
 uses that key too, reducing the audited five-bound residual from 6,018 calls
 to fewer than 100 without changing row counts.
+[Integer `COALESCE` and `IFNULL` expressions](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#integer-coalesce-and-ifnull-results)
+also use it for stable materialized rows, including a NULL fallback and complete
+OR branches.
 The [matched in-memory timing](benchmarks/results/2026-10-15-materialized-integer-expression-lookup.md)
 confirms a repeated-query speedup for this shape. [Text expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-text-expression-lookup)
 use the effective comparison collation and reduce the audited `LOWER(d.k)=o.x`

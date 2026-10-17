@@ -95,6 +95,31 @@ def main():
                             actual = cursor.fetchall()
                             assert actual == expected, (source, predicate, actual, expected)
 
+                    cursor.execute("CREATE TABLE coalesce_bounds(id INT PRIMARY KEY,x BIGINT)")
+                    cursor.execute(
+                        "INSERT INTO coalesce_bounds VALUES"
+                        "(1,0),(2,1),(3,-1),(4,-2147483648),(5,NULL)"
+                    )
+                    for prefix, source in [
+                        ("", "abs_rows d"),
+                        ("", "(SELECT id,k FROM abs_rows) d"),
+                        ("", "(SELECT DISTINCT id,k FROM abs_rows) d"),
+                        ("WITH materialized AS (SELECT DISTINCT id,k FROM abs_rows) ", "materialized d"),
+                    ]:
+                        for predicate, expected in [
+                            ("COALESCE(d.k,0)=o.x", ((1, 2), (2, 1), (3, 1), (4, 1), (5, 0))),
+                            ("o.x=COALESCE(d.k,0)", ((1, 2), (2, 1), (3, 1), (4, 1), (5, 0))),
+                            ("IFNULL(d.k,0)=o.x", ((1, 2), (2, 1), (3, 1), (4, 1), (5, 0))),
+                            ("COALESCE(d.k,0)=o.x OR d.id=1",
+                             ((1, 3), (2, 2), (3, 2), (4, 2), (5, 1))),
+                        ]:
+                            cursor.execute(
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE " + predicate + ") FROM coalesce_bounds o ORDER BY o.id"
+                            )
+                            actual = cursor.fetchall()
+                            assert actual == expected, (source, predicate, actual, expected)
+
                     for index, (column_type, minimum, maximum) in enumerate([
                         ("TINYINT", -128, 127),
                         ("SMALLINT", -32768, 32767),
@@ -119,7 +144,7 @@ def main():
                         assert cursor.fetchall() == (
                             (first_bound, 1), (first_bound + 1, 1), (first_bound + 2, 0)
                         ), column_type
-                print(f"MySQL {version}: indexed, pass-through, materialized, and signed-boundary ABS; integer BIT_COUNT counts match")
+                print(f"MySQL {version}: indexed, pass-through, materialized, and signed-boundary ABS; integer BIT_COUNT and COALESCE counts match")
             finally:
                 if connection:
                     connection.close()

@@ -13018,6 +13018,45 @@ let tests =
                             | other -> failtestf "expected MySQL BIT_COUNT counts, got %A" other
                             Expect.isLessThan calls 100 "the integer expression key bounds residual work"
 
+                testCase "materialized correlated COALESCE uses an integer expression key"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE coalesce_bounds(id INT PRIMARY KEY,x BIGINT)" |> ignore
+                    runDefault store "CREATE TABLE coalesce_rows(id INT PRIMARY KEY,k INT)" |> ignore
+                    runDefault store "INSERT INTO coalesce_bounds VALUES(1,0),(2,1),(3,-1),(4,-2147483648),(5,NULL)" |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (id - 500))
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO coalesce_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO coalesce_rows VALUES(1000,-2147483648),(1001,NULL)" |> ignore
+
+                    for prefix, source in
+                        [ "", "(SELECT DISTINCT id,k FROM coalesce_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM coalesce_rows) ", "materialized d" ] do
+                        for predicate, expected in
+                            [ "COALESCE(d.k,0)=o.x", [ 2; 1; 1; 1; 0 ]
+                              "o.x=COALESCE(d.k,0)", [ 2; 1; 1; 1; 0 ]
+                              "IFNULL(d.k,0)=o.x", [ 2; 1; 1; 1; 0 ]
+                              "COALESCE(d.k,0)=o.x OR d.id=1", [ 3; 2; 2; 2; 1 ] ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                                + "FROM coalesce_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, rows) ->
+                                let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                                Expect.equal actual (expected |> List.map Some) (source + " " + predicate)
+                            | other -> failtestf "expected MySQL COALESCE counts, got %A" other
+                            Expect.isLessThan calls 100 "the integer expression key bounds residual work"
+
                 testCase "materialized correlated text expression keys use comparison collation"
                 <| fun _ ->
                     let mutable calls = 0

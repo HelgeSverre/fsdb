@@ -15869,6 +15869,10 @@ and private tryMaterializedCorrelatedLookup
                 | FuncCall(name, [ expression ])
                     when equalsIgnoreCase name "ABS" || equalsIgnoreCase name "BIT_COUNT" ->
                     integerKeyExpression expression
+                | FuncCall(name, expressions)
+                    when (equalsIgnoreCase name "COALESCE" && not (List.isEmpty expressions))
+                         || (equalsIgnoreCase name "IFNULL" && List.length expressions = 2) ->
+                    expressions |> List.forall integerKeyExpression
                 | BinOp((Add | Sub | Mul), left, right) ->
                     integerKeyExpression left && integerKeyExpression right
                 | _ -> false

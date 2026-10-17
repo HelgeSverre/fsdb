@@ -65,6 +65,21 @@ complete OR branch. In the 1,002-row materialized regression, the leading
 `TOUCH(d.id)` residual ran 6,018 times before this lookup for five outer
 bounds. It now runs fewer than 100 times while returning the same counts.
 
+### Integer `COALESCE` and `IFNULL` results
+
+Stable `COALESCE` expressions with integer arguments, and two-argument
+`IFNULL` expressions with integer arguments, now use the same statement-local
+key. This includes a literal fallback for a NULL inner column. A noninteger
+result or bound retains the scan, and the original SQL comparison still checks
+each candidate.
+
+The [MySQL 8.4.11 oracle](../scripts/correlated-abs-oracle.py) agrees on
+physical, pass-through, materialized derived, and materialized CTE sources.
+The focused materialized regression covers NULL, negative and minimum `INT`
+values, reversed equality, `IFNULL`, and an OR branch. Before the key, its
+first five-bound `COALESCE` probe made 6,018 residual calls; it now makes
+fewer than 100 with the same row counts.
+
 ## Statement-local text expression lookup
 
 Stable, row-local text expressions over a materialized source now get a
