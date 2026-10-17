@@ -784,27 +784,35 @@ let private addBooleanContribution operator contribution state =
 let private tryBooleanScore state =
     if state.Matched && not state.Excluded then Some state.Score else None
 
-let private parseBooleanQuery rules (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
-    let policy, tokenizer = rules.Stopwords, rules.Tokenizer
-    let mutable i = 0
-    let len = query.Length
+let private booleanGroupSyntaxError (query: string) =
+    let mutable depth = 0
+    let mutable inPhrase = false
+    let mutable error = None
 
-    let balancedGroups () =
-        let mutable depth = 0
-        let mutable inPhrase = false
-        let mutable valid = true
-
-        for c in query do
+    for c in query do
+        if error.IsNone then
             if c = '"' then
                 inPhrase <- not inPhrase
             elif not inPhrase then
                 match c with
                 | '(' -> depth <- depth + 1
-                | ')' when depth = 0 -> valid <- false
+                | ')' when depth = 0 -> error <- Some "syntax error, unexpected ')', expecting $end"
                 | ')' -> depth <- depth - 1
                 | _ -> ()
 
-        valid && depth = 0
+    if error.IsSome then error
+    elif depth <> 0 then Some "syntax error, unexpected $end"
+    else None
+
+let internal booleanSyntaxErrorInView (view: ReadView<'id>) query =
+    match view.Rules.Tokenizer with
+    | Words _ -> booleanGroupSyntaxError query
+    | Ngrams _ -> None
+
+let private parseBooleanQuery rules (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
+    let policy, tokenizer = rules.Stopwords, rules.Tokenizer
+    let mutable i = 0
+    let len = query.Length
 
     let rec skipSpace () =
         if i < len && Char.IsWhiteSpace query.[i] then
@@ -919,7 +927,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
         List.ofSeq acc
 
     match tokenizer with
-    | Ngrams _ when not (balancedGroups ()) -> []
+    | Ngrams _ when booleanGroupSyntaxError query |> Option.isSome -> []
     | _ -> nodes 0
 
 let private proximityMatches (doc: Token[]) (words: Token[]) distance =

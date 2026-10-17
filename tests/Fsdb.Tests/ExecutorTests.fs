@@ -2601,6 +2601,38 @@ let tests =
                     | Err(1253, _) -> ()
                     | other -> failtestf "expected incompatible collation error, got %A" other
 
+                testCase "word fulltext rejects unbalanced Boolean groups"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE boolean_syntax_docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body))" |> ignore
+                    runDefault store "INSERT INTO boolean_syntax_docs VALUES(1,'alpha beta'),(2,'beta gamma')" |> ignore
+                    for query, expectedMessage in
+                        [ "alpha (", "syntax error, unexpected $end"
+                          "alpha )", "syntax error, unexpected ')', expecting $end"
+                          "(alpha", "syntax error, unexpected $end"
+                          "alpha)", "syntax error, unexpected ')', expecting $end" ] do
+                        let sql =
+                            sprintf "SELECT id FROM boolean_syntax_docs WHERE MATCH(body) AGAINST('%s' IN BOOLEAN MODE) ORDER BY id" query
+                        match runDefault store sql with
+                        | Err(1064, message) -> Expect.equal message expectedMessage query
+                        | result -> failtestf "expected MySQL Boolean syntax error for %A, got %A" query result
+                    for query in [ "(alpha)"; "\"alpha"; "alpha \"" ] do
+                        let sql =
+                            sprintf "SELECT id FROM boolean_syntax_docs WHERE MATCH(body) AGAINST('%s' IN BOOLEAN MODE) ORDER BY id" query
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL Boolean match for %A, got %A" query result
+                    runDefault store
+                        "CREATE TABLE boolean_ngram_docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram)"
+                    |> ignore
+                    runDefault store "INSERT INTO boolean_ngram_docs VALUES(1,'alpha beta'),(2,'beta gamma')" |> ignore
+                    for query in [ "alpha ("; "alpha )"; "(alpha"; "alpha)" ] do
+                        let sql =
+                            sprintf "SELECT id FROM boolean_ngram_docs WHERE MATCH(body) AGAINST('%s' IN BOOLEAN MODE) ORDER BY id" query
+                        match runDefault store sql with
+                        | ResultSet(_, []) -> ()
+                        | result -> failtestf "expected no ngram Boolean matches for %A, got %A" query result
+
                 testCase "FULLTEXT functional key parts are rejected before catalog publication"
                 <| fun _ ->
                     let store = newStore ()

@@ -914,7 +914,9 @@ oracle-verified TF × IDF² scoring with its epsilon floor and built-in stopword
 list. Word stopwords are filtered when indexing; ordinary queries can still
 match surviving collation-equivalent or historical postings
 ([oracle evidence](torture/findings/2026-10-07-fulltext-word-stopword-postings.md)). Boolean syntax covers
-`+ - > < ~ word* "phrases" @N proximity ()` with depth cap; blind
+`+ - > < ~ word* "phrases" @N proximity ()` with depth cap; [unbalanced
+word-parser groups](torture/findings/2026-10-17-word-boolean-group-syntax.md)
+raise MySQL error 1064 while ngram groups return no matches; blind
 relevance-feedback expansion and bare WHERE-MATCH relevance ordering are also
 supported.
 
