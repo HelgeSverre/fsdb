@@ -188,6 +188,9 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
              if legacy_chars is not None else TERMS)
     if legacy_range is not None:
         terms += [f'"{prefix + char}"' for char in legacy_chars]
+    if legacy_range == (0xFE20, 0xFE30):
+        terms += [prefix + char + '文' for char in legacy_chars]
+        terms += [char + prefix for char in legacy_chars]
     if legacy_range == (0xAC00, 0xAD00):
         terms += [prefix + char for char in ("가", "각", "가", "ㄱㅏ", "각")]
     modes = MODES
