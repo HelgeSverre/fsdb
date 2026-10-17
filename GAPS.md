@@ -1055,6 +1055,9 @@ matches MySQL at sizes 1 and 2.
 The [punctuation and script-number probe](torture/findings/2026-10-17-general-ci-punctuation-script-numbers.md)
 preserves distinct dash, quote, superscript, and subscript weights that ICU
 otherwise merges; the U+2000–U+20FF ngram lane matches at sizes 1 and 2.
+The [adjacent symbol-block audit](torture/findings/2026-10-17-general-ci-adjacent-symbol-blocks.md)
+found no additional membership or relevance differences across seven
+U+2300–U+2AFF blocks at sizes 1 and 2; U+2800–U+28FF was not sampled.
 The [Bopomofo and Kanbun probe](torture/findings/2026-10-17-general-ci-bopomofo-weights.md)
 preserves distinct U+3100–U+31BF primary weights; the extension-block ngram
 lane matches MySQL at sizes 1–10 (288 searches per size), as does the
