@@ -16066,7 +16066,7 @@ and private tryMaterializedCorrelatedLookup
                     | _ -> false
                 expressionEqualityCandidates indexable decimalLookup acceptsBound acceptsBound predicate
 
-            let finiteNumericDouble = function
+            let rec finiteNumericDouble = function
                 | VDouble number when System.Double.IsFinite number -> Some number
                 | VInt _ | VUInt _ | VDecimal _ | VBit _ as value ->
                     let number = Value.toDouble value
@@ -16079,6 +16079,8 @@ and private tryMaterializedCorrelatedLookup
                     ) with
                     | true, number when System.Double.IsFinite number -> Some number
                     | _ -> None
+                | VEncodedString _ as value ->
+                    Value.toText value |> Option.bind (VString >> finiteNumericDouble)
                 | _ -> None
 
             // Numeric bounds compare with a DOUBLE result in the approximate
@@ -16091,7 +16093,7 @@ and private tryMaterializedCorrelatedLookup
                     | _ -> None
                 let probeKey value =
                     match value with
-                    | VInt _ | VUInt _ | VDecimal _ | VBit _ | VString _ as value ->
+                    | VInt _ | VUInt _ | VDecimal _ | VBit _ | VString _ | VEncodedString _ as value ->
                         finiteNumericDouble value |> Option.map VDouble
                     | value -> doubleKey value
 

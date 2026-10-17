@@ -289,6 +289,10 @@ the narrow string equality and `BETWEEN` probes from more than 1,000 residual
 calls to fewer than 80 across six outer rows. A string with trailing text
 (`12.5x`) still takes the scan path: MySQL emits conversion warnings for it,
 so narrowing the residual evaluation would change the warning count.
+Charset-tagged clean strings from `CAST(o.x AS CHAR)` now take the same key
+for equality, positive `IN`, and `BETWEEN`. The maintained MySQL oracle agrees
+on those six-bound results, while the focused equality case drops from 5,027
+residual calls to fewer than 80.
 
 ## Correlated DOUBLE expression IN candidates
 

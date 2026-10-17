@@ -69,6 +69,7 @@ def main():
                         ("d.k+0e0=o.d", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0=o.i", (0, 0, 0, 0, 1, 1)),
                         ("d.k+0e0=o.s", (1, 0, 0, 1, 1, 1)),
+                        ("d.k+0e0=CAST(o.x AS CHAR)", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0=o.x OR d.id=12", (2, 1, 1, 2, 2, 2)),
                     ]
                     for predicate, expected in cases:
@@ -84,6 +85,7 @@ def main():
                             assert cursor._result.warning_count == 0, predicate
                     in_cases = [
                         ("d.k+0e0 IN (o.s,o.x)", (1, 0, 0, 1, 1, 1)),
+                        ("d.k+0e0 IN (CAST(o.x AS CHAR),NULL)", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0 IN (o.s,o.d)", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0 IN (o.s,CAST(NULL AS DOUBLE))", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0 IN (o.s,o.s)", (1, 0, 0, 1, 1, 1)),
@@ -107,6 +109,7 @@ def main():
                         ("d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0", (3, 0, 0, 3, 2, 1)),
                         ("d.k+0e0<o.s", (513, 1001, 0, 488, 500, 1001)),
                         ("d.k+0e0 BETWEEN o.s AND o.s", (1, 0, 0, 1, 1, 1)),
+                        ("d.k+0e0 BETWEEN CAST(o.x AS CHAR) AND CAST(o.x AS CHAR)", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0<o.x OR d.id=999", (514, 1001, 1, 489, 501, 1001)),
                     ]
                     for predicate, expected in range_cases:

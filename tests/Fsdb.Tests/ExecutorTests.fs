@@ -13441,6 +13441,8 @@ let tests =
                           "d.k+0e0=o.d", [ 1; 0; 0; 1; 1; 1 ]
                           "d.k+0e0=o.i", [ 0; 0; 0; 0; 1; 1 ]
                           "d.k+0e0=o.s", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0=CAST(o.x AS CHAR)", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (CAST(o.x AS CHAR),NULL)", [ 1; 0; 0; 1; 1; 1 ]
                           "d.k+0e0 IN (o.s,o.x)", [ 1; 0; 0; 1; 1; 1 ]
                           "d.k+0e0 IN (o.s,o.d)", [ 1; 0; 0; 1; 1; 1 ]
                           "d.k+0e0 IN (o.s,CAST(NULL AS DOUBLE))", [ 1; 0; 0; 1; 1; 1 ]
@@ -13468,6 +13470,7 @@ let tests =
                           "d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0", [ 3; 0; 0; 3; 2; 1 ]
                           "d.k+0e0<o.s", [ 513; 1001; 0; 488; 500; 1001 ]
                           "d.k+0e0 BETWEEN o.s AND o.s", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 BETWEEN CAST(o.x AS CHAR) AND CAST(o.x AS CHAR)", [ 1; 0; 0; 1; 1; 1 ]
                           "d.k+0e0<o.x OR d.id=999", [ 514; 1001; 1; 489; 501; 1001 ] ] do
                         calls <- 0
                         let sql =
@@ -13481,7 +13484,8 @@ let tests =
                         | other -> failtestf "expected materialized DOUBLE range matches for %s, got %A" predicate other
                         if predicate = "d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0" then
                             Expect.isLessThan calls 80 "narrow DOUBLE range must bound residual work"
-                        if predicate = "d.k+0e0 BETWEEN o.s AND o.s" then
+                        if predicate = "d.k+0e0 BETWEEN o.s AND o.s"
+                           || predicate = "d.k+0e0 BETWEEN CAST(o.x AS CHAR) AND CAST(o.x AS CHAR)" then
                             Expect.isLessThan calls 80 "clean numeric string range must bound residual work"
 
                     for predicate in
