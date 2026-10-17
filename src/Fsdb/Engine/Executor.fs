@@ -14006,7 +14006,11 @@ and private indexedColumnFor (tref: TableRef) =
                 System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase)))
         |> Option.map (fun physical -> physical.Column, Some physical.Transform)
 
+    let refersToRoutineVariable =
+        Expression.exists (function Col name -> tryRoutineVariable name |> Option.isSome | _ -> false)
+
     function
+    | expression when refersToRoutineVariable expression -> None
     | Col name -> Some(name, None)
     | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
         Some(name, None)
@@ -15105,7 +15109,7 @@ and private tryPhysicalProjectionUncached
 
                 let directColumn =
                     function
-                    | Col name -> Some name
+                    | Col name when tryRoutineVariable name |> Option.isNone -> Some name
                     | QualifiedCol(qualifier, name)
                         when qualifier.Equals(sourceQualifier, System.StringComparison.OrdinalIgnoreCase) ->
                         Some name
