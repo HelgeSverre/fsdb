@@ -293,6 +293,14 @@ Other approximate numeric combinations, text, and functional-expression
 bounds retain their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 
+[Grouped outer-join functional dependencies](torture/findings/2026-10-17-outer-join-group-dependencies.md)
+now follow LEFT/RIGHT join direction, including `USING` and `NATURAL`
+equalities. A nullable unique key on the null-complemented side contributes a
+dependency when an `ON` equality rules out NULL in matched rows; extra
+preserved-side `ON` inputs must be fixed by the group before dependencies
+cross the join. Physical unique keys inside parenthesized joined operands also
+participate in this inference.
+
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
 multi-column `COUNT(DISTINCT ...)`, the `GROUP_CONCAT` byte ceiling,
 statement-atomic multi-table DML, and exact ODKU affected-row counts. Row
