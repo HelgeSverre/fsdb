@@ -285,6 +285,23 @@ def main():
                     except pymysql.MySQLError as error:
                         assert error.args[0] == 1288, error.args
 
+                    for algorithm, expected in [("MERGE", "YES"), ("TEMPTABLE", "NO"),
+                                                ("UNDEFINED", "YES")]:
+                        name = "recursive_algorithm_" + algorithm.lower()
+                        cursor.execute(f"CREATE ALGORITHM={algorithm} VIEW {name} AS {recursive} SELECT k FROM seq")
+                        cursor.execute(
+                            "SELECT IS_UPDATABLE FROM information_schema.views "
+                            "WHERE table_schema='probe' AND table_name=%s", (name,)
+                        )
+                        assert cursor.fetchone() == (expected,), name
+                        outer = "recursive_outer_" + algorithm.lower()
+                        cursor.execute(f"CREATE VIEW {outer} AS SELECT k FROM {name}")
+                        cursor.execute(
+                            "SELECT IS_UPDATABLE FROM information_schema.views "
+                            "WHERE table_schema='probe' AND table_name=%s", (outer,)
+                        )
+                        assert cursor.fetchone() == (expected,), outer
+
                     waiter = connect(socket)
                     waiter.select_db("probe")
                     try:

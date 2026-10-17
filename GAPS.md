@@ -813,6 +813,8 @@ Recursive-only views also report MySQL's audited `IS_UPDATABLE=YES` metadata
 for direct, joined, and nested-derived CTE projections, while UPDATE still
 returns 1288. Computed, distinct, and grouped *outer* projections report `NO`;
 grouping or DISTINCT inside a nested derived source still reports `YES`.
+An explicit TEMPTABLE algorithm reports `NO`, including through a direct outer
+view, while MERGE and UNDEFINED retain the audited `YES` metadata.
 [Audited `STRAIGHT_JOIN` edges](torture/findings/2026-10-15-multiple-derived-straight-view.md)
 between those derived sources or at the physical target retain the same
 writable metadata and target-predicate filtering.

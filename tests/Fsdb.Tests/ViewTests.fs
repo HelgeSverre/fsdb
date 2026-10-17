@@ -2675,6 +2675,22 @@ let tests =
               | Err(1288, _) -> ()
               | other -> failtestf "expected recursive-only UPDATE rejection, got %A" other
 
+              for algorithm, expected in [ "MERGE", "YES"; "TEMPTABLE", "NO"; "UNDEFINED", "YES" ] do
+                  let name = "recursive_algorithm_" + algorithm.ToLowerInvariant()
+                  expectOk
+                      (run store ($"CREATE ALGORITHM={algorithm} VIEW {name} AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) SELECT k FROM seq"))
+                      ("create " + name)
+                  Expect.equal
+                      (rows store ($"SELECT IS_UPDATABLE FROM information_schema.views WHERE table_name='{name}'"))
+                      [ [ Some expected ] ]
+                      (name + " metadata matches MySQL")
+                  let outer = "recursive_outer_" + algorithm.ToLowerInvariant()
+                  expectOk (run store ($"CREATE VIEW {outer} AS SELECT k FROM {name}")) ("create " + outer)
+                  Expect.equal
+                      (rows store ($"SELECT IS_UPDATABLE FROM information_schema.views WHERE table_name='{outer}'"))
+                      [ [ Some expected ] ]
+                      (outer + " metadata inherits the algorithm boundary")
+
           testCase "joined views update a target after read-only CTE derived sources"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

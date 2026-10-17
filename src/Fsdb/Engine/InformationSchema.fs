@@ -2024,7 +2024,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             Joins = select.Joins |> List.map (fun join -> { join with Table = expand join.Table })
             Ctes = [] }
 
-let private isUpdatableView (catalog: Catalog) (schema: string) (definition: string) =
+let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) =
     let views = viewCatalogEntries catalog
 
     let isPhysicalTable defaultSchema (source: TableRef) =
@@ -2035,7 +2035,8 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
         |> Option.bind (Map.tryFind (source.Table.ToLowerInvariant()))
         |> Option.isSome
 
-    let rec check seen schema definition =
+    let rec check seen (view: SystemCatalog.View.Entry) =
+        let schema = view.Schema
         let sourceAllowsUpdates (source: TableRef) =
             let sourceSchema = source.Database |> Option.defaultValue schema
             let key = sourceSchema.ToLowerInvariant(), source.Table.ToLowerInvariant()
@@ -2047,10 +2048,13 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                 |> List.tryFind (fun view ->
                     view.Schema.Equals(sourceSchema, StringComparison.OrdinalIgnoreCase)
                     && view.Name.Equals(source.Table, StringComparison.OrdinalIgnoreCase))
-                |> Option.exists (fun view -> not (Set.contains key seen) && check (Set.add key seen) sourceSchema view.Definition)
+                |> Option.exists (fun sourceView ->
+                    not (Set.contains key seen) && check (Set.add key seen) sourceView)
 
-        match Fsdb.Parser.parse definition with
-        | Ok(Select parsed) ->
+        match view.Algorithm.Equals("TEMPTABLE", StringComparison.OrdinalIgnoreCase),
+              Fsdb.Parser.parse view.Definition with
+        | true, _ -> false
+        | _, Ok(Select parsed) ->
             let select = parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
             match select.From with
             | Some source ->
@@ -2109,12 +2113,12 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
             | _ -> false
         | _ -> false
 
-    check Set.empty schema definition
+    check Set.empty view
 
 let private viewsRows (catalog: Catalog) : Value[] list =
     viewCatalogEntries catalog
     |> List.map (fun view ->
-        [| vs "def"; vs view.Schema; vs view.Name; vs (canonicalViewDefinition catalog view.Schema true view.Definition); vs view.CheckOption; vs (if isUpdatableView catalog view.Schema view.Definition then "YES" else "NO"); vs view.Definer
+        [| vs "def"; vs view.Schema; vs view.Name; vs (canonicalViewDefinition catalog view.Schema true view.Definition); vs view.CheckOption; vs (if isUpdatableView catalog view then "YES" else "NO"); vs view.Definer
            vs view.SecurityType; vs view.CharacterSetClient; vs view.CollationConnection |])
 
 let private viewTableUsageColumns =
