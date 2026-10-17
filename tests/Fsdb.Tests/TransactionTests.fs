@@ -2007,7 +2007,19 @@ let tests =
                         [ [ Some "1"; Some "3" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "12" ] ], 2UL
                         "(1,0),(2,1),(3,2)", "UPDATE tx_limited_rebase SET n=3 WHERE id=1",
                         "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 2",
-                        [ [ Some "1"; Some "3" ] ], 2UL ] do
+                        [ [ Some "1"; Some "3" ] ], 2UL
+                        "(1,0),(2,0),(3,0),(4,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
+                        "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 3",
+                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ]; [ Some "4"; Some "1" ] ], 3UL
+                        "(1,0),(2,0),(3,0),(4,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
+                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 3",
+                        [ [ Some "1"; Some "-1" ] ], 3UL
+                        "(1,0),(2,1),(3,2),(4,3)", "UPDATE tx_limited_rebase SET n=4 WHERE id=1",
+                        "UPDATE tx_limited_rebase SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 3",
+                        [ [ Some "1"; Some "4" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "12" ]; [ Some "4"; Some "13" ] ], 3UL
+                        "(1,0),(2,1),(3,2),(4,3)", "UPDATE tx_limited_rebase SET n=4 WHERE id=1",
+                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 3",
+                        [ [ Some "1"; Some "4" ] ], 3UL ] do
                       let store = Fsdb.Storage.create ()
                       let setup = create 1 store
                       let index = if indexed then ", KEY ix_n(n)" else ""
@@ -2036,7 +2048,7 @@ let tests =
 
           testCase "limited ordered writes reselect after a contended first row is deleted"
           <| fun _ ->
-              for limit in [ 1; 2 ] do
+              for limit in [ 1; 2; 3 ] do
                   for indexed in [ false; true ] do
                       for verb in [ "UPDATE"; "DELETE" ] do
                           let store = Fsdb.Storage.create ()

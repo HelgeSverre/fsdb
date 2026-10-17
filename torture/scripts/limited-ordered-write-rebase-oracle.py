@@ -49,7 +49,7 @@ def main():
                     cursor.execute("USE probe")
 
                 cases = 0
-                for limit in (1, 2):
+                for limit in (1, 2, 3):
                     for indexed in (False, True):
                         for scenario in ("predicate", "sort_key"):
                             for verb in ("UPDATE", "DELETE"):
@@ -59,11 +59,10 @@ def main():
                                         cursor.execute("DROP TABLE IF EXISTS target")
                                         index = ", KEY ix_n(n)" if indexed else ""
                                         cursor.execute(f"CREATE TABLE target(id INT PRIMARY KEY,n INT{index})")
-                                        second_value = 0 if scenario == "predicate" else 1
-                                        rows = f"(1,0),(2,{second_value})"
-                                        if limit == 2:
-                                            third_value = 0 if scenario == "predicate" else 2
-                                            rows += f",(3,{third_value})"
+                                        rows = ",".join(
+                                            f"({id},{0 if scenario == 'predicate' else id - 1})"
+                                            for id in range(1, limit + 2)
+                                        )
                                         cursor.execute(f"INSERT INTO target VALUES{rows}")
                                         cursor.execute("BEGIN")
                                         owner_value = -1 if scenario == "predicate" else limit + 1
@@ -118,7 +117,7 @@ def main():
                                 finally:
                                     waiter.close()
 
-                for limit in (1, 2):
+                for limit in (1, 2, 3):
                     for indexed in (False, True):
                         for verb in ("UPDATE", "DELETE"):
                             waiter = connect(socket)
@@ -599,7 +598,7 @@ def main():
                     finally:
                         waiter.close()
 
-                print(f"MySQL {version}: {cases} ordered LIMIT 1/2 writes reselected after updates/deletes; "
+                print(f"MySQL {version}: {cases} ordered LIMIT 1/2/3 writes reselected after updates/deletes; "
                       f"{len(insert_cases) * 4} integer, {len(date_cases) * 2} DATE, "
                       f"{len(composite_cases) * 2} composite, {text_case_count} text, "
                       f"{composite_text_count} composite text, and {len(secondary_cases) * 2} secondary-order "

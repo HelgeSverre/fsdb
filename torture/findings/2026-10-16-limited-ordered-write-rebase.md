@@ -21,14 +21,13 @@ then changes row 2 to `n=11`; the analogous DELETE removes row 2.
 
 The [disposable MySQL oracle](../scripts/limited-ordered-write-rebase-oracle.py)
 asserts the wait, affected count, and final rows for all combinations of
-write verb, predicate-versus-sort-key change, and index presence at both
-`LIMIT 1` and `LIMIT 2`. For the latter, a third row fills the vacated result
-slot: when the owner makes row 1 fail the predicate, the waiting write changes
-rows 2 and 3; when row 1 moves behind both in sort order, it again changes
-rows 2 and 3. A further eight cases delete the first candidate in the owner
+write verb, predicate-versus-sort-key change, and index presence at `LIMIT 1`,
+`LIMIT 2`, and `LIMIT 3`. At `LIMIT 3`, a fourth row fills the vacated result
+slot after row 1 fails the predicate or moves behind the other rows in sort
+order. A further twelve cases delete the first candidate in the owner
 transaction; the waiting UPDATE or DELETE fills the vacated result slot at
-`LIMIT 1` or `LIMIT 2`, with and without a secondary predicate index. MySQL
-8.4.11 and the matching `TransactionTests` cases agree on all 24 combinations.
+all three limits, with and without a secondary predicate index. MySQL 8.4.11
+and the matching `TransactionTests` cases agree on all 36 combinations.
 No engine change was required for these row-change audits.
 
 ## Pending inserted candidates
