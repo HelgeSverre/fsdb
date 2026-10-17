@@ -338,6 +338,15 @@ let private generalEnclosedAlphanumericWeight c =
 let private foldGeneralEnclosedAlphanumerics (value: string) =
     foldEscapedGeneralWeights '\uE0B3' generalEnclosedAlphanumericWeight value
 
+// MySQL general_ci gives 3001-303F literal weights, including the combining
+// marks and quote forms ICU ignores or merges. U+3000 has its own space fold.
+let private generalCjkSymbolWeight c =
+    if c >= '\u3001' && c <= '\u303f' then
+        ValueSome(char (0xEF00 + int c - 0x3000))
+    else ValueNone
+let private foldGeneralCjkSymbols (value: string) =
+    foldEscapedGeneralWeights '\uE0B4' generalCjkSymbolWeight value
+
 // MySQL's general_ci gives these spaces and format characters separate,
 // positional weights. ICU ignores some and equates others at primary strength.
 let private generalFormatControlWeight = function
@@ -545,7 +554,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             |> foldGeneralKanaMarks |> foldGeneralCombiningAccents
             |> foldGeneralCjkRadicals |> foldGeneralKanaWeights
             |> foldGeneralCompatibilityIdeographs |> foldGeneralEnclosedCjk
-            |> foldGeneralEnclosedAlphanumerics
+            |> foldGeneralEnclosedAlphanumerics |> foldGeneralCjkSymbols
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->
