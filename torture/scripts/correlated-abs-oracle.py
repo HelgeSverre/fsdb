@@ -82,6 +82,12 @@ def main():
                              ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
                             ("ABS(d.k)+0 IN (CAST(o.x AS DOUBLE),NULL)",
                              ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0=CAST(o.x AS CHAR)",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0 IN (CONCAT(o.x,'e0'),NULL)",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0=CONCAT(o.x,'.5')",
+                             ((1, 0), (2, 0), (3, 0), (4, 0), (5, 0))),
                         ]:
                             cursor.execute(
                                 prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source

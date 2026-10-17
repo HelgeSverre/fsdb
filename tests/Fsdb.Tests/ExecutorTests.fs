@@ -13020,6 +13020,34 @@ let tests =
                         | other -> failtestf "expected double-bound integer expression result, got %A" other
                         Expect.isLessThan calls 80 "double bounds narrow integer expression candidates"
 
+                    for predicate, expected in
+                        [ "ABS(d.k)+0=CAST(o.x AS CHAR)", [ 2; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0 IN (CONCAT(o.x,'e0'),NULL)", [ 2; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0=CONCAT(o.x,'.5')", [ 0; 0; 0; 0; 0 ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                            + "FROM abs_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            Expect.equal (rows |> List.map (fun row -> row.[1]))
+                                (expected |> List.map (string >> Some)) predicate
+                        | other -> failtestf "expected numeric-string integer expression result, got %A" other
+                        Expect.isLessThan calls 80 "clean string bounds narrow integer expression candidates"
+
+                    calls <- 0
+                    match run store registry
+                        ("SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
+                         + "WHERE TOUCH(d.id)=d.id AND ABS(d.k)+0=CONCAT(o.x,'x')) "
+                         + "FROM abs_bounds o ORDER BY o.id") with
+                    | ResultSet(_, rows) ->
+                        Expect.equal (rows |> List.map (fun row -> row.[1]))
+                            ([ 2; 0; 0; 0; 1 ] |> List.map (string >> Some))
+                            "trailing text retains numeric-prefix comparison"
+                    | other -> failtestf "expected trailing-text integer expression result, got %A" other
+                    Expect.isGreaterThan calls 1000 "trailing text retains the scan and conversion warnings"
+
                     runDefault store "CREATE TABLE wide_unsigned_rows(id INT PRIMARY KEY,k BIGINT UNSIGNED)" |> ignore
                     runDefault store
                         "INSERT INTO wide_unsigned_rows VALUES(1,9223372036854775807),(2,9223372036854775808),(3,18446744073709551615)"

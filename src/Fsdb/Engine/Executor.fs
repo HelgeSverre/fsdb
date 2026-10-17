@@ -15970,6 +15970,21 @@ and private tryMaterializedCorrelatedLookup
                     integerKeyExpression left && integerKeyExpression right
                 | _ -> false
 
+            let decimalIntegerBoundKey number =
+                if number = System.Decimal.Truncate number then
+                    if number >= decimal System.Int64.MinValue
+                       && number <= decimal System.Int64.MaxValue then
+                        Some(VInt(int64 number))
+                    elif number >= 0m && number <= decimal System.UInt64.MaxValue then
+                        Some(VUInt(uint64 number))
+                    else Some(VDecimal number)
+                else Some(VDecimal number)
+
+            let cleanNumericStringBound text =
+                let _, truncated = Value.coerceLeadingDouble text
+                if truncated then None
+                else Value.tryLeadingDecimal text |> Option.bind decimalIntegerBoundKey
+
             let integerExpressionLookup expression =
                 let lookups =
                     getMemoized memo.MaterializedCorrelatedIntegerExpressions source (fun () ->
@@ -15983,16 +15998,11 @@ and private tryMaterializedCorrelatedLookup
                             | VInt _ | VUInt _ as value -> Some(canonicalIntegerKey value)
                             | _ -> None
                         let boundKey = function
-                            | VDecimal number when number = System.Decimal.Truncate number ->
-                                if number >= decimal System.Int64.MinValue
-                                   && number <= decimal System.Int64.MaxValue then
-                                    Some(VInt(int64 number))
-                                elif number >= 0m && number <= decimal System.UInt64.MaxValue then
-                                    Some(VUInt(uint64 number))
-                                else Some(VDecimal number)
                             // Only integer row results enter this lookup. A fractional
                             // or out-of-range DECIMAL has no matching integer key.
-                            | VDecimal number -> Some(VDecimal number)
+                            | VDecimal number -> decimalIntegerBoundKey number
+                            | VString text -> cleanNumericStringBound text
+                            | VEncodedString _ as value -> Value.toText value |> Option.bind cleanNumericStringBound
                             | VDouble number when System.Double.IsFinite number -> Some(VDouble number)
                             | value -> integerKey value
                         // Numeric comparison with a DOUBLE bound rounds even
@@ -16022,6 +16032,8 @@ and private tryMaterializedCorrelatedLookup
                 let acceptsBound = function
                     | VNull | VInt _ | VUInt _ | VDecimal _ -> true
                     | VDouble number -> System.Double.IsFinite number
+                    | VString text -> cleanNumericStringBound text |> Option.isSome
+                    | VEncodedString _ as value -> Value.toText value |> Option.bind cleanNumericStringBound |> Option.isSome
                     | _ -> false
                 expressionEqualityCandidates indexable integerExpressionLookup (fun _ -> true) acceptsBound predicate
 

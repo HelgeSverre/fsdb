@@ -45,8 +45,10 @@ within the signed or unsigned 64-bit domain normalize to the corresponding
 integer key, while fractional and out-of-range values have no integer match.
 Finite DOUBLE bounds use a second key in the approximate comparison domain;
 this preserves matches when adjacent large integers round to the same DOUBLE.
-String bounds still scan. The lookup also participates in complete OR-branch
-unions.
+Clean numeric string bounds, including charset-tagged `CAST AS CHAR` results,
+also use the exact integer key. A string with trailing nonnumeric text retains
+the scan so its numeric-prefix conversion and warnings remain observable. The
+lookup also participates in complete OR-branch unions.
 
 The same [profile](../scripts/correlated-materialized-functional-profile.fsx)
 now reports **6 residual calls** for `ABS(d.k)+0=o.x`, down from 4,004.
@@ -72,6 +74,10 @@ the first out-of-range DECIMAL value.
 The finite DOUBLE-bound regression likewise reduces 4,014 residual calls to
 fewer than 80. The wide unsigned oracle checks rounded equality at 2⁶³ and
 2⁶⁴, where exact integer equality would miss MySQL's DOUBLE-domain matches.
+The numeric-string oracle covers `CAST AS CHAR`, exponent strings, and
+fractional strings. Its focused materialized regression reduces the clean
+string case from 4,014 residual calls to fewer than 80; a trailing-text case
+continues to scan.
 
 ### Integer `BIT_COUNT` results
 
