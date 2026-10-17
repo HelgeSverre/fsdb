@@ -245,7 +245,7 @@ let private generalSyntheticPair c =
     match c with
     | '\uE0C0' | '\uE0D0' | '\uE0E0' | '\uE300' | '\uE0F0' | '\uE600'
     | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5'
-    | '\uE0B6' | '\uE0B7' | '\uE0B8' | '\uE0B9' | '\uE0BA' | '\uE0BB' | '\uE0BC' as marker ->
+    | '\uE0B6' | '\uE0B7' | '\uE0B8' | '\uE0B9' | '\uE0BA' | '\uE0BB' | '\uE0BC' | '\uE0BD' as marker ->
         pair marker marker
     // Halfwidth voicing and decomposed kana marks have their own positional weights.
     | '\uff9e' -> pair '\uE0C0' '\uE0C1'
@@ -313,6 +313,10 @@ let private generalSyntheticPair c =
              || (c >= '\u2070' && c <= '\u208F')
              || c = '\u2099' ->
         pair '\uE0BC' (char (0xF810 + int c - 0x2000))
+    // MySQL's general collation keeps this Glagolitic/Coptic block in
+    // written-code-point order; ICU case-folds many of its letter pairs.
+    | c when c >= '\u2C00' && c <= '\u2CFF' ->
+        pair '\uE0BD' (char (0xE500 + int c - 0x2C00))
     // Letterlike symbols, number forms, and arrows retain their code-point
     // weights, except lowercase Roman numerals share uppercase weights.
     | c when c >= '\u2100' && c <= '\u21ff' ->

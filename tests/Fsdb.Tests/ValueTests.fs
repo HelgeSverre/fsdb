@@ -1588,6 +1588,20 @@ let tests =
                     Expect.isFalse (col.Equals "‐" "\uE0BC\uF820")
                         "a literal marker cannot alias punctuation"
 
+                testCase "utf8mb4_general_ci keeps Glagolitic and Coptic weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let forms = [ 0x2C00 .. 0x2CFF ] |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> Set.ofList |> Set.count) 256
+                        "MySQL assigns one literal primary weight per code point"
+                    for left, right in forms |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "the block follows MySQL's code-point order"
+                    for left, right in [ "Ⰰ", "ⰰ"; "⳯", "⳰" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isFalse (col.Equals "Ⰰ" "\uE0BD\uE500")
+                        "a literal marker cannot alias a Glagolitic character"
+
                 testCase "utf8mb4_general_ci keeps Bopomofo extension weights distinct"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get

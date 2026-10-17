@@ -576,6 +576,17 @@ let tests =
               for term, expected in [ "❶", "1"; "➀", "2"; "➊", "3"; "⫝̸", "4"; "⫝", "5" ] do
                   Expect.equal (search term) [ expected ] (term + " keeps its own posting")
 
+          testCase "general Unicode Glagolitic and Coptic ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE coptic_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO coptic_docs VALUES(1,'中Ⰰ文'),(2,'中ⰰ文'),(3,'中⳯文'),(4,'中⳰文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM coptic_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              for term, expected in [ "Ⰰ", "1"; "ⰰ", "2"; "⳯", "3"; "⳰", "4" ] do
+                  Expect.equal (search term) [ expected ] (term + " keeps its own posting")
+
           testCase "general Unicode Bopomofo extension ngrams retain distinct postings"
           <| fun _ ->
               let store = create ()
