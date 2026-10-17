@@ -105,3 +105,9 @@ view target with every assigned outer physical target in table order before
 rebasing the transaction snapshot. The focused regression checks both owner
 positions, wait behavior, affected counts, commits, and final rows. Other
 multi-target outer-join shapes remain to audit.
+
+A bare assignment to `m`, which is exposed by `x` but not by `v`, also
+claims `x` despite the view's hidden base table having its own `m` column.
+With an owner holding `x.m=10`, MySQL and Fsdb both wait, then set `x.m=11`,
+`t.n=1`, and `z.n=1` while leaving `x.n=0`. The focused regression covers
+this uniquely owned bare target as well as the qualified assignments above.

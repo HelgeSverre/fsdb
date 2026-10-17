@@ -2634,6 +2634,39 @@ let tests =
                       | ResultSet(_, [ [ Some actual ] ]) ->
                           Expect.equal actual expected (heldTable + " rebases " + table)
                       | result -> failtestf "expected committed row from %s, got %A" table result
+              handle session "UPDATE tx_read_view_outer SET n=0,m=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_last SET n=0 WHERE id=1" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, held = handle owner "UPDATE tx_read_view_outer SET m=10 WHERE id=1"
+              Expect.equal held (Affected 1UL) "owner holds the outer-only column"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              use bareStarted = new Threading.ManualResetEventSlim(false)
+              let bareWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      bareStarted.Set()
+                      handle waiter
+                          ("UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                           + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                           + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                           + "SET m=m+1,v.n=v.n+1,z.n=z.n+1 WHERE v.id=1"))
+              Expect.isTrue (bareStarted.Wait(TimeSpan.FromSeconds 1.0)) "bare outer writer starts"
+              Expect.isFalse (bareWaiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  "bare outer-only assignment waits for its physical row"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits outer-only column"
+              Expect.isTrue (bareWaiting.Wait(TimeSpan.FromSeconds 5.0)) "bare outer writer resumes"
+              let waiter, bareResult = bareWaiting.Result
+              Expect.equal bareResult (Affected 3UL) "all three targets update after bare outer wait"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "bare outer writer commits"
+              for table, column, expected in
+                  [ "tx_read_view_outer", "m", "11"
+                    "tx_read_view_outer", "n", "0"
+                    "tx_read_view_target", "n", "1"
+                    "tx_read_view_last", "n", "1" ] do
+                  match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + "." + column + " rebases")
+                  | result -> failtestf "expected committed %s.%s, got %A" table column result
               handle session "DELETE FROM tx_read_view_last" |> ignore
               handle session "INSERT INTO tx_read_view_last VALUES(99,0)" |> ignore
               handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore

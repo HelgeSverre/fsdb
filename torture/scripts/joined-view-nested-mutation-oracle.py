@@ -539,6 +539,45 @@ def main():
                             expected = 11 if table == held_target else 1
                             assert cursor.fetchone() == (expected,), (held_target, table)
 
+                    cursor.execute("UPDATE x SET n=0,m=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE z SET n=0 WHERE id=1")
+                    with owner.cursor() as owner_cursor:
+                        owner_cursor.execute("BEGIN")
+                        owner_cursor.execute("UPDATE x SET m=10 WHERE id=1")
+                    started = threading.Event()
+                    finished = threading.Event()
+                    outcome = {}
+
+                    def waiting_bare_outer_update():
+                        try:
+                            with waiter.cursor() as waiting_cursor:
+                                waiting_cursor.execute("BEGIN")
+                                started.set()
+                                waiting_cursor.execute(
+                                    "UPDATE " + extended_source
+                                    + " SET m=m+1,v.n=v.n+1,z.n=z.n+1 WHERE v.id=1"
+                                )
+                                outcome["affected"] = waiting_cursor.rowcount
+                                waiting_cursor.execute("COMMIT")
+                        except Exception as error:
+                            outcome["error"] = error
+                        finally:
+                            finished.set()
+
+                    thread = threading.Thread(target=waiting_bare_outer_update, daemon=True)
+                    thread.start()
+                    assert started.wait(2), "bare outer assignment starts"
+                    assert not finished.wait(0.2), "bare outer assignment waits for x"
+                    owner.commit()
+                    assert finished.wait(5), "bare outer assignment resumes"
+                    thread.join()
+                    assert outcome == {"affected": 3}, outcome
+                    for table, column, expected in (("x", "m", 11), ("x", "n", 0),
+                                                     ("t", "n", 1), ("z", "n", 1)):
+                        cursor.execute(f"SELECT {column} FROM {table} WHERE id=1")
+                        assert cursor.fetchone() == (expected,), (table, column)
+
                     cursor.execute("DELETE FROM z")
                     cursor.execute("INSERT INTO z VALUES(99,0)")
                     cursor.execute("UPDATE x SET n=0 WHERE id=1")
@@ -563,7 +602,8 @@ def main():
                     "two-target writes rebased and kept caller/definer grants separate; "
                     "disjoint rows did not wait; three-source outer joins preserved both left- and right-hand targets; "
                     "four-source right/left and right/right chains updated only matched physical targets; "
-                    "contended view and outer targets waited and rebased all three assignments"
+                    "contended view and outer targets waited and rebased all three assignments; "
+                    "a bare outer-only column waited and rebased its physical target"
                 )
             finally:
                 for connection in connections:
