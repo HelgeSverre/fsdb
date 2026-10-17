@@ -80,6 +80,8 @@ def main():
                         cursor.execute(query)
                         actual = tuple(count for _, count in cursor.fetchall())
                         assert actual == expected, (predicate, actual, expected)
+                        if "o.s" in predicate:
+                            assert cursor._result.warning_count == 0, predicate
                     range_cases = [
                         ("d.k+0e0<o.x", (513, 1001, 0, 488, 500, 1001)),
                         ("o.x>d.k+0e0", (513, 1001, 0, 488, 500, 1001)),
@@ -88,6 +90,7 @@ def main():
                         ("d.k+0e0>=o.i", (490, 2, 0, 514, 503, 2)),
                         ("d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0", (3, 0, 0, 3, 2, 1)),
                         ("d.k+0e0<o.s", (513, 1001, 0, 488, 500, 1001)),
+                        ("d.k+0e0 BETWEEN o.s AND o.s", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0<o.x OR d.id=999", (514, 1001, 1, 489, 501, 1001)),
                     ]
                     for predicate, expected in range_cases:
@@ -98,6 +101,28 @@ def main():
                         )
                         actual = tuple(count for _, count in cursor.fetchall())
                         assert actual == expected, (predicate, actual, expected)
+                        if "o.s" in predicate:
+                            assert cursor._result.warning_count == 0, predicate
+                    cursor.execute("INSERT INTO outer_bounds VALUES(7,NULL,NULL,NULL,'12.5x')")
+                    for predicate in ("d.k+0e0=o.s", "d.k+0e0 BETWEEN o.s AND o.s"):
+                        cursor.execute(
+                            "SELECT (SELECT COUNT(*) FROM "
+                            "(SELECT DISTINCT id,k FROM inner_rows) d "
+                            f"WHERE {predicate}) FROM outer_bounds o WHERE o.id=7"
+                        )
+                        assert cursor.fetchone()[0] == 1, predicate
+                        assert cursor._result.warning_count > 0, predicate
+                    for text, expected, has_warning in (
+                        ("1e-500", 1, False), ("1e309", 0, True), (" 12.5 ", 1, False)
+                    ):
+                        cursor.execute("UPDATE outer_bounds SET s=%s WHERE id=7", (text,))
+                        cursor.execute(
+                            "SELECT (SELECT COUNT(*) FROM "
+                            "(SELECT DISTINCT id,k FROM inner_rows) d "
+                            "WHERE d.k+0e0=o.s) FROM outer_bounds o WHERE o.id=7"
+                        )
+                        assert cursor.fetchone()[0] == expected, text
+                        assert (cursor._result.warning_count > 0) == has_warning, text
                     cursor.execute(
                         "SELECT x=i,x+0e0=i,9007199254740992e0=i,"
                         "9007199254740992e0+0e0=i "

@@ -15958,18 +15958,27 @@ and private tryMaterializedCorrelatedLookup
                 | VInt _ | VUInt _ | VDecimal _ | VBit _ as value ->
                     let number = Value.toDouble value
                     if System.Double.IsFinite number then Some number else None
+                | VString text when not (System.String.IsNullOrWhiteSpace text) ->
+                    match System.Double.TryParse(
+                        text,
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture
+                    ) with
+                    | true, number when System.Double.IsFinite number -> Some number
+                    | _ -> None
                 | _ -> None
 
             // Numeric bounds compare with a DOUBLE result in the approximate
             // domain, including exact values that round to the same double.
-            // Text bounds retain the scan because their coercion is broader.
+            // Fully numeric strings use that domain too; strings requiring a
+            // truncated conversion retain the scan and its warning count.
             let doubleExpressionCandidates predicate =
                 let doubleKey = function
                     | VDouble number when System.Double.IsFinite number -> Some(VDouble number)
                     | _ -> None
                 let probeKey value =
                     match value with
-                    | VInt _ | VUInt _ | VDecimal _ | VBit _ as value ->
+                    | VInt _ | VUInt _ | VDecimal _ | VBit _ | VString _ as value ->
                         finiteNumericDouble value |> Option.map VDouble
                     | value -> doubleKey value
 

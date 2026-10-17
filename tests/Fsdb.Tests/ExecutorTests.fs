@@ -13074,15 +13074,15 @@ let tests =
                          + "(1002,9007199254740992),(1003,9007199254740994)")
                     |> ignore
 
-                    for predicate, expected, keyed in
-                        [ "d.k=o.x", [ 1; 0; 0; 1; 1; 1 ], true
-                          "d.k+0e0=o.x", [ 1; 0; 0; 1; 1; 1 ], true
-                          "o.x=d.k+0e0", [ 1; 0; 0; 1; 1; 1 ], true
-                          "d.k*1e0=o.x", [ 1; 0; 0; 1; 1; 1 ], true
-                          "d.k+0e0=o.d", [ 1; 0; 0; 1; 1; 1 ], true
-                          "d.k+0e0=o.i", [ 0; 0; 0; 0; 1; 1 ], true
-                          "d.k+0e0=o.s", [ 1; 0; 0; 1; 1; 1 ], false
-                          "d.k+0e0=o.x OR d.id=12", [ 2; 1; 1; 2; 2; 2 ], true ] do
+                    for predicate, expected in
+                        [ "d.k=o.x", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0=o.x", [ 1; 0; 0; 1; 1; 1 ]
+                          "o.x=d.k+0e0", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k*1e0=o.x", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0=o.d", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0=o.i", [ 0; 0; 0; 0; 1; 1 ]
+                          "d.k+0e0=o.s", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0=o.x OR d.id=12", [ 2; 1; 1; 2; 2; 2 ] ] do
                         calls <- 0
                         let sql =
                             "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
@@ -13093,8 +13093,7 @@ let tests =
                             let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
                             Expect.equal actual (expected |> List.map Some) predicate
                         | other -> failtestf "expected materialized DOUBLE matches for %s, got %A" predicate other
-                        if keyed then Expect.isLessThan calls 80 (predicate + " must bound residual work")
-                        else Expect.isGreaterThan calls 1000 "string coercion must retain the scan"
+                        Expect.isLessThan calls 80 (predicate + " must bound residual work")
 
                     for predicate, expected in
                         [ "d.k+0e0<o.x", [ 513; 1001; 0; 488; 500; 1001 ]
@@ -13104,6 +13103,7 @@ let tests =
                           "d.k+0e0>=o.i", [ 490; 2; 0; 514; 503; 2 ]
                           "d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0", [ 3; 0; 0; 3; 2; 1 ]
                           "d.k+0e0<o.s", [ 513; 1001; 0; 488; 500; 1001 ]
+                          "d.k+0e0 BETWEEN o.s AND o.s", [ 1; 0; 0; 1; 1; 1 ]
                           "d.k+0e0<o.x OR d.id=999", [ 514; 1001; 1; 489; 501; 1001 ] ] do
                         calls <- 0
                         let sql =
@@ -13117,8 +13117,36 @@ let tests =
                         | other -> failtestf "expected materialized DOUBLE range matches for %s, got %A" predicate other
                         if predicate = "d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0" then
                             Expect.isLessThan calls 80 "narrow DOUBLE range must bound residual work"
-                        if predicate = "d.k+0e0<o.s" then
-                            Expect.isGreaterThan calls 1000 "string-coerced DOUBLE range must retain the scan"
+                        if predicate = "d.k+0e0 BETWEEN o.s AND o.s" then
+                            Expect.isLessThan calls 80 "clean numeric string range must bound residual work"
+
+                    runDefault store "INSERT INTO double_bounds VALUES(7,NULL,NULL,NULL,'12.5x')" |> ignore
+                    for predicate in [ "d.k+0e0=o.s"; "d.k+0e0 BETWEEN o.s AND o.s" ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                            + "FROM double_bounds o WHERE o.id=7"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | other -> failtestf "expected truncated string bound to retain its result, got %A" other
+                        Expect.isGreaterThan calls 1000 "truncated numeric text retains residual evaluation"
+
+                    for bound, expected, keyed in
+                        [ "1e-500", "1", true
+                          "1e309", "0", false
+                          " 12.5 ", "1", true ] do
+                        runDefault store (sprintf "UPDATE double_bounds SET s='%s' WHERE id=7" bound) |> ignore
+                        calls <- 0
+                        let sql =
+                            "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND d.k+0e0=o.s) "
+                            + "FROM double_bounds o WHERE o.id=7"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected bound
+                        | other -> failtestf "expected string-bound DOUBLE result for %s, got %A" bound other
+                        if keyed then Expect.isLessThan calls 80 (bound + " uses the key")
+                        else Expect.isGreaterThan calls 1000 (bound + " retains the scan")
 
                     match runDefault store
                         ("SELECT x=i,x+0e0=i,9007199254740992e0=i,"

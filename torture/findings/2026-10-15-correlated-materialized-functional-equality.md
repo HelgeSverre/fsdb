@@ -131,3 +131,15 @@ also exposed a decimal-to-binary64 halfway conversion error at 2⁵³+1: the
 CLR direct cast rounded to 2⁵³+2, while MySQL rounded to 2⁵³. Parsing the
 exact decimal digits now gives the matching single rounding for numeric
 comparisons and range bounds.
+
+## Fully numeric string bounds
+
+A correlated DOUBLE expression can also use its statement-local equality or
+range key when the outer string is fully numeric and converts to a finite
+DOUBLE. MySQL 8.4.11 returns the same rows without warnings for the audited
+string equality, inequality, and `BETWEEN` cases, including a value above
+2⁵³ that rounds to an existing DOUBLE key. The executor regression reduces
+the narrow string equality and `BETWEEN` probes from more than 1,000 residual
+calls to fewer than 80 across six outer rows. A string with trailing text
+(`12.5x`) still takes the scan path: MySQL emits conversion warnings for it,
+so narrowing the residual evaluation would change the warning count.
