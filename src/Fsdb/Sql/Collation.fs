@@ -319,6 +319,15 @@ let private generalCompatibilityIdeographWeight c =
 let private foldGeneralCompatibilityIdeographs (value: string) =
     foldEscapedGeneralWeights '\uE0B1' generalCompatibilityIdeographWeight value
 
+// MySQL general_ci gives enclosed CJK forms and square units in 3200-33FF
+// literal weights; ICU expands several to ordinary letters or ideographs.
+let private generalEnclosedCjkWeight c =
+    if c >= '\u3200' && c <= '\u33ff' then
+        ValueSome(char (0xEC00 + int c - 0x3200))
+    else ValueNone
+let private foldGeneralEnclosedCjk (value: string) =
+    foldEscapedGeneralWeights '\uE0B2' generalEnclosedCjkWeight value
+
 // MySQL's general_ci gives these spaces and format characters separate,
 // positional weights. ICU ignores some and equates others at primary strength.
 let private generalFormatControlWeight = function
@@ -525,7 +534,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             |> foldGeneralHalfwidthMarks |> foldGeneralFormatControls
             |> foldGeneralKanaMarks |> foldGeneralCombiningAccents
             |> foldGeneralCjkRadicals |> foldGeneralKanaWeights
-            |> foldGeneralCompatibilityIdeographs
+            |> foldGeneralCompatibilityIdeographs |> foldGeneralEnclosedCjk
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->
