@@ -1581,6 +1581,15 @@ let tests =
                         Expect.isFalse (col.Equals left right) (left + " differs from " + right)
                     Expect.isFalse (col.Equals "∃" "\uE0B6\uF103") "literal marker cannot alias an operator"
 
+                testCase "utf8mb4_general_ci distinguishes dingbats and supplemental operators"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let keys = [ 0x2700 .. 0x27FF ] @ [ 0x2A00 .. 0x2AFF ] |> List.map (char >> string >> col.KeyOf)
+                    Expect.equal (keys |> Set.ofList |> Set.count) 512 "each audited symbol has its own MySQL weight"
+                    for left, right in [ "❶", "➀"; "❶", "➊"; "➀", "➊"; "⫝̸", "⫝" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isFalse (col.Equals "❶" "\uE0B7\uF276") "literal marker cannot alias a dingbat"
+
                 testCase "utf8mb4_general_ci retains decomposed combining accents"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
