@@ -6324,7 +6324,10 @@ let private geometryDistanceSphereFn: Scalar =
         let radius = suppliedRadius |> Option.defaultWith (fun () -> defaultRadius functionName first.Srid)
 
         sphericalPointSetDistance radius (coordinates functionName first) (coordinates functionName second)
-        |> Option.map VDouble
+        |> Option.map (fun distance ->
+            if Double.IsInfinity distance then
+                raise (SqlError(3049, "Overflow error: INFINITY in function st_distance_sphere."))
+            VDouble distance)
         |> Option.defaultValue VNull
 
     function
