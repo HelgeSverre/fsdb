@@ -1004,6 +1004,9 @@ The [format-control probe](torture/findings/2026-10-17-general-ci-format-control
 also keeps nine audited format/space characters distinct. The corpus now
 matches at token sizes 5–10; smaller sizes and broader collation behavior
 remain open.
+The [decomposed-kana probe](torture/findings/2026-10-17-general-ci-kana-marks.md)
+keeps combining voicing marks distinct from precomposed kana under
+`utf8mb4_general_ci`; the audited corpus now matches at sizes 4–10.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

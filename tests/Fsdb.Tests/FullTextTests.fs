@@ -233,6 +233,30 @@ let tests =
                   let booleanIds = if expectedId = 2 then [ 2 ] else []
                   Expect.equal (ids (booleanScores index term)) booleanIds "Boolean parsing follows MySQL's control boundaries"
 
+          testCase "general Unicode ngrams do not compose kana marks"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              for size in [ 3; 4 ] do
+                  let rules = { Tokenizer = Ngrams size; Stopwords = StopwordPolicy.BuiltIn }
+                  let index =
+                      buildIndexWithDocumentSettings rules collation
+                          [ 1, rules, [ "ガラス" ]
+                            2, rules, [ "カ\u3099ラス" ]
+                            3, rules, [ "パピ" ]
+                            4, rules, [ "ハ\u309aピ" ]
+                            5, rules, [ "日本語日本語" ]
+                            6, rules, [ "中文中文中文" ]
+                            7, rules, [ "北海道東京" ]
+                            8, rules, [ "韓国語学校" ] ]
+                  let cases =
+                      if size = 3 then
+                          [ "ガラス", [ 1 ]; "カ\u3099ラス", [ 2 ]; "パピ", []; "ハ\u309aピ", [ 4 ] ]
+                      else
+                          [ "ガラス", []; "カ\u3099ラス", [ 2 ]; "パピ", []; "ハ\u309aピ", [] ]
+                  for term, expected in cases do
+                      for scores in [ naturalScores index term; booleanScores index term; expansionScores index term ] do
+                          Expect.equal (scores |> Map.keys |> Seq.toList) expected (sprintf "MySQL size %d search for %A" size term)
+
           testCase "boolean ngram terms retain Unicode number characters"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }
