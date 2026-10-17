@@ -71,3 +71,30 @@ publication within the executor/storage path, while preserving the separate
 WAL acknowledgement problem. It does not identify a particular lock or
 allocation as the cause. The probes were removed and the normal Release CLI
 rebuilt with zero warnings.
+
+## Prepared-publication experiment
+
+The stage profile suggested moving single-row preparation outside the
+database publication slot. A temporary prototype reused the existing
+prepared-candidate path for ordinary one-row, non-`IGNORE`, trigger-free
+inserts while holding the shared schema lock through publication. It needed
+an explicit functional-index error boundary to preserve SQL errors; after
+that correction, `just check` passed 3,706 tests with zero build warnings.
+
+The same durable keyless-insert harness used two fresh-database trials, one
+second of warmup, and five measured seconds per trial. The corrected
+prototype ran first, followed by a clean rebuilt original implementation.
+
+| Implementation | One writer, fsdb inserts/s | Eight writers, fsdb inserts/s | Eight writers, durable MySQL inserts/s |
+|---|---:|---:|---:|
+| Prepared candidate prototype | 6,411 (1.6% RSD) | 11,658 (4.6% RSD) | 46,462 |
+| Original path, restored | 6,442 (0.5% RSD) | 12,268 (2.0% RSD) | 47,188 |
+
+An earlier prototype run reached 12,351 eight-writer inserts/s but predated
+the required error-boundary fix and is not a valid adoption control. The
+corrected version showed no one-writer gain and was slower than the bracketed
+original at eight writers. Short trials cannot quantify a small difference,
+but they provide no evidence that the added path closes the scaling gap. The
+prototype was removed and the normal Release CLI rebuilt. Further work should
+identify a measured cost inside row preparation or publication rather than
+moving the whole preparation path speculatively.
