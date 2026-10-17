@@ -261,7 +261,6 @@ let private generalSyntheticPair c =
     | '\u200d' -> pair '\uE0D0' '\uE0D6'
     | '\u2060' -> pair '\uE0D0' '\uE0D7'
     | '\u3000' -> pair '\uE0D0' '\uE0D8'
-    | '\ufe0f' -> pair '\uE0D0' '\uE0D9'
     // Decomposed accents retain their written weight, apart from Greek iota.
     | c when c >= '\u0300' && c <= '\u036f' && c <> '\u0345' ->
         pair '\uE300' (char (0xE400 + int c - 0x0300))
@@ -305,6 +304,9 @@ let private generalSyntheticPair c =
         pair '\uE0BB' (char (0xF680 + int c - 0x1DC0))
     | c when c >= '\u20D0' && c <= '\u20FF' ->
         pair '\uE0BB' (char (0xF700 + int c - 0x20D0))
+    // Variation selectors are significant under general_ci, including FE0F.
+    | c when c >= '\uFE00' && c <= '\uFE0F' ->
+        pair '\uE0BB' (char (0xF800 + int c - 0xFE00))
     // Letterlike symbols, number forms, and arrows retain their code-point
     // weights, except lowercase Roman numerals share uppercase weights.
     | c when c >= '\u2100' && c <= '\u21ff' ->

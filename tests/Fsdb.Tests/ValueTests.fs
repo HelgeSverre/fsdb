@@ -1624,6 +1624,18 @@ let tests =
                     Expect.isFalse (col.Equals "⃐" "\uE0BB\uF700")
                         "a literal marker cannot alias a symbol mark"
 
+                testCase "utf8mb4_general_ci keeps variation-selector weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let selectors = [ 0xFE00 .. 0xFE0F ] |> List.map (char >> string)
+                    Expect.equal (selectors |> List.map col.KeyOf |> Set.ofList |> Set.count) 16
+                        "MySQL assigns each variation selector its written primary weight"
+                    for left, right in selectors |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "variation-selector weights follow codepoint order"
+                    Expect.isFalse (col.Equals "\uFE00" "\uE0BB\uF800")
+                        "a literal marker cannot alias a variation selector"
+
                 testCase "utf8mb4_general_ci keeps letterlike symbols at their written weights"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get

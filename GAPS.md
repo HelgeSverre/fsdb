@@ -1057,6 +1057,10 @@ preserves distinct U+1AB0–U+1AFF, U+1DC0–U+1DFF, and U+20D0–U+20FF
 weights in CJK text. The adjacent U+FE20–U+FE2F block needs no override.
 Their expanded ngram lanes match MySQL at sizes 1–10 (186, 384, 198, and 96
 searches per size, respectively).
+[General Unicode variation selectors](torture/findings/2026-10-17-general-ci-variation-selectors.md)
+now retain their distinct written weights across U+FE00–U+FE0F, including
+U+FE0F, in equality keys and ngram postings. The two-column corpus matches
+MySQL at token sizes 1–10 (96 searches per size).
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

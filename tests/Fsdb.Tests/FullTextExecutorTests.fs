@@ -599,6 +599,19 @@ let tests =
               Expect.equal (search "⃐") [ "5" ] "a symbol mark keeps its own posting"
               Expect.equal (search "⃑") [ "6" ] "the next symbol mark keeps its own posting"
 
+          testCase "general Unicode variation-selector ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE variation_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO variation_docs VALUES(1,'中\uFE00文'),(2,'中\uFE01文'),(3,'中\uFE0E文'),(4,'中\uFE0F文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM variation_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "\uFE00") [ "1" ] "the first selector keeps its own posting"
+              Expect.equal (search "\uFE01") [ "2" ] "the next selector keeps its own posting"
+              Expect.equal (search "\uFE0E") [ "3" ] "the penultimate selector keeps its own posting"
+              Expect.equal (search "\uFE0F") [ "4" ] "the final selector keeps its own posting"
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()
