@@ -46,3 +46,28 @@ from this table.
 Both temporary probes were removed, the normal Release CLI rebuilt with zero
 warnings, and the working tree was clean before this report was written. No
 queue, lock, or WAL behavior was changed.
+
+## Executor follow-up
+
+A separate temporary build measured `TableLocks.accessesForStatement` and
+`Executor.executeAs` for only the keyless inserts, with durable acknowledgement
+timed in the same run. It used the same host, schema, durability settings,
+20,000-operation counter deltas, and one/eight-writer arrangement. The
+one-writer measured phase was seven seconds (6,551 fsdb and 16,727 MySQL
+inserts/s); the eight-writer phase was nine seconds (12,073 fsdb and 47,291
+MySQL inserts/s). These are single profiled trials, not a before/after
+throughput comparison.
+
+| Writers | Statement-access discovery µs/call | `Executor.executeAs` µs/call | Durable acknowledgement µs/call | Executor time outside acknowledgement µs/call |
+|---:|---:|---:|---:|---:|
+| 1 | 2.47 | 68.31 | 50.35 | 17.96 |
+| 8 | 7.79 | 381.01 | 284.43 | 96.58 |
+
+The last column again subtracts nested timers from the same run. Access
+discovery grows but is small relative to the executor. The executor's work
+outside acknowledgement grows by about 79 µs per call from one to eight
+writers. This narrows the next investigation to insert row preparation and
+publication within the executor/storage path, while preserving the separate
+WAL acknowledgement problem. It does not identify a particular lock or
+allocation as the cause. The probes were removed and the normal Release CLI
+rebuilt with zero warnings.
