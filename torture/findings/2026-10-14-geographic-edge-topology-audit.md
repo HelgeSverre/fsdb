@@ -182,6 +182,27 @@ with independent `outer within` and `not hole within` tests would preserve
 fsdb's wrong answer, and treating zero line distance as boundary would
 contradict MySQL's `ST_Touches=0` for the hole polygon.
 
+## Geographic winding strategy boundary
+
+MySQL 8.4.11's [point/polygon `Within` implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/within.cc#L661-L669)
+passes the complete polygon to Boost.Geometry with its ellipsoidal
+`geographic_winding` strategy. MySQL constructs that strategy from the SRS
+spheroid in [`within.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/within.cc#L53-L59),
+and the pinned source names [Boost 1.84.0](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/cmake/boost.cmake#L24).
+Boost's [winding strategy](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/spherical/point_in_poly_winding.hpp)
+counts longitude and antipodal crossings, with special handling around the
+poles, and its [geographic side test](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/side.hpp)
+uses Andoyer azimuths. Fsdb instead sums spherical angles along sampled
+ellipsoidal segments in `geographicRingContains`, then composes exterior and
+hole classifications.
+
+This source difference is a plausible cause of the near-polar point result,
+not a proof of which Boost branch decides that point. The next behavior
+change should compare a faithful winding/side implementation against the
+entire point corpus before replacing fsdb's classifier. The line/polygon
+relation differences also involve MySQL's geographic segment-intersection
+strategy, so a point-only winding change cannot be claimed to close them.
+
 ## Near-machine-precision hole-edge offsets
 
 A separate MySQL 8.4.11 probe placed `LINESTRING(1.5 y,3.0 y)` beside the
