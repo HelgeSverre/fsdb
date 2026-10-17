@@ -41,14 +41,18 @@ inner-join position, qualified or uniquely owned bare.
 MySQL 8.4.11 updates both targets in `UPDATE va JOIN vb ON va.id=vb.id SET
 va.n=va.n+1,vb.n=vb.n+1` when `va` and `vb` are distinct updatable join views.
 Their definitions may each call an internal link-table alias `l`; those names
-belong to separate view scopes. The maintained native oracle now pins the
-two-row update and both resulting physical values. Fsdb handles the same
-two-target statement when the internal aliases differ, covered by a focused
-transaction regression, but returns 1066 (`Not unique table/alias: 'l'`) when
-they match. The view expansion currently places both internal joins in one
-source scope without renaming colliding aliases. This remains an open view
-rewrite gap; renaming must also update target, predicate, check-option, and
-authorization references before it can be applied safely.
+belong to separate view scopes. The maintained native oracle pins both view
+orders, the two-row update, and both resulting physical values. Fsdb previously
+returned 1066 (`Not unique table/alias: 'l'`) because view expansion placed
+both internal joins in one source scope. It now gives a colliding read-side
+table alias a fresh name when flattening the first view. The mapping follows
+exposed expressions, join conditions, visibility predicates, and CHECK OPTION
+checks; authorization still uses the stored view's original names. The focused
+regression covers both view orders and an invalid CHECK OPTION update that
+leaves both physical targets unchanged. The first view also projects `l.id`
+and filters on `l.id=1`, exercising the renamed alias outside the join
+condition. Collisions involving writable target
+aliases or non-table read sources remain to audit.
 
 ## A physical target beside the writable view
 

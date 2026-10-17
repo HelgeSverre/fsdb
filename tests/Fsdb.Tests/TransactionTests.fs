@@ -2444,15 +2444,32 @@ let tests =
               handle session "INSERT INTO tx_dual_a VALUES(1,10)" |> ignore
               handle session "INSERT INTO tx_dual_b VALUES(1,20)" |> ignore
               handle session "INSERT INTO tx_dual_link VALUES(1)" |> ignore
-              handle session "CREATE VIEW tx_dual_va AS SELECT a.id,a.n FROM tx_dual_a a JOIN tx_dual_link la ON a.id=la.id" |> ignore
-              handle session "CREATE VIEW tx_dual_vb AS SELECT b.id,b.n FROM tx_dual_b b JOIN tx_dual_link lb ON b.id=lb.id" |> ignore
+              handle session "CREATE VIEW tx_dual_va AS SELECT a.id,a.n,l.id AS link_id FROM tx_dual_a a JOIN tx_dual_link l ON a.id=l.id WHERE l.id=1" |> ignore
+              handle session "CREATE VIEW tx_dual_vb AS SELECT b.id,b.n,l.id AS link_id FROM tx_dual_b b JOIN tx_dual_link l ON b.id=l.id" |> ignore
               let sql =
-                  "UPDATE tx_dual_va va JOIN tx_dual_vb vb ON va.id=vb.id "
+                  "UPDATE tx_dual_va va JOIN tx_dual_vb vb ON va.link_id=vb.link_id "
                   + "SET va.n=va.n+1,vb.n=vb.n+1"
               Expect.equal (handle session sql |> snd) (Affected 2UL) "both view targets update"
               match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
               | ResultSet(_, [ [ Some "11"; Some "21" ] ]) -> ()
               | result -> failtestf "expected both physical view targets to change, got %A" result
+              Expect.equal
+                  (handle session
+                      "UPDATE tx_dual_vb vb JOIN tx_dual_va va ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1" |> snd)
+                  (Affected 2UL)
+                  "reversed view order updates both targets"
+              handle session
+                  ("CREATE VIEW tx_dual_checked AS SELECT a.id,a.n FROM tx_dual_a a "
+                   + "JOIN tx_dual_link l ON a.id=l.id WITH CASCADED CHECK OPTION")
+              |> ignore
+              match handle session
+                  ("UPDATE tx_dual_checked vc JOIN tx_dual_vb vb ON vc.id=vb.id "
+                   + "SET vc.id=2,vb.n=vb.n+1") |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected joined view CHECK OPTION error, got %A" result
+              match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "12"; Some "22" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve both targets, got %A" result
 
           testCase "joined view can supply read rows while another source is updated"
           <| fun _ ->

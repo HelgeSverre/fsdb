@@ -742,17 +742,36 @@ def main():
                         "INSERT INTO dual_a VALUES(1,10)",
                         "INSERT INTO dual_b VALUES(1,20)",
                         "INSERT INTO dual_link VALUES(1)",
-                        "CREATE VIEW dual_va AS SELECT a.id,a.n FROM dual_a a JOIN dual_link l ON a.id=l.id",
-                        "CREATE VIEW dual_vb AS SELECT b.id,b.n FROM dual_b b JOIN dual_link l ON b.id=l.id",
+                        "CREATE VIEW dual_va AS SELECT a.id,a.n,l.id AS link_id FROM dual_a a JOIN dual_link l ON a.id=l.id WHERE l.id=1",
+                        "CREATE VIEW dual_vb AS SELECT b.id,b.n,l.id AS link_id FROM dual_b b JOIN dual_link l ON b.id=l.id",
                     ):
                         cursor.execute(sql)
                     cursor.execute(
-                        "UPDATE dual_va va JOIN dual_vb vb ON va.id=vb.id "
+                        "UPDATE dual_va va JOIN dual_vb vb ON va.link_id=vb.link_id "
                         "SET va.n=va.n+1,vb.n=vb.n+1"
                     )
                     assert cursor.rowcount == 2, "two writable views with matching internal aliases"
                     cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
                     assert cursor.fetchone() == (11, 21)
+                    cursor.execute(
+                        "UPDATE dual_vb vb JOIN dual_va va ON va.id=vb.id "
+                        "SET vb.n=vb.n+1,va.n=va.n+1"
+                    )
+                    assert cursor.rowcount == 2, "reversed writable-view order"
+                    cursor.execute(
+                        "CREATE VIEW dual_checked AS SELECT a.id,a.n FROM dual_a a "
+                        "JOIN dual_link l ON a.id=l.id WITH CASCADED CHECK OPTION"
+                    )
+                    try:
+                        cursor.execute(
+                            "UPDATE dual_checked vc JOIN dual_vb vb ON vc.id=vb.id "
+                            "SET vc.id=2,vb.n=vb.n+1"
+                        )
+                        raise AssertionError("joined CHECK OPTION accepted an invalid update")
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                    cursor.execute("SELECT a.id,a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (1, 12, 22)
 
                 print(
                     f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
@@ -765,7 +784,8 @@ def main():
                     "contended view and outer targets waited and rebased all assignments; "
                     "a bare outer-only column waited and rebased its physical target; "
                     "four- and five-source CHECK OPTION rejected atomically; "
-                    "two writable views with matching internal aliases updated both physical targets"
+                    "two writable views with matching internal aliases updated both physical targets in both orders; "
+                    "their CHECK OPTION rejected atomically"
                 )
             finally:
                 for connection in connections:
