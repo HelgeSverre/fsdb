@@ -26,6 +26,22 @@ retries were observed.
 The candidate gained about 21% at one writer and 7.5% at eight writers
 against the paired original runs. Two trials on one host do not establish a
 universal gain; the change also leaves most of the eight-writer gap to MySQL.
+
+Two additional eight-writer workloads used fresh databases, two seven-second
+trials after two seconds of warmup, and the same candidate-then-original
+order. These exercise indexed inserts and distinct-row updates rather than
+only keyless inserts. Neither reported retries.
+
+| Workload | Original fsdb inserts or updates/s | Reused stream inserts or updates/s | Original MySQL ops/s | Candidate-run MySQL ops/s |
+|---|---:|---:|---:|---:|
+| Indexed insert | 5,251 | 5,532 | 42,467 | 42,405 |
+| Distinct update | 6,736 | 6,899 | 28,172 | 27,665 |
+
+The candidate was about 5.4% faster on indexed inserts and 2.4% faster on
+distinct updates in these short trials. The smaller update difference is
+directional; it does not establish a stable effect. Neither workload showed
+a throughput regression.
+
 The persistence suite passed 127 tests before the focused post-checkpoint
 reopen test was added. That test confirms a write after checkpoint rotation
 lands in the new WAL and recovery combines it with the snapshot. The full
