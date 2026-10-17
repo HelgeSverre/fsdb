@@ -244,7 +244,7 @@ let private generalSyntheticPair c =
     let pair marker weight = ValueSome(struct (marker, weight))
     match c with
     | '\uE0C0' | '\uE0D0' | '\uE0E0' | '\uE300' | '\uE0F0' | '\uE600'
-    | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5' | '\uE0B6' | '\uE0B7' | '\uE0B8' as marker -> pair marker marker
+    | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5' | '\uE0B6' | '\uE0B7' | '\uE0B8' | '\uE0B9' as marker -> pair marker marker
     // Halfwidth voicing and decomposed kana marks have their own positional weights.
     | '\uff9e' -> pair '\uE0C0' '\uE0C1'
     | '\uff9f' -> pair '\uE0C0' '\uE0C2'
@@ -288,6 +288,10 @@ let private generalSyntheticPair c =
     // written primary weight, including the unassigned positions in the block.
     | c when c >= '\uFE10' && c <= '\uFE6F' ->
         pair '\uE0B8' (char (0xF300 + int c - 0xFE10))
+    // Kanbun and Bopomofo extension letters have distinct legacy weights;
+    // ICU merges a few pairs that MySQL keeps separate.
+    | c when c >= '\u3190' && c <= '\u31BF' ->
+        pair '\uE0B9' (char (0xF400 + int c - 0x3190))
     // Letterlike symbols, number forms, and arrows retain their code-point
     // weights, except lowercase Roman numerals share uppercase weights.
     | c when c >= '\u2100' && c <= '\u21ff' ->

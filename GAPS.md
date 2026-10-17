@@ -1047,6 +1047,9 @@ matches at sizes 1 and 2.
 The [vertical and small-form punctuation probe](torture/findings/2026-10-17-general-ci-vertical-small-forms.md)
 preserves distinct U+FE10–U+FE6F weights; its expanded two-column ngram lane
 matches MySQL at sizes 1 and 2.
+The [Kanbun and Bopomofo extension probe](torture/findings/2026-10-17-general-ci-bopomofo-weights.md)
+preserves distinct U+3190–U+31BF primary weights; its expanded ngram lane
+matches MySQL at sizes 1–10.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

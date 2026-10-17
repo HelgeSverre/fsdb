@@ -1576,6 +1576,20 @@ let tests =
                     Expect.isFalse (col.Equals "︐" "\uE0B8\uF300")
                         "a literal marker cannot alias vertical punctuation"
 
+                testCase "utf8mb4_general_ci keeps Bopomofo extension weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let forms = [ 0x3190 .. 0x31BF ] |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> Set.ofList |> Set.count) 48
+                        "MySQL assigns each Kanbun and Bopomofo extension point a distinct primary weight"
+                    for left, right in forms |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "the block follows MySQL's codepoint-ordered weights"
+                    Expect.isFalse (col.Equals "ㆣ" "ㆻ") "the two letters have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "ㆤ" "ㆥ") "adjacent letters have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "ㆣ" "\uE0B9\uF413")
+                        "a literal marker cannot alias an extension letter"
+
                 testCase "utf8mb4_general_ci keeps letterlike symbols at their written weights"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
