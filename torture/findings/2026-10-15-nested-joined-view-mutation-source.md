@@ -54,5 +54,8 @@ still expose the view target; the caller's outer-table grant is checked
 separately. The same authorization split works through an additional view
 layer with a different definer. `CURRENT_USER()` in the caller's outer-table
 assignment stays the caller identity rather than changing to the view definer.
-Further multi-target source kinds, bare
-assignments, and outer joins remain to audit.
+An unqualified assignment to a column exposed by exactly one outer physical
+source resolves to that source, even when the view's hidden base table has a
+column with the same name. A column exposed by both the view and an outer
+source remains ambiguous with error 1052. Further multi-target source kinds,
+other bare-assignment shapes, and outer joins remain to audit.

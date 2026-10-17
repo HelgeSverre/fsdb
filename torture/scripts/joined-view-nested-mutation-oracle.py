@@ -47,11 +47,11 @@ def main():
                     assert version.startswith("8.4.11"), version
                     for sql in [
                         "CREATE DATABASE probe", "USE probe",
-                        "CREATE TABLE t(id INT PRIMARY KEY,n INT)",
+                        "CREATE TABLE t(id INT PRIMARY KEY,n INT,m INT DEFAULT 0)",
                         "CREATE TABLE l(id INT PRIMARY KEY)",
                         "CREATE TABLE x(id INT PRIMARY KEY)",
                         "CREATE TABLE y(id INT PRIMARY KEY)",
-                        "INSERT INTO t VALUES(1,0)", "INSERT INTO l VALUES(1)",
+                        "INSERT INTO t(id,n) VALUES(1,0)", "INSERT INTO l VALUES(1)",
                         "INSERT INTO x VALUES(1)", "INSERT INTO y VALUES(1)",
                     ]:
                         cursor.execute(sql)
@@ -137,6 +137,7 @@ def main():
 
                 with reader.cursor() as cursor:
                     cursor.execute("ALTER TABLE x ADD COLUMN n INT DEFAULT 0")
+                    cursor.execute("ALTER TABLE x ADD COLUMN m INT DEFAULT 0")
                     for source in (
                         "x JOIN v ON x.id=v.id",
                         "v JOIN x ON x.id=v.id",
@@ -156,6 +157,12 @@ def main():
                         assert cursor.fetchone() == (2,), source
                         cursor.execute("SELECT n FROM t WHERE id=1")
                         assert cursor.fetchone() == (3,), source
+                        cursor.execute("UPDATE x SET m=0")
+                        cursor.execute("UPDATE " + source + " SET m=m+1,v.n=v.n+1 WHERE v.id=1")
+                        assert cursor.rowcount == 2, source
+                        cursor.execute("SELECT m FROM x WHERE id=1")
+                        assert cursor.fetchone() == (1,), source
+                        cursor.execute("UPDATE t SET n=3 WHERE id=1")
                     with owner.cursor() as owner_cursor:
                         owner_cursor.execute("BEGIN")
                         owner_cursor.execute("UPDATE t SET n=n+1 WHERE id=1")
@@ -291,7 +298,7 @@ def main():
                         raise AssertionError("outer physical target requires UPDATE privilege")
 
                 with owner.cursor() as cursor:
-                    cursor.execute("INSERT INTO t VALUES(2,0)")
+                    cursor.execute("INSERT INTO t(id,n) VALUES(2,0)")
                     cursor.execute("INSERT INTO l VALUES(2)")
                     cursor.execute("INSERT INTO x(id) VALUES(2)")
                     cursor.execute("BEGIN")

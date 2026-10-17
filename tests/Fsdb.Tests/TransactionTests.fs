@@ -2438,13 +2438,13 @@ let tests =
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = create 1 store
-              handle session "CREATE TABLE tx_read_view_target(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "CREATE TABLE tx_read_view_target(id INT PRIMARY KEY,n INT,m INT DEFAULT 0)" |> ignore
               handle session "CREATE TABLE tx_read_view_link(id INT PRIMARY KEY)" |> ignore
-              handle session "CREATE TABLE tx_read_view_outer(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "CREATE TABLE tx_read_view_outer(id INT PRIMARY KEY,n INT,m INT DEFAULT 0)" |> ignore
               handle session "CREATE TABLE tx_read_view_other(id INT PRIMARY KEY)" |> ignore
-              handle session "INSERT INTO tx_read_view_target VALUES(1,10)" |> ignore
+              handle session "INSERT INTO tx_read_view_target(id,n) VALUES(1,10)" |> ignore
               handle session "INSERT INTO tx_read_view_link VALUES(1)" |> ignore
-              handle session "INSERT INTO tx_read_view_outer VALUES(1,0)" |> ignore
+              handle session "INSERT INTO tx_read_view_outer(id,n) VALUES(1,0)" |> ignore
               handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
               handle session
                   "CREATE VIEW tx_read_joined_view AS SELECT t.id,t.n FROM tx_read_view_target t JOIN tx_read_view_link l ON l.id=t.id"
@@ -2470,6 +2470,13 @@ let tests =
                   match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
                   | ResultSet(_, [ [ Some "11" ] ]) -> ()
                   | result -> failtestf "expected joined view target update, got %A" result
+                  handle session "UPDATE tx_read_view_outer SET m=0" |> ignore
+                  let bareSql = "UPDATE " + source + " SET m=m+1,v.n=v.n+1 WHERE v.id=1"
+                  Expect.equal (handle session bareSql |> snd) (Affected 2UL)
+                      (source + " resolves bare m to the outer target")
+                  match handle session "SELECT m FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected bare outer assignment, got %A" result
                   handle session "UPDATE tx_read_view_target SET n=10" |> ignore
               let owner, _ = handle (create 3 store) "BEGIN"
               let owner, ownerResult = handle owner "UPDATE tx_read_view_target SET n=n+1 WHERE id=1"

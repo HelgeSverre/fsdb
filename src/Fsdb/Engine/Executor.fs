@@ -29068,12 +29068,23 @@ let rec executeAs
         | Some view ->
             let viewQualifier = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
             let baseQualifier = view.UpdateFrom.Alias |> Option.defaultValue view.UpdateFrom.Table
-            let joinedColumns =
+            let joinedOwners =
                 updateStmt.Joins
                 |> List.collect (fun join -> FromItem.leaves join.Table)
-                |> List.collect (fun source -> selectSourceColumns store dbName source |> List.choose id)
-                |> List.map (fun column -> column.Name.ToLowerInvariant())
-                |> Set.ofList
+                |> List.collect (fun source ->
+                    match FromItem.tryQualifier source with
+                    | Some owner ->
+                        selectSourceColumns store dbName source
+                        |> List.choose id
+                        |> List.map (fun column -> column.Name.ToLowerInvariant(), owner)
+                    | None -> [])
+                |> List.groupBy fst
+                |> List.map (fun (name, sources) -> name, sources |> List.map snd |> List.distinct)
+                |> Map.ofList
+            let owners (column: string) = joinedOwners |> Map.tryFind (column.ToLowerInvariant()) |> Option.defaultValue []
+            let viewExposes (column: string) =
+                view.OrderedColumns
+                |> List.exists (fun name -> equalsIgnoreCase name column)
             let mutable ambiguousColumn = None
             let callerCurrentUser =
                 Functions.lookup "CURRENT_USER" registry
@@ -29092,11 +29103,15 @@ let rec executeAs
                         |> Option.map qualifyView
                         |> Option.orElse (Some(QualifiedCol("__fsdb_view", name)))
                     | Col name when Map.containsKey (name.ToLowerInvariant()) view.Expressions ->
-                        if Set.contains (name.ToLowerInvariant()) joinedColumns then
+                        if not (owners name).IsEmpty then
                             ambiguousColumn <- Some name
                             None
                         else
                             Map.tryFind (name.ToLowerInvariant()) view.Expressions |> Option.map qualifyView
+                    | Col name ->
+                        match owners name with
+                        | [ owner ] -> Some(QualifiedCol(owner, name))
+                        | _ -> None
                     | _ -> None) expression
 
             match
@@ -29104,8 +29119,13 @@ let rec executeAs
                 |> traverse (fun assignment ->
                     if assignment.Table |> Option.exists (fun qualifier -> not (equalsIgnoreCase qualifier viewQualifier)) then
                         Ok(assignment, None)
-                    elif assignment.Table.IsNone && Set.contains (assignment.Column.ToLowerInvariant()) joinedColumns then
+                    elif assignment.Table.IsNone && viewExposes assignment.Column && not (owners assignment.Column).IsEmpty then
                         Error(1052, sprintf "Column '%s' in field list is ambiguous" assignment.Column)
+                    elif assignment.Table.IsNone && not (viewExposes assignment.Column) then
+                        match owners assignment.Column with
+                        | [ owner ] -> Ok({ assignment with Table = Some owner }, None)
+                        | [] -> Error(1054, sprintf "Unknown column '%s' in field list" assignment.Column)
+                        | _ -> Error(1052, sprintf "Column '%s' in field list is ambiguous" assignment.Column)
                     else
                         match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets with
                         | Some target -> Ok(assignment, Some target)
@@ -29146,7 +29166,9 @@ let rec executeAs
                     | Some name -> ids, Err(1052, sprintf "Column '%s' in field list is ambiguous" name)
                     | None ->
                         let target = assignments |> List.choose snd |> List.head
-                        executeViewWrite view target (Update rewritten) (Some updateStmt)
+                        let classified =
+                            { updateStmt with Assignments = assignments |> List.map fst }
+                        executeViewWrite view target (Update rewritten) (Some classified)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty && tryStoredView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome ->
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
