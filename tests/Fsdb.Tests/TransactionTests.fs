@@ -2573,6 +2573,58 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "right-preserving view row should update, got %A" result
               handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session "CREATE TABLE tx_read_view_last(id INT PRIMARY KEY,n INT)" |> ignore
+              let extendedRightPreserving =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1 WHERE v.id=1"
+              let countIf present = if present then 1 else 0
+              for hasIntermediate, hasLast in [ true, true; true, false; false, true; false, false ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  if hasIntermediate then
+                      handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  if hasLast then
+                      handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let expectedCount = 1 + countIf hasIntermediate + countIf hasLast
+                  Expect.equal (handle session extendedRightPreserving |> snd) (Affected(uint64 expectedCount))
+                      "the wider outer tree updates only matched physical targets"
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some value ] ]) ->
+                      Expect.equal value (string (countIf hasIntermediate)) "the preceding target follows its join"
+                  | result -> failtestf "expected preceding target row, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected preserved view target update, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_last WHERE id=1" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows (if hasLast then [ [ Some "1" ] ] else [])
+                          "the final target follows its optional join"
+                  | result -> failtestf "expected optional target rows, got %A" result
+              handle session "DELETE FROM tx_read_view_last" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(99,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let finalRightPreserving =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "RIGHT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1 WHERE z.id=99"
+              Expect.equal (handle session finalRightPreserving |> snd) (Affected 1UL)
+                  "the final right join updates its physical row without a view match"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing view match must leave the first target unchanged, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing view match must leave the view target unchanged, got %A" result
+              match handle session "SELECT n FROM tx_read_view_last WHERE id=99" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected final preserving target update, got %A" result
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
               handle session
                   ("CREATE VIEW tx_read_filtered_view AS SELECT t.id,t.n FROM tx_read_view_target t "
                    + "JOIN tx_read_view_link l ON l.id=t.id WHERE t.n>0")

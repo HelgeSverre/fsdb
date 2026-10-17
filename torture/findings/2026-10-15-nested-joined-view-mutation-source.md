@@ -78,5 +78,14 @@ rows present, both `x` and the view's physical target update; without `y`,
 the preserving `v` row still updates while `x` does not. Fsdb previously
 reported 1146 for the later view. The symmetric rewrite now moves `v` to
 the first source with a LEFT join to grouped `x LEFT JOIN y`, preserving the
-right-hand row and the original ON scope. Other wider outer-join trees still
-need an audit.
+right-hand row and the original ON scope.
+
+The native oracle also extends that three-source chain with a final physical
+table `z`. With `LEFT JOIN z`, the writable view remains the preserved target
+across all four combinations of present or missing `y` and `z` rows. MySQL
+updates one to three physical rows accordingly: the view's target always,
+`x` only when `y` matches, and `z` only when it matches. With `RIGHT JOIN z`
+and no matching view row, MySQL updates only `z`. The focused transaction
+regression checks the same affected counts and stored rows. Fsdb already
+matched these cases; no executor change was needed. Other wider outer-join
+trees and concurrent multi-target writes remain unaudited.

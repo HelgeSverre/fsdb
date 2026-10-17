@@ -872,6 +872,9 @@ invalid two-target write. Audited three-source outer chains preserve the
 first target when an intermediate row is absent and reject CHECK OPTION
 changes atomically. A later right-preserving joined view also stays writable
 after a preceding LEFT JOIN, including when its companion row is absent.
+An audited fourth physical source after that view can be optional under
+`LEFT JOIN`, or preserve its own row under `RIGHT JOIN` when the view is absent;
+both retain MySQL's matched-target affected counts.
 Other wider outer-join trees, multi-target writes, and broader security-layer
 combinations remain open.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
