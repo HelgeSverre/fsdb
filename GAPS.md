@@ -1674,6 +1674,10 @@ implementation effort:
    A [completion-option check](benchmarks/results/2026-10-14-write-completion-check.md)
    likewise found no eight-writer gain from changing group-commit task
    continuations; the candidate was reverted.
+   A [fixed group-commit batch-window check](benchmarks/results/2026-10-17-group-commit-batch-window-check.md)
+   on the retained-WAL-stream branch found a clear one-writer regression from
+   a 50 microsecond leader delay. Eight-writer controls drifted, so the
+   candidate was reverted without a scheduling-policy change.
    A [WAL queue and batch-stage profile](benchmarks/results/2026-10-15-wal-queue-stage-profile.md)
    found queue admission small relative to completion and measured per-batch
    file-open and flush costs. A retained-handle prototype removed the open
