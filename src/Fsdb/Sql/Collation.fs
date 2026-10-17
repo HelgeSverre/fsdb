@@ -238,13 +238,58 @@ let private foldLegacyUnicodeJamo (value: string) =
 // general_ci leaves compatibility Jamo distinct from conjoining Jamo.
 let private foldGeneralUnicodeJamo (value: string) = foldUnicodeJamo (fun _ -> None) value
 
-// Keep the escape rule in one place: a literal marker must never alias a
-// synthetic primary weight, including when it precedes another private-use char.
-let private foldEscapedGeneralWeights (marker: char) (syntheticWeight: char -> char voption) (value: string) =
+// Every synthetic key has a private-use marker. Literal markers double so
+// they cannot alias a generated weight, including beside other private-use text.
+let private generalSyntheticPair c =
+    let pair marker weight = ValueSome(struct (marker, weight))
+    match c with
+    | '\uE0C0' | '\uE0D0' | '\uE0E0' | '\uE300' | '\uE0F0' | '\uE600'
+    | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' as marker -> pair marker marker
+    // Halfwidth voicing and decomposed kana marks have their own positional weights.
+    | '\uff9e' -> pair '\uE0C0' '\uE0C1'
+    | '\uff9f' -> pair '\uE0C0' '\uE0C2'
+    | '\u3099' -> pair '\uE0E0' '\uE0E1'
+    | '\u309a' -> pair '\uE0E0' '\uE0E2'
+    // ICU ignores or merges these format controls; MySQL keeps them distinct.
+    | '\u034f' -> pair '\uE0D0' '\uE0D1'
+    | '\u00a0' -> pair '\uE0D0' '\uE0D2'
+    | '\u180e' -> pair '\uE0D0' '\uE0D3'
+    | '\u200b' -> pair '\uE0D0' '\uE0D4'
+    | '\u200c' -> pair '\uE0D0' '\uE0D5'
+    | '\u200d' -> pair '\uE0D0' '\uE0D6'
+    | '\u2060' -> pair '\uE0D0' '\uE0D7'
+    | '\u3000' -> pair '\uE0D0' '\uE0D8'
+    | '\ufe0f' -> pair '\uE0D0' '\uE0D9'
+    // Decomposed accents retain their written weight, apart from Greek iota.
+    | c when c >= '\u0300' && c <= '\u036f' && c <> '\u0345' ->
+        pair '\uE300' (char (0xE400 + int c - 0x0300))
+    // Assigned CJK radicals do not share the corresponding ideograph weight.
+    | c when (c >= '\u2e80' && c <= '\u2e99')
+             || (c >= '\u2e9b' && c <= '\u2ef3')
+             || (c >= '\u2f00' && c <= '\u2fd5') ->
+        pair '\uE0F0' (char (0xE100 + int c - 0x2e80))
+    // General Unicode keeps kana script, width, voicing, and size distinctions.
+    | c when (c >= '\u3041' && c <= '\u3096') || (c >= '\u3099' && c <= '\u30ff') ->
+        pair '\uE600' (char (0xE700 + int c - 0x3040))
+    | c when c >= '\uff61' && c <= '\uff9f' ->
+        pair '\uE600' (char (0xE900 + int c - 0xff61))
+    // These compatibility blocks retain their written forms; circled letters
+    // are the exception whose lowercase forms share uppercase weights.
+    | c when c >= '\uf900' && c <= '\ufaff' ->
+        pair '\uE0B1' (char (0xEA00 + int c - 0xF900))
+    | c when c >= '\u3200' && c <= '\u33ff' ->
+        pair '\uE0B2' (char (0xEC00 + int c - 0x3200))
+    | c when c >= '\u2460' && c <= '\u24ff' ->
+        let upper = if c >= '\u24d0' && c <= '\u24e9' then char (int c - 26) else c
+        pair '\uE0B3' (char (0xEE00 + int upper - 0x2460))
+    | c when c >= '\u3001' && c <= '\u303f' ->
+        pair '\uE0B4' (char (0xEF00 + int c - 0x3000))
+    | _ -> ValueNone
+
+let private foldGeneralSyntheticWeights (value: string) =
     let mutable first = 0
     while first < value.Length
-          && value.[first] <> marker
-          && (match syntheticWeight value.[first] with ValueNone -> true | ValueSome _ -> false) do
+          && (match generalSyntheticPair value.[first] with ValueNone -> true | ValueSome _ -> false) do
         first <- first + 1
     if first = value.Length then value
     else
@@ -252,116 +297,10 @@ let private foldEscapedGeneralWeights (marker: char) (syntheticWeight: char -> c
         result.Append(value, 0, first) |> ignore
         for index in first .. value.Length - 1 do
             let c = value.[index]
-            if c = marker then result.Append(marker).Append(marker) |> ignore
-            else
-                match syntheticWeight c with
-                | ValueSome weight -> result.Append(marker).Append(weight) |> ignore
-                | ValueNone -> result.Append(c) |> ignore
+            match generalSyntheticPair c with
+            | ValueSome(struct (marker, weight)) -> result.Append(marker).Append(weight) |> ignore
+            | ValueNone -> result.Append(c) |> ignore
         result.ToString()
-
-// ICU drops the halfwidth voicing marks from general_ci's primary key when
-// they join neighboring kana. MySQL gives each mark a positional weight.
-let private generalHalfwidthMarkWeight = function
-    | '\uff9e' -> ValueSome '\uE0C1'
-    | '\uff9f' -> ValueSome '\uE0C2'
-    | _ -> ValueNone
-let private foldGeneralHalfwidthMarks (value: string) =
-    foldEscapedGeneralWeights '\uE0C0' generalHalfwidthMarkWeight value
-
-// ICU composes kana plus U+3099/U+309A before primary comparison. MySQL's
-// general_ci keeps the written base and combining mark as separate weights.
-let private generalKanaMarkWeight = function
-    | '\u3099' -> ValueSome '\uE0E1'
-    | '\u309a' -> ValueSome '\uE0E2'
-    | _ -> ValueNone
-let private foldGeneralKanaMarks (value: string) =
-    foldEscapedGeneralWeights '\uE0E0' generalKanaMarkWeight value
-
-// ICU ignores most decomposed accents at primary strength. MySQL general_ci
-// retains their written weights; U+0345 has its own Greek-iota mapping, and
-// U+034F is already preserved by the format-control fold.
-let private generalCombiningAccentWeight c =
-    if c >= '\u0300' && c <= '\u036f' && c <> '\u0345' && c <> '\u034f' then
-        ValueSome(char (0xE400 + int c - 0x0300))
-    else ValueNone
-let private foldGeneralCombiningAccents (value: string) =
-    foldEscapedGeneralWeights '\uE300' generalCombiningAccentWeight value
-
-// MySQL general_ci assigns literal weights to the assigned Hiragana,
-// Katakana, and halfwidth-kana characters. ICU drops voiced/small-kana
-// distinctions at primary strength even when it keeps scripts distinct.
-let private generalKanaWeight c =
-    if (c >= '\u3041' && c <= '\u3096') || (c >= '\u3099' && c <= '\u30ff') then
-        ValueSome(char (0xE700 + int c - 0x3040))
-    elif c >= '\uff61' && c <= '\uff9f' then
-        ValueSome(char (0xE900 + int c - 0xff61))
-    else ValueNone
-let private foldGeneralKanaWeights (value: string) =
-    foldEscapedGeneralWeights '\uE600' generalKanaWeight value
-
-// ICU folds CJK radicals onto their compatibility ideographs. MySQL general_ci
-// assigns each defined radical its own primary weight.
-let private generalCjkRadicalWeight c =
-    if (c >= '\u2e80' && c <= '\u2e99')
-       || (c >= '\u2e9b' && c <= '\u2ef3')
-       || (c >= '\u2f00' && c <= '\u2fd5') then
-        ValueSome(char (0xE100 + int c - 0x2e80))
-    else ValueNone
-let private foldGeneralCjkRadicals (value: string) =
-    foldEscapedGeneralWeights '\uE0F0' generalCjkRadicalWeight value
-
-// MySQL general_ci assigns F900-FAFF their written code-point weights.
-// ICU compatibility decomposition otherwise merges these with unified Han.
-let private generalCompatibilityIdeographWeight c =
-    if c >= '\uf900' && c <= '\ufaff' then
-        ValueSome(char (0xEA00 + int c - 0xF900))
-    else ValueNone
-let private foldGeneralCompatibilityIdeographs (value: string) =
-    foldEscapedGeneralWeights '\uE0B1' generalCompatibilityIdeographWeight value
-
-// MySQL general_ci gives enclosed CJK forms and square units in 3200-33FF
-// literal weights; ICU expands several to ordinary letters or ideographs.
-let private generalEnclosedCjkWeight c =
-    if c >= '\u3200' && c <= '\u33ff' then
-        ValueSome(char (0xEC00 + int c - 0x3200))
-    else ValueNone
-let private foldGeneralEnclosedCjk (value: string) =
-    foldEscapedGeneralWeights '\uE0B2' generalEnclosedCjkWeight value
-
-// MySQL general_ci gives 2460-24FF their written weights, except that the
-// circled lowercase letters share the corresponding circled uppercase weights.
-let private generalEnclosedAlphanumericWeight c =
-    if c >= '\u2460' && c <= '\u24ff' then
-        let upper = if c >= '\u24d0' && c <= '\u24e9' then char (int c - 26) else c
-        ValueSome(char (0xEE00 + int upper - 0x2460))
-    else ValueNone
-let private foldGeneralEnclosedAlphanumerics (value: string) =
-    foldEscapedGeneralWeights '\uE0B3' generalEnclosedAlphanumericWeight value
-
-// MySQL general_ci gives 3001-303F literal weights, including the combining
-// marks and quote forms ICU ignores or merges. U+3000 has its own space fold.
-let private generalCjkSymbolWeight c =
-    if c >= '\u3001' && c <= '\u303f' then
-        ValueSome(char (0xEF00 + int c - 0x3000))
-    else ValueNone
-let private foldGeneralCjkSymbols (value: string) =
-    foldEscapedGeneralWeights '\uE0B4' generalCjkSymbolWeight value
-
-// MySQL's general_ci gives these spaces and format characters separate,
-// positional weights. ICU ignores some and equates others at primary strength.
-let private generalFormatControlWeight = function
-    | '\u034f' -> ValueSome '\uE0D1'
-    | '\u00a0' -> ValueSome '\uE0D2'
-    | '\u180e' -> ValueSome '\uE0D3'
-    | '\u200b' -> ValueSome '\uE0D4'
-    | '\u200c' -> ValueSome '\uE0D5'
-    | '\u200d' -> ValueSome '\uE0D6'
-    | '\u2060' -> ValueSome '\uE0D7'
-    | '\u3000' -> ValueSome '\uE0D8'
-    | '\ufe0f' -> ValueSome '\uE0D9'
-    | _ -> ValueNone
-let private foldGeneralFormatControls (value: string) =
-    foldEscapedGeneralWeights '\uE0D0' generalFormatControlWeight value
 
 // MySQL's legacy UCA keeps some enclosed Korean/ideograph forms distinct,
 // while expanding enclosed kana and square unit forms that ICU keeps apart.
@@ -550,11 +489,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_general_ci" ->
             value.Replace("ß", "s").Replace("ẞ", "s")
             |> foldLegacySupplementary |> foldGeneralUnicodeJamo
-            |> foldGeneralHalfwidthMarks |> foldGeneralFormatControls
-            |> foldGeneralKanaMarks |> foldGeneralCombiningAccents
-            |> foldGeneralCjkRadicals |> foldGeneralKanaWeights
-            |> foldGeneralCompatibilityIdeographs |> foldGeneralEnclosedCjk
-            |> foldGeneralEnclosedAlphanumerics |> foldGeneralCjkSymbols
+            |> foldGeneralSyntheticWeights
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->
