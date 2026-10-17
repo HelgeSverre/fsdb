@@ -13165,7 +13165,11 @@ let tests =
                           "d.k+0.00 IN (o.x,NULL)", [ 1; 0; 0; 1 ], true
                           "d.k+0.00 IN (o.x,o.x)", [ 1; 0; 0; 1 ], true
                           "d.k+0.00 IN (o.x,NULL) OR d.id=12", [ 2; 1; 1; 2 ], true
-                          "d.k+0.00 IN (o.f,NULL)", [ 1; 0; 0; 1 ], false ] do
+                          "d.k+0.00 IN (o.f,NULL)", [ 1; 0; 0; 1 ], false
+                          "d.k+0.00>o.x+480.00", [ 9; 0; 0; 30 ], true
+                          "d.k+0.00 BETWEEN o.x+480.00 AND o.x+481.00", [ 2; 0; 0; 1 ], true
+                          "d.k+0.00>o.x+480.00 OR d.id=12", [ 10; 1; 1; 31 ], true
+                          "d.k+0.00>o.f+480e0", [ 9; 0; 0; 30 ], false ] do
                         calls <- 0
                         let sql =
                             "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM decimal_rows) d "

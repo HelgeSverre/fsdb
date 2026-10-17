@@ -136,6 +136,23 @@ focused four-bound `d.k+0.00 IN (o.x,o.x+1.00)` regression initially made
 5,010 residual calls and now stays below 80; the maintained profile records
 nine calls.
 
+### Statement-local decimal expression ranges
+
+The same stable, row-local DECIMAL expressions now build an ordered
+statement-local lookup for correlated inequalities and `BETWEEN`. DECIMAL
+and integer bounds use exact decimal ordering; NULL produces no matching
+candidates. Selected rows return in materialized-source order, and the
+original SQL predicate still decides membership. A non-DECIMAL row result
+or a bound outside the exact decimal/integer domain falls back to a scan,
+including DOUBLE bounds.
+
+The [MySQL 8.4.11 oracle](../scripts/correlated-materialized-decimal-oracle.py)
+checks strict and inclusive comparisons, `BETWEEN`, NULL, a complete OR
+branch, and a DOUBLE comparison. Before this range lookup, the selective
+`d.k+0.00>o.x+480.00` regression ran its `TOUCH` residual 5,010 times;
+the focused test now keeps it below 80 calls with the same `(9,0,0,30)`
+counts. Broader mixed numeric domains and volatile expressions remain scans.
+
 ## Statement-local finite DOUBLE expression lookup
 
 Finite DOUBLE results now get a statement-local key when the outer bound is

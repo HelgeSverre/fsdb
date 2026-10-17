@@ -730,6 +730,7 @@ type private StatementMemo =
       MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>
       MaterializedCorrelatedIntegerExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedDecimalExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
+      MaterializedCorrelatedDecimalRanges: Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>
       MaterializedCorrelatedDoubleExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedDoubleRanges: Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>
       MaterializedCorrelatedTextExpressions: Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>
@@ -760,6 +761,8 @@ let private freshStatementMemo () =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedDecimalExpressions =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+      MaterializedCorrelatedDecimalRanges =
+        Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedDoubleExpressions =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedDoubleRanges =
@@ -16023,6 +16026,89 @@ and private tryMaterializedCorrelatedLookup
                 let acceptsBound value = value = VNull || (probeKey value |> Option.isSome)
                 expressionEqualityCandidates rowLocalExpression doubleLookup acceptsBound acceptsBound predicate
 
+            let decimalRangeCandidates predicate =
+                let decimalKey = function
+                    | VDecimal number -> Some number
+                    | VInt number -> Some(decimal number)
+                    | VUInt number -> Some(decimal number)
+                    | _ -> None
+
+                let rangeLookup expression =
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedDecimalRanges source (fun () ->
+                            Dictionary<Expr, MaterializedRangeLookup option>(HashIdentity.Reference))
+
+                    getMemoized lookups expression (fun () ->
+                        let sourceRows = List.toArray rows
+                        let entries = ResizeArray<decimal * int>()
+                        let mutable compatible = true
+                        for index = 0 to sourceRows.Length - 1 do
+                            if compatible then
+                                match evalExpr (rowContext sourceRows.[index]) expression with
+                                | Ok VNull -> ()
+                                | Ok(VDecimal number) -> entries.Add(number, index)
+                                | _ -> compatible <- false
+
+                        if not compatible then None
+                        else
+                            let entries = entries.ToArray()
+                            Array.sortInPlaceBy fst entries
+
+                            let firstMatching bound inclusive =
+                                let mutable lower, upper = 0, entries.Length
+                                while lower < upper do
+                                    let middle = lower + (upper - lower) / 2
+                                    let key = fst entries.[middle]
+                                    if key < bound || (key = bound && not inclusive) then
+                                        lower <- middle + 1
+                                    else
+                                        upper <- middle
+                                lower
+
+                            Some(fun lower upper ->
+                                let convert = function
+                                    | None -> Some None
+                                    | Some(value, inclusive) ->
+                                        decimalKey value |> Option.map (fun number -> Some(number, inclusive))
+
+                                let isNullBound = function Some(VNull, _) -> true | _ -> false
+                                match convert lower, convert upper with
+                                | _ when isNullBound lower || isNullBound upper -> Some []
+                                | Some lower, Some upper ->
+                                    let first =
+                                        lower
+                                        |> Option.map (fun (value, inclusive) -> firstMatching value inclusive)
+                                        |> Option.defaultValue 0
+                                    let afterLast =
+                                        upper
+                                        |> Option.map (fun (value, inclusive) -> firstMatching value (not inclusive))
+                                        |> Option.defaultValue entries.Length
+                                    entries.[first .. afterLast - 1]
+                                    |> Array.map snd
+                                    |> Array.sort
+                                    |> Array.map (fun index -> sourceRows.[index])
+                                    |> Array.toList
+                                    |> Some
+                                | _ -> None))
+
+                let indexed expression =
+                    if rowLocalExpression expression
+                       && Option.isNone (tryCorrelatedInnerColumn probeSource expression) then Some expression
+                    else None
+                let bound expression =
+                    tryCorrelatedProbeValue probeSource context expression
+                    |> Option.map (fun value -> expression, value)
+
+                predicate
+                |> optionalConjuncts
+                |> List.collect (rangePredicatesFor indexed bound)
+                |> List.choose (fun range ->
+                    rangeLookup range.Column
+                    |> Option.bind (fun lookup ->
+                        let value = Option.map (fun ((_, value), inclusive) -> value, inclusive)
+                        lookup (value range.Lower) (value range.Upper)))
+                |> intersectSharedRows
+
             let doubleRangeCandidates predicate =
                 let rangeLookup expression =
                     let lookups =
@@ -16320,6 +16406,7 @@ and private tryMaterializedCorrelatedLookup
                     [ equalityCandidates (Some branch)
                       integerExpressionCandidates (Some branch)
                       decimalExpressionCandidates (Some branch)
+                      decimalRangeCandidates (Some branch)
                       doubleExpressionCandidates (Some branch)
                       doubleRangeCandidates (Some branch)
                       textExpressionCandidates (Some branch)
@@ -16345,6 +16432,7 @@ and private tryMaterializedCorrelatedLookup
             [ equalityCandidates whereExpr
               integerExpressionCandidates whereExpr
               decimalExpressionCandidates whereExpr
+              decimalRangeCandidates whereExpr
               doubleExpressionCandidates whereExpr
               doubleRangeCandidates whereExpr
               textExpressionCandidates whereExpr
