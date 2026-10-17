@@ -282,6 +282,26 @@ let private foldGeneralCombiningAccents (value: string) =
             else result.Append(c) |> ignore
         result.ToString()
 
+// MySQL general_ci assigns literal weights to the assigned Hiragana,
+// Katakana, and halfwidth-kana characters. ICU drops voiced/small-kana
+// distinctions at primary strength even when it keeps scripts distinct.
+let private foldGeneralKanaWeights (value: string) =
+    let isFullwidth c =
+        (c >= '\u3041' && c <= '\u3096') || (c >= '\u3099' && c <= '\u30ff')
+    let isHalfwidth c = c >= '\uff61' && c <= '\uff9f'
+    let marker = '\uE600'
+    if not (value |> Seq.exists (fun c -> c = marker || isFullwidth c || isHalfwidth c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif isFullwidth c then
+                result.Append(marker).Append(char (0xE700 + int c - 0x3040)) |> ignore
+            elif isHalfwidth c then
+                result.Append(marker).Append(char (0xE900 + int c - 0xff61)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
 // ICU folds CJK radicals onto their compatibility ideographs. MySQL general_ci
 // assigns each defined radical its own primary weight.
 let private foldGeneralCjkRadicals (value: string) =
@@ -515,7 +535,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             |> foldLegacySupplementary |> foldGeneralUnicodeJamo
             |> foldGeneralHalfwidthMarks |> foldGeneralFormatControls
             |> foldGeneralKanaMarks |> foldGeneralCombiningAccents
-            |> foldGeneralCjkRadicals
+            |> foldGeneralCjkRadicals |> foldGeneralKanaWeights
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->

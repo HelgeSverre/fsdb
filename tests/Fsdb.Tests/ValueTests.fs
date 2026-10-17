@@ -1538,6 +1538,19 @@ let tests =
                     Expect.isTrue (col.Equals "é" "e") "precomposed acute remains MySQL accent-insensitive"
                     Expect.isFalse (col.Equals "\u0301" "\uE300\uE401") "literal marker cannot alias an accent"
 
+                testCase "utf8mb4_general_ci keeps kana scripts and widths distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in
+                        [ "か", "カ"; "ｶ", "カ"; "ﾊﾟ", "パ"
+                          "が", "か"; "ガ", "カ"; "パ", "ハ"
+                          "がな", "かな"; "ぁ", "あ"
+                          "ゝ", "ヽ"; "ゞ", "ヾ"; "ゟ", "ヿ"
+                          "ゟ", "ゝゞ"; "ヿ", "ヽヾ" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the kana spelling"
+                    Expect.isFalse (col.Equals "が" "\uE600\uE70C") "literal marker cannot alias kana"
+
                 testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
                     [ "utf8mb4_0900_ai_ci", true

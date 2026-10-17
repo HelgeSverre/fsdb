@@ -1013,6 +1013,10 @@ audited general-collation corpus now matches at ngram sizes 3–10.
 The [combining-accent probe](torture/findings/2026-10-17-general-ci-combining-accents.md)
 keeps decomposed accents in positional keys and removes the audited size-2
 short Boolean false positives; kana forms and query expansion remain open.
+The [kana-weight probe](torture/findings/2026-10-17-general-ci-kana-weights.md)
+also preserves assigned fullwidth and halfwidth kana weights; the two-column
+general-collation ngram corpus now has only four size-1 relevance differences,
+with sizes 2–10 matching all audited searches.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
