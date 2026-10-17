@@ -1262,8 +1262,13 @@ let internal tryFlatBooleanScoresDictionaryInView
 
             for posting in postings do
                 if posting.Operator = MustNot then
-                    for KeyValue(id, _) in posting.Rows do
-                        totals.Remove id |> ignore
+                    if posting.Rows.Count <= totals.Count then
+                        for KeyValue(id, _) in posting.Rows do
+                            totals.Remove id |> ignore
+                    else
+                        for id in totals.Keys |> Seq.toArray do
+                            if Map.containsKey id posting.Rows then
+                                totals.Remove id |> ignore
 
             let scores = Collections.Generic.Dictionary<'id, float>(totals.Count)
 
@@ -1274,6 +1279,10 @@ let internal tryFlatBooleanScoresDictionaryInView
                 scores.Add(id, visibleBooleanScore score))
 
             scores
+
+        let postingWork =
+            postings
+            |> List.sumBy (fun posting -> int64 posting.Rows.Count)
 
         match smallestRequiredPosting with
         | Some rows ->
@@ -1294,11 +1303,9 @@ let internal tryFlatBooleanScoresDictionaryInView
                 candidateIds
                 |> Option.map (fun candidates -> int64 candidates.Count * int64 postings.Length)
 
-            let postingWork =
-                positiveTerms
-                |> List.sumBy (fun posting -> int64 posting.Rows.Count)
-
             match candidateIds, candidateProbeWork with
+            | _, _ when positiveTerms |> List.forall (fun posting -> posting.Rows.IsEmpty) ->
+                Collections.Generic.Dictionary<'id, float>()
             | Some candidates, Some work when work < postingWork -> scoreCandidates candidates candidates.Count
             | _ -> accumulatePositivePostings ()
 
@@ -1309,7 +1316,15 @@ let internal tryFlatBooleanScoresDictionaryInView
         let result = Collections.Generic.Dictionary<'id, float>()
         scores |> Map.iter (fun id score -> result.Add(id, visibleBooleanScore score))
         Some result
-    | None -> nodes |> flatTerms [] |> Option.map scoreTerms
+    | None ->
+        nodes
+        |> flatTerms []
+        |> Option.map (fun terms ->
+            if (terms |> List.forall (fun (operator, _, _) -> operator = MustNot))
+               || (candidateIds |> Option.exists Set.isEmpty) then
+                Collections.Generic.Dictionary<'id, float>()
+            else
+                scoreTerms terms)
 
 let internal tryFlatBooleanScoresDictionaryWithin candidateIds index query =
     tryFlatBooleanScoresDictionaryInView candidateIds (readView index) query

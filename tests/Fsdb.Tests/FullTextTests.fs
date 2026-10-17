@@ -697,10 +697,19 @@ let tests =
                   [ "database concurrency -security"
                     ">database <concurrency ~tutorial"
                     "-database"
+                    "-database -security"
+                    "missing -database"
+                    "security -database"
+                    "security -concurrency"
                     "data* concur*" ] do
                   let expected = booleanScores index query
                   let actual = tryFlatBooleanScoresDictionary index query |> Option.get |> asMap
                   Expect.equal actual expected (sprintf "flat scoring matches for %s" query)
+
+              for query in [ "-database -security"; "database -security" ] do
+                  Expect.isEmpty
+                      (tryFlatBooleanScoresDictionaryWithin (Some Set.empty) index query |> Option.get)
+                      (sprintf "empty candidate scope avoids matches for %s" query)
 
               Expect.isNone (tryFlatBooleanScoresDictionary index "\"database concurrency\"") "phrases use general scoring"
               Expect.isNone (tryFlatBooleanScoresDictionary index "(+database +concurrency)") "groups use general scoring"

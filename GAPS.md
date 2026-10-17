@@ -953,6 +953,9 @@ range, and spatial candidates before scoring. Inner joins also propagate compati
 bounds through equality chains without shrinking the relevance corpus. Multi-table
 UPDATE/DELETE score each physical source before evaluating joins, predicates,
 and assignments.
+[Flat Boolean exclusion terms](torture/findings/2026-10-17-negative-fulltext-candidates.md)
+now skip posting traversal when no positive term or candidate can match, and
+mixed-term exclusions scan the smaller of their posting and matched rows.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
