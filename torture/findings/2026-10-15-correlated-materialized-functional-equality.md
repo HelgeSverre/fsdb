@@ -39,9 +39,12 @@ arithmetic (`+`, `-`, `*`, unary negation, and `ABS`) over exposed integer
 columns and integer constants. It evaluates each expression once per
 materialized row, keys signed and compatible unsigned integers together, and
 keeps the full SQL predicate as the residual check. NULL rows contribute no
-equality key. An evaluation error, a noninteger result, or a noninteger outer
-bound falls back to the normal scan so numeric coercion cannot cause a false
-negative. The lookup also participates in complete OR-branch unions.
+equality key. An evaluation error or a noninteger row result falls back to the
+normal scan. Exact DECIMAL outer bounds now also use this key: integral values
+within the signed or unsigned 64-bit domain normalize to the corresponding
+integer key, while fractional and out-of-range values have no integer match.
+DOUBLE and string bounds still scan. The lookup also participates in complete
+OR-branch unions.
 
 The same [profile](../scripts/correlated-materialized-functional-profile.fsx)
 now reports **6 residual calls** for `ABS(d.k)+0=o.x`, down from 4,004.
@@ -51,14 +54,19 @@ functional key for text, decimal, floating, volatile, or outer-dependent
 expressions.
 
 The key also unions candidates for positive `IN` lists whose outer bounds
-are exact signed or unsigned integers or NULL. Duplicate bounds share row
-identities, NULL contributes no WHERE-true candidates, and a complete OR
-branch can union the result with another candidate set. A DECIMAL member
-retains the scan because it can change the comparison domain. The MySQL 8.4.11
-oracle covers `ABS(d.k)+0`, `BIT_COUNT(d.k)`, and `COALESCE(d.k,0)` over physical,
-pass-through, materialized derived, and CTE sources. The focused materialized
+are exact signed or unsigned integers, DECIMAL values, or NULL. Duplicate
+bounds share row identities, NULL contributes no WHERE-true candidates, and a
+complete OR branch can union the result with another candidate set. A fractional DECIMAL
+member contributes no integer candidate while other members can still match.
+The MySQL 8.4.11 oracle covers `ABS(d.k)+0`, `BIT_COUNT(d.k)`, and
+`COALESCE(d.k,0)` over physical, pass-through, materialized derived, and CTE
+sources. The focused materialized
 regression fell from 6,018 residual calls for the narrow `ABS` `IN` query to
 fewer than 80; the maintained three-outer-row profile reports seven calls.
+The new DECIMAL-bound regression reduces a 4,014-call scan to fewer than 80
+residual calls and checks integral, fractional, and mixed members. A separate
+wide unsigned oracle and regression cover 2⁶³, `BIGINT UNSIGNED` maximum, and
+the first out-of-range DECIMAL value.
 
 ### Integer `BIT_COUNT` results
 

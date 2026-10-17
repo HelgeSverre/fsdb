@@ -15977,7 +15977,19 @@ and private tryMaterializedCorrelatedLookup
                         let integerKey = function
                             | VInt _ | VUInt _ as value -> Some(canonicalIntegerKey value)
                             | _ -> None
-                        buildExpressionLookup expression integerKey integerKey)
+                        let boundKey = function
+                            | VDecimal number when number = System.Decimal.Truncate number ->
+                                if number >= decimal System.Int64.MinValue
+                                   && number <= decimal System.Int64.MaxValue then
+                                    Some(VInt(int64 number))
+                                elif number >= 0m && number <= decimal System.UInt64.MaxValue then
+                                    Some(VUInt(uint64 number))
+                                else Some(VDecimal number)
+                            // Only integer row results enter this lookup. A fractional
+                            // or out-of-range DECIMAL has no matching integer key.
+                            | VDecimal number -> Some(VDecimal number)
+                            | value -> integerKey value
+                        buildExpressionLookup expression integerKey boundKey)
 
             let integerExpressionCandidates predicate =
                 let indexable indexed =
@@ -15997,7 +16009,7 @@ and private tryMaterializedCorrelatedLookup
                     && integerKeyExpression indexed && rowLocalExpression indexed
 
                 let acceptsBound = function
-                    | VNull | VInt _ | VUInt _ -> true
+                    | VNull | VInt _ | VUInt _ | VDecimal _ -> true
                     | _ -> false
                 expressionEqualityCandidates indexable integerExpressionLookup (fun _ -> true) acceptsBound predicate
 
