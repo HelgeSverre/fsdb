@@ -22,6 +22,10 @@ radii on opposite sides of the antipodal overflow threshold, near-antipodal
 points on either side of the antimeridian, and a reversed point-set pair.
 `1e307` times the antipodal angle remains finite.
 
-This does not address MySQL's separate parse-time error 1367 for an
-out-of-range `1e309` literal. It also does not assert exact bitwise parity
-for spherical distances across the antimeridian.
+Out-of-range exponential literals such as `1e309` and `-1e309` now return
+MySQL's parse-time error 1367 before evaluating the distance function. The
+native oracle agrees on 19 radius cases and two bare-literal errors, including
+zero, negative, subnormal, maximum finite, and overflowing radii.
+String-to-DOUBLE conversion retains its distinct warning and clamping behavior.
+This audit does not assert exact bitwise parity for spherical distances across
+the antimeridian.

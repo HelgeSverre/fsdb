@@ -27,18 +27,22 @@ def connect(**options):
     raise RuntimeError("database server did not become ready")
 
 
-def run(connection, first, second, radius):
-    sql = (
-        "SELECT ST_DISTANCE_SPHERE("
-        f"ST_GeomFromText('{first}',4326),"
-        f"ST_GeomFromText('{second}',4326),{radius})"
-    )
+def run_statement(connection, sql):
     try:
         with connection.cursor() as cursor:
             cursor.execute(sql)
             return cursor.fetchone()[0]
     except pymysql.MySQLError as error:
         return "error", error.args
+
+
+def run(connection, first, second, radius):
+    sql = (
+        "SELECT ST_DISTANCE_SPHERE("
+        f"ST_GeomFromText('{first}',4326),"
+        f"ST_GeomFromText('{second}',4326),{radius})"
+    )
+    return run_statement(connection, sql)
 
 
 def main():
@@ -91,6 +95,14 @@ def main():
                     ("POINT(0 0)", "POINT(0 179.999999)", "5.72e307"),
                     ("POINT(0 0)", "POINT(0 -179.999999)", "5.72e307"),
                     ("POINT(0 0)", "MULTIPOINT((0 180),(0 1))", "1e308"),
+                    ("POINT(0 0)", "POINT(0 0)", "0"),
+                    ("POINT(0 0)", "POINT(0 1)", "0"),
+                    ("POINT(0 0)", "POINT(0 1)", "-1"),
+                    ("POINT(0 0)", "POINT(0 1)", "1e-308"),
+                    ("POINT(0 0)", "POINT(0 1)", "1.7976931348623157e308"),
+                    ("POINT(0 0)", "POINT(0 1)", "-1e309"),
+                    ("POINT(0 0)", "POINT(0 0)", "1e309"),
+                    ("POINT(0 0)", "POINT(0 1)", "1e309"),
                 ]
                 for first, second, radius in cases:
                     expected = run(mysql_connection, first, second, radius)
@@ -101,7 +113,13 @@ def main():
                         assert math.isclose(actual, expected, rel_tol=1e-13, abs_tol=0), (
                             first, second, radius, expected, actual
                         )
-                print(f"MySQL {version}: {len(cases)} large-radius cases matched")
+                for sql in ("SELECT 1e309", "SELECT -1e309"):
+                    expected = run_statement(mysql_connection, sql)
+                    actual = run_statement(fsdb_connection, sql)
+                    assert expected == actual == (
+                        "error", (1367, "Illegal double '1e309' value found during parsing")
+                    ), (sql, expected, actual)
+                print(f"MySQL {version}: {len(cases)} radius cases and two bare literal errors matched")
             finally:
                 if fsdb_connection:
                     fsdb_connection.close()
