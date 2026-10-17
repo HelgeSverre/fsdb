@@ -213,6 +213,21 @@ zero distance is not a safe replacement for MySQL's relation result. The
 full replay remains at 12 of 412 line mismatches, one of 189 near-hole point
 mismatches, and no near-exterior point mismatches.
 
+A finer 7-by-7 corner grid around latitude `86` and longitude `1` found three
+point mismatches: `(86, 1.0000001)`, `(86, 1.000001)`, and `(86, 1.00001)`.
+MySQL reports all three outside and disjoint from the complete polygon;
+fsdb reports them inside and intersecting. The other 46 points agreed,
+including the same longitude offsets at nearby latitudes, longitude `1`,
+and longitude `1.0001` at latitude `86`. The result narrows the discrepancy
+to a short interval on the hole's lower-latitude level. It does not establish
+that a numeric cutoff is the rule: Boost 1.84's
+[geographic winding implementation](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/point_in_poly_winding.hpp)
+uses longitude crossing counts, endpoint-level handling, and an
+[Andoyer-azimuth side test](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/side.hpp),
+whereas fsdb's sampled angle sum has no equivalent endpoint-level branch.
+The full replay still has 12 of 412 line mismatches and one of the original
+189 near-hole point mismatches.
+
 ## Near-machine-precision hole-edge offsets
 
 A separate MySQL 8.4.11 probe placed `LINESTRING(1.5 y,3.0 y)` beside the

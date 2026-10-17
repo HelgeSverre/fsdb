@@ -181,6 +181,27 @@ def main():
         print(f"{point_count} near-hole points; {len(point_mismatches)} point mismatches")
         for mismatch in point_mismatches:
             print("point", mismatch)
+        # Resolve the near-polar corner more finely before changing the
+        # geographic winding rule. The broad point corpus samples only one
+        # offset on each side of this boundary.
+        polar_polygon = (
+            "POLYGON((85 0,85 4,89 4,89 0,85 0),"
+            "(86 1,88 1,88 3,86 3,86 1))"
+        )
+        polar_latitudes = (85.99999, 86, 86.0000001, 86.000001, 86.00001, 86.0001, 86.001)
+        polar_longitudes = (0.99999, 1, 1.0000001, 1.000001, 1.00001, 1.0001, 1.001)
+        polar_mismatches = []
+        for latitude in polar_latitudes:
+            for longitude in polar_longitudes:
+                coordinates = f"{latitude} {longitude}"
+                expected = point_result(mysql_connection, coordinates, polar_polygon)
+                actual = point_result(fsdb_connection, coordinates, polar_polygon)
+                if actual != expected:
+                    polar_mismatches.append((coordinates, expected, actual))
+        print(f"{len(polar_latitudes) * len(polar_longitudes)} polar-corner points; "
+              f"{len(polar_mismatches)} point mismatches")
+        for mismatch in polar_mismatches:
+            print("polar corner", mismatch)
         # The near-polar mismatch is not explained by classifying each ring as
         # an independent polygon: both engines agree on those two predicates.
         polar_point = "ST_GeomFromText('POINT(86 1.00001)',4326)"
