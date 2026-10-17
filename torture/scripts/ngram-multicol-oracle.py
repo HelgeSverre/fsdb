@@ -182,10 +182,14 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                  if legacy_chars is not None else DOCUMENTS)
     if legacy_range == (0x2F800, 0x2F900):
         documents += [(prefix + char + '文', '') for char in ("𠀀", "😀", "丽", "並")]
+    if legacy_range == (0xAC00, 0xAD00):
+        documents += [(prefix + char + '文', '') for char in ("가", "ㄱㅏ", "각")]
     terms = ([prefix + char for char in legacy_chars]
              if legacy_chars is not None else TERMS)
     if legacy_range is not None:
         terms += [f'"{prefix + char}"' for char in legacy_chars]
+    if legacy_range == (0xAC00, 0xAD00):
+        terms += [prefix + char for char in ("가", "각", "가", "ㄱㅏ", "각")]
     modes = MODES
     collation = collation_override or ("utf8mb4_unicode_ci" if legacy_chars is not None else None)
     with tempfile.TemporaryDirectory(prefix=f"fsdb-ngram-{size}-") as directory:
