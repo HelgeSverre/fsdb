@@ -13621,7 +13621,9 @@ let tests =
                         for predicate, boundId, expected, keyed in
                             [ "d.k=o.s", 1, "1", true
                               "d.k BETWEEN o.s AND o.s", 1, "1", true
+                              "d.k IN(o.s,o.s)", 1, "1", true
                               "d.k=o.s", 4, "1", false
+                              "d.k IN(o.s,o.s)", 4, "1", false
                               "d.k=o.s", 5, "1", true
                               "d.k=o.s", 6, "1", true
                               "d.k=o.s", 7, "0", false ] do

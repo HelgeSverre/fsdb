@@ -394,8 +394,9 @@ complement](torture/findings/2026-10-15-correlated-materialized-functional-equal
 uses the existing two-range union and preserves decisive comparisons with a
 NULL opposite bound.
 [Indexed physical and pass-through DOUBLE columns](torture/findings/2026-10-17-correlated-physical-double-string.md)
-also use fully numeric finite correlated string bounds for equality and
-narrow ranges, leaving the original predicate to decide row membership.
+also use fully numeric finite correlated string bounds for equality,
+narrow ranges, and [positive `IN` lists](torture/findings/2026-10-17-correlated-physical-double-string.md#correlated-positive-in-bounds),
+leaving the original predicate to decide row membership.
 
 ## 3. Built-in functions
 

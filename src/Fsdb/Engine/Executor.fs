@@ -15417,6 +15417,20 @@ and private tryProjectedPhysicalCorrelatedInRowIds store (projection: PhysicalPr
     let indexedColumn expression =
         tryCorrelatedInnerColumn probeSource expression
         |> Option.map (fun name -> name, None)
+    let doubleBound = function
+        | VNull -> Some VNull
+        | VString text when not (System.String.IsNullOrWhiteSpace text) ->
+            match System.Double.TryParse(
+                text,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture
+            ) with
+            | true, number when System.Double.IsFinite number -> Some(VDouble number)
+            | _ -> None
+        | (VDouble _ | VInt _ | VUInt _ | VDecimal _ | VBit _) as value ->
+            let number = Value.toDouble value
+            if System.Double.IsFinite number then Some(VDouble number) else None
+        | _ -> None
     let boundValue (name, _) expression =
         let value =
             match expression with
@@ -15430,10 +15444,14 @@ and private tryProjectedPhysicalCorrelatedInRowIds store (projection: PhysicalPr
             |> Option.bind (fun index ->
                 let outputColumn = projection.OutputColumns.[index]
                 tryPhysicalProjectionColumn projection name
-                |> Option.bind (equalityMembershipDomain store)
-                |> Option.filter (fun domain ->
-                    compatibleCorrelatedMembershipBound context outputColumn domain expression value)
-                |> Option.map (fun _ -> value)))
+                |> Option.bind (fun physicalColumn ->
+                    match physicalColumn.Type with
+                    | TDouble _ -> doubleBound value
+                    | _ ->
+                        equalityMembershipDomain store physicalColumn
+                        |> Option.filter (fun domain ->
+                            compatibleCorrelatedMembershipBound context outputColumn domain expression value)
+                        |> Option.map (fun _ -> value))))
 
     let candidateIds (probe: IndexInProbe) =
         let names = probe.Columns |> List.map fst

@@ -20,3 +20,15 @@ calls on both source shapes. A malformed or overflowing string still declines
 the probe and scans, preserving the existing conversion path. This audit
 covers row membership and candidate work; plan-dependent warning counts for
 non-finite text bounds remain to verify separately.
+
+## Correlated positive IN bounds
+
+The physical `IN` planner also declined `DOUBLE` keys, so even
+`d.k IN(o.s,o.s)` scanned 1,001 inner rows for each outer probe. It now
+converts finite numeric values and fully numeric strings to the DOUBLE key
+before unioning indexed row IDs. Duplicate bounds remain deduplicated by row
+ID, and the original `IN` predicate remains the residual check. Malformed or
+overflowing text still declines the index and scans. In the focused regression,
+the clean-string probe falls from 2,004 to fewer than 80 residual calls across
+direct and pass-through physical sources. The native MySQL 8.4.11 oracle
+matches the audited row counts for each string form.
