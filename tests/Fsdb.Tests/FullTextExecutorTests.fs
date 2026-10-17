@@ -562,6 +562,18 @@ let tests =
               for term, expected in [ "❶", "1"; "➀", "2"; "➊", "3"; "⫝̸", "4"; "⫝", "5" ] do
                   Expect.equal (search term) [ expected ] (term + " keeps its own posting")
 
+          testCase "Japanese kana-sensitive ngrams separate hiragana and katakana"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE japanese_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_ja_0900_as_cs_ks,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO japanese_docs VALUES(1,'こ'),(2,'コ'),(3,'カ'),(4,'ｶ')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM japanese_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "こ") [ "1" ] "hiragana posting remains separate"
+              Expect.equal (search "コ") [ "2" ] "katakana posting remains separate"
+              Expect.equal (search "カ") [ "3"; "4" ] "unvoiced width forms share a posting"
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()

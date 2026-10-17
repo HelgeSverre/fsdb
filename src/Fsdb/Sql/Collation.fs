@@ -153,6 +153,30 @@ let private foldKanaVariants (value: string) =
 
         result.ToString()
 
+// ICU's Japanese sort key merges kana scripts even for MySQL's `_ks` variant.
+// Compose dakuten first so both spellings of a voiced hiragana receive one key.
+let private markJapaneseHiragana (value: string) =
+    let value =
+        if value.Contains('\u3099') || value.Contains('\u309A') then
+            value.Normalize(NormalizationForm.FormC)
+        else value
+    let marker = '\uE0B8'
+    let isHiragana (c: char) =
+        (c >= '\u3041' && c <= '\u3096') || c = '\u309D' || c = '\u309E'
+    let mutable first = 0
+    while first < value.Length && not (isHiragana value.[first] || value.[first] = marker) do
+        first <- first + 1
+
+    if first = value.Length then value
+    else
+        let result = StringBuilder(value.Length + 4)
+        result.Append(value, 0, first) |> ignore
+        for index in first .. value.Length - 1 do
+            let c = value.[index]
+            result.Append(c) |> ignore
+            if isHiragana c || c = marker then result.Append(marker) |> ignore
+        result.ToString()
+
 let private foldSmallKana (value: string) =
     let regular = function
         | 'ァ' -> 'ア' | 'ィ' -> 'イ' | 'ゥ' -> 'ウ' | 'ェ' -> 'エ' | 'ォ' -> 'オ'
@@ -497,6 +521,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
 
     let foldText (value: string) =
         match name with
+        | "utf8mb4_ja_0900_as_cs_ks" -> markJapaneseHiragana value
         | "utf8mb4_general_ci" ->
             value.Replace("ß", "s").Replace("ẞ", "s")
             |> foldLegacySupplementary |> foldGeneralUnicodeJamo
