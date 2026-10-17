@@ -2437,6 +2437,20 @@ let attach (dataDir: string) (store: Store) : unit =
     Directory.CreateDirectory dataDir |> ignore
     let walPath = Path.Combine(dataDir, walFileName)
     let entryCount = ref 0
+    // The group-commit queue serializes every use of this stream.
+    let mutable walStream: FileStream option = None
+
+    let openWal () =
+        match walStream with
+        | Some stream -> stream
+        | None ->
+            let stream = new FileStream(walPath, FileMode.Append, FileAccess.Write, FileShare.Read)
+            walStream <- Some stream
+            stream
+
+    let closeWal () =
+        walStream |> Option.iter _.Dispose()
+        walStream <- None
 
     // The replica advances only after fsync, so rotation never snapshots a
     // catalog mutation whose WAL record is not yet durable.
@@ -2448,6 +2462,9 @@ let attach (dataDir: string) (store: Store) : unit =
         replica.PreparedXas.[xid] <- branch
 
     let tryRotateFromReplica () =
+        // Rotation truncates the WAL path. Release the append handle first so
+        // the next batch opens the replacement file on every platform.
+        closeWal ()
         reindexAllForReplay replica
         writeSnapshotAndTruncate dataDir replica
         true
@@ -2456,7 +2473,7 @@ let attach (dataDir: string) (store: Store) : unit =
 
     let appendBatch (events: CommitEvent list) =
         let walSize =
-            use s = new FileStream(walPath, FileMode.Append, FileAccess.Write, FileShare.Read)
+            let s = openWal ()
 
             for event in events do
                 let bytes = encodeWalRecord event
