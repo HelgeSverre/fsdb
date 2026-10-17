@@ -112,5 +112,11 @@ while `(b,4)` leaves the first slot alone. Under `utf8mb4_bin`, a pending
 falls before them. The corresponding ascending or descending UPDATE/DELETE
 waits, affected counts, and final rows agree in all 20 audited combinations.
 The [native oracle](../scripts/limited-ordered-write-rebase-oracle.py) and
-focused transaction regression cover both collations. Wider tuples, mixed
-sort directions with text components, and other collations remain to audit.
+focused transaction regression cover both collations.
+
+An additional eight MySQL and fsdb cases cover mixed ASC/DESC and DESC/ASC
+sorting across the text and integer columns. In both directions, MySQL waits
+for an uncommitted `(b,2)` insert even when that tuple sorts beyond the first
+visible candidate; after commit, both engines update or delete the same first
+row. This confirms the scheduler's conservative mixed-direction wait for the
+audited two-column shape. Wider tuples and other collations remain open.

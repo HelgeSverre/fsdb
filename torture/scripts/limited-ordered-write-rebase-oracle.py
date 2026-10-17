@@ -443,6 +443,8 @@ def main():
                     ("ASC", "ASC", ("Ä", 0), True, (("Ä", 0),), 1, "utf8mb4_0900_ai_ci"),
                     ("DESC", "DESC", ("Ä", 0), True, (("Ä", 0),), 1, "utf8mb4_bin"),
                     ("DESC", "DESC", ("Ä", 0), False, (("d", 1),), 1, "utf8mb4_0900_ai_ci"),
+                    ("ASC", "DESC", ("b", 2), True, (("b", 3),), 1, None),
+                    ("DESC", "ASC", ("b", 2), True, (("d", 1),), 1, None),
                 )
                 composite_text_count = 0
                 base_text_keys = (("b", 1), ("b", 3), ("d", 1))

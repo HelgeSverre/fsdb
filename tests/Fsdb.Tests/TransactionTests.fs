@@ -2304,7 +2304,9 @@ let tests =
                       let cases =
                           [ "ASC", "ASC", ("b", 0), true, [ "b", 0 ], 1
                             "ASC", "ASC", ("b", 4), false, [ "b", 1 ], 1
-                            "ASC", "ASC", ("b", 2), true, [ "b", 1; "b", 2 ], 2 ]
+                            "ASC", "ASC", ("b", 2), true, [ "b", 1; "b", 2 ], 2
+                            "ASC", "DESC", ("b", 2), true, [ "b", 3 ], 1
+                            "DESC", "ASC", ("b", 2), true, [ "d", 1 ], 1 ]
                           @ if collation = "utf8mb4_bin" then
                                 [ "ASC", "ASC", ("Ä", 0), false, [ "b", 1 ], 1
                                   "DESC", "DESC", ("Ä", 0), true, [ "Ä", 0 ], 1 ]
