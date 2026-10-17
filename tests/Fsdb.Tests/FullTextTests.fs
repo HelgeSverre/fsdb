@@ -212,6 +212,27 @@ let tests =
                   Expect.equal (scores |> Map.keys |> Seq.toList) [ 1 ] "only the matching document scores"
                   closeTo 1.8123811483383179 scores.[1] "MySQL weights five distinct size-6 grams"
 
+          testCase "general Unicode size-5 ngrams separate format and space controls"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 5; Stopwords = StopwordPolicy.BuiltIn }
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index =
+                  buildIndexWithDocumentSettings rules collation
+                      [ 1, rules, [ "生日\u200d快乐" ]
+                        2, rules, [ "生日\ufe0f快乐" ]
+                        3, rules, [ "生日\u00a0快乐" ]
+                        4, rules, [ "生日\u3000快乐" ]
+                        5, rules, [ "日本語日本語" ]
+                        6, rules, [ "中文中文中文" ]
+                        7, rules, [ "北海道東京" ]
+                        8, rules, [ "韓国語学校" ] ]
+              for term, expectedId in [ "生日\u200d快乐", 1; "生日\ufe0f快乐", 2; "生日\u00a0快乐", 3 ] do
+                  let ids scores = scores |> Map.keys |> Seq.toList
+                  Expect.equal (ids (naturalScores index term)) [ expectedId ] "natural mode keeps the format weight"
+                  Expect.equal (ids (expansionScores index term)) [ expectedId ] "query expansion keeps the format weight"
+                  let booleanIds = if expectedId = 2 then [ 2 ] else []
+                  Expect.equal (ids (booleanScores index term)) booleanIds "Boolean parsing follows MySQL's control boundaries"
+
           testCase "boolean ngram terms retain Unicode number characters"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }

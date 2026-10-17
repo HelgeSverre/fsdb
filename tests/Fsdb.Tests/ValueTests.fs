@@ -1490,6 +1490,25 @@ let tests =
                         Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the voicing mark"
                     Expect.isFalse (col.Equals "ﾟ" "\uE0C0\uE0C2") "literal marker cannot alias the mark key"
 
+                testCase "utf8mb4_general_ci preserves distinct format and space weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let weighted =
+                        [ '\u034f'; '\u00a0'; '\u180e'; '\u200b'; '\u200c'
+                          '\u200d'; '\u2060'; '\u3000'; '\ufe0f' ]
+                    let keys = weighted |> List.map (fun c -> col.KeyOf ("生" + string c + "日"))
+                    Expect.equal (keys |> List.distinct |> List.length) weighted.Length "each audited control has its own positional key"
+                    for c in weighted do
+                        Expect.isFalse (col.Equals ("生" + string c + "日") "生日") "MySQL weights each audited control"
+                    for left, right in
+                        [ "生日\u200d快乐", "生日\ufe0f快乐"
+                          "生日\u00a0快乐", "生日\u3000快乐"
+                          "生日\u200d快乐", "生日快乐"
+                          "生日\ufe0f快乐", "生日快乐" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the distinction"
+                    Expect.isFalse (col.Equals "\u200d" "\uE0D0\uE0D6") "literal marker cannot alias a control"
+
                 testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
                     [ "utf8mb4_0900_ai_ci", true
