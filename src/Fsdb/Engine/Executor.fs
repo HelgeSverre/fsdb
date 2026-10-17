@@ -15866,7 +15866,8 @@ and private tryMaterializedCorrelatedLookup
                      |> Option.bind (fun index -> equalityMembershipDomain store columns.[index]))
                     |> Option.exists (function IntegerMembership -> true | _ -> false)
                 | Neg expression -> integerKeyExpression expression
-                | FuncCall(name, [ expression ]) when equalsIgnoreCase name "ABS" ->
+                | FuncCall(name, [ expression ])
+                    when equalsIgnoreCase name "ABS" || equalsIgnoreCase name "BIT_COUNT" ->
                     integerKeyExpression expression
                 | BinOp((Add | Sub | Mul), left, right) ->
                     integerKeyExpression left && integerKeyExpression right
@@ -15900,7 +15901,8 @@ and private tryMaterializedCorrelatedLookup
                                 tryCorrelatedSignedIntegerColumn probeSource columns column |> Option.isSome
                             | _ -> false)
 
-                    if hasInnerColumn && not alreadyIndexed && integerKeyExpression indexed then
+                    if hasInnerColumn && not alreadyIndexed
+                       && integerKeyExpression indexed && rowLocalExpression indexed then
                         tryCorrelatedProbeValue probeSource context bound
                         |> Option.bind (fun value ->
                             integerExpressionLookup indexed

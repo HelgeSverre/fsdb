@@ -50,6 +50,21 @@ arithmetic, OR, and DECIMAL-bound result corpus. This does not claim a general
 functional key for text, decimal, floating, volatile, or outer-dependent
 expressions.
 
+### Integer `BIT_COUNT` results
+
+An integer-valued `BIT_COUNT(d.k)` over an exposed integer column now reuses
+the same statement-local integer equality key. Its input is restricted to the
+integer expression forms above, avoiding the text and binary conversions that
+can emit warnings. The original comparison remains the residual filter, and
+the key is built only for a stable row-local expression.
+
+The [MySQL 8.4.11 oracle](../scripts/correlated-abs-oracle.py) agrees on
+physical, pass-through, materialized derived, and materialized CTE sources,
+including negative `INT` values, a NULL inner row, reversed equality, and a
+complete OR branch. In the 1,002-row materialized regression, the leading
+`TOUCH(d.id)` residual ran 6,018 times before this lookup for five outer
+bounds. It now runs fewer than 100 times while returning the same counts.
+
 ## Statement-local text expression lookup
 
 Stable, row-local text expressions over a materialized source now get a

@@ -12980,6 +12980,44 @@ let tests =
                     | other -> failtestf "expected coerced decimal equality, got %A" other
                     Expect.isGreaterThan calls 1000 "a decimal bound retains the compatible scan path"
 
+                testCase "materialized correlated BIT_COUNT uses an integer expression key"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE bit_bounds(id INT PRIMARY KEY,x BIGINT)" |> ignore
+                    runDefault store "CREATE TABLE bit_rows(id INT PRIMARY KEY,k INT)" |> ignore
+                    runDefault store "INSERT INTO bit_bounds VALUES(1,1),(2,2),(3,63),(4,64),(5,NULL)" |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (id - 500))
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO bit_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO bit_rows VALUES(1000,-2147483648),(1001,NULL)" |> ignore
+
+                    for prefix, source in
+                        [ "", "(SELECT DISTINCT id,k FROM bit_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM bit_rows) ", "materialized d" ] do
+                        for predicate, expected in
+                            [ "BIT_COUNT(d.k)=o.x", [ 9; 36; 9; 1; 0 ]
+                              "o.x=BIT_COUNT(d.k)", [ 9; 36; 9; 1; 0 ]
+                              "BIT_COUNT(d.k)=o.x OR d.id=1", [ 10; 37; 10; 2; 1 ] ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                                + "FROM bit_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, rows) ->
+                                let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                                Expect.equal actual (expected |> List.map Some) (source + " " + predicate)
+                            | other -> failtestf "expected MySQL BIT_COUNT counts, got %A" other
+                            Expect.isLessThan calls 100 "the integer expression key bounds residual work"
+
                 testCase "materialized correlated text expression keys use comparison collation"
                 <| fun _ ->
                     let mutable calls = 0

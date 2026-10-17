@@ -74,6 +74,27 @@ def main():
                             actual = cursor.fetchall()
                             assert actual == expected, (predicate, actual, expected)
 
+                    cursor.execute("CREATE TABLE bit_bounds(id INT PRIMARY KEY,x BIGINT)")
+                    cursor.execute("INSERT INTO bit_bounds VALUES(1,1),(2,2),(3,63),(4,64),(5,NULL)")
+                    cursor.execute("INSERT INTO abs_rows VALUES(1001,NULL)")
+                    for prefix, source in [
+                        ("", "abs_rows d"),
+                        ("", "(SELECT id,k FROM abs_rows) d"),
+                        ("", "(SELECT DISTINCT id,k FROM abs_rows) d"),
+                        ("WITH materialized AS (SELECT DISTINCT id,k FROM abs_rows) ", "materialized d"),
+                    ]:
+                        for predicate, expected in [
+                            ("BIT_COUNT(d.k)=o.x", ((1, 9), (2, 36), (3, 9), (4, 1), (5, 0))),
+                            ("o.x=BIT_COUNT(d.k)", ((1, 9), (2, 36), (3, 9), (4, 1), (5, 0))),
+                            ("BIT_COUNT(d.k)=o.x OR d.id=1", ((1, 10), (2, 37), (3, 10), (4, 2), (5, 1))),
+                        ]:
+                            cursor.execute(
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE " + predicate + ") FROM bit_bounds o ORDER BY o.id"
+                            )
+                            actual = cursor.fetchall()
+                            assert actual == expected, (source, predicate, actual, expected)
+
                     for index, (column_type, minimum, maximum) in enumerate([
                         ("TINYINT", -128, 127),
                         ("SMALLINT", -32768, 32767),
@@ -98,7 +119,7 @@ def main():
                         assert cursor.fetchall() == (
                             (first_bound, 1), (first_bound + 1, 1), (first_bound + 2, 0)
                         ), column_type
-                print(f"MySQL {version}: indexed, pass-through, materialized, and signed-boundary ABS counts match")
+                print(f"MySQL {version}: indexed, pass-through, materialized, and signed-boundary ABS; integer BIT_COUNT counts match")
             finally:
                 if connection:
                     connection.close()
