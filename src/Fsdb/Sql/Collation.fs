@@ -266,6 +266,24 @@ let private foldGeneralKanaMarks (value: string) =
             | _ -> result.Append(c) |> ignore
         result.ToString()
 
+// ICU folds CJK radicals onto their compatibility ideographs. MySQL general_ci
+// assigns each defined radical its own primary weight.
+let private foldGeneralCjkRadicals (value: string) =
+    let isRadical c =
+        (c >= '\u2e80' && c <= '\u2e99')
+        || (c >= '\u2e9b' && c <= '\u2ef3')
+        || (c >= '\u2f00' && c <= '\u2fd5')
+    let marker = '\uE0F0'
+    if not (value |> Seq.exists (fun c -> c = marker || isRadical c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif isRadical c then
+                result.Append(marker).Append(char (0xE100 + int c - 0x2e80)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
 // MySQL's general_ci gives these spaces and format characters separate,
 // positional weights. ICU ignores some and equates others at primary strength.
 let private foldGeneralFormatControls (value: string) =
@@ -480,7 +498,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             value.Replace("ß", "s").Replace("ẞ", "s")
             |> foldLegacySupplementary |> foldGeneralUnicodeJamo
             |> foldGeneralHalfwidthMarks |> foldGeneralFormatControls
-            |> foldGeneralKanaMarks
+            |> foldGeneralKanaMarks |> foldGeneralCjkRadicals
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->

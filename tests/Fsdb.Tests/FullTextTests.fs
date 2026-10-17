@@ -257,6 +257,24 @@ let tests =
                       for scores in [ naturalScores index term; booleanScores index term; expansionScores index term ] do
                           Expect.equal (scores |> Map.keys |> Seq.toList) expected (sprintf "MySQL size %d search for %A" size term)
 
+          testCase "general Unicode radical postings do not inflate ideograph relevance"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 3; Stopwords = StopwordPolicy.BuiltIn }
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index =
+                  buildIndexWithDocumentSettings rules collation
+                      [ 1, rules, [ "⽇本語"; "日本語" ]
+                        2, rules, [ "日本語"; "東京" ]
+                        3, rules, [ "中国語"; "学校" ]
+                        4, rules, [ "韓国語"; "中文" ] ]
+              for scores in [ naturalScores index "日本語"; booleanScores index "日本語" ] do
+                  Expect.equal (scores |> Map.keys |> Seq.toList) [ 1; 2 ] "both documents have one ideograph posting"
+                  for id in [ 1; 2 ] do
+                      closeTo 0.0906190574169159 scores.[id] "MySQL does not count the radical as another ideograph"
+              let radicalScores = naturalScores index "⽇本語"
+              Expect.equal (radicalScores |> Map.keys |> Seq.toList) [ 1 ] "radical query has its own posting"
+              closeTo 0.3624762296676636 radicalScores.[1] "radical relevance matches MySQL"
+
           testCase "boolean ngram terms retain Unicode number characters"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }
