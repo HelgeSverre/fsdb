@@ -73,4 +73,10 @@ also update both matching targets. When `y` is absent in the first chain,
 only `x` changes. The rewrite keeps the preceding `x LEFT JOIN y` operand
 grouped when moving `v` to a view-first RIGHT join, so null-extension and ON
 predicate scope survive. A three-source CHECK OPTION failure leaves both
-targets unchanged. Other wider outer-join trees still need an audit.
+targets unchanged. MySQL also accepts `x LEFT JOIN y RIGHT JOIN v`: with all
+rows present, both `x` and the view's physical target update; without `y`,
+the preserving `v` row still updates while `x` does not. Fsdb previously
+reported 1146 for the later view. The symmetric rewrite now moves `v` to
+the first source with a LEFT join to grouped `x LEFT JOIN y`, preserving the
+right-hand row and the original ON scope. Other wider outer-join trees still
+need an audit.

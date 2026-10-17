@@ -22999,7 +22999,8 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
 
     let rec move prior remaining =
         match remaining with
-        | ({ Kind = LeftJoin; Table = FromTable source; Using = [] } as join) :: rest ->
+        | ({ Table = FromTable source; Using = [] } as join) :: rest
+            when join.Kind = LeftJoin || join.Kind = RightJoin ->
             let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->
@@ -23017,7 +23018,9 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                         | earlier -> FromJoinGroup(FromTable update.From, List.rev earlier)
                     { update with
                         From = source
-                        Joins = { join with Kind = RightJoin; Table = preceding } :: rest }
+                        Joins = { join with
+                                    Kind = if join.Kind = LeftJoin then RightJoin else LeftJoin
+                                    Table = preceding } :: rest }
                 else update
             | None when isPhysical source -> move (join :: prior) rest
             | None -> update

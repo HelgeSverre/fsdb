@@ -2553,6 +2553,26 @@ let tests =
               match handle session "SELECT id,n FROM tx_read_view_target WHERE id=1" |> snd with
               | ResultSet(_, [ [ Some "1"; Some "0" ] ]) -> ()
               | result -> failtestf "CHECK OPTION must preserve the view target, got %A" result
+              let rightPreserving =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              Expect.equal (handle session rightPreserving |> snd) (Affected 2UL)
+                  "a right-preserving view updates both matched physical targets"
+              handle session "DELETE FROM tx_read_view_other WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              Expect.equal (handle session rightPreserving |> snd) (Affected 1UL)
+                  "the view target survives a missing preceding left-join row"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing preceding row must leave the outer target unchanged, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "right-preserving view row should update, got %A" result
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
               handle session
                   ("CREATE VIEW tx_read_filtered_view AS SELECT t.id,t.n FROM tx_read_view_target t "
                    + "JOIN tx_read_view_link l ON l.id=t.id WHERE t.n>0")

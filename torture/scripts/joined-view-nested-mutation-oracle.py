@@ -446,13 +446,40 @@ def main():
                     cursor.execute("SELECT id,n FROM t WHERE id=1")
                     assert cursor.fetchone() == (1, 0)
 
+                    right_source = "x LEFT JOIN y ON y.id=x.id RIGHT JOIN v ON v.id=y.id"
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE " + right_source
+                        + " SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+                    )
+                    assert cursor.rowcount == 2, "matched right-preserving joined view"
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+
+                    cursor.execute("DELETE FROM y WHERE id=1")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE " + right_source
+                        + " SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+                    )
+                    assert cursor.rowcount == 1, "missing preceding join keeps the view row"
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (0,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute("INSERT INTO y VALUES(1)")
+
                 print(
                     f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
                     "two-source outer joins preserved physical writes beside missing or filtered view rows; "
                     "nested CHECK OPTION returned 1369; shared bare n returned 1052; "
                     "third-position read grants were enforced; "
                     "two-target writes rebased and kept caller/definer grants separate; "
-                    "disjoint rows did not wait; three-source outer joins preserved the first target"
+                    "disjoint rows did not wait; three-source outer joins preserved both left- and right-hand targets"
                 )
             finally:
                 for connection in connections:
