@@ -23004,13 +23004,13 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->
                 let qualifier = source.Alias |> Option.defaultValue source.Table
-                let writesOnlyView =
+                let writesView =
                     update.Assignments
-                    |> List.forall (fun assignment ->
+                    |> List.exists (fun assignment ->
                         match assignment.Table with
                         | Some owner -> equalsIgnoreCase owner qualifier
                         | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
-                if writesOnlyView then
+                if writesView then
                     { update with
                         From = source
                         Joins = [ { join with Kind = RightJoin; Table = FromTable update.From } ] }
@@ -29161,10 +29161,18 @@ let rec executeAs
                 if targets.Length > 1 then
                     ids, Err(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName)
                 else
+                    let externalJoins =
+                        updateStmt.Joins |> List.map (Join.mapConditions rewrite)
+                    let viewPredicate = view.Predicate |> Option.map qualifyView
+                    let externalJoins, globalViewPredicate =
+                        match externalJoins, viewPredicate with
+                        | [ join ], Some predicate when join.Kind = RightJoin ->
+                            [ { join with On = BinOp(And, join.On, predicate) } ], None
+                        | _ -> externalJoins, viewPredicate
                     let rewritten =
                         { updateStmt with
                             From = view.UpdateFrom
-                            Joins = view.UpdateJoins @ (updateStmt.Joins |> List.map (Join.mapConditions rewrite))
+                            Joins = view.UpdateJoins @ externalJoins
                             Assignments =
                                 assignments
                                 |> List.map (fun (assignment, target) ->
@@ -29175,7 +29183,7 @@ let rec executeAs
                                             Column = target.Column
                                             Value = rewrite assignment.Value }
                                     | None -> { assignment with Value = rewrite assignment.Value })
-                            Where = combineViewPredicate (view.Predicate |> Option.map qualifyView) (updateStmt.Where |> Option.map rewrite)
+                            Where = combineViewPredicate globalViewPredicate (updateStmt.Where |> Option.map rewrite)
                             OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                             Limit = updateStmt.Limit |> Option.map rewrite }
 

@@ -2494,6 +2494,46 @@ let tests =
                   + "SET v.n=v.n+1 WHERE x.id=3"
               Expect.equal (handle session missingViewRow |> snd) (Affected 0UL)
                   "a nullable missing view row cannot be updated"
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id IN (1,3)" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              let outerMultiSql id =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id "
+                  + sprintf "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=%d" id
+              Expect.equal (handle session (outerMultiSql 1) |> snd) (Affected 2UL)
+                  "matched outer join updates both physical targets"
+              Expect.equal (handle session (outerMultiSql 3) |> snd) (Affected 1UL)
+                  "missing nullable view row leaves the preserving target writable"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=3" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected preserving outer row update, got %A" result
+              handle session
+                  ("CREATE VIEW tx_read_filtered_view AS SELECT t.id,t.n FROM tx_read_view_target t "
+                   + "JOIN tx_read_view_link l ON l.id=t.id WHERE t.n>0")
+              |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id IN (1,3)" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0" |> ignore
+              for source in
+                  [ "tx_read_view_outer x LEFT JOIN tx_read_filtered_view v ON v.id=x.id"
+                    "tx_read_filtered_view v RIGHT JOIN tx_read_view_outer x ON v.id=x.id" ] do
+                  for id in [ 1; 3 ] do
+                      handle session (sprintf "UPDATE tx_read_view_outer SET n=0 WHERE id=%d" id) |> ignore
+                      let sql = "UPDATE " + source + sprintf " SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=%d" id
+                      Expect.equal (handle session sql |> snd) (Affected 1UL)
+                          "a filtered-out or absent view row cannot suppress the preserving target"
+                      match handle session (sprintf "SELECT n FROM tx_read_view_outer WHERE id=%d" id) |> snd with
+                      | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                      | result -> failtestf "expected preserving outer row update, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "filtered view target should remain unchanged, got %A" result
+              handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              let matchedFiltered =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_filtered_view v ON v.id=x.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+              Expect.equal (handle session matchedFiltered |> snd) (Affected 2UL)
+                  "a matching filtered view still updates both targets"
+              handle session "UPDATE tx_read_view_outer SET n=2 WHERE id=1" |> ignore
               handle session "UPDATE tx_read_view_target SET n=10" |> ignore
               let owner, _ = handle (create 3 store) "BEGIN"
               let owner, ownerResult = handle owner "UPDATE tx_read_view_target SET n=n+1 WHERE id=1"
@@ -2526,6 +2566,12 @@ let tests =
               match handle session rejected |> snd with
               | Err(1369, _) -> ()
               | result -> failtestf "expected multi-target CHECK OPTION rejection, got %A" result
+              let rejectedOuter =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_checked v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2 WHERE x.id=1"
+              match handle session rejectedOuter |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected outer-join CHECK OPTION rejection, got %A" result
               match handle session "SELECT id,n FROM tx_read_view_outer WHERE id=1" |> snd with
               | ResultSet(_, [ [ Some "1"; Some "3" ] ]) -> ()
               | result -> failtestf "CHECK OPTION must preserve outer target, got %A" result

@@ -60,8 +60,12 @@ column with the same name. A column exposed by both the view and an outer
 source remains ambiguous with error 1052. Further multi-target source kinds,
 other bare-assignment shapes, and wider outer joins remain to audit. MySQL
 also updates a writable view on either side of a two-source LEFT or RIGHT
-join. Fsdb matches the audited view-only assignments, including a missing
-nullable view row that updates nothing; the right-side LEFT join is normalized
-to its equivalent view-first RIGHT join before the view's physical sources
-are expanded. Outer joins that also write the preserving physical table still
-need a separate row-preservation audit.
+join. Fsdb matches the audited one- and two-target assignments; a missing
+nullable view row updates only the preserving table when it is assigned. The
+right-side LEFT join is normalized to its equivalent view-first RIGHT join
+before the view's physical sources are expanded. A view predicate stays in
+that outer join's ON condition rather than filtering preserving rows in the
+global WHERE. A matching filtered view updates both targets; a filtered-out
+view row leaves its physical target unchanged. CHECK OPTION still rejects an
+invalid view assignment without changing the preserving table. Wider outer
+join trees still need a row-preservation audit.

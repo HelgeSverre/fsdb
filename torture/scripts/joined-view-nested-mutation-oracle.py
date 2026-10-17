@@ -178,6 +178,53 @@ def main():
                         "UPDATE x LEFT JOIN v ON v.id=x.id SET v.n=v.n+1 WHERE x.id=3"
                     )
                     assert cursor.rowcount == 0
+                    cursor.execute("UPDATE x SET n=0 WHERE id IN (1,3)")
+                    cursor.execute("UPDATE t SET n=3 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE x LEFT JOIN v ON v.id=x.id "
+                        "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+                    )
+                    assert cursor.rowcount == 2
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (4,)
+                    cursor.execute(
+                        "UPDATE x LEFT JOIN v ON v.id=x.id "
+                        "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=3"
+                    )
+                    assert cursor.rowcount == 1
+                    cursor.execute("SELECT n FROM x WHERE id=3")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute(
+                        "CREATE VIEW filtered_v AS SELECT t.id,t.n FROM t JOIN l "
+                        "ON l.id=t.id WHERE t.n>0"
+                    )
+                    cursor.execute("UPDATE x SET n=0 WHERE id IN (1,3)")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    for source in (
+                        "x LEFT JOIN filtered_v v ON v.id=x.id",
+                        "filtered_v v RIGHT JOIN x ON v.id=x.id",
+                    ):
+                        for id in (1, 3):
+                            cursor.execute(f"UPDATE x SET n=0 WHERE id={id}")
+                            cursor.execute(
+                                "UPDATE " + source
+                                + f" SET x.n=x.n+1,v.n=v.n+1 WHERE x.id={id}"
+                            )
+                            assert cursor.rowcount == 1, (source, id)
+                            cursor.execute(f"SELECT n FROM x WHERE id={id}")
+                            assert cursor.fetchone() == (1,), (source, id)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (0,)
+                    cursor.execute("UPDATE t SET n=10 WHERE id=1")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE x LEFT JOIN filtered_v v ON v.id=x.id "
+                        "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+                    )
+                    assert cursor.rowcount == 2
+                    cursor.execute("UPDATE x SET n=2 WHERE id=1")
                     cursor.execute("UPDATE t SET n=3 WHERE id=1")
                     with owner.cursor() as owner_cursor:
                         owner_cursor.execute("BEGIN")
@@ -223,6 +270,15 @@ def main():
                         assert error.args[0] == 1369, error.args
                     else:
                         raise AssertionError("multi-target CHECK OPTION should reject the write")
+                    try:
+                        cursor.execute(
+                            "UPDATE x LEFT JOIN checked ON x.id=checked.id "
+                            "SET x.n=x.n+1,checked.id=2 WHERE x.id=1"
+                        )
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error.args
+                    else:
+                        raise AssertionError("outer-join CHECK OPTION should reject the write")
                     cursor.execute("SELECT id,n FROM x WHERE id=1")
                     assert cursor.fetchone() == (1, 3)
                     cursor.execute("SELECT id,n FROM t WHERE id=1")
@@ -348,7 +404,7 @@ def main():
 
                 print(
                     f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
-                    "two-source outer joins updated matched view rows and skipped missing nullable rows; "
+                    "two-source outer joins preserved physical writes beside missing or filtered view rows; "
                     "nested CHECK OPTION returned 1369; shared bare n returned 1052; "
                     "third-position read grants were enforced; "
                     "two-target writes rebased and kept caller/definer grants separate; "
