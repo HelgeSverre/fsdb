@@ -13082,6 +13082,11 @@ let tests =
                           "d.k+0e0=o.d", [ 1; 0; 0; 1; 1; 1 ]
                           "d.k+0e0=o.i", [ 0; 0; 0; 0; 1; 1 ]
                           "d.k+0e0=o.s", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (o.s,o.x)", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (o.s,o.d)", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (o.s,CAST(NULL AS DOUBLE))", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (o.s,o.s)", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (o.s,o.x) OR d.id=12", [ 2; 1; 1; 2; 2; 2 ]
                           "d.k+0e0=o.x OR d.id=12", [ 2; 1; 1; 2; 2; 2 ] ] do
                         calls <- 0
                         let sql =
@@ -13121,7 +13126,7 @@ let tests =
                             Expect.isLessThan calls 80 "clean numeric string range must bound residual work"
 
                     runDefault store "INSERT INTO double_bounds VALUES(7,NULL,NULL,NULL,'12.5x')" |> ignore
-                    for predicate in [ "d.k+0e0=o.s"; "d.k+0e0 BETWEEN o.s AND o.s" ] do
+                    for predicate in [ "d.k+0e0=o.s"; "d.k+0e0 BETWEEN o.s AND o.s"; "d.k+0e0 IN (o.s,o.x)" ] do
                         calls <- 0
                         let sql =
                             "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
@@ -13137,16 +13142,17 @@ let tests =
                           "1e309", "0", false
                           " 12.5 ", "1", true ] do
                         runDefault store (sprintf "UPDATE double_bounds SET s='%s' WHERE id=7" bound) |> ignore
-                        calls <- 0
-                        let sql =
-                            "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
-                            + "WHERE TOUCH(d.id)=d.id AND d.k+0e0=o.s) "
-                            + "FROM double_bounds o WHERE o.id=7"
-                        match run store registry sql with
-                        | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected bound
-                        | other -> failtestf "expected string-bound DOUBLE result for %s, got %A" bound other
-                        if keyed then Expect.isLessThan calls 80 (bound + " uses the key")
-                        else Expect.isGreaterThan calls 1000 (bound + " retains the scan")
+                        for predicate in [ "d.k+0e0=o.s"; "d.k+0e0 IN (o.s,o.x)" ] do
+                            calls <- 0
+                            let sql =
+                                "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
+                                + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                                + "FROM double_bounds o WHERE o.id=7"
+                            match run store registry sql with
+                            | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected (bound + predicate)
+                            | other -> failtestf "expected string-bound DOUBLE result for %s, got %A" bound other
+                            if keyed then Expect.isLessThan calls 80 (bound + predicate + " uses the key")
+                            else Expect.isGreaterThan calls 1000 (bound + predicate + " retains the scan")
 
                     match runDefault store
                         ("SELECT x=i,x+0e0=i,9007199254740992e0=i,"

@@ -16001,11 +16001,35 @@ and private tryMaterializedCorrelatedLookup
                                 doubleLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
                             | _ -> None)
 
+                let inCandidate indexed bounds =
+                    if not (rowLocalExpression indexed) then
+                        None
+                    else
+                        let boundValue = function
+                            | Cast(LiteralValue VNull, _) -> Some VNull
+                            | expression -> tryCorrelatedProbeValue probeSource context expression
+                        bounds
+                        |> List.map boundValue
+                        |> tryAllSome
+                        |> Option.bind (fun values ->
+                            if values |> List.forall (fun value -> value = VNull || (probeKey value |> Option.isSome)) then
+                                doubleLookup indexed
+                                |> Option.bind (fun lookup ->
+                                    values
+                                    |> List.map (fun value -> lookup [ value ])
+                                    |> tryAllSome
+                                    |> Option.map (fun groups ->
+                                        let seen = HashSet<Value[]>(HashIdentity.Reference)
+                                        groups |> List.collect id |> List.filter seen.Add))
+                            else
+                                None)
+
                 predicate
                 |> optionalConjuncts
                 |> List.choose (function
                     | BinOp(Eq, left, right) ->
                         candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | In(indexed, bounds) -> inCandidate indexed bounds
                     | _ -> None)
                 |> intersectSharedRows
 
