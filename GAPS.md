@@ -967,6 +967,9 @@ remains open.
 The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
 also matches MySQL's distinct U+2200–U+22FF primary weights in the same
 two-column ngram lane at token sizes 1–10.
+The [dingbat and supplemental-operator audit](torture/findings/2026-10-17-general-ci-later-symbol-weights.md)
+likewise preserves literal U+2700–U+27FF and U+2A00–U+2AFF weights, including
+decorated number forms that ICU had merged.
 
 The [Boolean query Unicode character-table gap](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md)
 is closed for audited cases: Boolean word and phrase boundaries now use

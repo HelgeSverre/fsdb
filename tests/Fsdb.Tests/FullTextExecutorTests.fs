@@ -551,6 +551,17 @@ let tests =
               for term, expected in [ "∃", "1"; "∄", "2"; "∈", "3"; "∉", "4"; "∣", "5"; "∤", "6" ] do
                   Expect.equal (search term) [ expected ] (term + " keeps its own posting")
 
+          testCase "general Unicode dingbat and supplemental ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE later_symbol_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO later_symbol_docs VALUES(1,'中❶文'),(2,'中➀文'),(3,'中➊文'),(4,'中⫝̸文'),(5,'中⫝文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM later_symbol_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              for term, expected in [ "❶", "1"; "➀", "2"; "➊", "3"; "⫝̸", "4"; "⫝", "5" ] do
+                  Expect.equal (search term) [ expected ] (term + " keeps its own posting")
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()

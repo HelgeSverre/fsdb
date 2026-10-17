@@ -244,7 +244,7 @@ let private generalSyntheticPair c =
     let pair marker weight = ValueSome(struct (marker, weight))
     match c with
     | '\uE0C0' | '\uE0D0' | '\uE0E0' | '\uE300' | '\uE0F0' | '\uE600'
-    | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5' | '\uE0B6' as marker -> pair marker marker
+    | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5' | '\uE0B6' | '\uE0B7' as marker -> pair marker marker
     // Halfwidth voicing and decomposed kana marks have their own positional weights.
     | '\uff9e' -> pair '\uE0C0' '\uE0C1'
     | '\uff9f' -> pair '\uE0C0' '\uE0C2'
@@ -292,6 +292,9 @@ let private generalSyntheticPair c =
     // Mathematical operators in this block keep one primary weight per code point.
     | c when c >= '\u2200' && c <= '\u22ff' ->
         pair '\uE0B6' (char (0xF100 + int c - 0x2200))
+    // MySQL keeps dingbats and supplemental mathematical operators distinct.
+    | c when (c >= '\u2700' && c <= '\u27ff') || (c >= '\u2a00' && c <= '\u2aff') ->
+        pair '\uE0B7' (char (0xF200 + int c - 0x2700))
     | _ -> ValueNone
 
 let private foldGeneralSyntheticWeights (value: string) =
