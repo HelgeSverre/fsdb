@@ -204,6 +204,22 @@ let private foldUnicode520MongolianSeparator (value: string) =
             | c -> result.Append(c) |> ignore
         result.ToString()
 
+// UCA 5.2 gives the first seven combining half marks one primary weight and
+// the remaining marks distinct weights. ICU treats the whole block as
+// ignorable, which otherwise merges unrelated ngram postings.
+let private foldUnicode520CombiningHalfMarks (value: string) =
+    let marker = '\uE0A2'
+    if not (value |> Seq.exists (fun c -> c = marker || (c >= '\uFE20' && c <= '\uFE2F'))) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif c >= '\uFE20' && c <= '\uFE2F' then
+                let weight = if c <= '\uFE26' then 0 else int c - 0xFE26
+                result.Append(marker).Append(char (0xE0A3 + weight)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
 // ICU composes conjoining Hangul Jamo into syllables. MySQL's older Unicode
 // collations retain their individual weights; each collation decides whether
 // compatibility Jamo share them.
@@ -541,7 +557,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_unicode_520_ci" ->
             value |> foldCjkPunctuationForms true |> foldLegacyBopomofoForms
             |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
-            |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
+            |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
+            |> foldLegacyUnicodeJamo
         | "utf8mb4_unicode_ci" ->
             value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms
