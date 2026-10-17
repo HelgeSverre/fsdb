@@ -1790,11 +1790,14 @@ let tests =
                 testCase "legacy vertical punctuation keeps MySQL implicit-weight order"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
-                    let forms = [ 0xFE10 .. 0xFE19 ] |> List.map (char >> string)
-                    Expect.equal (forms |> List.map col.KeyOf |> List.distinct |> List.length) 10 "each vertical form has its own key"
+                    let forms = [ 0xFE10 .. 0xFE1F ] @ [ 0xFE24 .. 0xFE2F ] |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> List.distinct |> List.length) 28
+                        "each implicit vertical or half-mark form has its own key"
                     for left, right in forms |> List.pairwise do
-                        Expect.isLessThan (col.ComparePrimary left right) 0 "vertical forms follow their implicit-weight order"
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "vertical and half-mark forms follow their implicit-weight order"
                     Expect.isFalse (col.Equals "︒" "\uE011\uE013") "a literal private-use marker cannot alias a vertical form"
+                    Expect.isFalse (col.Equals "︤" "\uE011\uE025") "a literal marker cannot alias a half mark"
 
                 testCase "legacy enclosed CJK implicit weights stay distinct"
                 <| fun _ ->

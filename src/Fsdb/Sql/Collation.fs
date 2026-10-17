@@ -498,8 +498,8 @@ let private foldLegacySupplementary (value: string) =
             index <- index + 1
         result.ToString()
 
-// UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
-// newer MySQL weights fold its presentation forms.
+// UCA 4.0 gives FE10–FE1F and FE24–FE2F implicit, distinct weights;
+// newer MySQL weights fold many of these presentation forms.
 let private foldCjkPunctuationForms modern (value: string) =
     let value =
         let isWidthForm c =
@@ -521,13 +521,15 @@ let private foldCjkPunctuationForms modern (value: string) =
     else
         // Escape the marker in source text before encoding vertical forms.
         // Keep FE11's existing marker so stored ngram keys remain compatible.
-        if comma |> Seq.exists (fun c -> c = '\uE011' || (c >= '\uFE10' && c <= '\uFE19')) then
+        let hasImplicitWeight c =
+            (c >= '\uFE10' && c <= '\uFE1F') || (c >= '\uFE24' && c <= '\uFE2F')
+        if comma |> Seq.exists (fun c -> c = '\uE011' || hasImplicitWeight c) then
             let result = StringBuilder(comma.Length)
             for c in comma do
                 match c with
                 | '\uE011' -> result.Append("\uE011\uE011") |> ignore
                 | '\uFE11' -> result.Append("\uE011\uE012") |> ignore
-                | c when c >= '\uFE10' && c <= '\uFE19' ->
+                | c when hasImplicitWeight c ->
                     let marker = if c = '\uFE10' then '\uE010' else char (int '\uE013' + int c - int '\uFE12')
                     result.Append('\uE011').Append(marker) |> ignore
                 | c -> result.Append(c) |> ignore

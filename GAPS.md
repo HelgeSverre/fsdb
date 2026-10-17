@@ -966,6 +966,9 @@ A [legacy-collation selector and CJK punctuation audit](torture/findings/2026-10
 found no membership or relevance differences across 4,800 additional
 two-column ngram queries at token sizes 1–10. This narrows the sampled
 legacy-collation gap; MeCab and unsampled weight families remain open.
+The [U+FE10–U+FE6F legacy vertical-form audit](torture/findings/2026-10-18-legacy-vertical-half-mark-ngram.md)
+also now matches 504 MySQL searches per token size at sizes 1–10, after
+preserving UCA 4.0's distinct U+FE1A–U+FE1F and U+FE24–U+FE2F weights.
 
 The [general Unicode letterlike-symbol audit](torture/findings/2026-10-17-general-ci-letterlike-weights.md)
 matches MySQL's U+2100–U+21FF primary-weight classes in two-column
