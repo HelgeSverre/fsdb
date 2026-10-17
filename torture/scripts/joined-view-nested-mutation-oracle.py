@@ -537,6 +537,28 @@ def main():
                                                      ("z", "n", 0), ("w", "n", 0)):
                         cursor.execute(f"SELECT {column} FROM {table} WHERE id=1")
                         assert cursor.fetchone() == (expected,), (table, column)
+                    for has_y, has_z in ((True, False), (False, True), (False, False)):
+                        cursor.execute("DELETE FROM y")
+                        cursor.execute("DELETE FROM z")
+                        if has_y:
+                            cursor.execute("INSERT INTO y VALUES(1)")
+                        if has_z:
+                            cursor.execute("INSERT INTO z VALUES(1,0)")
+                        try:
+                            cursor.execute(
+                                "UPDATE x LEFT JOIN y ON y.id=x.id "
+                                "RIGHT JOIN checked v ON v.id=y.id "
+                                "LEFT JOIN z ON z.id=v.id RIGHT JOIN w ON w.id=v.id "
+                                "SET x.n=x.n+1,v.id=2,z.n=z.n+1,w.n=w.n+1 WHERE w.id=1"
+                            )
+                            raise AssertionError("optional-target CHECK OPTION accepted a disappearing view row")
+                        except pymysql.MySQLError as error:
+                            assert error.args[0] == 1369, (has_y, has_z, error)
+                        for table, column, expected in (("x", "n", 0), ("t", "id", 1), ("w", "n", 0)):
+                            cursor.execute(f"SELECT {column} FROM {table} WHERE id=1")
+                            assert cursor.fetchone() == (expected,), (has_y, has_z, table)
+                        cursor.execute("SELECT n FROM z WHERE id=1")
+                        assert cursor.fetchall() == (((0,),) if has_z else ()), (has_y, has_z)
                     for has_y, has_z in itertools.product((True, False), repeat=2):
                         cursor.execute("DELETE FROM y")
                         cursor.execute("DELETE FROM z")

@@ -2649,6 +2649,29 @@ let tests =
                   | ResultSet(_, [ [ Some actual ] ]) ->
                       Expect.equal actual expected (table + "." + column + " survives five-source CHECK OPTION")
                   | result -> failtestf "expected unchanged %s.%s, got %A" table column result
+              for hasIntermediate, hasLast in [ true, false; false, true; false, false ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  if hasIntermediate then
+                      handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  if hasLast then
+                      handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  match handle session rejectedFiveSource |> snd with
+                  | Err(1369, _) -> ()
+                  | result -> failtestf "expected optional five-source CHECK OPTION rejection, got %A" result
+                  for table, column, expected in
+                      [ "tx_read_view_outer", "n", "0"
+                        "tx_read_view_target", "id", "1"
+                        "tx_read_view_fifth", "n", "0" ] do
+                      match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                      | ResultSet(_, [ [ Some actual ] ]) ->
+                          Expect.equal actual expected (table + " survives optional CHECK OPTION")
+                      | result -> failtestf "expected unchanged %s.%s, got %A" table column result
+                  match handle session "SELECT n FROM tx_read_view_last WHERE id=1" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows (if hasLast then [ [ Some "0" ] ] else [])
+                          "optional z target survives CHECK OPTION"
+                  | result -> failtestf "expected optional target after CHECK OPTION, got %A" result
               let fiveSource rowId =
                   "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
                   + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
