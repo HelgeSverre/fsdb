@@ -21,8 +21,11 @@ Fsdb now limits `utf8mb4_general_ci` short Boolean lookups to postings made
 with an ngram size no greater than the query term's rune length. An earlier
 one-character posting remains reachable after raising the active ngram size;
 the collapsed size-2 posting does not. The differential corpus now has zero
-differences at sizes 1 and 2. Legacy Unicode collations retain their padded
-space lookup behavior, covered by a separate regression.
+differences across 1,260 searches at each of ngram sizes 1–10. Adjacent
+U+2B00–U+2BFF and U+2E00–U+2EFF controls also have zero differences at
+sizes 1 and 2 (1,518 and 1,254 searches per size, respectively). Legacy
+Unicode collations retain their padded-space lookup behavior, covered by a
+separate regression.
 
 Native `WEIGHT_STRING` confirms all 256 characters in the block have
 distinct literal primary weights, so this was not a collation-key alias.
@@ -31,5 +34,5 @@ Reproduce after building the Release CLI:
 
 ```sh
 python3 torture/scripts/general-ci-range-weight-oracle.py 2D00 2E00
-python3 torture/scripts/ngram-multicol-oracle.py --legacy-range 2D00:2E00 --collation utf8mb4_general_ci 1 2
+python3 torture/scripts/ngram-multicol-oracle.py --legacy-range 2D00:2E00 --collation utf8mb4_general_ci 1 2 3 4 5 6 7 8 9 10
 ```

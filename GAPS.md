@@ -1062,8 +1062,9 @@ The [Glagolitic and Coptic block probe](torture/findings/2026-10-17-general-ci-g
 preserves MySQL's distinct U+2C00–U+2CFF weights; its expanded ngram lane
 matches at sizes 1 and 2.
 The [adjacent U+2D00–U+2DFF probe](torture/findings/2026-10-17-general-ci-2d00-boolean-boundary.md)
-now matches at sizes 1 and 2. It corrected 152 Boolean-mode membership or
-relevance differences at size 2 while preserving historical short postings.
+now matches at sizes 1–10. It corrected 152 Boolean-mode membership or
+relevance differences at size 2 while preserving historical short postings;
+adjacent U+2B00 and U+2E00 controls match at sizes 1 and 2.
 The [Bopomofo and Kanbun probe](torture/findings/2026-10-17-general-ci-bopomofo-weights.md)
 preserves distinct U+3100–U+31BF primary weights; the extension-block ngram
 lane matches MySQL at sizes 1–10 (288 searches per size), as does the
