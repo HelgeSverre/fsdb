@@ -360,8 +360,10 @@ exact DECIMAL and integer outer bounds now union candidates from that key.
 Finite DOUBLE equality and mixed exact/DOUBLE `IN` members use the ordered
 DECIMAL-expression lookup with per-member cuts. [Ordered DECIMAL-expression ranges](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-ranges)
 also narrow correlated inequalities and `BETWEEN` with exact DECIMAL or
-integer bounds, and now finite DOUBLE bounds, while preserving source order
-and residual comparison; strings and non-finite bounds retain the scan.
+integer bounds, finite DOUBLE bounds, and audited row-derived VARCHAR bounds,
+while preserving source order and residual comparison. Fully numeric finite
+VARCHAR bounds use approximate cuts; malformed strings retain the scan.
+Literal strings keep MySQL's separate exact DECIMAL comparison behavior.
 [Finite DOUBLE-domain keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-lookup)
 now reduce `d.k+0e0=o.x` from 5,005 to seven calls too. DECIMAL and integer
 bounds and fully numeric finite strings use the same approximate comparison

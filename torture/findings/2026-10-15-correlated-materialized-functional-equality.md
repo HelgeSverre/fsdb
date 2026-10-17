@@ -148,8 +148,8 @@ expression keys remained open at this point.
 Positive `IN` lists now union candidates from the same DECIMAL key when every
 outer member is an exact DECIMAL, signed or unsigned integer, or NULL. Duplicate
 members share row identities, NULL contributes no WHERE-true candidates, and a
-complete OR branch can still match. A DOUBLE member keeps the scan because it
-changes the comparison domain. The native oracle confirms five `IN` forms,
+complete OR branch can still match. A later ordered lookup also handles finite
+DOUBLE members in their approximate comparison domain. The native oracle confirms five `IN` forms,
 including outer arithmetic, duplicates, NULL, OR, and DOUBLE fallback. The
 focused four-bound `d.k+0.00 IN (o.x,o.x+1.00)` regression initially made
 5,010 residual calls and now stays below 80; the maintained profile records
@@ -175,8 +175,16 @@ that `IN (DOUBLE 2⁵³, DECIMAL 2⁵³+1)` includes both rounded keys and the
 exact member, regardless of list order; NULL adds no matches.
 The 1,000-row `IN (o.f,NULL)` profile drops from 3,008 to seven residual
 calls across four outer rows.
-Non-finite DOUBLE and string bounds, or a non-DECIMAL row result, retain the
-scan.
+Row-derived VARCHAR bounds compare with a DECIMAL expression in MySQL's
+approximate domain. Fully numeric finite strings now cut the ordered key for
+equality, `IN`, inequalities, and `BETWEEN`; malformed strings retain the scan
+and residual comparison. Literal string equality remains exact, even beyond
+2⁵³, while literal string `BETWEEN` uses one approximate domain across its
+operands. The native oracle pins both behaviors with adjacent DECIMAL values
+at 2⁵³. In the 1,000-row profile, correlated VARCHAR equality and `IN` each
+take seven residual calls, and the selective inequality takes 44; all three
+previously scanned 3,008 rows. Non-finite DOUBLE bounds and a non-DECIMAL row
+result retain the scan.
 
 The [MySQL 8.4.11 oracle](../scripts/correlated-materialized-decimal-oracle.py)
 checks strict and inclusive comparisons, `BETWEEN`, NULL, a complete OR

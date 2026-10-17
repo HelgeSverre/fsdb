@@ -5481,6 +5481,13 @@ let private isIntegerColumnType = function
 
 let private isIntegerColumn column = column |> Option.exists (_.Type >> isIntegerColumnType)
 
+let private isTextColumn column =
+    column
+    |> Option.exists (fun column ->
+        match column.Type with
+        | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText -> true
+        | _ -> false)
+
 let private compareWithColumnDomain
     (leftExpr: Expr) (leftColumn: ColumnDef option) left
     (rightExpr: Expr) (rightColumn: ColumnDef option) right =
@@ -5501,6 +5508,13 @@ let private compareWithColumnDomain
     | VDouble bound, VUInt integer
         when isIntegerColumn rightColumn && leftColumn.IsNone && not (rowDependent leftExpr) ->
         -(Value.compareIntegerToDouble (bigint integer) bound)
+    // A row-derived text column compares with a DECIMAL expression in the
+    // approximate numeric domain. A quoted constant instead keeps MySQL's
+    // exact DECIMAL/string comparison, including values beyond 2^53.
+    | VDecimal number, VString text when isTextColumn rightColumn ->
+        Operators.compare (Value.toDouble (VDecimal number)) (Value.toDouble (VString text))
+    | VString text, VDecimal number when isTextColumn leftColumn ->
+        Operators.compare (Value.toDouble (VString text)) (Value.toDouble (VDecimal number))
     | _ -> Value.compare left right
 
 let private resolvedCompareWithColumns
@@ -6429,8 +6443,15 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     // operands. A DOUBLE bound makes numeric DECIMAL values
                     // approximate even beside an exact DECIMAL bound.
                     let approximate =
-                        [ ve; vlo; vhi ] |> List.forall (fun value -> value = VNull || numeric value)
-                        && [ ve; vlo; vhi ] |> List.exists (function VDouble _ -> true | _ -> false)
+                        let values = [ ve; vlo; vhi ]
+                        (values |> List.forall (fun value -> value = VNull || numeric value)
+                         && values |> List.exists (function VDouble _ -> true | _ -> false))
+                        || (match ve with
+                            | VDecimal _ ->
+                                [ vlo; vhi ]
+                                |> List.forall (function VNull | VString _ -> true | value -> numeric value)
+                                && [ vlo; vhi ] |> List.exists (function VString _ -> true | _ -> false)
+                            | _ -> false)
                     let compareBound operation boundExpr boundValue =
                         if approximate then
                             Ok(Operators.compare (Value.toDouble ve) (Value.toDouble boundValue))
@@ -16129,10 +16150,22 @@ and private tryMaterializedCorrelatedLookup
                     tryCorrelatedProbeValue probeSource context expression
                     |> Option.map (fun value -> expression, value)
 
+                let approximateBound expression value =
+                    match value with
+                    | VDouble number when System.Double.IsFinite number -> Some(VDouble number)
+                    | VString text when isTextColumn (tryColumnDefForExpr context expression)
+                                        && not (System.String.IsNullOrWhiteSpace text) ->
+                        let number, truncated = Value.coerceLeadingDouble text
+                        if not truncated && System.Double.IsFinite number then Some(VDouble number) else None
+                    | _ -> None
+
+                let cutValue expression value =
+                    approximateBound expression value |> Option.defaultValue value
+
                 let lookupRange (range: RangeLookupBounds<Expr, Expr * Value>) =
                     rangeLookup range.Column
                     |> Option.bind (fun lookup ->
-                        let value = Option.map (fun ((_, value), inclusive) -> value, inclusive)
+                        let value = Option.map (fun ((expression, value), inclusive) -> cutValue expression value, inclusive)
                         lookup (value range.Lower) (value range.Upper))
 
                 let candidates expression =
@@ -16141,22 +16174,32 @@ and private tryMaterializedCorrelatedLookup
                     | BinOp(Eq, left, right) ->
                         let approximateEquality indexedExpression boundExpression =
                             match indexed indexedExpression, bound boundExpression with
-                            | Some indexedExpression, Some(_, VDouble number) when System.Double.IsFinite number ->
-                                rangeLookup indexedExpression
-                                |> Option.bind (fun lookup ->
-                                    lookup (Some(VDouble number, true)) (Some(VDouble number, true)))
+                            | Some indexedExpression, Some(expression, value) ->
+                                approximateBound expression value
+                                |> Option.bind (fun cut ->
+                                    rangeLookup indexedExpression
+                                    |> Option.bind (fun lookup ->
+                                        lookup (Some(cut, true)) (Some(cut, true))))
                             | _ -> None
                         approximateEquality left right
                         |> Option.orElseWith (fun () -> approximateEquality right left)
                         |> Option.toList
                     | In(indexedExpression, boundExpressions) ->
-                        match indexed indexedExpression, boundExpressions |> List.map correlatedBoundValue |> tryAllSome with
+                        let bounds =
+                            boundExpressions
+                            |> List.map (fun expression ->
+                                correlatedBoundValue expression |> Option.map (fun value -> expression, value))
+                            |> tryAllSome
+                        match indexed indexedExpression, bounds with
                         | Some indexedExpression, Some values
-                            when values |> List.exists (function VDouble _ -> true | _ -> false) ->
+                            when values |> List.exists (fun (expression, value) ->
+                                approximateBound expression value |> Option.isSome) ->
                             rangeLookup indexedExpression
                             |> Option.bind (fun lookup ->
                                 values
-                                |> List.map (fun value -> lookup (Some(value, true)) (Some(value, true)))
+                                |> List.map (fun (expression, value) ->
+                                    let cut = cutValue expression value
+                                    lookup (Some(cut, true)) (Some(cut, true)))
                                 |> tryAllSome
                                 |> Option.map (fun groups ->
                                     let seen = HashSet<Value[]>(HashIdentity.Reference)
@@ -16166,9 +16209,11 @@ and private tryMaterializedCorrelatedLookup
                     | Between(indexedExpression, lowerExpression, upperExpression) ->
                         match indexed indexedExpression, bound lowerExpression, bound upperExpression with
                         | Some indexedExpression, Some(_, lower), Some(_, upper)
-                            when (match lower, upper with VDouble _, _ | _, VDouble _ -> true | _ -> false) ->
+                            when (match lower, upper with
+                                  | VDouble _, _ | _, VDouble _ | VString _, _ | _, VString _ -> true
+                                  | _ -> false) ->
                             let approximate = function
-                                | VInt _ | VUInt _ | VDecimal _ | VDouble _ | VBit _ as value -> finiteNumericDouble value
+                                | VInt _ | VUInt _ | VDecimal _ | VDouble _ | VBit _ | VString _ as value -> finiteNumericDouble value
                                 | _ -> None
                             if lower = VNull || upper = VNull then [ [] ]
                             else

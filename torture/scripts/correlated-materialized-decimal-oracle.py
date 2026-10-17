@@ -45,11 +45,13 @@ def main():
                     assert version.startswith("8.4.11"), version
                     for query in [
                         "CREATE DATABASE probe", "USE probe",
-                        "CREATE TABLE outer_bounds(id INT PRIMARY KEY,x DECIMAL(12,2),i BIGINT,f DOUBLE)",
+                        "CREATE TABLE outer_bounds(id INT PRIMARY KEY,x DECIMAL(12,2),i BIGINT,f DOUBLE,s VARCHAR(40),sr VARCHAR(40))",
                         "CREATE TABLE inner_rows(id INT PRIMARY KEY,k DECIMAL(12,2))",
                         "INSERT INTO outer_bounds VALUES"
-                        "(1,10.25,10,10.25),(2,999.00,999,999.00),"
-                        "(3,NULL,NULL,NULL),(4,-10.25,-10,-10.25)",
+                        "(1,10.25,10,10.25,'10.25','490.25'),"
+                        "(2,999.00,999,999.00,'999','1479'),"
+                        "(3,NULL,NULL,NULL,NULL,NULL),"
+                        "(4,-10.25,-10,-10.25,'-10.25','469.75')",
                     ]:
                         cursor.execute(query)
                     cursor.executemany(
@@ -79,6 +81,9 @@ def main():
                         ("d.k+0.00 BETWEEN o.x+480.00 AND o.x+481.00", (2, 0, 0, 1)),
                         ("d.k+0.00>o.x+480.00 OR d.id=12", (10, 1, 1, 31)),
                         ("d.k+0.00>o.f+480e0", (9, 0, 0, 30)),
+                        ("d.k+0.00=o.s", (1, 0, 0, 1)),
+                        ("d.k+0.00 IN (o.s,NULL)", (1, 0, 0, 1)),
+                        ("d.k+0.00>o.sr", (9, 0, 0, 30)),
                     ]
                     for predicate, expected in cases:
                         query = (
@@ -107,6 +112,37 @@ def main():
                         "FROM wide_bounds o ORDER BY o.id"
                     )
                     assert cursor.fetchall() == ((1, "2,3"), (2, "4"))
+                    for predicate, expected in [
+                        ("d.k+0.00='9007199254740993'", "3"),
+                        ("d.k+0.00>='9007199254740993'", "3,4"),
+                        ("d.k+0.00 BETWEEN '9007199254740993' AND '9007199254740994'", "2,3,4"),
+                        ("d.k+0.00 IN ('9007199254740993',9007199254740993.00)", "2,3"),
+                        ("d.k+0.00='9007199254740993x'", "3"),
+                    ]:
+                        cursor.execute(
+                            "SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                            "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                            f"WHERE {predicate}"
+                        )
+                        assert cursor.fetchone() == (expected,), predicate
+                    cursor.execute("CREATE TABLE wide_string_bounds(id INT PRIMARY KEY,lo VARCHAR(40),hi VARCHAR(40))")
+                    cursor.execute("INSERT INTO wide_string_bounds VALUES"
+                                   "(1,'9007199254740993','9007199254740994'),"
+                                   "(2,'9007199254740993x','9007199254740994x'),"
+                                   "(3,'abc','xyz')")
+                    for predicate, expected in [
+                        ("d.k+0.00=o.lo", (("2,3",), ("2,3",), (None,))),
+                        ("d.k+0.00>=o.lo", (("2,3,4",), ("2,3,4",), ("1,2,3,4",))),
+                        ("d.k+0.00 BETWEEN o.lo AND o.hi", (("2,3,4",), ("2,3,4",), (None,))),
+                        ("d.k+0.00 IN (o.lo)", (("2,3",), ("2,3",), (None,))),
+                        ("d.k+0.00 IN (o.lo,9007199254740993.00)", (("2,3",), ("2,3",), ("3",))),
+                    ]:
+                        cursor.execute(
+                            "SELECT (SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                            "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                            f"WHERE {predicate}) FROM wide_string_bounds o ORDER BY o.id"
+                        )
+                        assert cursor.fetchall() == expected, predicate
                     for predicate, expected in [
                         ("d.k+0.00 IN (o.lo)", ((1, "2,3"), (2, "4"))),
                         ("d.k+0.00 IN (o.lo,9007199254740993.00)", ((1, "2,3"), (2, "3,4"))),
