@@ -180,6 +180,11 @@ domains retain the conservative wait. When the list also contains 4, both
 engines wait and then select rows 4 and 1. The oracle and focused transaction
 regression pin both verbs and their final rows.
 
+For `WHERE id NOT IN (4,5)` with pending id 4, MySQL also completes without
+waiting and selects visible rows 1 and 2. Fsdb now proves exclusion when any
+literal member equals the pending key; an unsupported comparison remains
+conservative. The native oracle covers both write verbs.
+
 The same proof now covers a text primary-key filter using the column's
 collation key. With visible `b,d,f` ordered by a secondary integer key, a
 pending `z` at rank zero does not delay `WHERE id<='f' ORDER BY rank_value
@@ -189,6 +194,12 @@ oracle and transaction regression cover UPDATE and DELETE for all six cases,
 including affected counts and final rows. The check applies only to literal
 text comparisons with an indexed text key; other coercion domains retain the
 conservative wait.
+
+Literal text `IN` filters use the same key with the column's collation. A
+pending `Ä` is excluded by `IN ('a','b','d')` under `utf8mb4_bin`, but enters
+the selected pair under `utf8mb4_0900_ai_ci`; `IN ('b','d','z')` excludes it
+under the latter collation. The native oracle and transaction regression
+cover both write verbs, wait decisions, and resulting rows.
 
 An in-memory A/B/A check with 1,000 sequential inserts into a table with one
 secondary index measured warm trials around 186–205 ms on the previous and

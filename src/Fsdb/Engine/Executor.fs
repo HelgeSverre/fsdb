@@ -29954,6 +29954,23 @@ let transactionWriteTargets
                             | Col name -> Some name
                             | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some name
                             | _ -> None
+                        let excludesIn column candidates negated =
+                            match columnName column with
+                            | Some name ->
+                                match keyFor name ordered primary with
+                                | Some key ->
+                                    let comparison candidate =
+                                        comparableLiteral candidate
+                                        |> Option.bind (keyComparison name key)
+                                    if negated then
+                                        candidates |> List.exists (fun candidate -> comparison candidate = Some 0)
+                                    else
+                                        not candidates.IsEmpty
+                                        && (candidates
+                                            |> List.forall (fun candidate ->
+                                                comparison candidate |> Option.exists ((<>) 0)))
+                                | None -> false
+                            | None -> false
                         where
                         |> optionalConjuncts
                         |> List.exists (function
@@ -29967,18 +29984,8 @@ let transactionWriteTargets
                                             comparisonIsFalse operation (if reverse then -comparison else comparison))
                                     | _ -> false
                                 excludes left right false || excludes right left true
-                            | In(column, candidates) when not candidates.IsEmpty ->
-                                match columnName column with
-                                | Some name ->
-                                    match keyFor name ordered primary with
-                                    | Some key ->
-                                        candidates
-                                        |> List.forall (fun candidate ->
-                                            comparableLiteral candidate
-                                            |> Option.bind (keyComparison name key)
-                                            |> Option.exists ((<>) 0))
-                                    | None -> false
-                                | None -> false
+                            | In(column, candidates) -> excludesIn column candidates false
+                            | Not(In(column, candidates)) -> excludesIn column candidates true
                             | _ -> false)
 
                     let pending =

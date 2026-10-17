@@ -2513,7 +2513,8 @@ let tests =
                 for filter, shouldWait, selected in
                     [ "id<=2", false, [ 1; 2 ]
                       "id IN (1,2)", false, [ 1; 2 ]
-                      "id IN (1,2,4)", true, [ 4; 1 ] ] do
+                      "id IN (1,2,4)", true, [ 4; 1 ]
+                      "id NOT IN (4,5)", false, [ 1; 2 ] ] do
                   let store = Fsdb.Storage.create ()
                   let setup = create 1 store
                   handle setup "CREATE TABLE tx_filtered_frontier(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
@@ -2550,13 +2551,17 @@ let tests =
                       Expect.equal rows expected "the indexed filter selects only its matching rows"
                   | other -> failtestf "expected filtered frontier rows, got %A" other
 
-          testCase "indexed text filter excludes pending secondary keys"
+          testCase "indexed text filters classify pending secondary keys"
           <| fun _ ->
               let cases =
-                  [ "utf8mb4_bin", "z", false, [ "b"; "d" ]
-                    "utf8mb4_bin", "a", true, [ "a"; "b" ]
-                    "utf8mb4_0900_ai_ci", "Ä", true, [ "Ä"; "b" ] ]
-              for collation, insertedId, shouldWait, selected in cases do
+                  [ "utf8mb4_bin", "z", "id<='f'", false, [ "b"; "d" ]
+                    "utf8mb4_bin", "a", "id<='f'", true, [ "a"; "b" ]
+                    "utf8mb4_0900_ai_ci", "Ä", "id<='f'", true, [ "Ä"; "b" ]
+                    "utf8mb4_bin", "Ä", "id IN ('a','b','d')", false, [ "b"; "d" ]
+                    "utf8mb4_bin", "a", "id IN ('a','b','d')", true, [ "a"; "b" ]
+                    "utf8mb4_0900_ai_ci", "Ä", "id IN ('a','b','d')", true, [ "Ä"; "b" ]
+                    "utf8mb4_0900_ai_ci", "Ä", "id IN ('b','d','z')", false, [ "b"; "d" ] ]
+              for collation, insertedId, predicate, shouldWait, selected in cases do
                   for verb in [ "UPDATE"; "DELETE" ] do
                       let store = Fsdb.Storage.create ()
                       let setup = create 1 store
@@ -2577,7 +2582,7 @@ let tests =
                               let command =
                                   if verb = "UPDATE" then "UPDATE tx_text_filter SET n=n+1"
                                   else "DELETE FROM tx_text_filter"
-                              handle waiter (command + " WHERE id<='f' ORDER BY rank_value ASC LIMIT 2"))
+                              handle waiter (command + " WHERE " + predicate + " ORDER BY rank_value ASC LIMIT 2"))
                       Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "text-filter writer starts"
                       let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
                       Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"

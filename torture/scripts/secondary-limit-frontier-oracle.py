@@ -61,7 +61,9 @@ def main():
                           (2, 3, "id IN (1,2)", False, 0, "UPDATE"),
                           (2, 3, "id IN (1,2)", False, 0, "DELETE"),
                           (2, 3, "id IN (1,2,4)", True, 0, "UPDATE"),
-                          (2, 3, "id IN (1,2,4)", True, 0, "DELETE")]
+                          (2, 3, "id IN (1,2,4)", True, 0, "DELETE"),
+                          (2, 3, "id NOT IN (4,5)", False, 0, "UPDATE"),
+                          (2, 3, "id NOT IN (4,5)", False, 0, "DELETE")]
                 for limit, size, predicate, should_wait, inserted_rank, verb in cases:
                     waiter = connect(socket)
                     try:
@@ -112,11 +114,15 @@ def main():
                     finally:
                         waiter.close()
                 text_cases = (
-                    ("utf8mb4_bin", "z", False, ("b", "d")),
-                    ("utf8mb4_bin", "a", True, ("a", "b")),
-                    ("utf8mb4_0900_ai_ci", "Ä", True, ("Ä", "b")),
+                    ("utf8mb4_bin", "z", "id<='f'", False, ("b", "d")),
+                    ("utf8mb4_bin", "a", "id<='f'", True, ("a", "b")),
+                    ("utf8mb4_0900_ai_ci", "Ä", "id<='f'", True, ("Ä", "b")),
+                    ("utf8mb4_bin", "Ä", "id IN ('a','b','d')", False, ("b", "d")),
+                    ("utf8mb4_bin", "a", "id IN ('a','b','d')", True, ("a", "b")),
+                    ("utf8mb4_0900_ai_ci", "Ä", "id IN ('a','b','d')", True, ("Ä", "b")),
+                    ("utf8mb4_0900_ai_ci", "Ä", "id IN ('b','d','z')", False, ("b", "d")),
                 )
-                for collation, inserted_id, should_wait, selected in text_cases:
+                for collation, inserted_id, predicate, should_wait, selected in text_cases:
                     for verb in ("UPDATE", "DELETE"):
                         waiter = connect(socket)
                         try:
@@ -144,7 +150,7 @@ def main():
                                         started.set()
                                         command = "UPDATE target_text SET n=n+1" if verb == "UPDATE" else "DELETE FROM target_text"
                                         cursor.execute(
-                                            command + " WHERE id<='f' ORDER BY rank_value ASC LIMIT 2"
+                                            command + f" WHERE {predicate} ORDER BY rank_value ASC LIMIT 2"
                                         )
                                         result["affected"] = cursor.rowcount
                                         cursor.execute("COMMIT")
@@ -169,7 +175,7 @@ def main():
                                 expected = {key: value for key, value in expected.items() if key not in selected}
                             assert actual == expected, (collation, inserted_id, verb, actual, expected)
                             print(
-                                f"MySQL {version}: {verb} text primary={collation} pending={inserted_id} wait={waited}",
+                                f"MySQL {version}: {verb} text primary={collation} pending={inserted_id} predicate={predicate} wait={waited}",
                                 flush=True,
                             )
                         finally:
