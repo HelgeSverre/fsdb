@@ -1547,6 +1547,23 @@ let tests =
                         Expect.isTrue (col.Equals left right) (left + " retains its MySQL expansion")
                     Expect.isFalse (col.Equals "ℼ" "\uE040\uE23C") "literal marker cannot alias pi symbol"
 
+                testCase "legacy kana extensions and ligatures expand before kana folding"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in [ "ゟ", "より"; "ヿ", "コト"; "ゟ", "ヨリ"
+                                         "ㇰ", "ク"; "ㇵ", "ハ"; "ㇿ", "ロ" ] do
+                        Expect.isTrue (col.Equals left right) (left + " matches " + right)
+                        Expect.equal (col.KeyOf left) (col.KeyOf right) (left + " shares its index key")
+
+                testCase "legacy Bopomofo forms keep MySQL primary weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    Expect.isTrue (col.Equals "ㄍ" "ㆣ") "the older velar forms remain equal"
+                    for left, right in [ "ㄮ", "ㄜ"; "ㆻ", "ㄍ"; "ㆻ", "ㆣ" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
+                    Expect.isFalse (col.Equals "ㄮ" "\uE060\uE061") "the marker cannot alias a Bopomofo form"
+
                 testTheory
                     "MySQL 8.4 hiragana and katakana equality follows collation sensitivity"
                     [ "utf8mb4_0900_ai_ci", "ば", "パ", true

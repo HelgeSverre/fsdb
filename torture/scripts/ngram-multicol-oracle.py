@@ -235,6 +235,17 @@ def verify(size, legacy_punctuation=False, legacy_range=None):
                         actual = query(fsdb_connection, equality_sql, (char, expanded))
                         if actual != expected:
                             mismatches.append(("legacy equality", char, expanded, expected, actual))
+                    if legacy_range == (0x3000, 0x3200):
+                        kana = "クシストヌハヒフヘホムラリルレロ"
+                        pairs = [(chr(0x31F0 + offset), char) for offset, char in enumerate(kana)]
+                        pairs += [("ゟ", "より"), ("ヿ", "コト"), ("ㄍ", "ㆣ"),
+                                  ("ㄮ", "ㄜ"), ("ㆻ", "ㄍ")]
+                        for left, right in pairs:
+                            equality_checks += 1
+                            expected = query(mysql_connection, equality_sql, (left, right))
+                            actual = query(fsdb_connection, equality_sql, (left, right))
+                            if actual != expected:
+                                mismatches.append(("legacy equality", left, right, expected, actual))
                 for mode in modes:
                     for term in terms:
                         expected = result(mysql_connection, term, mode)
@@ -245,7 +256,7 @@ def verify(size, legacy_punctuation=False, legacy_range=None):
                         actual_scores = scored_result(fsdb_connection, term, mode)
                         if not scores_agree(expected_scores, actual_scores):
                             mismatches.append((mode, term, "relevance", expected_scores, actual_scores))
-                print(f"size {size}: {len(modes) * len(terms)} ngram queries, {equality_checks} NFKC equalities; {len(mismatches)} mismatches")
+                print(f"size {size}: {len(modes) * len(terms)} ngram queries, {equality_checks} legacy equalities; {len(mismatches)} mismatches")
                 for mismatch in mismatches[:40]:
                     print(mismatch)
                 if len(mismatches) > 40:

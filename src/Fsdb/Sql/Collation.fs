@@ -235,6 +235,35 @@ let private foldLegacyLetterlikeForms (value: string) =
             else result.Append(c) |> ignore
         result.ToString()
 
+// UCA 4.0 expands kana ligatures and folds the small katakana extension
+// before ordinary kana and accent folding.
+let private foldLegacyKanaForms (value: string) =
+    let ordinary = "クシストヌハヒフヘホムラリルレロ"
+    if not (value |> Seq.exists (fun c -> c = 'ゟ' || c = 'ヿ' || (c >= '\u31F0' && c <= '\u31FF'))) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            match c with
+            | 'ゟ' -> result.Append("より") |> ignore
+            | 'ヿ' -> result.Append("コト") |> ignore
+            | c when c >= '\u31F0' && c <= '\u31FF' -> result.Append(ordinary.[int c - 0x31F0]) |> ignore
+            | c -> result.Append(c) |> ignore
+        result.ToString()
+
+// ICU merges these Bopomofo forms with older letters; MySQL's legacy
+// collation keeps them at distinct primary weights.
+let private foldLegacyBopomofoForms (value: string) =
+    if not (value |> Seq.exists (fun c -> c = '\uE060' || c = 'ㄮ' || c = 'ㆻ')) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            match c with
+            | '\uE060' -> result.Append("\uE060\uE060") |> ignore
+            | 'ㄮ' -> result.Append("\uE060\uE061") |> ignore
+            | 'ㆻ' -> result.Append("\uE060\uE062") |> ignore
+            | c -> result.Append(c) |> ignore
+        result.ToString()
+
 // UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
 // newer MySQL weights fold its presentation forms.
 let private foldCjkPunctuationForms modern (value: string) =
@@ -306,6 +335,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_unicode_520_ci" -> value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
         | "utf8mb4_unicode_ci" ->
             value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
+                  |> foldLegacyKanaForms |> foldLegacyBopomofoForms
                   |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
         | _ -> value
 

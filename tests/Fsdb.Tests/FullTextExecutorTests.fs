@@ -431,6 +431,24 @@ let tests =
                   for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
                       Expect.equal (search term mode) [ id ] (term + " keeps its own " + mode + " posting")
 
+          testCase "legacy Unicode ngrams fold kana extensions and keep Bopomofo distinctions"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE kana_ligatures(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO kana_ligatures VALUES(1,'中ゟ文'),(2,'中ヿ文'),(3,'中より文'),(4,'中コト文'),(5,'中ㇰ文'),(6,'中ク文'),(7,'中ㄮ文'),(8,'中ㄜ文'),(9,'中ㆻ文'),(10,'中ㄍ文'),(11,'中ㆣ文')" |> ignore
+              let search term mode =
+                  let sql = $"SELECT id FROM kana_ligatures WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                  ids (run store sql)
+              for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
+                  Expect.equal (search "中ゟ" mode) [ "1" ] (mode + " ligature posting")
+                  Expect.equal (search "中ヿ" mode) [ "2" ] (mode + " katakana ligature posting")
+                  Expect.equal (search "中ㇰ" mode) [ "5"; "6" ] (mode + " small katakana folds")
+                  Expect.equal (search "中ㄍ" mode) [ "10"; "11" ] (mode + " older velar forms remain equal")
+              Expect.equal (search "中ㄮ" "IN NATURAL LANGUAGE MODE") [ "7" ] "Bopomofo extension stays distinct"
+              Expect.equal (search "中ㆻ" "IN NATURAL LANGUAGE MODE") [ "9" ] "newer Bopomofo stays distinct"
+              Expect.equal (search "中ㄮ" "IN BOOLEAN MODE") [] "historical Boolean word table excludes ㄮ"
+              Expect.equal (search "中ㆻ" "IN BOOLEAN MODE") [] "historical Boolean word table excludes ㆻ"
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()
