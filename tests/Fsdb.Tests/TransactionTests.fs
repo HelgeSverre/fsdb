@@ -1983,19 +1983,31 @@ let tests =
           testCase "limited ordered writes reselect after a contended predicate or sort key changes"
           <| fun _ ->
               for indexed in [ false; true ] do
-                  for initialRows, ownerWrite, statement, expectedRows in
+                  for initialRows, ownerWrite, statement, expectedRows, affected in
                       [ "(1,0),(2,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
                         "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 1",
-                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ] ]
+                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ] ], 1UL
                         "(1,0),(2,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
                         "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 1",
-                        [ [ Some "1"; Some "-1" ] ]
+                        [ [ Some "1"; Some "-1" ] ], 1UL
                         "(1,0),(2,1)", "UPDATE tx_limited_rebase SET n=2 WHERE id=1",
                         "UPDATE tx_limited_rebase SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 1",
-                        [ [ Some "1"; Some "2" ]; [ Some "2"; Some "11" ] ]
+                        [ [ Some "1"; Some "2" ]; [ Some "2"; Some "11" ] ], 1UL
                         "(1,0),(2,1)", "UPDATE tx_limited_rebase SET n=2 WHERE id=1",
                         "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 1",
-                        [ [ Some "1"; Some "2" ] ] ] do
+                        [ [ Some "1"; Some "2" ] ], 1UL
+                        "(1,0),(2,0),(3,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
+                        "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 2",
+                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ] ], 2UL
+                        "(1,0),(2,0),(3,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
+                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 2",
+                        [ [ Some "1"; Some "-1" ] ], 2UL
+                        "(1,0),(2,1),(3,2)", "UPDATE tx_limited_rebase SET n=3 WHERE id=1",
+                        "UPDATE tx_limited_rebase SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 2",
+                        [ [ Some "1"; Some "3" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "12" ] ], 2UL
+                        "(1,0),(2,1),(3,2)", "UPDATE tx_limited_rebase SET n=3 WHERE id=1",
+                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 2",
+                        [ [ Some "1"; Some "3" ] ], 2UL ] do
                       let store = Fsdb.Storage.create ()
                       let setup = create 1 store
                       let index = if indexed then ", KEY ix_n(n)" else ""
@@ -2016,7 +2028,7 @@ let tests =
                       Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes"
                       let waiter, result = waiting.Result
                       Expect.isTrue blocked "limited writer waits for the first candidate"
-                      Expect.equal result (Affected 1UL) "limited writer changes one rebased target"
+                      Expect.equal result (Affected affected) "limited writer changes the rebased targets"
                       Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
                       match handle setup "SELECT id,n FROM tx_limited_rebase ORDER BY id" |> snd with
                       | ResultSet(_, rows) -> Expect.equal rows expectedRows (statement + $" (indexed={indexed})")
