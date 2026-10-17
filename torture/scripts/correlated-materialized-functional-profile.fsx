@@ -41,4 +41,16 @@ let probe predicate =
 probe "d.k"
 probe "ABS(d.k)"
 probe "ABS(d.k)+0"
+calls <- 0
+let inResult =
+    connection.QueryValues(
+        "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM inner_rows) d "
+        + "WHERE TOUCH(d.id)=d.id AND ABS(d.k)+0 IN (o.x,o.x+1)) "
+        + "FROM outer_bounds o ORDER BY o.id", [])
+match inResult with
+| Ok(_, [ [ Some(Value.VInt 1L); Some(Value.VInt 2L) ]
+          [ Some(Value.VInt 2L); Some(Value.VInt 1L) ]
+          [ Some(Value.VInt 3L); Some(Value.VInt 0L) ] ]) ->
+    printfn "ABS(d.k)+0 IN (o.x,o.x+1): expected rows; residual calls=%d" calls
+| _ -> failwithf "Unexpected integer IN result: %A" inResult
 (connection :> System.IDisposable).Dispose()

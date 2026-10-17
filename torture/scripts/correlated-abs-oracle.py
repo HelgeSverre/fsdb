@@ -66,6 +66,12 @@ def main():
                             ("ABS(d.k)=o.x", ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
                             ("o.x=ABS(d.k)", ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
                             ("ABS(d.k)=o.x OR d.id=1", ((1, 3), (2, 1), (3, 1), (4, 1), (5, 2))),
+                            ("ABS(d.k)+0 IN (o.x,o.x+1)", ((1, 4), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0 IN (o.x,NULL)", ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0 IN (o.x,o.x)", ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0 IN (o.x,NULL) OR d.id=1", ((1, 3), (2, 1), (3, 1), (4, 1), (5, 2))),
+                            ("ABS(d.k)+0 IN (CAST(o.x AS DECIMAL(20,0)),NULL)",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
                         ]:
                             cursor.execute(
                                 prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
@@ -87,6 +93,7 @@ def main():
                             ("BIT_COUNT(d.k)=o.x", ((1, 9), (2, 36), (3, 9), (4, 1), (5, 0))),
                             ("o.x=BIT_COUNT(d.k)", ((1, 9), (2, 36), (3, 9), (4, 1), (5, 0))),
                             ("BIT_COUNT(d.k)=o.x OR d.id=1", ((1, 10), (2, 37), (3, 10), (4, 2), (5, 1))),
+                            ("BIT_COUNT(d.k) IN (o.x,NULL)", ((1, 9), (2, 36), (3, 9), (4, 1), (5, 0))),
                         ]:
                             cursor.execute(
                                 prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
@@ -112,6 +119,8 @@ def main():
                             ("IFNULL(d.k,0)=o.x", ((1, 2), (2, 1), (3, 1), (4, 1), (5, 0))),
                             ("COALESCE(d.k,0)=o.x OR d.id=1",
                              ((1, 3), (2, 2), (3, 2), (4, 2), (5, 1))),
+                            ("COALESCE(d.k,0) IN (o.x,NULL)",
+                             ((1, 2), (2, 1), (3, 1), (4, 1), (5, 0))),
                         ]:
                             cursor.execute(
                                 prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source

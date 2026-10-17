@@ -15856,6 +15856,14 @@ and private tryMaterializedCorrelatedLookup
                                 | _ -> Some [])
                         | _ -> None)
 
+            let unionExpressionLookupCandidates lookup values =
+                values
+                |> List.map (fun value -> lookup [ value ])
+                |> tryAllSome
+                |> Option.map (fun groups ->
+                    let seen = HashSet<Value[]>(HashIdentity.Reference)
+                    groups |> List.collect id |> List.filter seen.Add)
+
             // Integer arithmetic needs an exact result domain before its
             // signed and unsigned values can share one equality key.
             let rec integerKeyExpression = function
@@ -15892,7 +15900,7 @@ and private tryMaterializedCorrelatedLookup
                         buildExpressionLookup expression integerKey integerKey)
 
             let integerExpressionCandidates predicate =
-                let candidate indexed bound =
+                let indexable indexed =
                     let hasInnerColumn =
                         indexed
                         |> Expression.exists (function
@@ -15905,8 +15913,11 @@ and private tryMaterializedCorrelatedLookup
                                 tryCorrelatedSignedIntegerColumn probeSource columns column |> Option.isSome
                             | _ -> false)
 
-                    if hasInnerColumn && not alreadyIndexed
-                       && integerKeyExpression indexed && rowLocalExpression indexed then
+                    hasInnerColumn && not alreadyIndexed
+                    && integerKeyExpression indexed && rowLocalExpression indexed
+
+                let candidate indexed bound =
+                    if indexable indexed then
                         tryCorrelatedProbeValue probeSource context bound
                         |> Option.bind (fun value ->
                             integerExpressionLookup indexed
@@ -15914,11 +15925,29 @@ and private tryMaterializedCorrelatedLookup
                     else
                         None
 
+                let inCandidate indexed bounds =
+                    if not (indexable indexed) then
+                        None
+                    else
+                        let boundValue = function
+                            | Cast(LiteralValue VNull, _) -> Some VNull
+                            | expression -> tryCorrelatedProbeValue probeSource context expression
+                        bounds
+                        |> List.map boundValue
+                        |> tryAllSome
+                        |> Option.bind (fun values ->
+                            if values |> List.forall (function VNull | VInt _ | VUInt _ -> true | _ -> false) then
+                                integerExpressionLookup indexed
+                                |> Option.bind (fun lookup -> unionExpressionLookupCandidates lookup values)
+                            else
+                                None)
+
                 predicate
                 |> optionalConjuncts
                 |> List.choose (function
                     | BinOp(Eq, left, right) ->
                         candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | In(indexed, bounds) -> inCandidate indexed bounds
                     | _ -> None)
                 |> intersectSharedRows
 
@@ -16022,13 +16051,7 @@ and private tryMaterializedCorrelatedLookup
                         |> Option.bind (fun values ->
                             if values |> List.forall (fun value -> value = VNull || (probeKey value |> Option.isSome)) then
                                 doubleLookup indexed
-                                |> Option.bind (fun lookup ->
-                                    values
-                                    |> List.map (fun value -> lookup [ value ])
-                                    |> tryAllSome
-                                    |> Option.map (fun groups ->
-                                        let seen = HashSet<Value[]>(HashIdentity.Reference)
-                                        groups |> List.collect id |> List.filter seen.Add))
+                                |> Option.bind (fun lookup -> unionExpressionLookupCandidates lookup values)
                             else
                                 None)
 

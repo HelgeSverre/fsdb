@@ -12971,6 +12971,36 @@ let tests =
                             | other -> failtestf "expected materialized expression matches, got %A" other
                             Expect.isLessThan calls 80 "integer expression keys bound residual work"
 
+                    for predicate, expected in
+                        [ "ABS(d.k)+0 IN (o.x,o.x+1)", [ 4; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0 IN (o.x,NULL)", [ 2; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0 IN (o.x,o.x)", [ 2; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0 IN (o.x,NULL) OR d.id=1", [ 3; 1; 1; 1; 2 ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                            + "FROM abs_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual (expected |> List.map Some) predicate
+                        | other -> failtestf "expected materialized integer IN matches, got %A" other
+                        Expect.isLessThan calls 80 "integer expression IN bounds residual work"
+
+                    calls <- 0
+                    match run store registry
+                        ("SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
+                         + "WHERE TOUCH(d.id)=d.id AND "
+                         + "ABS(d.k)+0 IN (CAST(o.x AS DECIMAL(20,0)),NULL)) "
+                         + "FROM abs_bounds o ORDER BY o.id") with
+                    | ResultSet(_, rows) ->
+                        let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                        Expect.equal actual ([ 2; 0; 0; 0; 1 ] |> List.map Some)
+                            "decimal IN bounds preserve MySQL counts"
+                    | other -> failtestf "expected decimal IN fallback matches, got %A" other
+                    Expect.isGreaterThan calls 1000 "a decimal IN bound retains the scan path"
+
                     calls <- 0
                     match run store registry
                         ("SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
@@ -13005,7 +13035,8 @@ let tests =
                         for predicate, expected in
                             [ "BIT_COUNT(d.k)=o.x", [ 9; 36; 9; 1; 0 ]
                               "o.x=BIT_COUNT(d.k)", [ 9; 36; 9; 1; 0 ]
-                              "BIT_COUNT(d.k)=o.x OR d.id=1", [ 10; 37; 10; 2; 1 ] ] do
+                              "BIT_COUNT(d.k)=o.x OR d.id=1", [ 10; 37; 10; 2; 1 ]
+                              "BIT_COUNT(d.k) IN (o.x,NULL)", [ 9; 36; 9; 1; 0 ] ] do
                             calls <- 0
                             let sql =
                                 prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
@@ -13044,7 +13075,8 @@ let tests =
                             [ "COALESCE(d.k,0)=o.x", [ 2; 1; 1; 1; 0 ]
                               "o.x=COALESCE(d.k,0)", [ 2; 1; 1; 1; 0 ]
                               "IFNULL(d.k,0)=o.x", [ 2; 1; 1; 1; 0 ]
-                              "COALESCE(d.k,0)=o.x OR d.id=1", [ 3; 2; 2; 2; 1 ] ] do
+                              "COALESCE(d.k,0)=o.x OR d.id=1", [ 3; 2; 2; 2; 1 ]
+                              "COALESCE(d.k,0) IN (o.x,NULL)", [ 2; 1; 1; 1; 0 ] ] do
                             calls <- 0
                             let sql =
                                 prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source

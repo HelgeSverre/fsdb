@@ -50,6 +50,16 @@ arithmetic, OR, and DECIMAL-bound result corpus. This does not claim a general
 functional key for text, decimal, floating, volatile, or outer-dependent
 expressions.
 
+The key also unions candidates for positive `IN` lists whose outer bounds
+are exact signed or unsigned integers or NULL. Duplicate bounds share row
+identities, NULL contributes no WHERE-true candidates, and a complete OR
+branch can union the result with another candidate set. A DECIMAL member
+retains the scan because it can change the comparison domain. The MySQL 8.4.11
+oracle covers `ABS(d.k)+0`, `BIT_COUNT(d.k)`, and `COALESCE(d.k,0)` over physical,
+pass-through, materialized derived, and CTE sources. The focused materialized
+regression fell from 6,018 residual calls for the narrow `ABS` `IN` query to
+fewer than 80; the maintained three-outer-row profile reports seven calls.
+
 ### Integer `BIT_COUNT` results
 
 An integer-valued `BIT_COUNT(d.k)` over an exposed integer column now reuses
