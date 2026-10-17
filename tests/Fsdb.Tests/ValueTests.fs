@@ -1564,6 +1564,19 @@ let tests =
                         Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
                     Expect.isFalse (col.Equals "ㄮ" "\uE060\uE061") "the marker cannot alias a Bopomofo form"
 
+                testCase "legacy compatibility ideographs preserve measured UCA classes"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in [ "郞", "郞"; "並", "並"; "丽", "丽" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct key")
+                    for left, right in [ "逸", "逸"; "艹", "艹"
+                                         "丽", "丸"; "丽", "𠀀"; "丽", "😀" ] do
+                        Expect.isTrue (col.Equals left right) (left + " matches " + right)
+                        Expect.equal (col.KeyOf left) (col.KeyOf right) (left + " shares a key")
+                    Expect.isFalse (col.Equals "並" "\uE070\uE370") "BMP marker cannot alias a compatibility form"
+                    Expect.isFalse (col.Equals "丽" "\uE090\uE091") "supplementary marker cannot alias source text"
+
                 testTheory
                     "MySQL 8.4 hiragana and katakana equality follows collation sensitivity"
                     [ "utf8mb4_0900_ai_ci", "ば", "パ", true

@@ -264,6 +264,40 @@ let private foldLegacyBopomofoForms (value: string) =
             | c -> result.Append(c) |> ignore
         result.ToString()
 
+// Later BMP compatibility ideographs receive implicit primary weights in
+// MySQL's legacy UCA rather than the NFKC weights used by ICU.
+let private foldLegacyCompatibilityIdeographs (value: string) =
+    let isDistinct c =
+        c = '\uFA2E' || c = '\uFA2F'
+        || (c >= '\uFA6B' && c <= '\uFA6D')
+        || (c >= '\uFA70' && c <= '\uFAD9')
+    if not (value |> Seq.exists (fun c -> c = '\uE070' || isDistinct c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = '\uE070' then result.Append("\uE070\uE070") |> ignore
+            elif isDistinct c then
+                result.Append('\uE070').Append(char (0xE300 + int c - 0xFA00)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
+// MySQL's UCA 4.0 utf8mb4 collation gives every supplementary scalar the
+// same fallback primary weight, including emoji and CJK extensions.
+let private foldLegacySupplementary (value: string) =
+    if not (value |> Seq.exists (fun c -> c = '\uE090' || Char.IsHighSurrogate c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        let mutable index = 0
+        while index < value.Length do
+            let c = value.[index]
+            if c = '\uE090' then result.Append("\uE090\uE090") |> ignore
+            elif Char.IsHighSurrogate c && index + 1 < value.Length && Char.IsLowSurrogate value.[index + 1] then
+                result.Append("\uE090\uE091") |> ignore
+                index <- index + 1
+            else result.Append(c) |> ignore
+            index <- index + 1
+        result.ToString()
+
 // UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
 // newer MySQL weights fold its presentation forms.
 let private foldCjkPunctuationForms modern (value: string) =
@@ -336,6 +370,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_unicode_ci" ->
             value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms
+                  |> foldLegacyCompatibilityIdeographs
+                  |> foldLegacySupplementary
                   |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
         | _ -> value
 

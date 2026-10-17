@@ -449,6 +449,18 @@ let tests =
               Expect.equal (search "中ㄮ" "IN BOOLEAN MODE") [] "historical Boolean word table excludes ㄮ"
               Expect.equal (search "中ㆻ" "IN BOOLEAN MODE") [] "historical Boolean word table excludes ㆻ"
 
+          testCase "legacy Unicode ngrams keep later BMP ideographs distinct and share supplementary keys"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE compatibility_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO compatibility_docs VALUES(1,'中郞文'),(2,'中郞文'),(3,'中並文'),(4,'中並文'),(5,'中丽文'),(6,'中丸文'),(7,'中𠀀文')" |> ignore
+              let search term =
+                  let sql = $"SELECT id FROM compatibility_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (search "中郞") [ "1" ] "later BMP form keeps its implicit key"
+              Expect.equal (search "中並") [ "3" ] "second BMP form stays distinct from its base"
+              Expect.equal (search "中丽") [ "5"; "6"; "7" ] "supplementary forms share MySQL's fallback key"
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()

@@ -170,6 +170,8 @@ def verify(size, legacy_punctuation=False, legacy_range=None):
         legacy_chars = None
     documents = ([(prefix + char + '文', '') for char in legacy_chars]
                  if legacy_chars is not None else DOCUMENTS)
+    if legacy_range == (0x2F800, 0x2F900):
+        documents += [(prefix + char + '文', '') for char in ("𠀀", "😀", "丽", "並")]
     terms = ([prefix + char for char in legacy_chars]
              if legacy_chars is not None else TERMS)
     if legacy_range is not None:
@@ -235,17 +237,26 @@ def verify(size, legacy_punctuation=False, legacy_range=None):
                         actual = query(fsdb_connection, equality_sql, (char, expanded))
                         if actual != expected:
                             mismatches.append(("legacy equality", char, expanded, expected, actual))
+                    extra_pairs = []
                     if legacy_range == (0x3000, 0x3200):
                         kana = "クシストヌハヒフヘホムラリルレロ"
-                        pairs = [(chr(0x31F0 + offset), char) for offset, char in enumerate(kana)]
-                        pairs += [("ゟ", "より"), ("ヿ", "コト"), ("ㄍ", "ㆣ"),
-                                  ("ㄮ", "ㄜ"), ("ㆻ", "ㄍ")]
-                        for left, right in pairs:
-                            equality_checks += 1
-                            expected = query(mysql_connection, equality_sql, (left, right))
-                            actual = query(fsdb_connection, equality_sql, (left, right))
-                            if actual != expected:
-                                mismatches.append(("legacy equality", left, right, expected, actual))
+                        extra_pairs = [(chr(0x31F0 + offset), char) for offset, char in enumerate(kana)]
+                        extra_pairs += [("ゟ", "より"), ("ヿ", "コト"), ("ㄍ", "ㆣ"),
+                                        ("ㄮ", "ㄜ"), ("ㆻ", "ㄍ")]
+                    elif legacy_range == (0xFA00, 0xFB00):
+                        extra_pairs = [("郞", "郞"), ("並", "並"),
+                                       ("逸", "逸"), ("艹", "艹")]
+                    elif legacy_range == (0x2F800, 0x2F900):
+                        extra_pairs = [("丽", "丸"), ("丽", "𠀀"), ("丽", "😀"),
+                                       ("丽", "\U00010000"), ("丽", "\U0001D11E"),
+                                       ("丽", "\U000E0100"), ("丽", "\U0010FFFD"),
+                                       ("丽", "丽"), ("丽", "並")]
+                    for left, right in extra_pairs:
+                        equality_checks += 1
+                        expected = query(mysql_connection, equality_sql, (left, right))
+                        actual = query(fsdb_connection, equality_sql, (left, right))
+                        if actual != expected:
+                            mismatches.append(("legacy equality", left, right, expected, actual))
                 for mode in modes:
                     for term in terms:
                         expected = result(mysql_connection, term, mode)

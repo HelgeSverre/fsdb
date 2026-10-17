@@ -23,6 +23,6 @@ equality comparisons per size. The U+2100–U+21FF letterlike and
 U+3200–U+33FF enclosed-CJK size-two lanes also remain at zero. The full
 fsdb suite passes 3,715 tests.
 
-This is an audited range, not full legacy UCA parity. A separate sweep of
-U+FA00–U+FAFF and U+2F800–U+2F8FF still finds many compatibility-ideograph
-differences; those forms require their own equivalence mapping.
+This is an audited range, not full legacy UCA parity. The later
+[compatibility-ideograph sweep](2026-10-17-compatibility-ideograph-audit.md)
+has its own measured equivalence mapping.

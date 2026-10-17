@@ -1,28 +1,39 @@
-# Remaining legacy compatibility-ideograph differences
+# Legacy compatibility ideographs and supplementary fallback weights
 
-The maintained multi-column ngram oracle was run at token size two against
-native MySQL 8.4.11 with the new quoted-phrase lane. Three adjacent CJK
-ranges matched without further changes: U+2F00–U+2FFF (1,380 full-text
-queries, 214 NFKC comparisons), U+3400–U+34FF (1,536 queries), and
-U+F900–U+F9FF (1,536 queries, 256 NFKC comparisons).
+The maintained multi-column ngram oracle compares native MySQL 8.4.11 with
+fsdb under `utf8mb4_unicode_ci`. At token size two, U+2F00–U+2FFF,
+U+3400–U+34FF, and U+F900–U+F9FF already matched. The later
+U+FA00–U+FAFF and U+2F800–U+2F8FF ranges initially had 615 and 2,272
+membership, relevance, or NFKC-equality differences respectively.
 
-Two later compatibility-ideograph ranges remain divergent:
+For the BMP range, MySQL keeps U+FA2E, U+FA2F, U+FA6B–U+FA6D, and
+U+FA70–U+FAD9 distinct from their NFKC expansions. The older forms retain
+their existing equivalences, including the measured equal pairs
+U+FA25/U+FA67 and U+FA5D/U+FA5E. The legacy collation now gives only the
+later forms collision-escaped distinct keys.
 
-| Range | Full-text queries | NFKC comparisons | Total differences | NFKC equality differences |
-|---|---:|---:|---:|---:|
-| U+FA00–U+FAFF | 1,296 | 204 | 615 | 111 |
-| U+2F800–U+2F8FF | 1,536 | 256 | 2,272 | 224 |
+The supplementary range follows a different rule. In this legacy collation,
+MySQL gives the sampled supplementary CJK compatibility forms one shared
+fallback primary weight. Direct SQL also equates a sampled form with another
+supplementary compatibility form, a CJK Extension-B character, and an emoji,
+while keeping it distinct from its BMP NFKC base. The 32 NFKC expansions
+that MySQL equates with their source in U+2F800–U+2F8FF are themselves
+supplementary. Fsdb now applies one collision-escaped key to supplementary
+scalars under this collation. Original text still drives ngram tokenization.
+`WEIGHT_STRING` alone was not used to infer the rule: direct equality and
+full-text results supplied the oracle evidence.
 
-For U+FA00–U+FAFF, MySQL distinguishes the NFKC expansions of U+FA2E,
-U+FA2F, U+FA6B–U+FA6D, and U+FA70–U+FAD9 where fsdb currently folds
-them together. Most, but not all, supplementary compatibility ideographs in
-U+2F800–U+2F8FF also remain distinct from their NFKC expansions in MySQL.
-Those equality differences propagate into extra ngram matches and incorrect
-inverse-document-frequency scores. The supplementary range has 512
-natural-mode membership differences, so treating the entire range as one
-uniform fold or one uniformly distinct block would be unsafe.
+After the change, the U+FA00–U+FAFF lane has zero differences at startup
+ngram sizes 1–10, with 1,296 full-text queries and 208 direct equality
+comparisons per size. The U+2F800–U+2F8FF lane also has zero across sizes
+1–10, with 1,536 queries and 265 equalities per size; its corpus includes
+additional Extension-B, emoji, and BMP-base documents. Size-two adjacent
+samples of U+20000–U+200FF, U+1F600–U+1F6FF, and U+2F900–U+2F9FF have
+zero differences. The older U+F900–U+F9FF, kana/Bopomofo, and enclosed-CJK
+size-two lanes remain at zero. The full fsdb suite passes 3,717 tests.
 
-This audit leaves those ranges open. A correction needs MySQL-backed
-equivalence classes for the individual forms, including comparisons with
-their base ideographs and with each other, before changing legacy collation
-keys. It must retain the already-matching older U+F900–U+F9FF behavior.
+Direct equality checks additionally compare the shared supplementary key
+with U+10000, a musical symbol, a variation selector, and U+10FFFD.
+
+This is audited legacy-collation coverage. Exact MySQL weight bytes, other
+legacy collation families, and unmeasured scalar ranges remain open.
