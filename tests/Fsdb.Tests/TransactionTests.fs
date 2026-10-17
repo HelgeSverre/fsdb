@@ -2434,6 +2434,26 @@ let tests =
                       | Err(1052, _) -> ()
                       | result -> failtestf "expected ambiguous bare n error 1052, got %A" result
 
+          testCase "joined UPDATE writes two distinct updatable views"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              handle session "CREATE TABLE tx_dual_a(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "CREATE TABLE tx_dual_b(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "CREATE TABLE tx_dual_link(id INT PRIMARY KEY)" |> ignore
+              handle session "INSERT INTO tx_dual_a VALUES(1,10)" |> ignore
+              handle session "INSERT INTO tx_dual_b VALUES(1,20)" |> ignore
+              handle session "INSERT INTO tx_dual_link VALUES(1)" |> ignore
+              handle session "CREATE VIEW tx_dual_va AS SELECT a.id,a.n FROM tx_dual_a a JOIN tx_dual_link la ON a.id=la.id" |> ignore
+              handle session "CREATE VIEW tx_dual_vb AS SELECT b.id,b.n FROM tx_dual_b b JOIN tx_dual_link lb ON b.id=lb.id" |> ignore
+              let sql =
+                  "UPDATE tx_dual_va va JOIN tx_dual_vb vb ON va.id=vb.id "
+                  + "SET va.n=va.n+1,vb.n=vb.n+1"
+              Expect.equal (handle session sql |> snd) (Affected 2UL) "both view targets update"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "11"; Some "21" ] ]) -> ()
+              | result -> failtestf "expected both physical view targets to change, got %A" result
+
           testCase "joined view can supply read rows while another source is updated"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

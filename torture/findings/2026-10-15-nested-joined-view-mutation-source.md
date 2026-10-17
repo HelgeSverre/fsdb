@@ -36,6 +36,20 @@ before the owner commits, matching the oracle's disjoint-row result.
 The implementation handles view assignments in the first, second, or third
 inner-join position, qualified or uniquely owned bare.
 
+## Two writable views with shared internal aliases
+
+MySQL 8.4.11 updates both targets in `UPDATE va JOIN vb ON va.id=vb.id SET
+va.n=va.n+1,vb.n=vb.n+1` when `va` and `vb` are distinct updatable join views.
+Their definitions may each call an internal link-table alias `l`; those names
+belong to separate view scopes. The maintained native oracle now pins the
+two-row update and both resulting physical values. Fsdb handles the same
+two-target statement when the internal aliases differ, covered by a focused
+transaction regression, but returns 1066 (`Not unique table/alias: 'l'`) when
+they match. The view expansion currently places both internal joins in one
+source scope without renaming colliding aliases. This remains an open view
+rewrite gap; renaming must also update target, predicate, check-option, and
+authorization references before it can be applied safely.
+
 ## A physical target beside the writable view
 
 MySQL also accepts `UPDATE x JOIN v ON x.id=v.id SET x.n=x.n+1,v.n=v.n+1`

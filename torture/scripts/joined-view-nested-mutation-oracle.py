@@ -735,6 +735,25 @@ def main():
                     cursor.execute("SELECT n FROM z WHERE id=99")
                     assert cursor.fetchone() == (1,)
 
+                    for sql in (
+                        "CREATE TABLE dual_a(id INT PRIMARY KEY,n INT)",
+                        "CREATE TABLE dual_b(id INT PRIMARY KEY,n INT)",
+                        "CREATE TABLE dual_link(id INT PRIMARY KEY)",
+                        "INSERT INTO dual_a VALUES(1,10)",
+                        "INSERT INTO dual_b VALUES(1,20)",
+                        "INSERT INTO dual_link VALUES(1)",
+                        "CREATE VIEW dual_va AS SELECT a.id,a.n FROM dual_a a JOIN dual_link l ON a.id=l.id",
+                        "CREATE VIEW dual_vb AS SELECT b.id,b.n FROM dual_b b JOIN dual_link l ON b.id=l.id",
+                    ):
+                        cursor.execute(sql)
+                    cursor.execute(
+                        "UPDATE dual_va va JOIN dual_vb vb ON va.id=vb.id "
+                        "SET va.n=va.n+1,vb.n=vb.n+1"
+                    )
+                    assert cursor.rowcount == 2, "two writable views with matching internal aliases"
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (11, 21)
+
                 print(
                     f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
                     "two-source outer joins preserved physical writes beside missing or filtered view rows; "
@@ -745,7 +764,8 @@ def main():
                     "four- and five-source outer chains updated only matched physical targets; "
                     "contended view and outer targets waited and rebased all assignments; "
                     "a bare outer-only column waited and rebased its physical target; "
-                    "four- and five-source CHECK OPTION rejected atomically"
+                    "four- and five-source CHECK OPTION rejected atomically; "
+                    "two writable views with matching internal aliases updated both physical targets"
                 )
             finally:
                 for connection in connections:

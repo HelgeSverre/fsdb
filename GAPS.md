@@ -893,7 +893,9 @@ likewise preserve every present row.
 now claim every assigned table before rebasing the audited four- and
 five-source outer joins.
 Other wider outer-join trees, multi-target shapes, and broader security-layer
-combinations remain open.
+combinations remain open. [Two writable joined views](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
+update both physical targets when their internal aliases differ; equal
+view-local aliases still collide during expansion (1066), unlike MySQL.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
 before a local upload or server-side file read; ordinary inserts remain
 available through their supported forms.
