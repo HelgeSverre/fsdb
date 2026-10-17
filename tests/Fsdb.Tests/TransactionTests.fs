@@ -2497,6 +2497,34 @@ let tests =
               match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
               | ResultSet(_, [ [ Some "1"; Some "14"; Some "24" ] ]) -> ()
               | result -> failtestf "renamed target CHECK OPTION must preserve both rows, got %A" result
+              for sql in
+                  [ "CREATE VIEW tx_dual_va_derived AS SELECT a.id,a.n,r.id AS link_id FROM tx_dual_a a JOIN (SELECT id FROM tx_dual_link) r ON a.id=r.id"
+                    "CREATE VIEW tx_dual_vb_derived AS SELECT b.id,b.n,r.id AS link_id FROM tx_dual_b b JOIN (SELECT id FROM tx_dual_link) r ON b.id=r.id" ] do
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "expected derived view creation, got %d: %s" code message
+                  | _ -> ()
+              for name in [ "tx_dual_va_derived"; "tx_dual_vb_derived" ] do
+                  match handle session ("UPDATE " + name + " SET n=n WHERE id=1") |> snd with
+                  | Err(code, message) -> failtestf "expected standalone derived view update for %s, got %d: %s" name code message
+                  | _ -> ()
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_va_derived va JOIN tx_dual_vb_derived vb ON va.link_id=vb.link_id "
+                       + "SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                  (Affected 2UL)
+                  "two derived read sources may share view-local alias r"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "15"; Some "25" ] ]) -> ()
+              | result -> failtestf "expected both derived-source view targets to change, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_vb_derived vb JOIN tx_dual_va_derived va ON va.id=vb.id "
+                       + "SET vb.n=vb.n+1,va.n=va.n+1") |> snd)
+                  (Affected 2UL)
+                  "reversed derived-source view order updates both targets"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "16"; Some "26" ] ]) -> ()
+              | result -> failtestf "expected reversed derived-source view targets to change, got %A" result
 
           testCase "joined view can supply read rows while another source is updated"
           <| fun _ ->

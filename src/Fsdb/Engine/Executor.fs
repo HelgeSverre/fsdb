@@ -23039,7 +23039,7 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                 if not writesView then
                     update
                 else
-                    // All preceding sources are physical INNER JOIN operands.
+                    // Preceding sources are independent INNER JOIN operands.
                     // Attach this join's predicate to the last old operand,
                     // where every referenced alias is still in scope.
                     let joins =
@@ -23052,6 +23052,8 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                     { update with From = source; Joins = joins }
             | None when isPhysical source -> move (join :: prior) rest
             | None -> update
+        | ({ Kind = InnerJoin; Table = FromSubquery _; Using = [] } as join) :: rest ->
+            move (join :: prior) rest
         | _ -> update
 
     if isPhysical update.From then move [] update.Joins else update
@@ -23101,7 +23103,12 @@ let private freshenViewAliases (store: Store) (defaultDatabase: string) (update:
     joinedAliases |> List.iter (fun name -> used.Add name |> ignore)
     let mutable next = 0
     let aliases =
-        (baseAlias :: (joinSources |> List.choose (function FromTable table -> Some(qualifier table) | _ -> None)))
+        (baseAlias
+         :: (joinSources
+             |> List.choose (function
+                 | FromTable table -> Some(qualifier table)
+                 | FromSubquery(_, alias) -> Some alias
+                 | _ -> None)))
         |> List.distinct
         |> List.choose (fun name ->
             if not (Set.contains (name.ToLowerInvariant()) externalAliases) then None
@@ -23127,6 +23134,8 @@ let private freshenViewAliases (store: Store) (defaultDatabase: string) (update:
                 match renamed (qualifier table) with
                 | Some fresh -> FromTable { table with Alias = Some fresh }
                 | None -> FromTable table
+            | FromSubquery(select, alias) ->
+                FromSubquery(select, renamed alias |> Option.defaultValue alias)
             | FromJoinGroup(source, joins) -> FromJoinGroup(rewriteSource source, joins |> List.map rewriteJoin)
             | source -> source
         and rewriteJoin join =
@@ -27147,11 +27156,10 @@ let rec executeAs
         let targetKey = target.Database, target.Table, target.Qualifier
         let runtimeTargetKey = runtimeTarget.Database, runtimeTarget.Table, runtimeTarget.Qualifier
         let sourceAliases (source: UpdatableView) =
-            source.UpdateFrom
+            (source.UpdateFrom.Alias |> Option.defaultValue source.UpdateFrom.Table)
             :: (source.UpdateJoins
                 |> List.collect (fun join -> FromItem.leaves join.Table)
-                |> List.choose (function FromTable table -> Some table | _ -> None))
-            |> List.map (fun table -> table.Alias |> Option.defaultValue table.Table)
+                |> List.choose FromItem.tryQualifier)
         let originalAliases = sourceAliases view
         let runtimeAliases = sourceAliases runtimeView
         let restoreAliases =

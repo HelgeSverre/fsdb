@@ -798,6 +798,28 @@ def main():
                         assert error.args[0] == 1369, error
                     cursor.execute("SELECT a.id,a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
                     assert cursor.fetchone() == (1, 14, 24)
+                    cursor.execute(
+                        "CREATE VIEW dual_va_derived AS SELECT a.id,a.n,r.id AS link_id FROM dual_a a "
+                        "JOIN (SELECT id FROM dual_link) r ON a.id=r.id"
+                    )
+                    cursor.execute(
+                        "CREATE VIEW dual_vb_derived AS SELECT b.id,b.n,r.id AS link_id FROM dual_b b "
+                        "JOIN (SELECT id FROM dual_link) r ON b.id=r.id"
+                    )
+                    cursor.execute(
+                        "UPDATE dual_va_derived va JOIN dual_vb_derived vb ON va.link_id=vb.link_id "
+                        "SET va.n=va.n+1,vb.n=vb.n+1"
+                    )
+                    assert cursor.rowcount == 2, "two derived read sources share alias r"
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (15, 25)
+                    cursor.execute(
+                        "UPDATE dual_vb_derived vb JOIN dual_va_derived va ON va.id=vb.id "
+                        "SET vb.n=vb.n+1,va.n=va.n+1"
+                    )
+                    assert cursor.rowcount == 2, "reversed derived-view order"
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (16, 26)
 
                 print(
                     f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
@@ -811,7 +833,8 @@ def main():
                     "a bare outer-only column waited and rebased its physical target; "
                     "four- and five-source CHECK OPTION rejected atomically; "
                     "two writable views with matching internal aliases updated both physical targets in both orders; "
-                    "their CHECK OPTION rejected atomically; shared physical target aliases updated both targets in both orders"
+                    "their CHECK OPTION rejected atomically; shared physical target aliases updated both targets in both orders; "
+                    "shared derived read aliases updated both targets in both orders"
                 )
             finally:
                 for connection in connections:

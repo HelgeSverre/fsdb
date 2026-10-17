@@ -57,8 +57,12 @@ physical target tables are separately named `a` inside their definitions,
 in either view order. Runtime target and CHECK OPTION references use the fresh
 alias, while authorization checks use the stored target alias. The oracle and
 focused regression also verify a CHECK OPTION rejection leaves both targets
-unchanged after this rewrite. Non-table read-source alias collisions remain
-to audit.
+unchanged after this rewrite. Two views with independent derived read sources
+may also reuse the same alias `r`: the rewrite now renames that outer derived
+alias and can promote the second writable view past the first view's derived
+source. The oracle and regression cover both view orders and an exposed
+`r.id` join key. Dependent `LATERAL`, `JSON_TABLE`, and grouped non-table
+sources remain to audit.
 
 ## A physical target beside the writable view
 
