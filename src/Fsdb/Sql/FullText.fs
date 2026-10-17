@@ -217,11 +217,14 @@ let private isBinaryCollation (collation: Collation) =
 
 let private tokenWith (collation: Collation) (text: string) =
     // InnoDB folds full-text case even for nonbinary case-sensitive collations.
-    let text =
+    let foldedText =
         if isBinaryCollation collation then text
         else text.ToLowerInvariant()
-    { Text = text
-      Key = collation.KeyOf text }
+    // The legacy collation's historical case pairs are not identical to
+    // Unicode's current invariant lowercase mapping (for example Ↄ/ↄ).
+    let keyText = if collation.Name = "utf8mb4_unicode_ci" then text else foldedText
+    { Text = foldedText
+      Key = collation.KeyOf keyText }
 
 let private tokensWith tokenizer collation text =
     rawTokensWith tokenizer text |> Array.map (tokenWith collation)
@@ -811,7 +814,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
         while i < len && (BooleanWordChars.contains query.[i] || (query.[i] = '\'' && i > start)) do
             i <- i + 1
         let text = query.Substring(start, i - start).Trim('\'')
-        tokenWith collation text
+        tokenWith collation text, text
 
     let phraseWords phrase =
         let words =
@@ -893,7 +896,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
 
                     acc.Add(op, BPhrase(words, proximity))
                 elif BooleanWordChars.contains query.[i] then
-                    let w = readWord ()
+                    let w, sourceWord = readWord ()
                     let prefix = i < len && query.[i] = '*'
                     if prefix then i <- i + 1
                     if w.Text.Length > 0 then
@@ -902,7 +905,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                             | Words _ -> BWord(w, prefix)
                             | Ngrams size when runeLength w.Text < size -> BWord(w, prefix)
                             | Ngrams _ ->
-                                let words = tokensWith tokenizer collation w.Text |> Array.skipWhile (isSearchable rules >> not)
+                                let words = tokensWith tokenizer collation sourceWord |> Array.skipWhile (isSearchable rules >> not)
                                 match words with
                                 | [| word |] -> BWord(word, false)
                                 | _ -> BPhrase(words, None)

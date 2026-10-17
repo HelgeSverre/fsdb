@@ -215,6 +215,26 @@ let private foldLegacyEnclosedCjk (value: string) =
             else result.Append(c) |> ignore
         result.ToString()
 
+// ICU merges a few letterlike/number forms that MySQL's UCA 4.0 assigns
+// distinct primary weights. Escape the marker so literal private-use text
+// cannot share one of these synthetic keys.
+let private foldLegacyLetterlikeForms (value: string) =
+    let isDistinct = function
+        | '\u210F' | '\u2132' | '\u213C' | '\u214D' | '\u214E'
+        | '\u2150' | '\u2151' | '\u2152'
+        | '\u2183' | '\u2184' | '\u2189' -> true
+        | _ -> false
+    if not (value |> Seq.exists (fun c -> c = '\uE040' || c = '\u0127' || isDistinct c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = '\uE040' then result.Append("\uE040\uE040") |> ignore
+            elif c = '\u0127' then result.Append("\uE040\uE20F") |> ignore
+            elif isDistinct c then
+                result.Append('\uE040').Append(char (0xE200 + int c - 0x2100)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
 // UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
 // newer MySQL weights fold its presentation forms.
 let private foldCjkPunctuationForms modern (value: string) =
@@ -285,7 +305,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" -> value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
         | "utf8mb4_unicode_ci" ->
-            value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk
+            value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
         | _ -> value
 

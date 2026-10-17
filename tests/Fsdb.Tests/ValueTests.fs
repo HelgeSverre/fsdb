@@ -1533,6 +1533,20 @@ let tests =
                         Expect.isLessThan (col.ComparePrimary left right) 0 "implicit weights follow codepoint order"
                     Expect.isFalse (col.Equals "㉆" "\uE030\uE146") "literal private-use text cannot alias an enclosed ideograph"
 
+                testCase "legacy letterlike and number forms retain MySQL distinctions"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in
+                        [ "ℼ", "π"; "ℼ", "ℿ"; "ℏ", "ℎ"; "℁", "⅍"
+                          "Ⅎ", "ⅎ"; "Ↄ", "ↄ"; "⅐", "1⁄7"
+                          "⅑", "1⁄9"; "⅒", "1⁄10"; "↉", "0⁄3" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
+                    Expect.isTrue (col.Equals "ℋ" "ℌ") "the equal script-H group remains folded"
+                    for left, right in [ "℁", "a/s"; "ℏ", "ħ"; "ℿ", "Π" ] do
+                        Expect.isTrue (col.Equals left right) (left + " retains its MySQL expansion")
+                    Expect.isFalse (col.Equals "ℼ" "\uE040\uE23C") "literal marker cannot alias pi symbol"
+
                 testTheory
                     "MySQL 8.4 hiragana and katakana equality follows collation sensitivity"
                     [ "utf8mb4_0900_ai_ci", "ば", "パ", true

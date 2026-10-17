@@ -419,6 +419,18 @@ let tests =
               for term in [ "中㉆"; "中㊥"; "中㉊"; "中㉋"; "中㉌" ] do
                   Expect.equal (search term "IN BOOLEAN MODE") [] ("Boolean Unicode boundary " + term)
 
+          testCase "legacy Unicode ngrams retain historical letterlike case distinctions"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE symbol_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO symbol_docs VALUES(1,'中Ⅎ文'),(2,'中ⅎ文'),(3,'中Ↄ文'),(4,'中ↄ文')" |> ignore
+              let search term mode =
+                  let sql = $"SELECT id FROM symbol_docs WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                  ids (run store sql)
+              for id, term in [ "1", "中Ⅎ"; "2", "中ⅎ"; "3", "中Ↄ"; "4", "中ↄ" ] do
+                  for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
+                      Expect.equal (search term mode) [ id ] (term + " keeps its own " + mode + " posting")
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()
