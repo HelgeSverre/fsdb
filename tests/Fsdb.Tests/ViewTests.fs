@@ -569,6 +569,25 @@ let tests =
                   [ [ Some "1"; Some "14" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]
                   "nested join writes persist"
 
+          testCase "a checked single-source outer view can update a joined view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE layer_target(id INT PRIMARY KEY,n INT NOT NULL)") "create target"
+              expectOk (run store "CREATE TABLE layer_aux(id INT PRIMARY KEY,v INT NOT NULL)") "create aux"
+              expectOk (run store "INSERT INTO layer_target VALUES (1,10)") "seed target"
+              expectOk (run store "INSERT INTO layer_aux VALUES (1,1)") "seed aux"
+              expectOk
+                  (run store "CREATE VIEW layer_base AS SELECT t.id,t.n,a.v FROM layer_target t JOIN layer_aux a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create inner joined view"
+              expectOk
+                  (run store "CREATE VIEW layer_outer AS SELECT id,n FROM layer_base WHERE n>v+1 WITH CASCADED CHECK OPTION")
+                  "create checked outer view"
+              expectOk (run store "UPDATE layer_outer SET n=11 WHERE id=1") "update nested target"
+              match run store "UPDATE layer_outer SET n=2 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM layer_target WHERE id=1") [ [ Some "11" ] ] "rejected write is atomic"
+
           testCase "joined view outer layers preserve invoker and definer grants"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
