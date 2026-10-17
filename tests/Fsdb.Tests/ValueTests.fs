@@ -1562,6 +1562,16 @@ let tests =
                         Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the written symbol"
                     Expect.isFalse (col.Equals "〒" "\uE0B4\uEF12") "literal marker cannot alias a CJK symbol"
 
+                testCase "utf8mb4_general_ci keeps letterlike symbols at their written weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let keys = [ 0x2100 .. 0x21FF ] |> List.map (char >> string >> col.KeyOf)
+                    Expect.equal (keys |> Set.ofList |> Set.count) 240 "only the sixteen lowercase Roman numerals share weights"
+                    for left, right in [ "℁", "⅍"; "ℂ", "C"; "ℋ", "ℌ"; "Ⅎ", "ⅎ"; "Ↄ", "ↄ"; "←", "⇐" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isTrue (col.Equals "Ⅰ" "ⅰ") "Roman numeral case shares a primary weight"
+                    Expect.isFalse (col.Equals "℁" "\uE0B5\uF001") "literal marker cannot alias a letterlike symbol"
+
                 testCase "utf8mb4_general_ci retains decomposed combining accents"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get

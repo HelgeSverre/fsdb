@@ -220,9 +220,11 @@ let private tokenWith (collation: Collation) (text: string) =
     let foldedText =
         if isBinaryCollation collation then text
         else text.ToLowerInvariant()
-    // The legacy collation's historical case pairs are not identical to
-    // Unicode's current invariant lowercase mapping (for example Ↄ/ↄ).
-    let keyText = if collation.Name = "utf8mb4_unicode_ci" then text else foldedText
+    // Older collation weights can distinguish characters that current Unicode
+    // lowercasing merges, such as turned Latin and reversed C forms.
+    let keyText =
+        if collation.Name = "utf8mb4_unicode_ci" || collation.Name = "utf8mb4_general_ci" then text
+        else foldedText
     { Text = foldedText
       Key = collation.KeyOf keyText }
 
