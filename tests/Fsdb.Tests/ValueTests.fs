@@ -1584,7 +1584,7 @@ let tests =
                         "MySQL assigns each Kanbun and Bopomofo extension point a distinct primary weight"
                     for left, right in forms |> List.pairwise do
                         Expect.isLessThan (col.ComparePrimary left right) 0
-                            "the block follows MySQL's codepoint-ordered weights"
+                            "the blocks follow MySQL's codepoint-ordered weights"
                     Expect.isFalse (col.Equals "ㆣ" "ㆻ") "the two letters have distinct MySQL weights"
                     Expect.isFalse (col.Equals "ㆤ" "ㆥ") "adjacent letters have distinct MySQL weights"
                     Expect.isFalse (col.Equals "ㆣ" "\uE0B9\uF413")
@@ -1606,15 +1606,23 @@ let tests =
                 testCase "utf8mb4_general_ci keeps extended combining-mark weights distinct"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
-                    let marks = [ 0x1AB0 .. 0x1AFF ] |> List.map (char >> string)
-                    Expect.equal (marks |> List.map col.KeyOf |> Set.ofList |> Set.count) 80
+                    let marks =
+                        [ 0x1AB0 .. 0x1AFF ] @ [ 0x1DC0 .. 0x1DFF ] @ [ 0x20D0 .. 0x20FF ]
+                        |> List.map (char >> string)
+                    Expect.equal (marks |> List.map col.KeyOf |> Set.ofList |> Set.count) 192
                         "MySQL assigns each extended combining-mark point its written primary weight"
                     for left, right in marks |> List.pairwise do
                         Expect.isLessThan (col.ComparePrimary left right) 0
-                            "the block follows MySQL's codepoint-ordered weights"
+                            "the blocks follow MySQL's codepoint-ordered weights"
                     Expect.isFalse (col.Equals "᪰" "᪱") "neighboring marks have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "᷀" "᷁") "supplemental marks have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "⃐" "⃑") "symbol marks have distinct MySQL weights"
                     Expect.isFalse (col.Equals "᪰" "\uE0BB\uF600")
                         "a literal marker cannot alias an extended combining mark"
+                    Expect.isFalse (col.Equals "᷀" "\uE0BB\uF680")
+                        "a literal marker cannot alias a supplemental mark"
+                    Expect.isFalse (col.Equals "⃐" "\uE0BB\uF700")
+                        "a literal marker cannot alias a symbol mark"
 
                 testCase "utf8mb4_general_ci keeps letterlike symbols at their written weights"
                 <| fun _ ->

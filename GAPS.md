@@ -1053,8 +1053,10 @@ lane matches MySQL at sizes 1–10 (288 searches per size), as does the
 base-block lane (822 searches per size). The adjacent U+31C0–U+31FF control
 also matches (330 searches per size) without an override.
 The [extended combining-mark probe](torture/findings/2026-10-17-general-ci-extended-combining-marks.md)
-preserves distinct U+1AB0–U+1AFF weights in CJK text; its expanded ngram
-lane matches MySQL at sizes 1–10 (186 searches per size).
+preserves distinct U+1AB0–U+1AFF, U+1DC0–U+1DFF, and U+20D0–U+20FF
+weights in CJK text. The adjacent U+FE20–U+FE2F block needs no override.
+Their expanded ngram lanes match MySQL at sizes 1–10 (186, 384, 198, and 96
+searches per size, respectively).
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

@@ -301,6 +301,10 @@ let private generalSyntheticPair c =
     // merges some of them before full-text postings are built.
     | c when c >= '\u1AB0' && c <= '\u1AFF' ->
         pair '\uE0BB' (char (0xF600 + int c - 0x1AB0))
+    | c when c >= '\u1DC0' && c <= '\u1DFF' ->
+        pair '\uE0BB' (char (0xF680 + int c - 0x1DC0))
+    | c when c >= '\u20D0' && c <= '\u20FF' ->
+        pair '\uE0BB' (char (0xF700 + int c - 0x20D0))
     // Letterlike symbols, number forms, and arrows retain their code-point
     // weights, except lowercase Roman numerals share uppercase weights.
     | c when c >= '\u2100' && c <= '\u21ff' ->
