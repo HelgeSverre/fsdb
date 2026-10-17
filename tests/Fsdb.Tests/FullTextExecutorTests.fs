@@ -573,6 +573,17 @@ let tests =
               for term, expected in [ "ㆣ", "1"; "ㆻ", "2"; "ㆤ", "3"; "ㆥ", "4" ] do
                   Expect.equal (search term) [ expected ] (term + " keeps its own posting")
 
+          testCase "general Unicode Bopomofo base ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE bopomofo_base_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO bopomofo_base_docs VALUES(1,'中ㄜ文'),(2,'中ㄮ文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM bopomofo_base_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "ㄜ") [ "1" ] "the older letter keeps its own posting"
+              Expect.equal (search "ㄮ") [ "2" ] "the extended base letter keeps its own posting"
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()

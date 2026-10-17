@@ -1,4 +1,4 @@
-# `utf8mb4_general_ci` Kanbun and Bopomofo extension weights
+# `utf8mb4_general_ci` Bopomofo and Kanbun weights
 
 The two-column ngram differential corpus over U+3190–U+31BF found false
 matches under `utf8mb4_general_ci`. At token size 1, 76 membership or
@@ -12,12 +12,21 @@ escaped marker, so equality, indexes, and ngram postings agree on the same
 distinction. Focused tests cover all 48 keys, their order, representative
 collisions, marker escaping, and full-text searches.
 
+The adjacent U+3100–U+318F Bopomofo block exposed the same problem. MySQL
+assigns each of its 144 code points a distinct, codepoint-ordered primary
+weight, while Fsdb initially produced only 143 keys. In particular, `ㄜ`
+and `ㄮ` shared a key and each search found both documents. A separate
+escaped mapping now preserves all 144 keys without changing keys from the
+earlier fix. Focused equality, ordering, marker, and posting tests cover it.
+
 The native differential command is:
 
 ```sh
 python3 torture/scripts/ngram-multicol-oracle.py --legacy-range 3190:31C0 --collation utf8mb4_general_ci
+python3 torture/scripts/ngram-multicol-oracle.py --legacy-range 3100:3190 --collation utf8mb4_general_ci
 ```
 
 The audited two-column corpus agrees on matching rows and relevance for all
-288 searches at each token size from 1 through 10. Other Unicode blocks and
-full-text query shapes remain outside this finding.
+288 extension-block searches and all 822 base-block searches at each token
+size from 1 through 10. Other Unicode blocks and full-text query shapes
+remain outside this finding.

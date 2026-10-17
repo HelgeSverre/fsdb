@@ -1590,6 +1590,19 @@ let tests =
                     Expect.isFalse (col.Equals "ㆣ" "\uE0B9\uF413")
                         "a literal marker cannot alias an extension letter"
 
+                testCase "utf8mb4_general_ci keeps Bopomofo base weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let forms = [ 0x3100 .. 0x318F ] |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> Set.ofList |> Set.count) 144
+                        "MySQL assigns each base Bopomofo code point a distinct primary weight"
+                    for left, right in forms |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "the block follows MySQL's codepoint-ordered weights"
+                    Expect.isFalse (col.Equals "ㄜ" "ㄮ") "the two letters have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "ㄜ" "\uE0BA\uF51C")
+                        "a literal marker cannot alias a Bopomofo letter"
+
                 testCase "utf8mb4_general_ci keeps letterlike symbols at their written weights"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
