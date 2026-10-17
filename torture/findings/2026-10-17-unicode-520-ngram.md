@@ -1,7 +1,8 @@
-# Unicode 5.2 collation and CJK ngram membership
+# Legacy Unicode collations and CJK ngram membership
 
 The existing multi-column CJK corpus passes under the server's default
-collation, but `utf8mb4_unicode_520_ci` changes which ngrams compare equal.
+collation, but `utf8mb4_unicode_520_ci` and `utf8mb4_unicode_ci` change which
+ngrams compare equal.
 Before the fix, native MySQL 8.4.11 and fsdb differed on 114 of 387 searches
 at token size 2. The spacing and format-control differences now match.
 
@@ -30,12 +31,14 @@ The full `utf8mb4_unicode_520_ci` corpus now has zero differences at every
 token size from 1 through 10 (3,870 searches). At size 5, fsdb previously
 matched the short Boolean term `하늘` against the five-Jamo ngram `하늘`:
 ICU composes that Jamo sequence into the same key, whereas MySQL's UCA 5.2
-assigns distinct weights. The legacy-only Jamo folding preserves the measured
-compatibility-Jamo equivalences without composing it into Hangul syllables.
-MySQL gave distinct weights to all 256 U+1100–U+11FF Jamo checked, and all
-146 compatibility or halfwidth Jamo whose NFKD decomposition lies in that
-range compared equal to their decomposition.
-The size-2 `utf8mb4_unicode_ci` corpus improves from 88 to 36 differences; those
-remaining cases require separate legacy UCA work. The size-2 legacy
-punctuation and radical lanes remain at zero. The pinned MySQL 8.4 container
-does not include a MeCab plugin; this comparison covers ngram only.
+assigns distinct weights. The shared legacy Unicode Jamo folding preserves
+the measured compatibility-Jamo equivalences without composing it into Hangul
+syllables. Under both `utf8mb4_unicode_ci` and `utf8mb4_unicode_520_ci`, MySQL
+gave distinct weights to all 256 U+1100–U+11FF Jamo checked, and all 146
+compatibility or halfwidth Jamo whose NFKD decomposition lies in that range
+compared equal to their decomposition. After combining the legacy UCA folds
+with this Jamo rule, the full `utf8mb4_unicode_ci` corpus also has zero
+differences at every token size from 1 through 10 (3,870 searches). The
+size-2 legacy punctuation and radical lanes remain at zero. The pinned MySQL
+8.4 container does not include a MeCab plugin; this comparison covers ngram
+only.
