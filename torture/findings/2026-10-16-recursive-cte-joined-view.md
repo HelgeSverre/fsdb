@@ -94,7 +94,7 @@ expressions contain no subqueries; the oracle includes a volatile
 `LIMIT 1 OFFSET 0` case.
 
 MySQL labels a recursive-only view `IS_UPDATABLE=YES` but rejects its UPDATE
-with 1288. FSDB rejects that UPDATE too and currently reports `NO`; this
-metadata difference remains. More complex recursive/dependent source
-compositions, layered security, and other concurrent write shapes still need
-separate audits.
+with 1288. Fsdb now matches both outcomes as part of the broader
+[derived-source metadata rule](2026-10-17-derived-source-view-metadata.md).
+More complex recursive/dependent source compositions, layered security, and
+other concurrent write shapes still need separate audits.
