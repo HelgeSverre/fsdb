@@ -238,6 +238,20 @@ let private foldLegacyUnicodeJamo (value: string) =
 // general_ci leaves compatibility Jamo distinct from conjoining Jamo.
 let private foldGeneralUnicodeJamo (value: string) = foldUnicodeJamo (fun _ -> None) value
 
+// ICU drops the halfwidth voicing marks from general_ci's primary key when
+// they join neighboring kana. MySQL gives each mark a positional weight.
+let private foldGeneralHalfwidthMarks (value: string) =
+    if not (value |> Seq.exists (fun c -> c = '\uE0C0' || c = '\uff9e' || c = '\uff9f')) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            match c with
+            | '\uE0C0' -> result.Append("\uE0C0\uE0C0") |> ignore
+            | '\uff9e' -> result.Append("\uE0C0\uE0C1") |> ignore
+            | '\uff9f' -> result.Append("\uE0C0\uE0C2") |> ignore
+            | _ -> result.Append(c) |> ignore
+        result.ToString()
+
 // MySQL's legacy UCA keeps some enclosed Korean/ideograph forms distinct,
 // while expanding enclosed kana and square unit forms that ICU keeps apart.
 let private foldLegacyEnclosedCjk (value: string) =
@@ -425,6 +439,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_general_ci" ->
             value.Replace("ß", "s").Replace("ẞ", "s")
             |> foldLegacySupplementary |> foldGeneralUnicodeJamo
+            |> foldGeneralHalfwidthMarks
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->
