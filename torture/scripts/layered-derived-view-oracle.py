@@ -332,6 +332,27 @@ def exercise(connection):
                     "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_shadow_outer'")))
     results.append(("joined lateral shadow update", outcome(connection,
                     "UPDATE lateral_shadow_outer SET n=9 WHERE id=1")))
+    run(connection, "GRANT SELECT ON probe.flags TO inner_owner")
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_before_target_inner AS "
+        "SELECT t.id,t.n,f.flag,d.aux FROM "
+        "(SELECT id,SUM(flag) flag FROM flags GROUP BY id) f "
+        "JOIN LATERAL (SELECT a.aux FROM aux a WHERE a.id=f.id) d ON d.aux>0 "
+        "JOIN target t ON t.id=f.id",
+        "GRANT SELECT,UPDATE ON probe.lateral_before_target_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_before_target_outer "
+        "AS SELECT id,n AS metric FROM lateral_before_target_inner",
+    ]:
+        results.append(("lateral before target create", outcome(connection, sql)))
+    before_target_update = "UPDATE lateral_before_target_outer SET metric=metric+1 WHERE id=1"
+    results.append(("lateral before target metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_before_target_outer'")))
+    results.append(("lateral before target initial", outcome(connection, before_target_update)))
+    for table in ("flags", "aux", "target"):
+        run(connection, f"REVOKE SELECT ON probe.{table} FROM inner_owner")
+        results.append((f"lateral before target revoked {table}", outcome(connection, before_target_update)))
+        run(connection, f"GRANT SELECT ON probe.{table} TO inner_owner")
     results.append(("final rows", outcome(connection, "SELECT id,n FROM target ORDER BY id")))
     return results
 
