@@ -49,6 +49,14 @@ def point_result(connection, coordinates, polygon):
         return cursor.fetchone()
 
 
+def point_distance(connection, coordinates, polygon):
+    point = f"ST_GeomFromText('POINT({coordinates})',4326)"
+    area = f"ST_GeomFromText('{polygon}',4326)"
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT ST_Distance({point},{area})")
+        return cursor.fetchone()[0]
+
+
 def cases():
     polygons = [
         "POLYGON((0 0,0 4,4 4,4 0,0 0))",
@@ -217,10 +225,15 @@ def main():
                                 ("combined reversed", polar_combined_reversed)):
                 expected = point_result(mysql_connection, coordinates, ring)
                 assert expected == polar_expected[(coordinates, label)], (coordinates, label, expected)
+                mysql_distance = point_distance(mysql_connection, coordinates, ring)
+                assert mysql_distance == 0.0, (coordinates, label, mysql_distance)
                 print(
                     "polar ring", coordinates, label,
                     expected,
                     point_result(fsdb_connection, coordinates, ring),
+                    "distance",
+                    mysql_distance,
+                    point_distance(fsdb_connection, coordinates, ring),
                 )
         exterior = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
         edge_probes = [

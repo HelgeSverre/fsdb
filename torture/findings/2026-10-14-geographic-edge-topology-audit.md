@@ -204,6 +204,15 @@ combined rings. This rules out fixing the polar discrepancy by changing only
 the standalone hole-ring membership test; the full polygon relation must be
 validated as a unit.
 
+The native oracle also pins `ST_Distance(point, polygon)=0` for both polar
+points against the exterior, the standalone hole in either ring direction,
+and the combined polygon in either direction. That includes cases where
+MySQL reports the point outside and `ST_Intersects=0`. Fsdb likewise returns
+zero for most of these cases but reports about 0.09536 m for the outside
+point against one standalone-hole ring direction. Distance therefore has a
+separate ring-order sensitivity and cannot be used to infer the missing
+containment or intersection decision.
+
 ## Near-machine-precision hole-edge offsets
 
 A separate MySQL 8.4.11 probe placed `LINESTRING(1.5 y,3.0 y)` beside the

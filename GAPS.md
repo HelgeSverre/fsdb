@@ -418,7 +418,10 @@ The [geographic strategy follow-up](torture/findings/2026-10-14-geographic-edge-
 confirms zero distance on both engines for every remaining line mismatch,
 including the MySQL case that reports no intersection. MySQL's point/area and
 line/area relations use distinct Boost geographic strategies; reproducing
-those decisions is the next spatial implementation step.
+those decisions is the next spatial implementation step. The polar point
+audit also finds MySQL distance zero for standalone and combined rings even
+when its point relation reports disjointness, so distance is not a substitute
+for that strategy.
 
 [`ST_DISTANCE_SPHERE` with a large finite radius](torture/findings/2026-10-17-spherical-radius-overflow.md)
 now retains finite and zero point-set distances and reports MySQL error 3049
