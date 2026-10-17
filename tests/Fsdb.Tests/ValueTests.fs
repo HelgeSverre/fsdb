@@ -1521,6 +1521,14 @@ let tests =
                         Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the decomposed spelling"
                     Expect.isFalse (col.Equals "\u3099" "\uE0E0\uE0E1") "literal marker cannot alias the combining mark"
 
+                testCase "utf8mb4_general_ci keeps CJK radicals distinct from their ideographs"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for radical, ideograph in [ "⼀", "一"; "⽇", "日"; "⾔", "言"; "⿑", "齊" ] do
+                        Expect.isFalse (col.Equals radical ideograph) (radical + " differs from " + ideograph)
+                        Expect.notEqual (col.KeyOf radical) (col.KeyOf ideograph) "index keys preserve the radical"
+                    Expect.isFalse (col.Equals "⽇" "\uE0F0\uE1C7") "literal marker cannot alias a radical"
+
                 testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
                     [ "utf8mb4_0900_ai_ci", true

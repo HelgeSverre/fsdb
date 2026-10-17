@@ -230,7 +230,9 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     }
                     matched = result(mysql_connection, prefix + "︵", "IN NATURAL LANGUAGE MODE")
                     assert representative.issubset(set(matched)), (size, matched)
-                if legacy_radicals:
+                # The legacy Unicode collation equates Kangxi and ideograph
+                # spellings; general_ci assigns the radical its own weight.
+                if legacy_radicals and collation != "utf8mb4_general_ci":
                     representative = {
                         index for index, char in enumerate(legacy_chars, 1)
                         if char in ("⼀", "一")
