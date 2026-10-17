@@ -15,8 +15,8 @@ python3 torture/scripts/ngram-multicol-oracle.py --collation utf8mb4_unicode_520
 The command exits nonzero if differences remain. It starts disposable
 native MySQL and fsdb servers, verifies the MySQL version, and compares ordered
 IDs and relevance across natural, Boolean, and query-expansion modes. The
-collation option also accepts `utf8mb4_unicode_ci` and `utf8mb4_general_ci` for
-subsequent comparisons.
+collation option also accepts `utf8mb4_unicode_ci`, `utf8mb4_general_ci`, and
+`utf8mb4_0900_as_cs` for subsequent comparisons.
 
 A seven-document reduction isolates Unicode spacing and format characters.
 With `body` values `生<character>日`, empty `title`, and characters U+3000,
@@ -42,3 +42,11 @@ differences at every token size from 1 through 10 (3,870 searches). The
 size-2 legacy punctuation and radical lanes remain at zero. The pinned MySQL
 8.4 container does not include a MeCab plugin; this comparison covers ngram
 only.
+
+An additional full two-column run under accent- and case-sensitive
+`utf8mb4_0900_as_cs` matched MySQL 8.4.11 at every token size from 1 through
+10 (3,870 searches). The `utf8mb4_unicode_ci` compatibility-ideograph range
+U+F900–U+FAFF also matched for 2,832 searches at each of token sizes 1 and
+2, including natural, Boolean, and expansion searches with phrase forms.
+These are ngram membership and relevance results, not exact collation-weight
+byte parity.
