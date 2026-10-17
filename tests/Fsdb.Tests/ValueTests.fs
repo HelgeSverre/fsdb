@@ -1102,11 +1102,24 @@ let tests =
                         (abs (distance [ wgsMixed; wgsOrigin; hugeRadius ] / 1e306 - 1.745329251994328))
                         1e-12
                         "a finite point-set minimum wins over an overflowing pair"
+                    Expect.isLessThan
+                        (abs (distance [ wgsOrigin; wgsAntipode; VDouble 5.72e307 ] / 1e308 - 1.7969909978533616))
+                        1e-12
+                        "a radius just below the antipodal overflow threshold stays finite"
+                    Expect.isLessThan
+                        (abs (distance [ wgsOrigin; wgsMixed; hugeRadius ] / 1e306 - 1.745329251994328))
+                        1e-12
+                        "reversing a point-set pair retains the finite minimum"
                     Expect.throwsC
                         (fun () -> call "ST_Distance_Sphere" [ wgsOrigin; wgsAntipode; hugeRadius ] |> ignore)
                         (function
                         | Fsdb.Functions.SqlError(3049, "Overflow error: INFINITY in function st_distance_sphere.") -> ()
                         | error -> failtestf "expected MySQL spherical overflow error, got %A" error)
+                    Expect.throwsC
+                        (fun () -> call "ST_Distance_Sphere" [ wgsOrigin; wgsAntipode; VDouble 5.73e307 ] |> ignore)
+                        (function
+                        | Fsdb.Functions.SqlError(3049, "Overflow error: INFINITY in function st_distance_sphere.") -> ()
+                        | error -> failtestf "expected overflow just above the antipodal threshold, got %A" error)
 
                 testCase "ST_Length measures planar and WGS 84 linework"
                 <| fun _ ->

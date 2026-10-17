@@ -17,8 +17,10 @@ st_distance_sphere.`, while fsdb returned infinity.
 Fsdb now computes the central angle before multiplying by the radius and
 raises MySQL error 3049 only when the final point-set distance is infinite.
 The focused regression and native oracle cover zero, finite, multipoint,
-and overflowing results. All six oracle cases match MySQL; `1e307` times
-the antipodal angle remains finite.
+and overflowing results. All eleven oracle cases match MySQL, including
+radii on opposite sides of the antipodal overflow threshold, near-antipodal
+points on either side of the antimeridian, and a reversed point-set pair.
+`1e307` times the antipodal angle remains finite.
 
 This does not address MySQL's separate parse-time error 1367 for an
 out-of-range `1e309` literal. It also does not assert exact bitwise parity

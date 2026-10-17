@@ -86,6 +86,11 @@ def main():
                     ("POINT(0 0)", "POINT(0 180)", "1e308"),
                     ("MULTIPOINT((0 0),(0 180))", "POINT(0 0)", "1e308"),
                     ("MULTIPOINT((0 180),(0 1))", "POINT(0 0)", "1e308"),
+                    ("POINT(0 0)", "POINT(0 180)", "5.72e307"),
+                    ("POINT(0 0)", "POINT(0 180)", "5.73e307"),
+                    ("POINT(0 0)", "POINT(0 179.999999)", "5.72e307"),
+                    ("POINT(0 0)", "POINT(0 -179.999999)", "5.72e307"),
+                    ("POINT(0 0)", "MULTIPOINT((0 180),(0 1))", "1e308"),
                 ]
                 for first, second, radius in cases:
                     expected = run(mysql_connection, first, second, radius)
