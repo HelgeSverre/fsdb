@@ -98,3 +98,34 @@ but they provide no evidence that the added path closes the scaling gap. The
 prototype was removed and the normal Release CLI rebuilt. Further work should
 identify a measured cost inside row preparation or publication rather than
 moving the whole preparation path speculatively.
+
+## Insert core, database slot, and durable acknowledgement
+
+Another temporary Release build timed the keyless insert's row fold, index
+update, immutable row publication, wait for the database slot, time holding
+that slot, commit-event preparation, and durable acknowledgement. The profile
+used fresh WAL-backed fsdb and durable MySQL 8.4.11 databases, 1,000 seeded
+users/orders/articles, three seconds of warmup, and one 20-second measured
+trial per worker count. Counters accumulated across operations; the values
+below are deltas over the last complete 20,000 keyless inserts. Stopwatch
+frequency was 1,000,000,000 ticks/s. All timings are wall time, so concurrent
+call times are not additive CPU costs. Timers themselves also add overhead.
+
+| Writers | fsdb inserts/s | MySQL inserts/s | Insert core µs | Row fold µs | Reindex µs | Publish rows µs | Slot wait µs | Slot held µs | Events µs | Durable ack µs |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 7,199 | 16,600 | 8.01 | 6.99 | 0.42 | 0.27 | 0.02 | 10.28 | 0.89 | 60.18 |
+| 8 | 11,734 | 47,440 | 17.48 | 15.19 | 0.83 | 0.73 | 13.92 | 23.20 | 1.91 | 303.74 |
+
+The slot-held timer encloses insert core and event preparation; do not add
+these columns. At eight writers, the immutable row publication itself is
+below one microsecond per insert. The database-slot wait is material but
+much smaller than durable acknowledgement. Insert-core time approximately
+doubles under contention, primarily in the row fold, yet that growth also
+does not explain the earlier executor-wide increase by itself. The next
+useful measurement is within durable acknowledgement and the work between
+the executor entry and this storage call. A change to immutable row
+publication alone is unlikely to close this measured throughput gap.
+
+These are diagnostic single trials, not an optimization comparison. The
+temporary counters were removed after measurement; the ordinary Release
+build had zero warnings.
