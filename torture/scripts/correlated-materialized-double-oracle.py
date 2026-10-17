@@ -176,6 +176,19 @@ def main():
                             )
                             assert cursor.fetchone()[0] == count, (hint, text)
                             assert cursor._result.warning_count == warnings, (hint, text, cursor._result.warning_count)
+                    for hint, in_warning_cases in (
+                        ("", (("12.5x", 1, 1), ("1e309", 0, 0), ("Infinity", 1, 1), ("12.5", 1, 0))),
+                        ("IGNORE INDEX(ix_k)", (("12.5x", 1, 5), ("1e309", 1, 5),
+                                                ("Infinity", 1, 5), ("12.5", 1, 0))),
+                    ):
+                        for text, count, warnings in in_warning_cases:
+                            cursor.execute("UPDATE outer_bounds SET s=%s WHERE id=7", (text,))
+                            cursor.execute(
+                                "SELECT (SELECT COUNT(*) FROM warning_rows d " + hint
+                                + " WHERE d.k IN(o.s,o.s)) FROM outer_bounds o WHERE o.id=7"
+                            )
+                            assert cursor.fetchone()[0] == count, (hint, text)
+                            assert cursor._result.warning_count == warnings, (hint, text, cursor._result.warning_count)
                     cursor.execute(
                         "SELECT x=i,x+0e0=i,9007199254740992e0=i,"
                         "9007199254740992e0+0e0=i "

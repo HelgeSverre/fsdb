@@ -25,11 +25,12 @@ The physical `IN` planner also declined `DOUBLE` keys, so even
 `d.k IN(o.s,o.s)` scanned 1,001 inner rows for each outer probe. It now
 converts finite numeric values and fully numeric strings to the DOUBLE key
 before unioning indexed row IDs. Duplicate bounds remain deduplicated by row
-ID, and the original `IN` predicate remains the residual check. Malformed or
-overflowing text still declines the index and scans. In the focused regression,
+ID, and the original `IN` predicate remains the residual check. Malformed and
+overflowing text follow the shared equality-probe rules below. In the focused regression,
 the clean-string probe falls from 2,004 to fewer than 80 residual calls across
 direct and pass-through physical sources. The native MySQL 8.4.11 oracle
 matches the audited row counts for each string form.
+
 ## Numeric conversion warnings and indexed malformed bounds
 
 The follow-up oracle distinguishes an indexed comparison from `IGNORE INDEX`.
@@ -50,3 +51,12 @@ an infinite equality probe, which excludes every finite stored value;
 malformed overflow text retains the scan; range probes continue to require
 a fully numeric finite bound. The index probe distinguishes overflow text
 from nonnumeric words such as `Infinity` before applying this rule.
+
+The oracle also covers duplicate positive `IN` bounds. MySQL's indexed
+`k IN(o.s,o.s)` with malformed `12.5x` evaluates only its matching candidate,
+giving one warning; `IGNORE INDEX` evaluates all three rows and emits five.
+Fsdb passes string bounds through the shared physical equality-key conversion,
+and scalar `IN` stops comparing candidates after a true match. Indexed
+`1e309` yields no row or warning, while the scan still matches the maximum
+finite DOUBLE with five warnings. The focused session regression checks all
+eight indexed and scanned combinations, including `Infinity` and clean text.

@@ -6270,21 +6270,23 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     xs
                     |> traverse eval
                     |> Result.bind (fun values ->
-                        List.zip xs values
-                        |> traverse (fun (candidateExpr, candidate) ->
-                            comparisonResult
-                                ctx
-                                e
-                                (tryColumnDefForExpr ctx e)
-                                ve
-                                candidateExpr
-                                (tryColumnDefForExpr ctx candidateExpr)
-                                Eq
-                                candidate)
-                        |> Result.map (fun comparisons ->
-                            if comparisons |> List.exists ((=) (VInt 1L)) then VInt 1L
-                            elif comparisons |> List.exists ((=) VNull) then VNull
-                            else VInt 0L)))
+                        let rec compareUntilMatch sawNull = function
+                            | [] -> Ok(if sawNull then VNull else VInt 0L)
+                            | (candidateExpr, candidate) :: rest ->
+                                match comparisonResult
+                                          ctx
+                                          e
+                                          (tryColumnDefForExpr ctx e)
+                                          ve
+                                          candidateExpr
+                                          (tryColumnDefForExpr ctx candidateExpr)
+                                          Eq
+                                          candidate with
+                                | Error error -> Error error
+                                | Ok(VInt 1L) -> Ok(VInt 1L)
+                                | Ok VNull -> compareUntilMatch true rest
+                                | Ok _ -> compareUntilMatch sawNull rest
+                        List.zip xs values |> compareUntilMatch false))
     | InSubquery((Row _ as e), select) ->
         evalRowOperand ctx e
         |> Result.bind (fun value ->
@@ -15379,14 +15381,7 @@ and private tryProjectedPhysicalCorrelatedInRowIds store (projection: PhysicalPr
         |> Option.map (fun name -> name, None)
     let doubleBound = function
         | VNull -> Some VNull
-        | VString text when not (System.String.IsNullOrWhiteSpace text) ->
-            match System.Double.TryParse(
-                text,
-                System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture
-            ) with
-            | true, number when System.Double.IsFinite number -> Some(VDouble number)
-            | _ -> None
+        | VString _ as value -> Some value
         | (VDouble _ | VInt _ | VUInt _ | VDecimal _ | VBit _) as value ->
             let number = Value.toDouble value
             if System.Double.IsFinite number then Some(VDouble number) else None
