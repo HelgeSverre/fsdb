@@ -2420,6 +2420,52 @@ let tests =
                       Expect.equal rows expected "secondary-order write reselects after the insert"
                   | other -> failtestf "expected secondary-order rows, got %A" other
 
+          testCase "limited ordered write reselects secondary-index inserts at LIMIT two"
+          <| fun _ ->
+              let cases =
+                  [ "ASC", 0, "0", true, [ 0; 1 ]
+                    "ASC", 4, "4", false, [ 1; 2 ]
+                    "DESC", 4, "4", true, [ 4; 3 ]
+                    "DESC", 0, "0", false, [ 3; 2 ]
+                    "ASC", 0, "NULL", true, [ 0; 1 ] ]
+              for verb in [ "UPDATE"; "DELETE" ] do
+                for direction, insertedId, rankSql, shouldWait, changedIds in cases do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_secondary_two(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  handle setup "INSERT INTO tx_secondary_two VALUES(1,1,0),(2,2,0),(3,3,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_secondary_two VALUES(%d,%s,0)" insertedId rankSql)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a secondary-order candidate"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let statement =
+                              (if verb = "UPDATE" then "UPDATE tx_secondary_two SET n=n+1"
+                               else "DELETE FROM tx_secondary_two")
+                              + " WHERE n>=0 ORDER BY rank_value " + direction + " LIMIT 2"
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "secondary LIMIT two writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "secondary LIMIT two writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait "secondary LIMIT two frontier wait"
+                  Expect.equal result (Affected 2UL) "two secondary-ordered rows change"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                  match handle setup "SELECT id,n FROM tx_secondary_two ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          ([ 1; 2; 3; insertedId ] |> List.sort)
+                          |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
+                          |> List.map (fun id ->
+                              [ Some(string id); Some(if List.contains id changedIds then "1" else "0") ])
+                      Expect.equal rows expected "secondary LIMIT two write reselects after insert"
+                  | other -> failtestf "expected secondary LIMIT two rows, got %A" other
+
           testCase "equal non-unique secondary keys do not serialize inserts"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

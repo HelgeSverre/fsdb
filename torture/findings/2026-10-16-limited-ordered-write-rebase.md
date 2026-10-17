@@ -141,6 +141,17 @@ Distinct primary-key inserts with
 the same non-unique secondary value remain independent on both engines; the
 observation claims do not serialize them.
 
+At `LIMIT 2`, the native oracle now covers another ten UPDATE/DELETE cases
+with three visible rows. Fsdb and MySQL both wait for an insert that enters
+the selected pair, then update or delete the same two rows. The final rows
+and affected counts also agree when the pending insert sorts beyond the
+pair. For this small-table shape, MySQL waits even for those beyond-frontier
+inserts, while fsdb completes before the owner commits. A separate 1,000-row
+MySQL case with an insert beyond the frontier completes without waiting.
+The wait difference is therefore recorded as an open scheduling divergence;
+the audited evidence does not support a global rule to wait for every
+secondary-key claim at `LIMIT 2`.
+
 An in-memory A/B/A check with 1,000 sequential inserts into a table with one
 secondary index measured warm trials around 186–205 ms on the previous and
 current revisions. The spread does not establish a precise cost difference;

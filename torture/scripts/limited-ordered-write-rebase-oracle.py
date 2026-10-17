@@ -542,20 +542,16 @@ def main():
                     finally:
                         waiter.close()
 
-                secondary_cases = (
-                    ("ASC", 0, 0, True, 0), ("ASC", 3, 3, False, 1),
-                    ("DESC", 3, 3, True, 3), ("DESC", 0, 0, False, 2),
-                    ("ASC", 0, None, True, 0),
-                )
-                for verb, (direction, inserted_id, inserted_rank, should_wait, changed_id) in itertools.product(
-                    ("UPDATE", "DELETE"), secondary_cases
-                ):
+                def check_secondary_insert(verb, limit, direction, inserted_id, inserted_rank, should_wait, changed_ids):
                     waiter = connect(socket)
                     try:
                         with owner.cursor() as cursor:
                             cursor.execute("DROP TABLE IF EXISTS target")
                             cursor.execute("CREATE TABLE target(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))")
-                            cursor.execute("INSERT INTO target VALUES(1,1,0),(2,2,0)")
+                            cursor.executemany(
+                                "INSERT INTO target VALUES(%s,%s,0)",
+                                [(row_id, row_id) for row_id in range(1, limit + 2)],
+                            )
                             cursor.execute("BEGIN")
                             cursor.execute("INSERT INTO target VALUES(%s,%s,0)", (inserted_id, inserted_rank))
                         with waiter.cursor() as cursor:
@@ -569,7 +565,7 @@ def main():
                                 with waiter.cursor() as cursor:
                                     started.set()
                                     action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
-                                    cursor.execute(f"{action} WHERE n>=0 ORDER BY rank_value {direction} LIMIT 1")
+                                    cursor.execute(f"{action} WHERE n>=0 ORDER BY rank_value {direction} LIMIT {limit}")
                                     outcome["affected"] = cursor.rowcount
                                     cursor.execute("COMMIT")
                             except Exception as error:
@@ -586,17 +582,71 @@ def main():
                         with owner.cursor() as cursor:
                             cursor.execute("SELECT id,rank_value,n FROM target ORDER BY id")
                             final_rows = cursor.fetchall()
-                        ranks = {1: 1, 2: 2, inserted_id: inserted_rank}
+                        ranks = {row_id: row_id for row_id in range(1, limit + 2)}
+                        ranks[inserted_id] = inserted_rank
                         expected_rows = tuple(
-                            (row_id, ranks[row_id], int(row_id == changed_id))
-                            for row_id in sorted((1, 2, inserted_id))
-                            if verb == "UPDATE" or row_id != changed_id
+                            (row_id, ranks[row_id], int(row_id in changed_ids))
+                            for row_id in sorted(ranks)
+                            if verb == "UPDATE" or row_id not in changed_ids
                         )
-                        assert waited == should_wait, (verb, direction, inserted_id, waited)
-                        assert outcome == {"affected": 1}, outcome
-                        assert final_rows == expected_rows, (verb, direction, inserted_id, final_rows)
+                        assert waited == should_wait, (verb, limit, direction, inserted_id, waited)
+                        assert outcome == {"affected": limit}, outcome
+                        assert final_rows == expected_rows, (verb, limit, direction, inserted_id, final_rows)
                     finally:
                         waiter.close()
+
+                secondary_cases = (
+                    (1, "ASC", 0, 0, True, (0,)),
+                    (1, "ASC", 3, 3, False, (1,)),
+                    (1, "DESC", 3, 3, True, (3,)),
+                    (1, "DESC", 0, 0, False, (2,)),
+                    (1, "ASC", 0, None, True, (0,)),
+                    (2, "ASC", 0, 0, True, (0, 1)),
+                    (2, "ASC", 4, 4, True, (1, 2)),
+                    (2, "DESC", 4, 4, True, (4, 3)),
+                    (2, "DESC", 0, 0, True, (3, 2)),
+                    (2, "ASC", 0, None, True, (0, 1)),
+                )
+                for verb, case in itertools.product(("UPDATE", "DELETE"), secondary_cases):
+                    check_secondary_insert(verb, *case)
+
+                waiter = connect(socket)
+                try:
+                    with owner.cursor() as cursor:
+                        cursor.execute("DROP TABLE IF EXISTS target")
+                        cursor.execute("CREATE TABLE target(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))")
+                        cursor.executemany("INSERT INTO target VALUES(%s,%s,0)", [(i, i) for i in range(1, 1001)])
+                        cursor.execute("BEGIN")
+                        cursor.execute("INSERT INTO target VALUES(2000,2000,0)")
+                    with waiter.cursor() as cursor:
+                        cursor.execute("USE probe")
+                        cursor.execute("BEGIN")
+                    started = threading.Event()
+                    outcome = {}
+
+                    def waiting_after_large_insert():
+                        try:
+                            with waiter.cursor() as cursor:
+                                started.set()
+                                cursor.execute("UPDATE target SET n=n+1 WHERE n>=0 ORDER BY rank_value ASC LIMIT 2")
+                                outcome["affected"] = cursor.rowcount
+                                cursor.execute("COMMIT")
+                        except Exception as error:
+                            outcome["error"] = error
+
+                    thread = threading.Thread(target=waiting_after_large_insert, daemon=True)
+                    thread.start()
+                    assert started.wait(2)
+                    thread.join(0.2)
+                    assert not thread.is_alive(), "large secondary-order writer need not wait beyond the frontier"
+                    owner.commit()
+                    thread.join(5)
+                    assert outcome == {"affected": 2}, outcome
+                    with owner.cursor() as cursor:
+                        cursor.execute("SELECT id,n FROM target WHERE n=1 OR id=2000 ORDER BY id")
+                        assert cursor.fetchall() == ((1, 1), (2, 1), (2000, 0))
+                finally:
+                    waiter.close()
 
                 print(f"MySQL {version}: {cases} ordered LIMIT 1/2/3 writes reselected after updates/deletes; "
                       f"{len(insert_cases) * 4} integer, {len(date_cases) * 2} DATE, "
