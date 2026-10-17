@@ -809,6 +809,12 @@ rejects invalid target rows. An audited
 dependent-CTE UPDATE waits and rebases on its physical row under contention.
 Broader recursive compositions, layered security, and
 other concurrent write shapes remain open.
+Recursive-only views also report MySQL's audited `IS_UPDATABLE=YES` metadata
+for direct, joined, and nested-derived CTE projections, while UPDATE still
+returns 1288. Computed, distinct, and grouped *outer* projections report `NO`;
+grouping or DISTINCT inside a nested derived source still reports `YES`.
+An explicit TEMPTABLE algorithm reports `NO`, including through a direct outer
+view, while MERGE and UNDEFINED retain the audited `YES` metadata.
 [Audited `STRAIGHT_JOIN` edges](torture/findings/2026-10-15-multiple-derived-straight-view.md)
 between those derived sources or at the physical target retain the same
 writable metadata and target-predicate filtering.
@@ -833,7 +839,9 @@ also preserve writable metadata and target identity through a two-source
 dependency chain. [Aggregate-derived sources followed by one or two dependent
 `LATERAL` projections](torture/findings/2026-10-15-composed-join-view-writes.md#aggregate-source-followed-by-dependent-lateral-sources)
 also retain writable metadata, target identity, and CHECK OPTION behavior
-when the physical target is last. [JSON_TABLE joined views](torture/findings/2026-10-15-json-table-joined-view.md)
+when the physical target is last. A [two-layer lateral/aggregate checked view](torture/findings/2026-10-15-composed-join-view-writes.md#layered-lateral-and-aggregate-checks)
+also updates a renamed target and enforces both CASCADED predicates.
+[JSON_TABLE joined views](torture/findings/2026-10-15-json-table-joined-view.md)
 also update a physical component when the table function follows or precedes
 it, including dependent table-function chains; JSON_TABLE columns remain
 read-only. An [independent `LATERAL` first source](torture/findings/2026-10-15-composed-join-view-writes.md#independent-lateral-source-first)
@@ -855,9 +863,41 @@ row under contention; renamed exposed columns and CHECK OPTION match the
 Audited [inner joined views used as the first source of another joined
 mutation](torture/findings/2026-10-15-nested-joined-view-mutation-source.md)
 also update the physical target with either internal source order, retain
-CHECK OPTION, and wait under contention. Uniquely owned bare view-target
-assignments also work; ambiguous bare columns return 1052. Broader join,
-multi-target, and security-layer combinations remain open.
+CHECK OPTION, and wait under contention. The [nested mutation oracle](torture/scripts/joined-view-nested-mutation-oracle.py)
+also covers a writable view in the second or third position of an inner UPDATE
+join; its physical row is claimed before the statement, and outer-table read
+grants still apply. Uniquely owned bare view-target assignments also work;
+ambiguous bare columns return 1052. [Audited two-target UPDATEs](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#a-physical-target-beside-the-writable-view)
+write a separate physical join source beside the view, wait and rebase under
+contention, enforce CHECK OPTION atomically, and keep caller and layered
+definer grants separate; a bare assignment to a uniquely exposed outer column
+also resolves to that physical source, even if a hidden view base column shares
+its name. Audited two-source LEFT/RIGHT joins also update the view and the
+preserving physical table together: a missing or filtered-out nullable view
+row leaves that target untouched while the preserving row can still change;
+view predicates remain in the join condition and CHECK OPTION rolls back an
+invalid two-target write. Audited three-source outer chains preserve the
+first target when an intermediate row is absent and reject CHECK OPTION
+changes atomically. A later right-preserving joined view also stays writable
+after a preceding LEFT JOIN, including when its companion row is absent.
+An audited fourth physical source after that view can be optional under
+`LEFT JOIN`, or preserve its own row under `RIGHT JOIN` when the view is absent;
+both retain MySQL's matched-target affected counts. A [fifth right-preserving
+physical source](torture/findings/2026-10-15-nested-joined-view-mutation-source.md)
+also keeps the view and optional targets writable when matched, or updates
+itself alone without a view match. A fully matched five-source chain also
+rejects a `CASCADED CHECK OPTION` violation atomically across all four
+physical targets; the three combinations with missing optional targets
+likewise preserve every present row.
+[Contended writes across the view and outer physical targets](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#contended-multi-target-outer-writes)
+now claim every assigned table before rebasing the audited four- and
+five-source outer joins.
+Other wider outer-join trees, multi-target shapes, and broader security-layer
+combinations remain open. [Two writable joined views](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
+now update both physical targets even when their read-side internal table
+aliases, writable physical target aliases, or independent derived read-source
+aliases match; dependent and grouped non-table source collisions remain
+unaudited.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
 before a local upload or server-side file read; ordinary inserts remain
 available through their supported forms.
@@ -1659,7 +1699,9 @@ implementation effort:
    updatable view](torture/findings/2026-10-15-joined-view-mutation-source.md)
    now claims and rebases its physical row; [audited inner joined view
    sources](torture/findings/2026-10-15-nested-joined-view-mutation-source.md)
-   do likewise, including uniquely owned bare assignments. Literal equality
+   do likewise, including uniquely owned bare assignments; a writable view
+   in the second or third position of an inner join follows the same physical claim.
+   Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.
    Broader write shapes remain to audit.

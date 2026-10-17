@@ -1,5 +1,6 @@
 """MySQL 8.4 oracle for an UPDATE through a view join followed by another join."""
 
+import itertools
 import pathlib
 import subprocess
 import tempfile
@@ -46,21 +47,34 @@ def main():
                     assert version.startswith("8.4.11"), version
                     for sql in [
                         "CREATE DATABASE probe", "USE probe",
-                        "CREATE TABLE t(id INT PRIMARY KEY,n INT)",
+                        "CREATE TABLE t(id INT PRIMARY KEY,n INT,m INT DEFAULT 0)",
                         "CREATE TABLE l(id INT PRIMARY KEY)",
                         "CREATE TABLE x(id INT PRIMARY KEY)",
-                        "INSERT INTO t VALUES(1,0)", "INSERT INTO l VALUES(1)",
-                        "INSERT INTO x VALUES(1)",
+                        "CREATE TABLE y(id INT PRIMARY KEY)",
+                        "INSERT INTO t(id,n) VALUES(1,0)", "INSERT INTO l VALUES(1)",
+                        "INSERT INTO x VALUES(1)", "INSERT INTO y VALUES(1)",
                     ]:
                         cursor.execute(sql)
                 waiter.select_db("probe")
                 reader.select_db("probe")
 
-                for from_clause, assignment in (
-                    ("t JOIN l ON l.id=t.id", "v.n=v.n+1"),
-                    ("l JOIN t ON l.id=t.id", "v.n=v.n+1"),
-                    ("l JOIN t ON l.id=t.id", "n=n+1"),
+                for (from_clause, assignment), view_position in itertools.product(
+                    (
+                        ("t JOIN l ON l.id=t.id", "v.n=v.n+1"),
+                        ("l JOIN t ON l.id=t.id", "v.n=v.n+1"),
+                        ("l JOIN t ON l.id=t.id", "n=n+1"),
+                    ),
+                    (1, 2, 3),
                 ):
+                    def joined_source(view_name):
+                        if view_position == 1:
+                            return f"{view_name} JOIN x ON x.id={view_name}.id"
+                        if view_position == 2:
+                            return f"x JOIN {view_name} ON x.id={view_name}.id"
+                        return (
+                            f"x JOIN y ON y.id=x.id JOIN {view_name} "
+                            f"ON {view_name}.id=y.id"
+                        )
                     with owner.cursor() as cursor:
                         cursor.execute("UPDATE t SET n=0 WHERE id=1")
                         cursor.execute("DROP VIEW IF EXISTS v")
@@ -82,7 +96,7 @@ def main():
                                 cursor.execute("BEGIN")
                                 started.set()
                                 cursor.execute(
-                                    "UPDATE v JOIN x ON x.id=v.id "
+                                    "UPDATE " + joined_source("v") + " "
                                     "SET " + assignment + " WHERE v.id=1"
                                 )
                                 outcome["affected"] = cursor.rowcount
@@ -111,7 +125,7 @@ def main():
                         )
                         try:
                             cursor.execute(
-                                "UPDATE checked JOIN x ON x.id=checked.id "
+                                "UPDATE " + joined_source("checked") + " "
                                 "SET checked.id=2 WHERE checked.id=1"
                             )
                         except pymysql.MySQLError as error:
@@ -123,17 +137,240 @@ def main():
 
                 with reader.cursor() as cursor:
                     cursor.execute("ALTER TABLE x ADD COLUMN n INT DEFAULT 0")
+                    cursor.execute("ALTER TABLE x ADD COLUMN m INT DEFAULT 0")
+                    for source in (
+                        "x JOIN v ON x.id=v.id",
+                        "v JOIN x ON x.id=v.id",
+                        "x JOIN y ON y.id=x.id JOIN v ON v.id=y.id",
+                    ):
+                        cursor.execute("UPDATE x SET n=0")
+                        cursor.execute("UPDATE t SET n=2 WHERE id=1")
+                        cursor.execute("UPDATE " + source + " SET x.n=x.n+1 WHERE v.id=1")
+                        assert cursor.rowcount == 1, source
+                        cursor.execute("SELECT n FROM x WHERE id=1")
+                        assert cursor.fetchone() == (1,), source
+                        cursor.execute("SELECT n FROM t WHERE id=1")
+                        assert cursor.fetchone() == (2,), source
+                        cursor.execute("UPDATE " + source + " SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1")
+                        assert cursor.rowcount == 2, source
+                        cursor.execute("SELECT n FROM x WHERE id=1")
+                        assert cursor.fetchone() == (2,), source
+                        cursor.execute("SELECT n FROM t WHERE id=1")
+                        assert cursor.fetchone() == (3,), source
+                        cursor.execute("UPDATE x SET m=0")
+                        cursor.execute("UPDATE " + source + " SET m=m+1,v.n=v.n+1 WHERE v.id=1")
+                        assert cursor.rowcount == 2, source
+                        cursor.execute("SELECT m FROM x WHERE id=1")
+                        assert cursor.fetchone() == (1,), source
+                        cursor.execute("UPDATE t SET n=3 WHERE id=1")
+                    for source in (
+                        "v LEFT JOIN x ON x.id=v.id",
+                        "x LEFT JOIN v ON v.id=x.id",
+                        "v RIGHT JOIN x ON x.id=v.id",
+                    ):
+                        cursor.execute("UPDATE t SET n=3 WHERE id=1")
+                        cursor.execute("UPDATE " + source + " SET v.n=v.n+1 WHERE v.id=1")
+                        assert cursor.rowcount == 1, source
+                        cursor.execute("SELECT n FROM t WHERE id=1")
+                        assert cursor.fetchone() == (4,), source
+                    cursor.execute("INSERT INTO x(id) VALUES(3)")
+                    cursor.execute(
+                        "UPDATE x LEFT JOIN v ON v.id=x.id SET v.n=v.n+1 WHERE x.id=3"
+                    )
+                    assert cursor.rowcount == 0
+                    cursor.execute("UPDATE x SET n=0 WHERE id IN (1,3)")
+                    cursor.execute("UPDATE t SET n=3 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE x LEFT JOIN v ON v.id=x.id "
+                        "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+                    )
+                    assert cursor.rowcount == 2
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (4,)
+                    cursor.execute(
+                        "UPDATE x LEFT JOIN v ON v.id=x.id "
+                        "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=3"
+                    )
+                    assert cursor.rowcount == 1
+                    cursor.execute("SELECT n FROM x WHERE id=3")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute(
+                        "CREATE VIEW filtered_v AS SELECT t.id,t.n FROM t JOIN l "
+                        "ON l.id=t.id WHERE t.n>0"
+                    )
+                    cursor.execute("UPDATE x SET n=0 WHERE id IN (1,3)")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    for source in (
+                        "x LEFT JOIN filtered_v v ON v.id=x.id",
+                        "filtered_v v RIGHT JOIN x ON v.id=x.id",
+                    ):
+                        for id in (1, 3):
+                            cursor.execute(f"UPDATE x SET n=0 WHERE id={id}")
+                            cursor.execute(
+                                "UPDATE " + source
+                                + f" SET x.n=x.n+1,v.n=v.n+1 WHERE x.id={id}"
+                            )
+                            assert cursor.rowcount == 1, (source, id)
+                            cursor.execute(f"SELECT n FROM x WHERE id={id}")
+                            assert cursor.fetchone() == (1,), (source, id)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (0,)
+                    cursor.execute("UPDATE t SET n=10 WHERE id=1")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE x LEFT JOIN filtered_v v ON v.id=x.id "
+                        "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+                    )
+                    assert cursor.rowcount == 2
+                    cursor.execute("UPDATE x SET n=2 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=3 WHERE id=1")
+                    with owner.cursor() as owner_cursor:
+                        owner_cursor.execute("BEGIN")
+                        owner_cursor.execute("UPDATE t SET n=n+1 WHERE id=1")
+                    multi_started = threading.Event()
+                    multi_finished = threading.Event()
+                    multi_outcome = {}
+
+                    def waiting_multi_target():
+                        try:
+                            with waiter.cursor() as waiting_cursor:
+                                waiting_cursor.execute("BEGIN")
+                                multi_started.set()
+                                waiting_cursor.execute(
+                                    "UPDATE x JOIN v ON x.id=v.id "
+                                    "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+                                )
+                                multi_outcome["affected"] = waiting_cursor.rowcount
+                                waiting_cursor.execute("COMMIT")
+                        except Exception as error:
+                            multi_outcome["error"] = error
+                        finally:
+                            multi_finished.set()
+
+                    multi_thread = threading.Thread(target=waiting_multi_target, daemon=True)
+                    multi_thread.start()
+                    assert multi_started.wait(2), "multi-target UPDATE did not start"
+                    assert not multi_finished.wait(0.2), "multi-target UPDATE did not wait"
+                    owner.commit()
+                    assert multi_finished.wait(5), "multi-target UPDATE did not resume"
+                    multi_thread.join()
+                    assert multi_outcome == {"affected": 2}, multi_outcome
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (3,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (5,)
                     try:
                         cursor.execute(
-                            "UPDATE v JOIN x ON x.id=v.id SET n=n+1 WHERE v.id=1"
+                            "UPDATE x JOIN checked ON x.id=checked.id "
+                            "SET x.n=x.n+1,checked.id=2 WHERE checked.id=1"
                         )
                     except pymysql.MySQLError as error:
-                        assert error.args[0] == 1052, error.args
+                        assert error.args[0] == 1369, error.args
                     else:
-                        raise AssertionError("shared bare n should be ambiguous")
+                        raise AssertionError("multi-target CHECK OPTION should reject the write")
+                    try:
+                        cursor.execute(
+                            "UPDATE x LEFT JOIN checked ON x.id=checked.id "
+                            "SET x.n=x.n+1,checked.id=2 WHERE x.id=1"
+                        )
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error.args
+                    else:
+                        raise AssertionError("outer-join CHECK OPTION should reject the write")
+                    cursor.execute("SELECT id,n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (1, 3)
+                    cursor.execute("SELECT id,n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (1, 5)
+                    cursor.execute("CREATE USER 'limited_view_definer'@'localhost'")
+                    cursor.execute("GRANT SELECT,UPDATE ON probe.t TO 'limited_view_definer'@'localhost'")
+                    cursor.execute("GRANT SELECT ON probe.l TO 'limited_view_definer'@'localhost'")
+                    cursor.execute(
+                        "CREATE DEFINER='limited_view_definer'@'localhost' SQL SECURITY DEFINER "
+                        "VIEW limited_v AS SELECT t.id,t.n FROM t JOIN l ON l.id=t.id"
+                    )
+                    cursor.execute(
+                        "UPDATE x JOIN limited_v ON x.id=limited_v.id "
+                        "SET x.n=x.n+1,limited_v.n=limited_v.n+1 WHERE limited_v.id=1"
+                    )
+                    assert cursor.rowcount == 2
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (4,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (6,)
+                    cursor.execute("ALTER TABLE x ADD COLUMN who VARCHAR(100)")
+                    cursor.execute(
+                        "UPDATE x JOIN limited_v ON x.id=limited_v.id "
+                        "SET x.who=CURRENT_USER(),limited_v.n=limited_v.n+1 WHERE limited_v.id=1"
+                    )
+                    cursor.execute("SELECT who FROM x WHERE id=1")
+                    assert cursor.fetchone() == ("root@localhost",)
+                    cursor.execute("UPDATE t SET n=6 WHERE id=1")
+                    cursor.execute("CREATE USER 'outer_view_definer'@'localhost'")
+                    cursor.execute("GRANT SELECT,UPDATE ON probe.limited_v TO 'outer_view_definer'@'localhost'")
+                    cursor.execute(
+                        "CREATE DEFINER='outer_view_definer'@'localhost' SQL SECURITY DEFINER "
+                        "VIEW outer_v AS SELECT id,n FROM limited_v"
+                    )
+                    cursor.execute(
+                        "UPDATE x JOIN outer_v ON x.id=outer_v.id "
+                        "SET x.n=x.n+1,outer_v.n=outer_v.n+1 WHERE outer_v.id=1"
+                    )
+                    assert cursor.rowcount == 2
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (5,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (7,)
+                    for source in (
+                        "v JOIN x ON x.id=v.id",
+                        "x JOIN v ON x.id=v.id",
+                        "x JOIN y ON y.id=x.id JOIN v ON v.id=y.id",
+                    ):
+                        try:
+                            cursor.execute("UPDATE " + source + " SET n=n+1 WHERE v.id=1")
+                        except pymysql.MySQLError as error:
+                            assert error.args[0] == 1052, error.args
+                        else:
+                            raise AssertionError("shared bare n should be ambiguous")
+
+                    cursor.execute("CREATE USER 'view_writer'@'localhost'")
+                    cursor.execute("GRANT SELECT, UPDATE ON probe.v TO 'view_writer'@'localhost'")
+                writer = pymysql.connect(
+                    unix_socket=socket, user="view_writer", database="probe", autocommit=True
+                )
+                connections.append(writer)
+                restricted = (
+                    "UPDATE x JOIN y ON y.id=x.id JOIN v ON v.id=y.id "
+                    "SET v.n=v.n+1 WHERE v.id=1"
+                )
+                for table in ("x", "y"):
+                    try:
+                        with writer.cursor() as cursor:
+                            cursor.execute(restricted)
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] in (1142, 1143), error.args
+                    else:
+                        raise AssertionError("the outer lookup requires SELECT privilege")
+                    with reader.cursor() as cursor:
+                        cursor.execute(
+                            f"GRANT SELECT ON probe.{table} TO 'view_writer'@'localhost'"
+                        )
+                with writer.cursor() as cursor:
+                    cursor.execute(restricted)
+                    assert cursor.rowcount == 1
+                    try:
+                        cursor.execute(
+                            "UPDATE x JOIN v ON x.id=v.id "
+                            "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+                        )
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1143, error.args
+                    else:
+                        raise AssertionError("outer physical target requires UPDATE privilege")
 
                 with owner.cursor() as cursor:
-                    cursor.execute("INSERT INTO t VALUES(2,0)")
+                    cursor.execute("INSERT INTO t(id,n) VALUES(2,0)")
                     cursor.execute("INSERT INTO l VALUES(2)")
                     cursor.execute("INSERT INTO x(id) VALUES(2)")
                     cursor.execute("BEGIN")
@@ -165,10 +402,439 @@ def main():
                 assert completed_before_owner_commit, disjoint_outcome
                 assert disjoint_outcome == {"affected": 1}, disjoint_outcome
 
+                with reader.cursor() as cursor:
+                    outer_sources = (
+                        "x LEFT JOIN y ON y.id=x.id LEFT JOIN v ON v.id=y.id",
+                        "x LEFT JOIN v ON v.id=x.id LEFT JOIN y ON y.id=v.id",
+                    )
+                    for source in outer_sources:
+                        cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                        cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                        cursor.execute(
+                            "UPDATE " + source
+                            + " SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+                        )
+                        assert cursor.rowcount == 2, source
+                        cursor.execute("SELECT n FROM x WHERE id=1")
+                        assert cursor.fetchone() == (1,), source
+                        cursor.execute("SELECT n FROM t WHERE id=1")
+                        assert cursor.fetchone() == (1,), source
+                    cursor.execute("DELETE FROM y WHERE id=1")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE x LEFT JOIN y ON y.id=x.id LEFT JOIN v ON v.id=y.id "
+                        "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+                    )
+                    assert cursor.rowcount == 1
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (0,)
+                    cursor.execute("INSERT INTO y VALUES(1)")
+                    try:
+                        cursor.execute(
+                            "UPDATE x LEFT JOIN y ON y.id=x.id LEFT JOIN checked v ON v.id=y.id "
+                            "SET x.n=x.n+1,v.id=2 WHERE x.id=1"
+                        )
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error.args
+                    else:
+                        raise AssertionError("three-source CHECK OPTION should reject id=2")
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute("SELECT id,n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (1, 0)
+
+                    right_source = "x LEFT JOIN y ON y.id=x.id RIGHT JOIN v ON v.id=y.id"
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE " + right_source
+                        + " SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+                    )
+                    assert cursor.rowcount == 2, "matched right-preserving joined view"
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+
+                    cursor.execute("DELETE FROM y WHERE id=1")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE " + right_source
+                        + " SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+                    )
+                    assert cursor.rowcount == 1, "missing preceding join keeps the view row"
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (0,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute("INSERT INTO y VALUES(1)")
+
+                    cursor.execute("CREATE TABLE z(id INT PRIMARY KEY,n INT)")
+                    extended_source = right_source + " LEFT JOIN z ON z.id=v.id"
+                    cursor.execute("DELETE FROM z")
+                    cursor.execute("INSERT INTO z VALUES(1,0)")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    try:
+                        cursor.execute(
+                            "UPDATE x LEFT JOIN y ON y.id=x.id "
+                            "RIGHT JOIN checked v ON v.id=y.id "
+                            "LEFT JOIN z ON z.id=v.id "
+                            "SET x.n=x.n+1,v.id=2,z.n=z.n+1 WHERE v.id=1"
+                        )
+                        raise AssertionError("four-source CHECK OPTION accepted a disappearing view row")
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                    for table, column, expected in (("x", "n", 0), ("t", "id", 1),
+                                                     ("z", "n", 0)):
+                        cursor.execute(f"SELECT {column} FROM {table} WHERE id=1")
+                        assert cursor.fetchone() == (expected,), (table, column)
+                    for has_y, has_z in itertools.product((True, False), repeat=2):
+                        cursor.execute("DELETE FROM y")
+                        cursor.execute("DELETE FROM z")
+                        if has_y:
+                            cursor.execute("INSERT INTO y VALUES(1)")
+                        if has_z:
+                            cursor.execute("INSERT INTO z VALUES(1,0)")
+                        cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                        cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                        cursor.execute(
+                            "UPDATE " + extended_source + " SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1 WHERE v.id=1"
+                        )
+                        expected_count = 1 + int(has_y) + int(has_z)
+                        assert cursor.rowcount == expected_count, (has_y, has_z, cursor.rowcount)
+                        cursor.execute("SELECT n FROM x WHERE id=1")
+                        assert cursor.fetchone() == (int(has_y),), (has_y, has_z)
+                        cursor.execute("SELECT n FROM t WHERE id=1")
+                        assert cursor.fetchone() == (1,), (has_y, has_z)
+                        cursor.execute("SELECT n FROM z WHERE id=1")
+                        assert cursor.fetchall() == (((1,),) if has_z else ()), (has_y, has_z)
+
+                    cursor.execute("CREATE TABLE w(id INT PRIMARY KEY,n INT)")
+                    five_source = extended_source + " RIGHT JOIN w ON w.id=v.id"
+                    cursor.execute("DELETE FROM y")
+                    cursor.execute("DELETE FROM z")
+                    cursor.execute("INSERT INTO y VALUES(1)")
+                    cursor.execute("INSERT INTO z VALUES(1,0)")
+                    cursor.execute("INSERT INTO w VALUES(1,0)")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    try:
+                        cursor.execute(
+                            "UPDATE x LEFT JOIN y ON y.id=x.id "
+                            "RIGHT JOIN checked v ON v.id=y.id "
+                            "LEFT JOIN z ON z.id=v.id RIGHT JOIN w ON w.id=v.id "
+                            "SET x.n=x.n+1,v.id=2,z.n=z.n+1,w.n=w.n+1 WHERE w.id=1"
+                        )
+                        raise AssertionError("five-source CHECK OPTION accepted a disappearing view row")
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                    for table, column, expected in (("x", "n", 0), ("t", "id", 1),
+                                                     ("z", "n", 0), ("w", "n", 0)):
+                        cursor.execute(f"SELECT {column} FROM {table} WHERE id=1")
+                        assert cursor.fetchone() == (expected,), (table, column)
+                    for has_y, has_z in ((True, False), (False, True), (False, False)):
+                        cursor.execute("DELETE FROM y")
+                        cursor.execute("DELETE FROM z")
+                        if has_y:
+                            cursor.execute("INSERT INTO y VALUES(1)")
+                        if has_z:
+                            cursor.execute("INSERT INTO z VALUES(1,0)")
+                        try:
+                            cursor.execute(
+                                "UPDATE x LEFT JOIN y ON y.id=x.id "
+                                "RIGHT JOIN checked v ON v.id=y.id "
+                                "LEFT JOIN z ON z.id=v.id RIGHT JOIN w ON w.id=v.id "
+                                "SET x.n=x.n+1,v.id=2,z.n=z.n+1,w.n=w.n+1 WHERE w.id=1"
+                            )
+                            raise AssertionError("optional-target CHECK OPTION accepted a disappearing view row")
+                        except pymysql.MySQLError as error:
+                            assert error.args[0] == 1369, (has_y, has_z, error)
+                        for table, column, expected in (("x", "n", 0), ("t", "id", 1), ("w", "n", 0)):
+                            cursor.execute(f"SELECT {column} FROM {table} WHERE id=1")
+                            assert cursor.fetchone() == (expected,), (has_y, has_z, table)
+                        cursor.execute("SELECT n FROM z WHERE id=1")
+                        assert cursor.fetchall() == (((0,),) if has_z else ()), (has_y, has_z)
+                    for has_y, has_z in itertools.product((True, False), repeat=2):
+                        cursor.execute("DELETE FROM y")
+                        cursor.execute("DELETE FROM z")
+                        cursor.execute("DELETE FROM w")
+                        if has_y:
+                            cursor.execute("INSERT INTO y VALUES(1)")
+                        if has_z:
+                            cursor.execute("INSERT INTO z VALUES(1,0)")
+                        cursor.execute("INSERT INTO w VALUES(1,0)")
+                        cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                        cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                        cursor.execute(
+                            "UPDATE " + five_source
+                            + " SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1,w.n=w.n+1 WHERE w.id=1"
+                        )
+                        assert cursor.rowcount == 2 + int(has_y) + int(has_z), (has_y, has_z, cursor.rowcount)
+                        for table, expected in (("x", int(has_y)), ("t", 1), ("w", 1)):
+                            cursor.execute(f"SELECT n FROM {table} WHERE id=1")
+                            assert cursor.fetchone() == (expected,), (has_y, has_z, table)
+                        cursor.execute("SELECT n FROM z WHERE id=1")
+                        assert cursor.fetchall() == (((1,),) if has_z else ()), (has_y, has_z)
+
+                    cursor.execute("DELETE FROM w")
+                    cursor.execute("INSERT INTO w VALUES(99,0)")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE " + five_source
+                        + " SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1,w.n=w.n+1 WHERE w.id=99"
+                    )
+                    assert cursor.rowcount == 1, "the fifth right join preserves w alone"
+                    for table, row_id, expected in (("x", 1, 0), ("t", 1, 0), ("w", 99, 1)):
+                        cursor.execute(f"SELECT n FROM {table} WHERE id={row_id}")
+                        assert cursor.fetchone() == (expected,), table
+
+                    cursor.execute("DELETE FROM y")
+                    cursor.execute("DELETE FROM z")
+                    cursor.execute("DELETE FROM w")
+                    cursor.execute("INSERT INTO y VALUES(1)")
+                    cursor.execute("INSERT INTO z VALUES(1,0)")
+                    cursor.execute("INSERT INTO w VALUES(1,0)")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    with owner.cursor() as owner_cursor:
+                        owner_cursor.execute("BEGIN")
+                        owner_cursor.execute("UPDATE w SET n=10 WHERE id=1")
+                    started = threading.Event()
+                    finished = threading.Event()
+                    outcome = {}
+
+                    def waiting_five_source_update():
+                        try:
+                            with waiter.cursor() as waiting_cursor:
+                                waiting_cursor.execute("BEGIN")
+                                started.set()
+                                waiting_cursor.execute(
+                                    "UPDATE " + five_source
+                                    + " SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1,w.n=w.n+1 WHERE w.id=1"
+                                )
+                                outcome["affected"] = waiting_cursor.rowcount
+                                waiting_cursor.execute("COMMIT")
+                        except Exception as error:
+                            outcome["error"] = error
+                        finally:
+                            finished.set()
+
+                    thread = threading.Thread(target=waiting_five_source_update, daemon=True)
+                    thread.start()
+                    assert started.wait(2), "five-source writer starts"
+                    assert not finished.wait(0.2), "fifth target blocks the joined write"
+                    owner.commit()
+                    assert finished.wait(5), "five-source writer resumes"
+                    thread.join()
+                    assert outcome == {"affected": 4}, outcome
+                    for table, expected in (("x", 1), ("t", 1), ("z", 1), ("w", 11)):
+                        cursor.execute(f"SELECT n FROM {table} WHERE id=1")
+                        assert cursor.fetchone() == (expected,), table
+
+                    for held_target in ("t", "x", "z"):
+                        cursor.execute("DELETE FROM y")
+                        cursor.execute("DELETE FROM z")
+                        cursor.execute("INSERT INTO y VALUES(1)")
+                        cursor.execute("INSERT INTO z VALUES(1,0)")
+                        cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                        cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                        with owner.cursor() as owner_cursor:
+                            owner_cursor.execute("BEGIN")
+                            owner_cursor.execute(f"UPDATE {held_target} SET n=10 WHERE id=1")
+                        started = threading.Event()
+                        finished = threading.Event()
+                        outcome = {}
+
+                        def waiting_outer_update():
+                            try:
+                                with waiter.cursor() as waiting_cursor:
+                                    waiting_cursor.execute("BEGIN")
+                                    started.set()
+                                    waiting_cursor.execute(
+                                        "UPDATE " + extended_source
+                                        + " SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1 WHERE v.id=1"
+                                    )
+                                    outcome["affected"] = waiting_cursor.rowcount
+                                    waiting_cursor.execute("COMMIT")
+                            except Exception as error:
+                                outcome["error"] = error
+                            finally:
+                                finished.set()
+
+                        thread = threading.Thread(target=waiting_outer_update, daemon=True)
+                        thread.start()
+                        assert started.wait(2), held_target
+                        assert not finished.wait(0.2), held_target
+                        owner.commit()
+                        assert finished.wait(5), held_target
+                        thread.join()
+                        assert outcome == {"affected": 3}, (held_target, outcome)
+                        for table in ("x", "t", "z"):
+                            cursor.execute(f"SELECT n FROM {table} WHERE id=1")
+                            expected = 11 if table == held_target else 1
+                            assert cursor.fetchone() == (expected,), (held_target, table)
+
+                    cursor.execute("UPDATE x SET n=0,m=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE z SET n=0 WHERE id=1")
+                    with owner.cursor() as owner_cursor:
+                        owner_cursor.execute("BEGIN")
+                        owner_cursor.execute("UPDATE x SET m=10 WHERE id=1")
+                    started = threading.Event()
+                    finished = threading.Event()
+                    outcome = {}
+
+                    def waiting_bare_outer_update():
+                        try:
+                            with waiter.cursor() as waiting_cursor:
+                                waiting_cursor.execute("BEGIN")
+                                started.set()
+                                waiting_cursor.execute(
+                                    "UPDATE " + extended_source
+                                    + " SET m=m+1,v.n=v.n+1,z.n=z.n+1 WHERE v.id=1"
+                                )
+                                outcome["affected"] = waiting_cursor.rowcount
+                                waiting_cursor.execute("COMMIT")
+                        except Exception as error:
+                            outcome["error"] = error
+                        finally:
+                            finished.set()
+
+                    thread = threading.Thread(target=waiting_bare_outer_update, daemon=True)
+                    thread.start()
+                    assert started.wait(2), "bare outer assignment starts"
+                    assert not finished.wait(0.2), "bare outer assignment waits for x"
+                    owner.commit()
+                    assert finished.wait(5), "bare outer assignment resumes"
+                    thread.join()
+                    assert outcome == {"affected": 3}, outcome
+                    for table, column, expected in (("x", "m", 11), ("x", "n", 0),
+                                                     ("t", "n", 1), ("z", "n", 1)):
+                        cursor.execute(f"SELECT {column} FROM {table} WHERE id=1")
+                        assert cursor.fetchone() == (expected,), (table, column)
+
+                    cursor.execute("DELETE FROM z")
+                    cursor.execute("INSERT INTO z VALUES(99,0)")
+                    cursor.execute("UPDATE x SET n=0 WHERE id=1")
+                    cursor.execute("UPDATE t SET n=0 WHERE id=1")
+                    cursor.execute(
+                        "UPDATE " + right_source + " RIGHT JOIN z ON z.id=v.id "
+                        "SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1 WHERE z.id=99"
+                    )
+                    assert cursor.rowcount == 1, "the final right join preserves z without a view row"
+                    cursor.execute("SELECT n FROM x WHERE id=1")
+                    assert cursor.fetchone() == (0,)
+                    cursor.execute("SELECT n FROM t WHERE id=1")
+                    assert cursor.fetchone() == (0,)
+                    cursor.execute("SELECT n FROM z WHERE id=99")
+                    assert cursor.fetchone() == (1,)
+
+                    for sql in (
+                        "CREATE TABLE dual_a(id INT PRIMARY KEY,n INT)",
+                        "CREATE TABLE dual_b(id INT PRIMARY KEY,n INT)",
+                        "CREATE TABLE dual_link(id INT PRIMARY KEY)",
+                        "INSERT INTO dual_a VALUES(1,10)",
+                        "INSERT INTO dual_b VALUES(1,20)",
+                        "INSERT INTO dual_link VALUES(1)",
+                        "CREATE VIEW dual_va AS SELECT a.id,a.n,l.id AS link_id FROM dual_a a JOIN dual_link l ON a.id=l.id WHERE l.id=1",
+                        "CREATE VIEW dual_vb AS SELECT b.id,b.n,l.id AS link_id FROM dual_b b JOIN dual_link l ON b.id=l.id",
+                    ):
+                        cursor.execute(sql)
+                    cursor.execute(
+                        "UPDATE dual_va va JOIN dual_vb vb ON va.link_id=vb.link_id "
+                        "SET va.n=va.n+1,vb.n=vb.n+1"
+                    )
+                    assert cursor.rowcount == 2, "two writable views with matching internal aliases"
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (11, 21)
+                    cursor.execute(
+                        "UPDATE dual_vb vb JOIN dual_va va ON va.id=vb.id "
+                        "SET vb.n=vb.n+1,va.n=va.n+1"
+                    )
+                    assert cursor.rowcount == 2, "reversed writable-view order"
+                    cursor.execute(
+                        "CREATE VIEW dual_checked AS SELECT a.id,a.n FROM dual_a a "
+                        "JOIN dual_link l ON a.id=l.id WITH CASCADED CHECK OPTION"
+                    )
+                    try:
+                        cursor.execute(
+                            "UPDATE dual_checked vc JOIN dual_vb vb ON vc.id=vb.id "
+                            "SET vc.id=2,vb.n=vb.n+1"
+                        )
+                        raise AssertionError("joined CHECK OPTION accepted an invalid update")
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                    cursor.execute("SELECT a.id,a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (1, 12, 22)
+                    cursor.execute(
+                        "CREATE VIEW dual_vb_same AS SELECT a.id,a.n FROM dual_b a "
+                        "JOIN dual_link lb ON a.id=lb.id"
+                    )
+                    cursor.execute(
+                        "UPDATE dual_va va JOIN dual_vb_same vb ON va.id=vb.id "
+                        "SET va.n=va.n+1,vb.n=vb.n+1"
+                    )
+                    assert cursor.rowcount == 2, "two view-local physical targets share alias a"
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (13, 23)
+                    cursor.execute(
+                        "UPDATE dual_vb_same vb JOIN dual_va va ON va.id=vb.id "
+                        "SET vb.n=vb.n+1,va.n=va.n+1"
+                    )
+                    assert cursor.rowcount == 2, "reversed same-alias physical targets"
+                    try:
+                        cursor.execute(
+                            "UPDATE dual_checked vc JOIN dual_vb_same vb ON vc.id=vb.id "
+                            "SET vc.id=2,vb.n=vb.n+1"
+                        )
+                        raise AssertionError("same-alias joined CHECK OPTION accepted an invalid update")
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                    cursor.execute("SELECT a.id,a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (1, 14, 24)
+                    cursor.execute(
+                        "CREATE VIEW dual_va_derived AS SELECT a.id,a.n,r.id AS link_id FROM dual_a a "
+                        "JOIN (SELECT id FROM dual_link) r ON a.id=r.id"
+                    )
+                    cursor.execute(
+                        "CREATE VIEW dual_vb_derived AS SELECT b.id,b.n,r.id AS link_id FROM dual_b b "
+                        "JOIN (SELECT id FROM dual_link) r ON b.id=r.id"
+                    )
+                    cursor.execute(
+                        "UPDATE dual_va_derived va JOIN dual_vb_derived vb ON va.link_id=vb.link_id "
+                        "SET va.n=va.n+1,vb.n=vb.n+1"
+                    )
+                    assert cursor.rowcount == 2, "two derived read sources share alias r"
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (15, 25)
+                    cursor.execute(
+                        "UPDATE dual_vb_derived vb JOIN dual_va_derived va ON va.id=vb.id "
+                        "SET vb.n=vb.n+1,va.n=va.n+1"
+                    )
+                    assert cursor.rowcount == 2, "reversed derived-view order"
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (16, 26)
+
                 print(
-                    f"MySQL {version}: both join orders and bare target waited and rebased; "
+                    f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
+                    "two-source outer joins preserved physical writes beside missing or filtered view rows; "
                     "nested CHECK OPTION returned 1369; shared bare n returned 1052; "
-                    "disjoint rows did not wait"
+                    "third-position read grants were enforced; "
+                    "two-target writes rebased and kept caller/definer grants separate; "
+                    "disjoint rows did not wait; three-source outer joins preserved both left- and right-hand targets; "
+                    "four- and five-source outer chains updated only matched physical targets; "
+                    "contended view and outer targets waited and rebased all assignments; "
+                    "a bare outer-only column waited and rebased its physical target; "
+                    "four- and five-source CHECK OPTION rejected atomically; "
+                    "two writable views with matching internal aliases updated both physical targets in both orders; "
+                    "their CHECK OPTION rejected atomically; shared physical target aliases updated both targets in both orders; "
+                    "shared derived read aliases updated both targets in both orders"
                 )
             finally:
                 for connection in connections:

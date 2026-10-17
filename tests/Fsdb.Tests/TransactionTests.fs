@@ -2366,34 +2366,49 @@ let tests =
 
           testCase "nested joined view updates wait for the physical target"
           <| fun _ ->
-              for fromClause, assignment in
-                  [ "tx_nested_target t JOIN tx_nested_internal l ON l.id=t.id", "v.n=v.n+1"
-                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "v.n=v.n+1"
-                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "n=n+1" ] do
+              for fromClause, assignment, viewPosition in
+                  [ for fromClause, assignment in
+                        [ "tx_nested_target t JOIN tx_nested_internal l ON l.id=t.id", "v.n=v.n+1"
+                          "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "v.n=v.n+1"
+                          "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "n=n+1" ] do
+                        for position in 1..3 do
+                            yield fromClause, assignment, position ] do
                   let store = Fsdb.Storage.create ()
                   let setup = create 1 store
                   handle setup "CREATE TABLE tx_nested_target (id INT PRIMARY KEY, n INT)" |> ignore
                   handle setup "CREATE TABLE tx_nested_internal (id INT PRIMARY KEY)" |> ignore
                   handle setup "CREATE TABLE tx_nested_outer (id INT PRIMARY KEY)" |> ignore
+                  handle setup "CREATE TABLE tx_nested_other (id INT PRIMARY KEY)" |> ignore
                   handle setup "INSERT INTO tx_nested_target VALUES (1, 0)" |> ignore
                   handle setup "INSERT INTO tx_nested_internal VALUES (1)" |> ignore
                   handle setup "INSERT INTO tx_nested_outer VALUES (1)" |> ignore
+                  handle setup "INSERT INTO tx_nested_other VALUES (1)" |> ignore
                   handle setup ("CREATE VIEW tx_nested_view AS SELECT t.id, t.n FROM " + fromClause)
                   |> ignore
                   let owner, _ = handle (create 2 store) "BEGIN"
                   let owner, ownerWrite = handle owner "UPDATE tx_nested_target SET n=n+1 WHERE id=1"
                   Expect.equal ownerWrite (Affected 1UL) "the owner updates the base row"
                   let waiter, _ = handle (create 3 store) "BEGIN"
+                  let joinedSource viewName =
+                      if viewPosition = 1 then
+                          viewName + " v JOIN tx_nested_outer x ON x.id=v.id"
+                      elif viewPosition = 2 then
+                          "tx_nested_outer x JOIN " + viewName + " v ON x.id=v.id"
+                      else
+                          "tx_nested_outer x JOIN tx_nested_other y ON y.id=x.id JOIN "
+                          + viewName + " v ON v.id=y.id"
                   let sql =
-                      "UPDATE tx_nested_view v JOIN tx_nested_outer x ON x.id=v.id "
+                      "UPDATE " + joinedSource "tx_nested_view" + " "
                       + "SET " + assignment + " WHERE v.id=1"
                   let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter sql)
-                  Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the nested joined writer waits"
+                  if waiting.Wait(TimeSpan.FromMilliseconds 100.0) then
+                      let _, result = waiting.Result
+                      failtestf "nested joined writer should wait for %s, got %A" sql result
                   Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
                   Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the joined writer resumes"
                   let waiter, result = waiting.GetAwaiter().GetResult()
                   Expect.equal result (Affected 1UL) "the joined writer updates the rebased row"
-                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the waiter commits"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) ("the waiter commits: " + sql)
                   match handle setup "SELECT n FROM tx_nested_target WHERE id=1" |> snd with
                   | ResultSet(_, [ [ Some "2" ] ]) -> ()
                   | result -> failtestf "expected both increments, got %A" result
@@ -2404,7 +2419,7 @@ let tests =
                        + " WITH CASCADED CHECK OPTION")
                   |> ignore
                   let rejectedSql =
-                      "UPDATE tx_nested_checked v JOIN tx_nested_outer x ON x.id=v.id "
+                      "UPDATE " + joinedSource "tx_nested_checked" + " "
                       + "SET v.id=2 WHERE v.id=1"
                   match handle setup rejectedSql |> snd with
                   | Err(1369, _) -> ()
@@ -2419,6 +2434,619 @@ let tests =
                       | Err(1052, _) -> ()
                       | result -> failtestf "expected ambiguous bare n error 1052, got %A" result
 
+          testCase "joined UPDATE writes two distinct updatable views"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              handle session "CREATE TABLE tx_dual_a(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "CREATE TABLE tx_dual_b(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "CREATE TABLE tx_dual_link(id INT PRIMARY KEY)" |> ignore
+              handle session "INSERT INTO tx_dual_a VALUES(1,10)" |> ignore
+              handle session "INSERT INTO tx_dual_b VALUES(1,20)" |> ignore
+              handle session "INSERT INTO tx_dual_link VALUES(1)" |> ignore
+              handle session "CREATE VIEW tx_dual_va AS SELECT a.id,a.n,l.id AS link_id FROM tx_dual_a a JOIN tx_dual_link l ON a.id=l.id WHERE l.id=1" |> ignore
+              handle session "CREATE VIEW tx_dual_vb AS SELECT b.id,b.n,l.id AS link_id FROM tx_dual_b b JOIN tx_dual_link l ON b.id=l.id" |> ignore
+              let sql =
+                  "UPDATE tx_dual_va va JOIN tx_dual_vb vb ON va.link_id=vb.link_id "
+                  + "SET va.n=va.n+1,vb.n=vb.n+1"
+              Expect.equal (handle session sql |> snd) (Affected 2UL) "both view targets update"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "11"; Some "21" ] ]) -> ()
+              | result -> failtestf "expected both physical view targets to change, got %A" result
+              Expect.equal
+                  (handle session
+                      "UPDATE tx_dual_vb vb JOIN tx_dual_va va ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1" |> snd)
+                  (Affected 2UL)
+                  "reversed view order updates both targets"
+              handle session
+                  ("CREATE VIEW tx_dual_checked AS SELECT a.id,a.n FROM tx_dual_a a "
+                   + "JOIN tx_dual_link l ON a.id=l.id WITH CASCADED CHECK OPTION")
+              |> ignore
+              match handle session
+                  ("UPDATE tx_dual_checked vc JOIN tx_dual_vb vb ON vc.id=vb.id "
+                   + "SET vc.id=2,vb.n=vb.n+1") |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected joined view CHECK OPTION error, got %A" result
+              match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "12"; Some "22" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve both targets, got %A" result
+              handle session
+                  ("CREATE VIEW tx_dual_vb_same AS SELECT a.id,a.n FROM tx_dual_b a "
+                   + "JOIN tx_dual_link lb ON a.id=lb.id")
+              |> ignore
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_va va JOIN tx_dual_vb_same vb ON va.id=vb.id "
+                       + "SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                  (Affected 2UL)
+                  "two view-local physical targets may share alias a"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "13"; Some "23" ] ]) -> ()
+              | result -> failtestf "expected both same-alias view targets to change, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_vb_same vb JOIN tx_dual_va va ON va.id=vb.id "
+                       + "SET vb.n=vb.n+1,va.n=va.n+1") |> snd)
+                  (Affected 2UL)
+                  "reversed same-alias target order updates both views"
+              match handle session
+                  ("UPDATE tx_dual_checked vc JOIN tx_dual_vb_same vb ON vc.id=vb.id "
+                   + "SET vc.id=2,vb.n=vb.n+1") |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected renamed target CHECK OPTION error, got %A" result
+              match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "14"; Some "24" ] ]) -> ()
+              | result -> failtestf "renamed target CHECK OPTION must preserve both rows, got %A" result
+              for sql in
+                  [ "CREATE VIEW tx_dual_va_derived AS SELECT a.id,a.n,r.id AS link_id FROM tx_dual_a a JOIN (SELECT id FROM tx_dual_link) r ON a.id=r.id"
+                    "CREATE VIEW tx_dual_vb_derived AS SELECT b.id,b.n,r.id AS link_id FROM tx_dual_b b JOIN (SELECT id FROM tx_dual_link) r ON b.id=r.id" ] do
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "expected derived view creation, got %d: %s" code message
+                  | _ -> ()
+              for name in [ "tx_dual_va_derived"; "tx_dual_vb_derived" ] do
+                  match handle session ("UPDATE " + name + " SET n=n WHERE id=1") |> snd with
+                  | Err(code, message) -> failtestf "expected standalone derived view update for %s, got %d: %s" name code message
+                  | _ -> ()
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_va_derived va JOIN tx_dual_vb_derived vb ON va.link_id=vb.link_id "
+                       + "SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                  (Affected 2UL)
+                  "two derived read sources may share view-local alias r"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "15"; Some "25" ] ]) -> ()
+              | result -> failtestf "expected both derived-source view targets to change, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_vb_derived vb JOIN tx_dual_va_derived va ON va.id=vb.id "
+                       + "SET vb.n=vb.n+1,va.n=va.n+1") |> snd)
+                  (Affected 2UL)
+                  "reversed derived-source view order updates both targets"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "16"; Some "26" ] ]) -> ()
+              | result -> failtestf "expected reversed derived-source view targets to change, got %A" result
+
+          testCase "joined view can supply read rows while another source is updated"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              handle session "CREATE TABLE tx_read_view_target(id INT PRIMARY KEY,n INT,m INT DEFAULT 0)" |> ignore
+              handle session "CREATE TABLE tx_read_view_link(id INT PRIMARY KEY)" |> ignore
+              handle session "CREATE TABLE tx_read_view_outer(id INT PRIMARY KEY,n INT,m INT DEFAULT 0)" |> ignore
+              handle session "CREATE TABLE tx_read_view_other(id INT PRIMARY KEY)" |> ignore
+              handle session "INSERT INTO tx_read_view_target(id,n) VALUES(1,10)" |> ignore
+              handle session "INSERT INTO tx_read_view_link VALUES(1)" |> ignore
+              handle session "INSERT INTO tx_read_view_outer(id,n) VALUES(1,0)" |> ignore
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session
+                  "CREATE VIEW tx_read_joined_view AS SELECT t.id,t.n FROM tx_read_view_target t JOIN tx_read_view_link l ON l.id=t.id"
+              |> ignore
+              for source in
+                  [ "tx_read_view_outer x JOIN tx_read_joined_view v ON x.id=v.id"
+                    "tx_read_joined_view v JOIN tx_read_view_outer x ON x.id=v.id"
+                    "tx_read_view_outer x JOIN tx_read_view_other y ON y.id=x.id JOIN tx_read_joined_view v ON v.id=y.id" ] do
+                  handle session "UPDATE tx_read_view_outer SET n=0" |> ignore
+                  let sql = "UPDATE " + source + " SET x.n=x.n+1 WHERE v.id=1"
+                  Expect.equal (handle session sql |> snd) (Affected 1UL) source
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected outer row update through joined view read, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "10" ] ]) -> ()
+                  | result -> failtestf "joined view source must remain read-only, got %A" result
+                  let multiSql = "UPDATE " + source + " SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+                  Expect.equal (handle session multiSql |> snd) (Affected 2UL) (source + " updates both targets")
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                  | result -> failtestf "expected physical outer row update, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "11" ] ]) -> ()
+                  | result -> failtestf "expected joined view target update, got %A" result
+                  handle session "UPDATE tx_read_view_outer SET m=0" |> ignore
+                  let bareSql = "UPDATE " + source + " SET m=m+1,v.n=v.n+1 WHERE v.id=1"
+                  Expect.equal (handle session bareSql |> snd) (Affected 2UL)
+                      (source + " resolves bare m to the outer target")
+                  match handle session "SELECT m FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected bare outer assignment, got %A" result
+                  handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              for source in
+                  [ "tx_read_joined_view v LEFT JOIN tx_read_view_outer x ON x.id=v.id"
+                    "tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id"
+                    "tx_read_joined_view v RIGHT JOIN tx_read_view_outer x ON x.id=v.id" ] do
+                  handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+                  let sql = "UPDATE " + source + " SET v.n=v.n+1 WHERE v.id=1"
+                  Expect.equal (handle session sql |> snd) (Affected 1UL) source
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "11" ] ]) -> ()
+                  | result -> failtestf "expected view target update through outer join, got %A" result
+              handle session "INSERT INTO tx_read_view_outer(id,n) VALUES(3,0)" |> ignore
+              let missingViewRow =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id "
+                  + "SET v.n=v.n+1 WHERE x.id=3"
+              Expect.equal (handle session missingViewRow |> snd) (Affected 0UL)
+                  "a nullable missing view row cannot be updated"
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id IN (1,3)" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              let outerMultiSql id =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id "
+                  + sprintf "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=%d" id
+              Expect.equal (handle session (outerMultiSql 1) |> snd) (Affected 2UL)
+                  "matched outer join updates both physical targets"
+              Expect.equal (handle session (outerMultiSql 3) |> snd) (Affected 1UL)
+                  "missing nullable view row leaves the preserving target writable"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=3" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected preserving outer row update, got %A" result
+              for source in
+                  [ "tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id LEFT JOIN tx_read_joined_view v ON v.id=y.id"
+                    "tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id LEFT JOIN tx_read_view_other y ON y.id=v.id" ] do
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let sql = "UPDATE " + source + " SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+                  Expect.equal (handle session sql |> snd) (Affected 2UL)
+                      "three-source outer join updates both matched targets"
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected preserving target update, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected view target update, got %A" result
+              handle session "DELETE FROM tx_read_view_other WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let missingIntermediate =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "LEFT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+              Expect.equal (handle session missingIntermediate |> snd) (Affected 1UL)
+                  "a missing intermediate row keeps the first target writable"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected preserving target update, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing intermediate row must leave the view target untouched, got %A" result
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session
+                  ("CREATE VIEW tx_read_three_checked AS SELECT t.id,t.n FROM tx_read_view_target t "
+                   + "JOIN tx_read_view_link l ON l.id=t.id WITH CASCADED CHECK OPTION")
+              |> ignore
+              let rejectedThreeSource =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "LEFT JOIN tx_read_three_checked v ON v.id=y.id "
+                  + "SET x.n=x.n+1,v.id=2 WHERE x.id=1"
+              match handle session rejectedThreeSource |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected three-source CHECK OPTION rejection, got %A" result
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve the first target, got %A" result
+              match handle session "SELECT id,n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "0" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve the view target, got %A" result
+              let rightPreserving =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              Expect.equal (handle session rightPreserving |> snd) (Affected 2UL)
+                  "a right-preserving view updates both matched physical targets"
+              handle session "DELETE FROM tx_read_view_other WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              Expect.equal (handle session rightPreserving |> snd) (Affected 1UL)
+                  "the view target survives a missing preceding left-join row"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing preceding row must leave the outer target unchanged, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "right-preserving view row should update, got %A" result
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session "CREATE TABLE tx_read_view_last(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let rejectedFourSource =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_three_checked v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2,z.n=z.n+1 WHERE v.id=1"
+              match handle session rejectedFourSource |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected four-source CHECK OPTION rejection, got %A" result
+              for table, column, expected in
+                  [ "tx_read_view_outer", "n", "0"
+                    "tx_read_view_target", "id", "1"
+                    "tx_read_view_last", "n", "0" ] do
+                  match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + "." + column + " survives CHECK OPTION")
+                  | result -> failtestf "expected unchanged %s.%s, got %A" table column result
+              let extendedRightPreserving =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1 WHERE v.id=1"
+              let countIf present = if present then 1 else 0
+              for hasIntermediate, hasLast in [ true, true; true, false; false, true; false, false ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  if hasIntermediate then
+                      handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  if hasLast then
+                      handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let expectedCount = 1 + countIf hasIntermediate + countIf hasLast
+                  Expect.equal (handle session extendedRightPreserving |> snd) (Affected(uint64 expectedCount))
+                      "the wider outer tree updates only matched physical targets"
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some value ] ]) ->
+                      Expect.equal value (string (countIf hasIntermediate)) "the preceding target follows its join"
+                  | result -> failtestf "expected preceding target row, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected preserved view target update, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_last WHERE id=1" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows (if hasLast then [ [ Some "1" ] ] else [])
+                          "the final target follows its optional join"
+                  | result -> failtestf "expected optional target rows, got %A" result
+              handle session "CREATE TABLE tx_read_view_fifth(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "DELETE FROM tx_read_view_other" |> ignore
+              handle session "DELETE FROM tx_read_view_last" |> ignore
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+              handle session "INSERT INTO tx_read_view_fifth VALUES(1,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let rejectedFiveSource =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_three_checked v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "RIGHT JOIN tx_read_view_fifth w ON w.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2,z.n=z.n+1,w.n=w.n+1 WHERE w.id=1"
+              match handle session rejectedFiveSource |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected five-source CHECK OPTION rejection, got %A" result
+              for table, column, expected in
+                  [ "tx_read_view_outer", "n", "0"
+                    "tx_read_view_target", "id", "1"
+                    "tx_read_view_last", "n", "0"
+                    "tx_read_view_fifth", "n", "0" ] do
+                  match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + "." + column + " survives five-source CHECK OPTION")
+                  | result -> failtestf "expected unchanged %s.%s, got %A" table column result
+              for hasIntermediate, hasLast in [ true, false; false, true; false, false ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  if hasIntermediate then
+                      handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  if hasLast then
+                      handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  match handle session rejectedFiveSource |> snd with
+                  | Err(1369, _) -> ()
+                  | result -> failtestf "expected optional five-source CHECK OPTION rejection, got %A" result
+                  for table, column, expected in
+                      [ "tx_read_view_outer", "n", "0"
+                        "tx_read_view_target", "id", "1"
+                        "tx_read_view_fifth", "n", "0" ] do
+                      match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                      | ResultSet(_, [ [ Some actual ] ]) ->
+                          Expect.equal actual expected (table + " survives optional CHECK OPTION")
+                      | result -> failtestf "expected unchanged %s.%s, got %A" table column result
+                  match handle session "SELECT n FROM tx_read_view_last WHERE id=1" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows (if hasLast then [ [ Some "0" ] ] else [])
+                          "optional z target survives CHECK OPTION"
+                  | result -> failtestf "expected optional target after CHECK OPTION, got %A" result
+              let fiveSource rowId =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "RIGHT JOIN tx_read_view_fifth w ON w.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1,w.n=w.n+1 "
+                  + sprintf "WHERE w.id=%d" rowId
+              for hasIntermediate, hasLast in [ true, true; true, false; false, true; false, false ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  handle session "DELETE FROM tx_read_view_fifth" |> ignore
+                  if hasIntermediate then
+                      handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  if hasLast then
+                      handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  handle session "INSERT INTO tx_read_view_fifth VALUES(1,0)" |> ignore
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let expectedCount = 2 + countIf hasIntermediate + countIf hasLast
+                  Expect.equal (handle session (fiveSource 1) |> snd) (Affected(uint64 expectedCount))
+                      "the fifth right join updates its matched physical targets"
+                  for table, expected in
+                      [ "tx_read_view_outer", countIf hasIntermediate
+                        "tx_read_view_target", 1
+                        "tx_read_view_fifth", 1 ] do
+                      match handle session (sprintf "SELECT n FROM %s WHERE id=1" table) |> snd with
+                      | ResultSet(_, [ [ Some actual ] ]) ->
+                          Expect.equal actual (string expected) (table + " follows the five-source join")
+                      | result -> failtestf "expected five-source result for %s, got %A" table result
+                  match handle session "SELECT n FROM tx_read_view_last WHERE id=1" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows (if hasLast then [ [ Some "1" ] ] else [])
+                          "the optional target remains nullable in the five-source join"
+                  | result -> failtestf "expected optional five-source rows, got %A" result
+              handle session "DELETE FROM tx_read_view_fifth" |> ignore
+              handle session "INSERT INTO tx_read_view_fifth VALUES(99,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              Expect.equal (handle session (fiveSource 99) |> snd) (Affected 1UL)
+                  "the fifth right join preserves its row without a view match"
+              for table, rowId, expected in
+                  [ "tx_read_view_outer", 1, "0"
+                    "tx_read_view_target", 1, "0"
+                    "tx_read_view_fifth", 99, "1" ] do
+                  match handle session (sprintf "SELECT n FROM %s WHERE id=%d" table rowId) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + " preserves unmatched five-source writes")
+                  | result -> failtestf "expected unmatched five-source row from %s, got %A" table result
+              handle session "DELETE FROM tx_read_view_other" |> ignore
+              handle session "DELETE FROM tx_read_view_last" |> ignore
+              handle session "DELETE FROM tx_read_view_fifth" |> ignore
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+              handle session "INSERT INTO tx_read_view_fifth VALUES(1,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, held = handle owner "UPDATE tx_read_view_fifth SET n=10 WHERE id=1"
+              Expect.equal held (Affected 1UL) "owner holds the fifth target"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              use fifthStarted = new Threading.ManualResetEventSlim(false)
+              let fifthWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      fifthStarted.Set()
+                      handle waiter (fiveSource 1))
+              Expect.isTrue (fifthStarted.Wait(TimeSpan.FromSeconds 1.0)) "five-source writer starts"
+              Expect.isFalse (fifthWaiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  "the fifth target blocks the joined write"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "fifth target owner commits"
+              Expect.isTrue (fifthWaiting.Wait(TimeSpan.FromSeconds 5.0)) "five-source writer resumes"
+              let waiter, result = fifthWaiting.Result
+              Expect.equal result (Affected 4UL) "all four physical targets update after the fifth-target wait"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "five-source writer commits"
+              for table, expected in
+                  [ "tx_read_view_outer", "1"
+                    "tx_read_view_target", "1"
+                    "tx_read_view_last", "1"
+                    "tx_read_view_fifth", "11" ] do
+                  match handle session (sprintf "SELECT n FROM %s WHERE id=1" table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + " rebases after the fifth-target wait")
+                  | result -> failtestf "expected rebased five-source row from %s, got %A" table result
+              for heldTable in [ "tx_read_view_target"; "tx_read_view_outer"; "tx_read_view_last" ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, held = handle owner (sprintf "UPDATE %s SET n=10 WHERE id=1" heldTable)
+                  Expect.equal held (Affected 1UL) "owner holds one outer-join target"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter extendedRightPreserving)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "outer joined writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.isTrue blocked (heldTable + " blocks the outer joined write")
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "outer joined writer resumes"
+                  let waiter, result = waiting.Result
+                  Expect.equal result (Affected 3UL) "all three matched targets update after the wait"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) (heldTable + " outer joined writer commits")
+                  for table in [ "tx_read_view_outer"; "tx_read_view_target"; "tx_read_view_last" ] do
+                      let expected = if table = heldTable then "11" else "1"
+                      match handle session (sprintf "SELECT n FROM %s WHERE id=1" table) |> snd with
+                      | ResultSet(_, [ [ Some actual ] ]) ->
+                          Expect.equal actual expected (heldTable + " rebases " + table)
+                      | result -> failtestf "expected committed row from %s, got %A" table result
+              handle session "UPDATE tx_read_view_outer SET n=0,m=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_last SET n=0 WHERE id=1" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, held = handle owner "UPDATE tx_read_view_outer SET m=10 WHERE id=1"
+              Expect.equal held (Affected 1UL) "owner holds the outer-only column"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              use bareStarted = new Threading.ManualResetEventSlim(false)
+              let bareWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      bareStarted.Set()
+                      handle waiter
+                          ("UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                           + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                           + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                           + "SET m=m+1,v.n=v.n+1,z.n=z.n+1 WHERE v.id=1"))
+              Expect.isTrue (bareStarted.Wait(TimeSpan.FromSeconds 1.0)) "bare outer writer starts"
+              Expect.isFalse (bareWaiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  "bare outer-only assignment waits for its physical row"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits outer-only column"
+              Expect.isTrue (bareWaiting.Wait(TimeSpan.FromSeconds 5.0)) "bare outer writer resumes"
+              let waiter, bareResult = bareWaiting.Result
+              Expect.equal bareResult (Affected 3UL) "all three targets update after bare outer wait"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "bare outer writer commits"
+              for table, column, expected in
+                  [ "tx_read_view_outer", "m", "11"
+                    "tx_read_view_outer", "n", "0"
+                    "tx_read_view_target", "n", "1"
+                    "tx_read_view_last", "n", "1" ] do
+                  match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + "." + column + " rebases")
+                  | result -> failtestf "expected committed %s.%s, got %A" table column result
+              handle session "DELETE FROM tx_read_view_last" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(99,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let finalRightPreserving =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "RIGHT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1 WHERE z.id=99"
+              Expect.equal (handle session finalRightPreserving |> snd) (Affected 1UL)
+                  "the final right join updates its physical row without a view match"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing view match must leave the first target unchanged, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing view match must leave the view target unchanged, got %A" result
+              match handle session "SELECT n FROM tx_read_view_last WHERE id=99" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected final preserving target update, got %A" result
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session
+                  ("CREATE VIEW tx_read_filtered_view AS SELECT t.id,t.n FROM tx_read_view_target t "
+                   + "JOIN tx_read_view_link l ON l.id=t.id WHERE t.n>0")
+              |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id IN (1,3)" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0" |> ignore
+              for source in
+                  [ "tx_read_view_outer x LEFT JOIN tx_read_filtered_view v ON v.id=x.id"
+                    "tx_read_filtered_view v RIGHT JOIN tx_read_view_outer x ON v.id=x.id" ] do
+                  for id in [ 1; 3 ] do
+                      handle session (sprintf "UPDATE tx_read_view_outer SET n=0 WHERE id=%d" id) |> ignore
+                      let sql = "UPDATE " + source + sprintf " SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=%d" id
+                      Expect.equal (handle session sql |> snd) (Affected 1UL)
+                          "a filtered-out or absent view row cannot suppress the preserving target"
+                      match handle session (sprintf "SELECT n FROM tx_read_view_outer WHERE id=%d" id) |> snd with
+                      | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                      | result -> failtestf "expected preserving outer row update, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "filtered view target should remain unchanged, got %A" result
+              handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              let matchedFiltered =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_filtered_view v ON v.id=x.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+              Expect.equal (handle session matchedFiltered |> snd) (Affected 2UL)
+                  "a matching filtered view still updates both targets"
+              handle session "UPDATE tx_read_view_outer SET n=2 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              let owner, _ = handle (create 3 store) "BEGIN"
+              let owner, ownerResult = handle owner "UPDATE tx_read_view_target SET n=n+1 WHERE id=1"
+              Expect.equal ownerResult (Affected 1UL) "owner holds the view's physical row"
+              let waiter, _ = handle (create 4 store) "BEGIN"
+              let contended =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_joined_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter contended)
+              if waiting.Wait(TimeSpan.FromMilliseconds 100.0) then
+                  let _, result = waiting.Result
+                  failtestf "multi-target view write should wait, got %A" result
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "multi-target view write resumes"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 2UL) "both physical rows update after rebasing"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "waiter commits"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | result -> failtestf "expected rebased outer update, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "12" ] ]) -> ()
+              | result -> failtestf "expected rebased view target update, got %A" result
+              handle session
+                  "CREATE VIEW tx_read_checked AS SELECT t.id,t.n FROM tx_read_view_target t JOIN tx_read_view_link l ON l.id=t.id WITH CASCADED CHECK OPTION"
+              |> ignore
+              let rejected =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_checked v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2 WHERE v.id=1"
+              match handle session rejected |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected multi-target CHECK OPTION rejection, got %A" result
+              let rejectedOuter =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_checked v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2 WHERE x.id=1"
+              match handle session rejectedOuter |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected outer-join CHECK OPTION rejection, got %A" result
+              match handle session "SELECT id,n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "3" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve outer target, got %A" result
+              match handle session "SELECT id,n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "12" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve view target, got %A" result
+              handle session "CREATE USER tx_read_limited_definer" |> ignore
+              handle session "GRANT SELECT, UPDATE ON fsdb.tx_read_view_target TO tx_read_limited_definer" |> ignore
+              handle session "GRANT SELECT ON fsdb.tx_read_view_link TO tx_read_limited_definer" |> ignore
+              handle session
+                  "CREATE DEFINER='tx_read_limited_definer'@'%' SQL SECURITY DEFINER VIEW tx_read_limited_view AS SELECT t.id,t.n FROM tx_read_view_target t JOIN tx_read_view_link l ON l.id=t.id"
+              |> ignore
+              let limited =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_limited_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              Expect.equal (handle session limited |> snd) (Affected 2UL)
+                  "the caller updates the outer target even when the view definer lacks its grant"
+              handle session "ALTER TABLE tx_read_view_outer ADD COLUMN who VARCHAR(100)" |> ignore
+              let callerIdentity =
+                  match handle session "SELECT CURRENT_USER()" |> snd with
+                  | ResultSet(_, [ [ Some value ] ]) -> value
+                  | result -> failtestf "expected caller identity, got %A" result
+              let identityWrite =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_limited_view v ON x.id=v.id "
+                  + "SET x.who=CURRENT_USER(),v.n=v.n+1 WHERE v.id=1"
+              Expect.equal (handle session identityWrite |> snd) (Affected 2UL)
+                  "the outer assignment uses the caller identity"
+              match handle session "SELECT who FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some value ] ]) -> Expect.equal value callerIdentity "outer CURRENT_USER is the caller"
+              | result -> failtestf "expected outer CURRENT_USER value, got %A" result
+              handle session "CREATE USER tx_read_outer_definer" |> ignore
+              handle session "GRANT SELECT, UPDATE ON fsdb.tx_read_limited_view TO tx_read_outer_definer" |> ignore
+              handle session
+                  "CREATE DEFINER='tx_read_outer_definer'@'%' SQL SECURITY DEFINER VIEW tx_read_outer_view AS SELECT id,n FROM tx_read_limited_view"
+              |> ignore
+              let layered =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_outer_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              Expect.equal (handle session layered |> snd) (Affected 2UL)
+                  "layered view write retains the separate outer target"
+              handle session "CREATE USER tx_read_view_writer" |> ignore
+              handle session "GRANT SELECT, UPDATE ON fsdb.tx_read_joined_view TO tx_read_view_writer" |> ignore
+              handle session "GRANT SELECT ON fsdb.tx_read_view_outer TO tx_read_view_writer" |> ignore
+              let writer = { create 2 store with User = "tx_read_view_writer" }
+              let denied =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_joined_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              match handle writer denied |> snd with
+              | Err(1143, _) -> ()
+              | result -> failtestf "expected missing outer UPDATE column grant, got %A" result
+
           testCase "nested joined view update checks the caller's outer join reads"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -2426,23 +3054,34 @@ let tests =
               handle root "CREATE TABLE tx_nested_secure_target (id INT PRIMARY KEY, n INT)" |> ignore
               handle root "CREATE TABLE tx_nested_secure_inner (id INT PRIMARY KEY)" |> ignore
               handle root "CREATE TABLE tx_nested_secure_outer (id INT PRIMARY KEY)" |> ignore
+              handle root "CREATE TABLE tx_nested_secure_other (id INT PRIMARY KEY)" |> ignore
               handle root "INSERT INTO tx_nested_secure_target VALUES (1, 0)" |> ignore
               handle root "INSERT INTO tx_nested_secure_inner VALUES (1)" |> ignore
               handle root "INSERT INTO tx_nested_secure_outer VALUES (1)" |> ignore
+              handle root "INSERT INTO tx_nested_secure_other VALUES (1)" |> ignore
               handle root
                   "CREATE VIEW tx_nested_secure_view AS SELECT t.id,t.n FROM tx_nested_secure_target t JOIN tx_nested_secure_inner l ON l.id=t.id"
               |> ignore
               handle root "CREATE USER nested_writer" |> ignore
               handle root "GRANT SELECT, UPDATE ON fsdb.tx_nested_secure_view TO nested_writer" |> ignore
               let writer = { create 2 store with User = "nested_writer" }
-              let sql =
-                  "UPDATE tx_nested_secure_view v JOIN tx_nested_secure_outer x ON x.id=v.id "
-                  + "SET v.n=v.n+1 WHERE v.id=1"
-              match handle writer sql |> snd with
-              | Err(1143, _) | Err(1142, _) -> ()
-              | result -> failtestf "expected denied outer join read, got %A" result
+              let sources =
+                  [ "tx_nested_secure_view v JOIN tx_nested_secure_outer x ON x.id=v.id"
+                    "tx_nested_secure_outer x JOIN tx_nested_secure_view v ON x.id=v.id"
+                    "tx_nested_secure_outer x JOIN tx_nested_secure_other y ON y.id=x.id JOIN tx_nested_secure_view v ON v.id=y.id" ]
+              let sql source = "UPDATE " + source + " SET v.n=v.n+1 WHERE v.id=1"
+              for source in sources do
+                  match handle writer (sql source) |> snd with
+                  | Err(1143, _) | Err(1142, _) -> ()
+                  | result -> failtestf "expected denied outer join read, got %A" result
               handle root "GRANT SELECT ON fsdb.tx_nested_secure_outer TO nested_writer" |> ignore
-              Expect.equal (handle writer sql |> snd) (Affected 1UL) "granted lookup read permits the update"
+              for source in sources |> List.take 2 do
+                  Expect.equal (handle writer (sql source) |> snd) (Affected 1UL) "granted lookup read permits the update"
+              match handle writer (sql sources.[2]) |> snd with
+              | Err(1143, _) | Err(1142, _) -> ()
+              | result -> failtestf "expected denied second lookup read, got %A" result
+              handle root "GRANT SELECT ON fsdb.tx_nested_secure_other TO nested_writer" |> ignore
+              Expect.equal (handle writer (sql sources.[2]) |> snd) (Affected 1UL) "both lookup reads permit the update"
 
           testCase "disjoint joined view updates do not wait for another physical row"
           <| fun _ ->

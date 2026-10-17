@@ -22989,7 +22989,77 @@ let private rewriteViewExpression (view: UpdatableView) (expression: Expr) =
             | None -> Some(QualifiedCol("__fsdb_view", name))
         | _ -> None) expression
 
+let private writableViewFirst (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
+    let isCte (table: TableRef) =
+        table.Database.IsNone
+        && (update.Ctes |> List.exists (fun cte -> equalsIgnoreCase cte.CteName table.Table))
+    let isPhysical (table: TableRef) =
+        not (isCte table)
+        && (physicalFastPathTable store defaultDatabase table |> Option.isSome)
+
+    let rec move prior remaining =
+        match remaining with
+        | ({ Table = FromTable source; Using = [] } as join) :: rest
+            when join.Kind = LeftJoin || join.Kind = RightJoin ->
+            let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
+            match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
+            | Some view ->
+                let qualifier = source.Alias |> Option.defaultValue source.Table
+                let writesView =
+                    update.Assignments
+                    |> List.exists (fun assignment ->
+                        match assignment.Table with
+                        | Some owner -> equalsIgnoreCase owner qualifier
+                        | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+                if writesView then
+                    let preceding =
+                        match prior with
+                        | [] -> FromTable update.From
+                        | earlier -> FromJoinGroup(FromTable update.From, List.rev earlier)
+                    { update with
+                        From = source
+                        Joins = { join with
+                                    Kind = if join.Kind = LeftJoin then RightJoin else LeftJoin
+                                    Table = preceding } :: rest }
+                else update
+            | None when isPhysical source -> move (join :: prior) rest
+            | None -> update
+        | ({ Kind = InnerJoin; Table = FromTable source; Using = [] } as join) :: rest ->
+            let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
+            match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
+            | Some view ->
+                let qualifier = source.Alias |> Option.defaultValue source.Table
+                let writesView =
+                    update.Assignments
+                    |> List.exists (fun assignment ->
+                        match assignment.Table with
+                        | Some owner -> equalsIgnoreCase owner qualifier
+                        | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+
+                if not writesView then
+                    update
+                else
+                    // Preceding sources are independent INNER JOIN operands.
+                    // Attach this join's predicate to the last old operand,
+                    // where every referenced alias is still in scope.
+                    let joins =
+                        match prior with
+                        | [] -> { join with Table = FromTable update.From } :: rest
+                        | last :: earlierReversed ->
+                            let carried = { last with On = BinOp(And, last.On, join.On) }
+                            { join with Table = FromTable update.From; On = Lit(VInt 1L) }
+                            :: (List.rev (carried :: earlierReversed) @ rest)
+                    { update with From = source; Joins = joins }
+            | None when isPhysical source -> move (join :: prior) rest
+            | None -> update
+        | ({ Kind = InnerJoin; Table = FromSubquery _; Using = [] } as join) :: rest ->
+            move (join :: prior) rest
+        | _ -> update
+
+    if isPhysical update.From then move [] update.Joins else update
+
 let private targetsFirstJoinedView (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
+    let update = writableViewFirst store defaultDatabase update
     let database = update.From.Database |> Option.defaultValue defaultDatabase
     let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
 
@@ -23000,6 +23070,93 @@ let private targetsFirstJoinedView (store: Store) (defaultDatabase: string) (upd
             match assignment.Table with
             | Some owner -> equalsIgnoreCase owner qualifier
             | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets))
+
+/// View-local aliases must stay distinct when a joined UPDATE flattens
+/// multiple view definitions into one mutation source list.
+let private freshenViewAliases (store: Store) (defaultDatabase: string) (update: UpdateStmt) (view: UpdatableView) =
+    let used = HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+    let qualifier (table: TableRef) = table.Alias |> Option.defaultValue table.Table
+
+    for join in update.Joins do
+        for source in FromItem.leaves join.Table do
+            match source with
+            | FromTable table ->
+                used.Add(qualifier table) |> ignore
+                let database = table.Database |> Option.defaultValue defaultDatabase
+                match tryUpdatableView store database table.Table with
+                | Some externalView ->
+                    used.Add(qualifier externalView.UpdateFrom) |> ignore
+                    for nested in externalView.UpdateJoins do
+                        for leaf in FromItem.leaves nested.Table do
+                            FromItem.tryQualifier leaf |> Option.iter (fun name -> used.Add name |> ignore)
+                | None -> ()
+            | source -> FromItem.tryQualifier source |> Option.iter (fun name -> used.Add name |> ignore)
+
+    let externalAliases = used |> Seq.map _.ToLowerInvariant() |> Set.ofSeq
+    let baseAlias = qualifier view.UpdateFrom
+    used.Add baseAlias |> ignore
+    let joinSources = view.UpdateJoins |> List.collect (fun join -> FromItem.leaves join.Table)
+    let joinedAliases =
+        joinSources
+        |> List.choose FromItem.tryQualifier
+        |> List.distinct
+    joinedAliases |> List.iter (fun name -> used.Add name |> ignore)
+    let mutable next = 0
+    let aliases =
+        (baseAlias
+         :: (joinSources
+             |> List.choose (function
+                 | FromTable table -> Some(qualifier table)
+                 | FromSubquery(_, alias) -> Some alias
+                 | _ -> None)))
+        |> List.distinct
+        |> List.choose (fun name ->
+            if not (Set.contains (name.ToLowerInvariant()) externalAliases) then None
+            else
+                let mutable fresh = ""
+                let mutable available = false
+                while not available do
+                    next <- next + 1
+                    fresh <- "__fsdb_view_join_" + string next
+                    available <- used.Add fresh
+                Some(name.ToLowerInvariant(), fresh))
+        |> Map.ofList
+
+    if aliases.IsEmpty then view
+    else
+        let renamed (name: string) = Map.tryFind (name.ToLowerInvariant()) aliases
+        let rewrite expression =
+            Expression.rewrite (function
+                | QualifiedCol(owner, column) -> renamed owner |> Option.map (fun fresh -> QualifiedCol(fresh, column))
+                | _ -> None) expression
+        let rec rewriteSource = function
+            | FromTable table ->
+                match renamed (qualifier table) with
+                | Some fresh -> FromTable { table with Alias = Some fresh }
+                | None -> FromTable table
+            | FromSubquery(select, alias) ->
+                FromSubquery(select, renamed alias |> Option.defaultValue alias)
+            | FromJoinGroup(source, joins) -> FromJoinGroup(rewriteSource source, joins |> List.map rewriteJoin)
+            | source -> source
+        and rewriteJoin join =
+            { join with Table = rewriteSource join.Table; On = rewrite join.On }
+        let rewriteTarget (target: ViewColumnTarget) =
+            match renamed target.Qualifier with
+            | Some fresh -> { target with Qualifier = fresh }
+            | None -> target
+        let rewriteKey (database, table, owner) =
+            database, table, renamed owner |> Option.defaultValue owner
+        { view with
+            UpdateFrom =
+                match rewriteSource (FromTable view.UpdateFrom) with
+                | FromTable table -> table
+                | _ -> view.UpdateFrom
+            UpdateJoins = view.UpdateJoins |> List.map rewriteJoin
+            Targets = view.Targets |> Map.map (fun _ target -> rewriteTarget target)
+            Expressions = view.Expressions |> Map.map (fun _ expression -> rewrite expression)
+            Predicate = view.Predicate |> Option.map rewrite
+            CheckPredicates = view.CheckPredicates |> Map.toList |> List.map (fun (key, predicate) -> rewriteKey key, rewrite predicate) |> Map.ofList
+            JoinCheck = view.JoinCheck |> Option.map (fun check -> { check with Predicate = check.Predicate |> Option.map rewrite }) }
 
 let private resolveViewColumn (view: UpdatableView) (column: string) =
     match Map.tryFind (column.ToLowerInvariant()) view.Columns with
@@ -26995,8 +27152,56 @@ let rec executeAs
             (fun targetStore tableColumns _ candidate ->
                 finishInsertRow targetStore db table tableColumns candidate)
 
-    let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement (originalUpdate: UpdateStmt option) =
+    let executeViewWrite (view: UpdatableView) (runtimeView: UpdatableView) (target: ViewColumnTarget) (runtimeTarget: ViewColumnTarget) statement (originalUpdate: UpdateStmt option) =
         let targetKey = target.Database, target.Table, target.Qualifier
+        let runtimeTargetKey = runtimeTarget.Database, runtimeTarget.Table, runtimeTarget.Qualifier
+        let sourceAliases (source: UpdatableView) =
+            (source.UpdateFrom.Alias |> Option.defaultValue source.UpdateFrom.Table)
+            :: (source.UpdateJoins
+                |> List.collect (fun join -> FromItem.leaves join.Table)
+                |> List.choose FromItem.tryQualifier)
+        let originalAliases = sourceAliases view
+        let runtimeAliases = sourceAliases runtimeView
+        let restoreAliases =
+            List.zip runtimeAliases originalAliases
+            |> List.map (fun (runtime, original) -> runtime.ToLowerInvariant(), original)
+            |> Map.ofList
+        let restoreExpression expression =
+            Expression.rewrite (function
+                | QualifiedCol(owner, column) ->
+                    restoreAliases
+                    |> Map.tryFind (owner.ToLowerInvariant())
+                    |> Option.map (fun original -> QualifiedCol(original, column))
+                | _ -> None) expression
+        let writesView (update: UpdateStmt) (assignment: Assignment) =
+            let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
+            assignment.Table |> Option.forall (fun owner -> equalsIgnoreCase owner qualifier)
+        let viewAuthorizationStatement =
+            match statement, originalUpdate with
+            | Update rewritten, Some original ->
+                let assignments =
+                    List.zip original.Assignments rewritten.Assignments
+                    |> List.choose (fun (exposed, physical) ->
+                        if not (writesView original exposed) then None
+                        else
+                            match view.Targets |> Map.tryFind (exposed.Column.ToLowerInvariant()) with
+                            | Some mapped ->
+                                Some
+                                    { physical with
+                                        Table = Some mapped.Qualifier
+                                        Value = restoreExpression physical.Value }
+                            | None -> Some physical)
+                // The caller's original command checks other targets. A view
+                // definer authorizes only the component reached through it.
+                Update
+                    { rewritten with
+                        From = view.UpdateFrom
+                        Joins = view.UpdateJoins
+                        Assignments = assignments
+                        Where = view.Predicate
+                        OrderBy = []
+                        Limit = None }
+            | _ -> statement
         let writableAccessView database table =
             tryStoredView store database table
             |> Option.bind (fun stored ->
@@ -27022,11 +27227,11 @@ let rec executeAs
 
         let retarget (access: ViewAccess) =
             if access.Mode = OriginalWrite then
-                statement
+                viewAuthorizationStatement
             else
                 let qualified = SqlText.objectName (Some access.Database) access.Table
 
-                match statement with
+                match viewAuthorizationStatement with
                 | Insert(_, columns, rows, updates, ignore) -> Insert(qualified, exposedInsertColumns access columns, rows, updates, ignore)
                 | InsertSelect(_, columns, select, updates, ignore) -> InsertSelect(qualified, exposedInsertColumns access columns, select, updates, ignore)
                 | Replace(_, columns, rows) -> Replace(qualified, columns, rows)
@@ -27236,14 +27441,18 @@ let rec executeAs
 
                         let assignments =
                             original.Assignments
-                            |> List.map (fun (assignment: Assignment) ->
-                                match view.Targets |> Map.tryFind (assignment.Column.ToLowerInvariant()) with
-                                | Some target ->
-                                    { assignment with
-                                        Table = Some target.Qualifier
-                                        Column = target.ComponentColumn |> Option.defaultValue target.Column
-                                        Value = sourceExpression assignment.Value }
-                                | None -> assignment)
+                            |> List.choose (fun (assignment: Assignment) ->
+                                if not (writesView original assignment) then
+                                    None
+                                else
+                                    match view.Targets |> Map.tryFind (assignment.Column.ToLowerInvariant()) with
+                                    | Some target ->
+                                        Some
+                                            { assignment with
+                                                Table = Some target.Qualifier
+                                                Column = target.ComponentColumn |> Option.defaultValue target.Column
+                                                Value = sourceExpression assignment.Value }
+                                    | None -> Some assignment)
 
                         { update with
                             Assignments = assignments
@@ -27268,8 +27477,14 @@ let rec executeAs
                                     |> Result.mapError ViewGrantDenied)
                                 |> Result.bind (fun effective ->
                                     (match originalUpdate with
-                                     | Some original when original.Assignments.Length = authorizationUpdate.Assignments.Length ->
-                                         Ok(List.zip original.Assignments authorizationUpdate.Assignments)
+                                     | Some original ->
+                                         let exposedAssignments =
+                                             original.Assignments
+                                             |> List.filter (writesView original)
+                                         if exposedAssignments.Length = authorizationUpdate.Assignments.Length then
+                                             Ok(List.zip exposedAssignments authorizationUpdate.Assignments)
+                                         else
+                                             invalid ()
                                      | _ -> invalid ())
                                     |> Result.bind (traverse (fun (exposed, assignment) ->
                                         match Map.tryFind (exposed.Column.ToLowerInvariant()) view.Targets with
@@ -27369,13 +27584,13 @@ let rec executeAs
                 DynamicScope.withValue sharedViewCteScope (Some { Aliases = view.SharedCteAliases; Pending = true }) (fun () ->
                     executeAs store authorized dbName ids foundRows currentAccount statement)
 
-            let checkPredicate = Map.tryFind targetKey view.CheckPredicates
+            let checkPredicate = Map.tryFind runtimeTargetKey runtimeView.CheckPredicates
 
             let joinCheck =
-                if view.UpdateJoins.IsEmpty then None
-                else view.JoinCheck |> Option.map (fun check -> view.UpdateFrom, view.UpdateJoins, check.Predicate)
+                if runtimeView.UpdateJoins.IsEmpty then None
+                else runtimeView.JoinCheck |> Option.map (fun check -> runtimeView.UpdateFrom, runtimeView.UpdateJoins, check.Predicate)
 
-            match checkPredicate, view.Predicate, joinCheck with
+            match checkPredicate, runtimeView.Predicate, joinCheck with
             | None, None, None -> execute ()
             | checkPredicate, visibilityPredicate, joinCheck ->
                 DynamicScope.withValue
@@ -27383,7 +27598,7 @@ let rec executeAs
                     (Some
                         { Database = target.Database
                           Table = target.Table
-                          Qualifier = target.Qualifier
+                          Qualifier = runtimeTarget.Qualifier
                           View = view.ViewDatabase + "." + normalizeTableName view.ViewName
                           CheckPredicate = checkPredicate
                           VisibilityPredicate = visibilityPredicate
@@ -28602,7 +28817,7 @@ let rec executeAs
                                 Fields = baseFields
                                 Assignments = assignments }
 
-                    executeViewWrite view target rewritten None
+                    executeViewWrite view view target target rewritten None
 
     | LoadData load ->
         let db, table = splitQualified dbName load.Table
@@ -28748,7 +28963,7 @@ let rec executeAs
                 | Ok(), Ok assignments ->
                     let rewritten = Insert(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
 
-                    executeViewWrite view target rewritten None
+                    executeViewWrite view view target target rewritten None
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -28802,7 +29017,7 @@ let rec executeAs
                 | Ok(), Ok assignments ->
                     let rewritten = InsertSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select, assignments, ignoreDuplicates)
 
-                    executeViewWrite view target rewritten None
+                    executeViewWrite view view target target rewritten None
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -28876,7 +29091,7 @@ let rec executeAs
             | Ok(target, baseColumns) ->
                 let rewritten = Replace(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs)
 
-                executeViewWrite view target rewritten None
+                executeViewWrite view view target target rewritten None
 
     | Replace(table, columns, rowsExprs) ->
         let db, table = splitQualified dbName table
@@ -28904,7 +29119,7 @@ let rec executeAs
             | Ok(target, baseColumns) ->
                 let rewritten = ReplaceSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select)
 
-                executeViewWrite view target rewritten None
+                executeViewWrite view view target target rewritten None
 
     | ReplaceSelect(table, columns, select) ->
         let db, table = splitQualified dbName table
@@ -28934,7 +29149,7 @@ let rec executeAs
             | Ok(target, _), Ok rewrittenAssignments ->
                 let rewritten = ReplaceSet(SqlText.objectName (Some target.Database) target.Table, rewrittenAssignments)
 
-                executeViewWrite view target rewritten None
+                executeViewWrite view view target target rewritten None
 
     | ReplaceSet(table, assignments) ->
         let db, table = splitQualified dbName table
@@ -28986,20 +29201,36 @@ let rec executeAs
     | Update updateStmt
         when not updateStmt.Joins.IsEmpty
              && targetsFirstJoinedView store dbName updateStmt ->
+        let updateStmt = writableViewFirst store dbName updateStmt
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
 
         match tryUpdatableView store viewDb updateStmt.From.Table with
         | None -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
         | Some view ->
+            let runtimeView = freshenViewAliases store dbName updateStmt view
             let viewQualifier = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
-            let baseQualifier = view.UpdateFrom.Alias |> Option.defaultValue view.UpdateFrom.Table
-            let joinedColumns =
+            let baseQualifier = runtimeView.UpdateFrom.Alias |> Option.defaultValue runtimeView.UpdateFrom.Table
+            let joinedOwners =
                 updateStmt.Joins
                 |> List.collect (fun join -> FromItem.leaves join.Table)
-                |> List.collect (fun source -> selectSourceColumns store dbName source |> List.choose id)
-                |> List.map (fun column -> column.Name.ToLowerInvariant())
-                |> Set.ofList
+                |> List.collect (fun source ->
+                    match FromItem.tryQualifier source with
+                    | Some owner ->
+                        selectSourceColumns store dbName source
+                        |> List.choose id
+                        |> List.map (fun column -> column.Name.ToLowerInvariant(), owner)
+                    | None -> [])
+                |> List.groupBy fst
+                |> List.map (fun (name, sources) -> name, sources |> List.map snd |> List.distinct)
+                |> Map.ofList
+            let owners (column: string) = joinedOwners |> Map.tryFind (column.ToLowerInvariant()) |> Option.defaultValue []
+            let viewExposes (column: string) =
+                view.OrderedColumns
+                |> List.exists (fun name -> equalsIgnoreCase name column)
             let mutable ambiguousColumn = None
+            let callerCurrentUser =
+                Functions.lookup "CURRENT_USER" registry
+                |> Option.map (fun currentUser -> currentUser [])
             let qualifyView expression =
                 rewriteExprWith (function
                     | Col name -> Some(QualifiedCol(baseQualifier, name))
@@ -29007,60 +29238,92 @@ let rec executeAs
 
             let rewrite expression =
                 rewriteExprWith (function
+                    | FuncCall(name, []) when equalsIgnoreCase name "CURRENT_USER" ->
+                        callerCurrentUser |> Option.map Lit
                     | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier viewQualifier ->
-                        Map.tryFind (name.ToLowerInvariant()) view.Expressions
+                        Map.tryFind (name.ToLowerInvariant()) runtimeView.Expressions
                         |> Option.map qualifyView
                         |> Option.orElse (Some(QualifiedCol("__fsdb_view", name)))
-                    | Col name when Map.containsKey (name.ToLowerInvariant()) view.Expressions ->
-                        if Set.contains (name.ToLowerInvariant()) joinedColumns then
+                    | Col name when Map.containsKey (name.ToLowerInvariant()) runtimeView.Expressions ->
+                        if not (owners name).IsEmpty then
                             ambiguousColumn <- Some name
                             None
                         else
-                            Map.tryFind (name.ToLowerInvariant()) view.Expressions |> Option.map qualifyView
+                            Map.tryFind (name.ToLowerInvariant()) runtimeView.Expressions |> Option.map qualifyView
+                    | Col name ->
+                        match owners name with
+                        | [ owner ] -> Some(QualifiedCol(owner, name))
+                        | _ -> None
                     | _ -> None) expression
 
             match
                 updateStmt.Assignments
                 |> traverse (fun assignment ->
                     if assignment.Table |> Option.exists (fun qualifier -> not (equalsIgnoreCase qualifier viewQualifier)) then
-                        Error(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
-                    elif assignment.Table.IsNone && Set.contains (assignment.Column.ToLowerInvariant()) joinedColumns then
+                        Ok(assignment, None)
+                    elif assignment.Table.IsNone && viewExposes assignment.Column && not (owners assignment.Column).IsEmpty then
                         Error(1052, sprintf "Column '%s' in field list is ambiguous" assignment.Column)
+                    elif assignment.Table.IsNone && not (viewExposes assignment.Column) then
+                        match owners assignment.Column with
+                        | [ owner ] -> Ok({ assignment with Table = Some owner }, None)
+                        | [] -> Error(1054, sprintf "Unknown column '%s' in field list" assignment.Column)
+                        | _ -> Error(1052, sprintf "Column '%s' in field list is ambiguous" assignment.Column)
                     else
                         match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets with
-                        | Some target -> Ok(assignment, target)
+                        | Some target -> Ok(assignment, Some target)
                         | None -> Error(1054, sprintf "Unknown column '%s' in field list" assignment.Column))
             with
             | Error(code, message) -> ids, Err(code, message)
             | Ok assignments ->
                 let targets =
                     assignments
-                    |> List.map (fun (_, target) -> target.Database.ToLowerInvariant(), target.Table.ToLowerInvariant(), target.Qualifier.ToLowerInvariant())
+                    |> List.choose (fun (_, target) ->
+                        target
+                        |> Option.map (fun target ->
+                            target.Database.ToLowerInvariant(), target.Table.ToLowerInvariant(), target.Qualifier.ToLowerInvariant()))
                     |> List.distinct
 
                 if targets.Length > 1 then
                     ids, Err(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName)
                 else
+                    let externalJoins =
+                        updateStmt.Joins |> List.map (Join.mapConditions rewrite)
+                    let viewPredicate = runtimeView.Predicate |> Option.map qualifyView
+                    let externalJoins, globalViewPredicate =
+                        match externalJoins, viewPredicate with
+                        | [ join ], Some predicate when join.Kind = RightJoin ->
+                            [ { join with On = BinOp(And, join.On, predicate) } ], None
+                        | _ -> externalJoins, viewPredicate
                     let rewritten =
                         { updateStmt with
-                            From = view.UpdateFrom
-                            Joins = view.UpdateJoins @ (updateStmt.Joins |> List.map (Join.mapConditions rewrite))
+                            From = runtimeView.UpdateFrom
+                            Joins = runtimeView.UpdateJoins @ externalJoins
                             Assignments =
                                 assignments
                                 |> List.map (fun (assignment, target) ->
-                                    { assignment with
-                                        Table = Some target.Qualifier
-                                        Column = target.Column
-                                        Value = rewrite assignment.Value })
-                            Where = combineViewPredicate (view.Predicate |> Option.map qualifyView) (updateStmt.Where |> Option.map rewrite)
+                                    match target with
+                                    | Some _ ->
+                                        let runtimeTarget =
+                                            runtimeView.Targets.[assignment.Column.ToLowerInvariant()]
+                                        { assignment with
+                                            Table = Some runtimeTarget.Qualifier
+                                            Column = runtimeTarget.Column
+                                            Value = rewrite assignment.Value }
+                                    | None -> { assignment with Value = rewrite assignment.Value })
+                            Where = combineViewPredicate globalViewPredicate (updateStmt.Where |> Option.map rewrite)
                             OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                             Limit = updateStmt.Limit |> Option.map rewrite }
 
                     match ambiguousColumn with
                     | Some name -> ids, Err(1052, sprintf "Column '%s' in field list is ambiguous" name)
                     | None ->
-                        let target = assignments |> List.head |> snd
-                        executeViewWrite view target (Update rewritten) (Some updateStmt)
+                        let exposed, target =
+                            assignments
+                            |> List.pick (fun (assignment, mapped) -> mapped |> Option.map (fun target -> assignment, target))
+                        let runtimeTarget = runtimeView.Targets.[exposed.Column.ToLowerInvariant()]
+                        let classified =
+                            { updateStmt with Assignments = assignments |> List.map fst }
+                        executeViewWrite view runtimeView target runtimeTarget (Update rewritten) (Some classified)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty && tryStoredView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome ->
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
@@ -29128,7 +29391,7 @@ let rec executeAs
                             Limit = updateStmt.Limit |> Option.map rewrite }
 
                     let target = assignments |> List.head |> snd
-                    executeViewWrite view target (Update rewritten) (Some updateStmt)
+                    executeViewWrite view view target target (Update rewritten) (Some updateStmt)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -29565,7 +29828,7 @@ let rec executeAs
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
             let target = view.Targets |> Map.values |> Seq.head
-            executeViewWrite view target (Delete rewritten) None
+            executeViewWrite view view target target (Delete rewritten) None
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
@@ -30105,6 +30368,18 @@ let transactionWriteTargets
         |> Result.toOption
         |> Option.bind (insertTargets tableName columns)
 
+    let combineTargets (targets: (string * string * WriteLockTargets) list) : (string * string * WriteLockTargets) list =
+        targets
+        |> List.groupBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+        |> List.map (fun (_, grouped) ->
+            let database, table, _ = List.head grouped
+            database,
+            table,
+            { RowIds = grouped |> List.collect (fun (_, _, target) -> target.RowIds) |> List.distinct
+              Keys = grouped |> List.collect (fun (_, _, target) -> target.Keys) |> List.distinct })
+        // Every writer claims tables in the same order, regardless of join order.
+        |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+
     let joinedTargets (from: TableRef) (joins: Join list) (names: string list) predicate =
         let joinedTables =
             joins
@@ -30123,15 +30398,7 @@ let transactionWriteTargets
             |> function Some target -> Ok target | None -> Error())
         |> Result.toOption
         |> Option.defaultValue []
-        |> List.groupBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
-        |> List.map (fun (_, grouped) ->
-            let database, table, _ = List.head grouped
-            database,
-            table,
-            { RowIds = grouped |> List.collect (fun (_, _, target) -> target.RowIds) |> List.distinct
-              Keys = grouped |> List.collect (fun (_, _, target) -> target.Keys) |> List.distinct })
-        // Every writer claims tables in the same order, regardless of join order.
-        |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+        |> combineTargets
 
     match statement with
     | Update update when update.Joins.IsEmpty ->
@@ -30161,12 +30428,20 @@ let transactionWriteTargets
             | _ -> []
         | None -> targets update.From update.Where |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
+        let update = writableViewFirst store dbName update
         let viewDatabase = update.From.Database |> Option.defaultValue dbName
 
         let viewTargets =
             tryUpdatableView store viewDatabase update.From.Table
             |> Option.bind (fun view ->
-                update.Assignments
+                let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
+                let viewAssignments =
+                    update.Assignments
+                    |> List.filter (fun assignment ->
+                        match assignment.Table with
+                        | Some owner -> equalsIgnoreCase owner viewQualifier
+                        | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+                viewAssignments
                 |> traverse (fun assignment ->
                     Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
                     |> function Some target -> Ok target | None -> Error())
@@ -30174,7 +30449,6 @@ let transactionWriteTargets
                 |> Option.bind (function
                     | [] -> None
                     | first :: rest when rest |> List.forall (fun target -> viewTargetKey target = viewTargetKey first) ->
-                        let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
                         let physicalEquality (qualifier: string) (name: string) (literal: Expr) =
                             Map.tryFind (name.ToLowerInvariant()) view.Targets
                             |> Option.filter (fun column ->
@@ -30202,10 +30476,37 @@ let transactionWriteTargets
                               Partitions = []
                               IndexHints = [] }
                             physicalPredicate
+                        |> Option.map (fun target -> view, target)
                     | _ -> None))
 
         match viewTargets with
-        | Some target -> [ target ]
+        | Some(view, target) ->
+            let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
+            let outerTables =
+                update.Joins
+                |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
+                |> List.choose (function FromTable table -> Some table | _ -> None)
+                |> List.choose (fun table ->
+                    physicalFastPathTable store dbName table
+                    |> Option.map (fun physical -> table, physical))
+            let externalNames =
+                update.Assignments
+                |> List.choose (fun assignment ->
+                    match assignment.Table with
+                    | Some owner when not (equalsIgnoreCase owner viewQualifier) -> Some owner
+                    | Some _ -> None
+                    | None ->
+                        let owners =
+                            outerTables
+                            |> List.filter (fun (_, table) ->
+                                table.Columns |> List.exists (fun column -> equalsIgnoreCase column.Name assignment.Column))
+                        if Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets then None
+                        else
+                            match owners with
+                            | [ (table, _) ] -> Some(table.Alias |> Option.defaultValue table.Table)
+                            | _ -> None)
+            target :: joinedTargets update.From update.Joins externalNames None
+            |> combineTargets
         | None ->
             let projectedNames body =
                 let projections =

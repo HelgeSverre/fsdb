@@ -163,6 +163,23 @@ def main():
                 assert_error(connection, "UPDATE two_source_outer SET n=0 WHERE id=1", 1369)
                 assert run(connection, "SELECT n FROM two_source_target") == ((11,),)
 
+                for sql in [
+                    "CREATE VIEW lateral_checked_inner AS SELECT a.id AS target_id,a.n AS metric,d.flag,e.x "
+                    "FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d "
+                    "JOIN LATERAL (SELECT d.id x) e ON TRUE JOIN a ON a.id=e.x "
+                    "WHERE a.n>=0 WITH CASCADED CHECK OPTION",
+                    "CREATE VIEW lateral_checked_outer AS SELECT iv.target_id AS id,iv.metric AS n,s.aux "
+                    "FROM lateral_checked_inner iv JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) s "
+                    "ON s.id=iv.target_id WHERE iv.metric<s.aux WITH CASCADED CHECK OPTION",
+                ]:
+                    run(connection, sql)
+                assert run(connection, "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_checked_outer'") == (("YES",),)
+                run(connection, "UPDATE a SET n=0")
+                assert run(connection, "UPDATE lateral_checked_outer SET n=1 WHERE id=1") == 1
+                assert_error(connection, "UPDATE lateral_checked_outer SET n=-1 WHERE id=1", 1369)
+                assert_error(connection, "UPDATE lateral_checked_outer SET n=10 WHERE id=1", 1369)
+                assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 1), (2, 0))
+
                 print(f"MySQL {version}: {len(SHAPES)} composed join-view shapes, private aliases, and two leading sources matched the expected write contract")
             finally:
                 if connection:
