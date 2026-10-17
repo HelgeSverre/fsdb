@@ -1,4 +1,4 @@
-"""Inspect native MySQL 8.4.11 utf8mb4_general_ci weights for a Unicode range."""
+"""Inspect native MySQL 8.4.11 collation weights for a Unicode range."""
 
 import argparse
 import pathlib
@@ -22,6 +22,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("start", type=lambda value: int(value, 16))
     parser.add_argument("stop", type=lambda value: int(value, 16))
+    parser.add_argument("--collation", choices=("utf8mb4_general_ci", "utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci"),
+                        default="utf8mb4_general_ci")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="fsdb-general-weight-") as directory:
         root = pathlib.Path(directory)
@@ -52,7 +54,7 @@ def main():
                         encoded = chr(codepoint).encode("utf-8").hex()
                         cursor.execute(
                             "SELECT HEX(WEIGHT_STRING(_utf8mb4 0x"
-                            + encoded + " COLLATE utf8mb4_general_ci))"
+                            + encoded + " COLLATE " + args.collation + "))"
                         )
                         weights[codepoint] = cursor.fetchone()[0]
                     nonliteral = [

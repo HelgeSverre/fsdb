@@ -188,7 +188,7 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
              if legacy_chars is not None else TERMS)
     if legacy_range is not None:
         terms += [f'"{prefix + char}"' for char in legacy_chars]
-    if legacy_range == (0xFE20, 0xFE30):
+    if legacy_range in ((0xFE20, 0xFE30), (0x1AB0, 0x1B00)):
         terms += [prefix + char + '文' for char in legacy_chars]
         terms += [char + prefix for char in legacy_chars]
     if legacy_range == (0xAC00, 0xAD00):

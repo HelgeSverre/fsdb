@@ -219,6 +219,22 @@ let private foldUnicode520CombiningHalfMarks (value: string) =
             else result.Append(c) |> ignore
         result.ToString()
 
+// MySQL's UCA 5.2 table assigns individual implicit primary weights across
+// U+1AB0–U+1AFF, including positions assigned after Unicode 5.2. ICU ignores
+// many of these newer combining marks. Escape the marker in literal input so
+// a real private-use character cannot alias a generated weight.
+let private foldUnicode520ExtendedCombiningMarks (value: string) =
+    let marker = '\uE0AE'
+    if not (value |> Seq.exists (fun c -> c = marker || (c >= '\u1AB0' && c <= '\u1AFF'))) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif c >= '\u1AB0' && c <= '\u1AFF' then
+                result.Append(marker).Append(char (0xE400 + int c - 0x1AB0)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
 // ICU composes conjoining Hangul Jamo into syllables. MySQL's older Unicode
 // collations retain their individual weights; each collation decides whether
 // compatibility Jamo share them.
@@ -557,6 +573,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             value |> foldCjkPunctuationForms true |> foldLegacyBopomofoForms
             |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
             |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
+            |> foldUnicode520ExtendedCombiningMarks
             |> foldLegacyUnicodeJamo
         | "utf8mb4_unicode_ci" ->
             value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms

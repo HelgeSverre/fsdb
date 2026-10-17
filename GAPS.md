@@ -1085,6 +1085,12 @@ preserves distinct U+1AB0–U+1AFF, U+1DC0–U+1DFF, and U+20D0–U+20FF
 weights in CJK text. The adjacent U+FE20–U+FE2F block needs no override.
 Their expanded ngram lanes match MySQL at sizes 1–10 (186, 384, 198, and 96
 searches per size, respectively).
+For `utf8mb4_unicode_520_ci`, [combining half marks](torture/findings/2026-10-18-unicode-520-combining-half-marks.md)
+retain the UCA 5.2 split between primary-ignorable U+FE20–U+FE26 and
+distinct U+FE27–U+FE2F weights. The [extended mark block](torture/findings/2026-10-18-unicode-520-extended-combining-marks.md)
+also keeps the 80 distinct U+1AB0–U+1AFF implicit weights. The half-mark
+two-column ngram probe matches MySQL at sizes 1 and 2; the extended-mark
+probe matches at sizes 1–10. Other Unicode 5.2 blocks remain to audit.
 [General Unicode variation selectors](torture/findings/2026-10-17-general-ci-variation-selectors.md)
 now retain their distinct written weights across U+FE00–U+FE0F, including
 U+FE0F, in equality keys and ngram postings. The two-column corpus matches
