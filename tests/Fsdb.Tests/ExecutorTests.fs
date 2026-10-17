@@ -4422,7 +4422,7 @@ let tests =
                     runCancelled 300L "SELECT COUNT(*) FROM aggregate_cancel WHERE ARM(id) = id"
                     runCancelled 1L "SELECT SUM(ARM(id)), AVG(ARM(id)) FROM aggregate_cancel" ]
 
-          testCase "limited joins observe cancellation while a pushed filter rejects source rows"
+          testCase "limited indexed joins observe cancellation while filters reject source rows"
           <| fun _ ->
               let store = newStore ()
               runDefault store "CREATE TABLE filter_base (n INT)" |> ignore
@@ -4446,7 +4446,7 @@ let tests =
 
               runDefault store "DELETE FROM filter_partner WHERE id = 601" |> ignore
 
-              for predicate in [ "a.n < 0"; "a.n BETWEEN -10 AND -1" ] do
+              for predicate in [ "a.n < 0"; "a.n BETWEEN -10 AND -1"; "n < 0"; "a.n + 0 < 0" ] do
                   use cancellation = new System.Threading.CancellationTokenSource()
                   let mutable armCalls = 0
                   let cancelOnFirstMatch =
