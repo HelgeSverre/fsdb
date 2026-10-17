@@ -186,6 +186,14 @@ let tests =
               Expect.equal (ids (naturalScores index "生\u180e日")) [ 6 ] "weighted separator has distinct ngrams"
               Expect.equal (ids (booleanScores index "生\u3000日")) [ 1; 2; 3; 4; 5 ] "Boolean lookup uses the same padded keys"
 
+          testCase "Unicode 5.2 Boolean ngrams do not compose Korean Jamo into short terms"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get
+              let rules = { Tokenizer = Ngrams 5; Stopwords = StopwordPolicy.BuiltIn }
+              let index = buildIndexWithDocumentSettings rules collation
+                              [ 1, rules, [ "하늘하늘"; "한글" ] ]
+              Expect.isEmpty (booleanScores index "하늘") "short composed query does not address a Jamo ngram"
+
           testCase "boolean ngram terms retain Unicode number characters"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }

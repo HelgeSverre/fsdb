@@ -26,11 +26,16 @@ U+200C/U+200D/U+2060 in this corpus, while ICU treats all four as ignorable.
 The fix applies MySQL's measured PAD SPACE equivalences for the legacy Unicode
 collations and preserves U+180E's UCA 5.2 primary weight with an escaped key.
 
-The full `utf8mb4_unicode_520_ci` corpus now has zero differences at token
-sizes 1–4 and 6–10. At size 5, one pre-existing Boolean search for `하늘`
-still returns a row in fsdb and none in MySQL, affecting both membership and
-relevance; the same two mismatches occur at the parent revision. The size-2
-`utf8mb4_unicode_ci` corpus improves from 88 to 36 differences; those
+The full `utf8mb4_unicode_520_ci` corpus now has zero differences at every
+token size from 1 through 10 (3,870 searches). At size 5, fsdb previously
+matched the short Boolean term `하늘` against the five-Jamo ngram `하늘`:
+ICU composes that Jamo sequence into the same key, whereas MySQL's UCA 5.2
+assigns distinct weights. The legacy-only Jamo folding preserves the measured
+compatibility-Jamo equivalences without composing it into Hangul syllables.
+MySQL gave distinct weights to all 256 U+1100–U+11FF Jamo checked, and all
+146 compatibility or halfwidth Jamo whose NFKD decomposition lies in that
+range compared equal to their decomposition.
+The size-2 `utf8mb4_unicode_ci` corpus improves from 88 to 36 differences; those
 remaining cases require separate legacy UCA work. The size-2 legacy
 punctuation and radical lanes remain at zero. The pinned MySQL 8.4 container
 does not include a MeCab plugin; this comparison covers ngram only.

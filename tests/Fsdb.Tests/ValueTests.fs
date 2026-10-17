@@ -1448,6 +1448,19 @@ let tests =
                             Expect.isFalse (col.Equals "生\u180e" "生") "Mongolian vowel separator remains weighted"
                             Expect.isFalse (col.Equals "\u180e" "\uE0A0\uE0A1") "literal marker cannot alias separator"
 
+                testCase "Unicode 5.2 keeps Hangul Jamo distinct from composed syllables"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_520_ci" |> Option.get
+                    Expect.isFalse (col.Equals "하" "하") "leading and vowel Jamo do not compose into a syllable"
+                    Expect.isFalse (col.Equals "늘" "늘") "trailing Jamo remains a separate weight"
+                    Expect.isFalse (col.Equals "하늘" "하늘") "Jamo sequence differs from composed Hangul"
+                    Expect.isTrue (col.Equals "하" "ㅎㅏ") "compatibility Jamo share leading and vowel weights"
+                    Expect.equal (col.KeyOf "하") (col.KeyOf "ㅎㅏ") "compatibility Jamo share index keys"
+                    Expect.equal (col.HashOf "하") (col.HashOf "ㅎㅏ") "compatibility Jamo share hash keys"
+                    Expect.isTrue (col.Equals "ᄂ" "ㄴ") "compatibility consonant shares leading weight"
+                    Expect.isFalse (col.Equals "ᆯ" "ㄹ") "trailing and leading consonants differ"
+                    Expect.isFalse (col.Equals "ᄒ" "\uE0B0\uE512") "literal marker cannot alias a Jamo key"
+
                 testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
                     [ "utf8mb4_0900_ai_ci", true
