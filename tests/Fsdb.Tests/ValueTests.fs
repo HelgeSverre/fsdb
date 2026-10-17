@@ -1572,6 +1572,15 @@ let tests =
                     Expect.isTrue (col.Equals "Ⅰ" "ⅰ") "Roman numeral case shares a primary weight"
                     Expect.isFalse (col.Equals "℁" "\uE0B5\uF001") "literal marker cannot alias a letterlike symbol"
 
+                testCase "utf8mb4_general_ci keeps mathematical operators at their written weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let keys = [ 0x2200 .. 0x22FF ] |> List.map (char >> string >> col.KeyOf)
+                    Expect.equal (keys |> Set.ofList |> Set.count) 256 "each mathematical operator has its own MySQL weight"
+                    for left, right in [ "∃", "∄"; "∈", "∉"; "∣", "∤"; "∥", "∦"; "∼", "≁"; "≈", "≉" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isFalse (col.Equals "∃" "\uE0B6\uF103") "literal marker cannot alias an operator"
+
                 testCase "utf8mb4_general_ci retains decomposed combining accents"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
