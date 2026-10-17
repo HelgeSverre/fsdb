@@ -257,6 +257,28 @@ def main():
                         "WHERE table_schema='probe' AND table_name='recursive_only'"
                     )
                     assert cursor.fetchone() == ("YES",)  # MySQL metadata overstates this view.
+                    for suffix, body, expected in [
+                        ("expression", "SELECT k+1 AS x FROM seq", "NO"),
+                        ("distinct", "SELECT DISTINCT k FROM seq", "NO"),
+                        ("group", "SELECT k,COUNT(*) AS c FROM seq GROUP BY k", "NO"),
+                        ("join", "SELECT a.k FROM seq a JOIN seq b ON a.k=b.k", "YES"),
+                        ("derived", "SELECT d.k FROM (SELECT k FROM seq) d", "YES"),
+                        ("derived_group", "SELECT d.k FROM (SELECT COUNT(*) AS k FROM seq) d", "YES"),
+                        ("derived_distinct", "SELECT d.k FROM (SELECT DISTINCT k FROM seq) d", "YES"),
+                    ]:
+                        name = "recursive_only_" + suffix
+                        cursor.execute(f"CREATE VIEW {name} AS {recursive} {body}")
+                        cursor.execute(
+                            "SELECT IS_UPDATABLE FROM information_schema.views "
+                            "WHERE table_schema='probe' AND table_name=%s", (name,)
+                        )
+                        assert cursor.fetchone() == (expected,), name
+                        if expected == "YES":
+                            try:
+                                cursor.execute(f"UPDATE {name} SET k=4")
+                                raise AssertionError(f"{name} unexpectedly accepted UPDATE")
+                            except pymysql.MySQLError as error:
+                                assert error.args[0] == 1288, (name, error.args)
                     try:
                         cursor.execute("UPDATE recursive_only SET k=4")
                         raise AssertionError("recursive-only view accepted UPDATE")

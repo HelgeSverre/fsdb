@@ -2071,15 +2071,12 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                          || join.Kind = CrossJoin
                          || join.Kind = NaturalJoin)
                         && (match join.Table with FromTable _ | FromSubquery _ | FromLateral _ | FromJsonTable _ -> true | _ -> false))
-                let shapeAllowsUpdates =
-                    ((select.Joins.IsEmpty && match source with FromTable _ -> true | _ -> false)
-                     || (sourceOrderAllowsUpdates && joinsSupported && not select.Joins.IsEmpty))
-                    && not select.Distinct
+                let queryAllowsUpdates =
+                    not select.Distinct
                     && not select.CalculateFoundRows
                     && select.GroupBy.IsEmpty
                     && not select.Rollup
                     && select.Windows.IsEmpty
-                    && select.Ctes.IsEmpty
                     && select.Having.IsNone
                     && select.Limit.IsNone
                     && select.Offset.IsNone
@@ -2091,13 +2088,24 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                             | QualifiedCol _ -> true
                             | _ -> false))
 
-                if not shapeAllowsUpdates then
-                    false
-                elif not select.Joins.IsEmpty then
+                let writableSource =
                     sourceAllowsUpdates source
                     || (select.Joins |> List.exists (fun join -> sourceAllowsUpdates join.Table))
+                let ordinaryShape =
+                    ((select.Joins.IsEmpty && match source with FromTable _ -> true | _ -> false)
+                     || (sourceOrderAllowsUpdates && joinsSupported && not select.Joins.IsEmpty))
+                    && select.Ctes.IsEmpty
+                    && writableSource
+                // MySQL reports a direct outer projection over a recursive
+                // read-only source as updatable, although UPDATE rejects it.
+                let recursiveReadOnlyShape =
+                    (parsed.Ctes |> List.exists _.Recursive)
+                    && (match source with FromSubquery _ -> true | _ -> false)
+                    && joinsSupported
+                if not queryAllowsUpdates then
+                    false
                 else
-                    sourceAllowsUpdates source
+                    ordinaryShape || recursiveReadOnlyShape
             | _ -> false
         | _ -> false
 

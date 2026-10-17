@@ -2647,6 +2647,30 @@ let tests =
                   (run store
                       "CREATE VIEW recursive_only AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) SELECT k FROM seq")
                   "create recursive-only view"
+              Expect.equal
+                  (rows store "SELECT IS_UPDATABLE FROM information_schema.views WHERE table_name='recursive_only'")
+                  [ [ Some "YES" ] ]
+                  "MySQL reports recursive-only view metadata as updatable"
+              for suffix, body, expected in
+                  [ "expression", "SELECT k+1 AS x FROM seq", "NO"
+                    "distinct", "SELECT DISTINCT k FROM seq", "NO"
+                    "group", "SELECT k,COUNT(*) AS c FROM seq GROUP BY k", "NO"
+                    "join", "SELECT a.k FROM seq a JOIN seq b ON a.k=b.k", "YES"
+                    "derived", "SELECT d.k FROM (SELECT k FROM seq) d", "YES"
+                    "derived_group", "SELECT d.k FROM (SELECT COUNT(*) AS k FROM seq) d", "YES"
+                    "derived_distinct", "SELECT d.k FROM (SELECT DISTINCT k FROM seq) d", "YES" ] do
+                  let name = "recursive_only_" + suffix
+                  expectOk
+                      (run store ($"CREATE VIEW {name} AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) {body}"))
+                      ("create " + name)
+                  Expect.equal
+                      (rows store ($"SELECT IS_UPDATABLE FROM information_schema.views WHERE table_name='{name}'"))
+                      [ [ Some expected ] ]
+                      (name + " metadata matches MySQL")
+                  if expected = "YES" then
+                      match run store ($"UPDATE {name} SET k=4") with
+                      | Err(1288, _) -> ()
+                      | other -> failtestf "expected %s UPDATE rejection, got %A" name other
               match run store "UPDATE recursive_only SET k=4" with
               | Err(1288, _) -> ()
               | other -> failtestf "expected recursive-only UPDATE rejection, got %A" other

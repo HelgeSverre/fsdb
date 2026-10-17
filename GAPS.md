@@ -809,6 +809,10 @@ rejects invalid target rows. An audited
 dependent-CTE UPDATE waits and rebases on its physical row under contention.
 Broader recursive compositions, layered security, and
 other concurrent write shapes remain open.
+Recursive-only views also report MySQL's audited `IS_UPDATABLE=YES` metadata
+for direct, joined, and nested-derived CTE projections, while UPDATE still
+returns 1288. Computed, distinct, and grouped *outer* projections report `NO`;
+grouping or DISTINCT inside a nested derived source still reports `YES`.
 [Audited `STRAIGHT_JOIN` edges](torture/findings/2026-10-15-multiple-derived-straight-view.md)
 between those derived sources or at the physical target retain the same
 writable metadata and target-predicate filtering.
