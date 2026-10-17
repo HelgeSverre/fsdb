@@ -190,6 +190,20 @@ MySQL's relation strategy. The next candidate fix should reproduce the
 geographic winding and segment-relation decisions, then pass the entire
 line/point corpus; changing only a tolerance or sampled step is unsupported.
 
+The near-polar point has a further ring-composition wrinkle. MySQL 8.4.11
+reports `POINT(86 1.00001)` inside the standalone exterior polygon and
+outside the standalone hole polygon, yet outside their combined polygon.
+At `POINT(86 2.99999)`, it reports the point inside both standalone polygons
+and inside the combined polygon. Reversing either standalone hole or the
+combined hole ring leaves those results unchanged. MySQL calls all five
+polygons valid. Fsdb agrees on the exterior and on the first standalone-hole
+result, but not on the combined result; it also differs on the second
+standalone-hole result while matching the combined result. The maintained
+oracle now pins MySQL's validity and point relations for these isolated and
+combined rings. This rules out fixing the polar discrepancy by changing only
+the standalone hole-ring membership test; the full polygon relation must be
+validated as a unit.
+
 ## Near-machine-precision hole-edge offsets
 
 A separate MySQL 8.4.11 probe placed `LINESTRING(1.5 y,3.0 y)` beside the

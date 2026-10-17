@@ -185,6 +185,43 @@ def main():
         print(f"{point_count} near-hole points; {len(point_mismatches)} point mismatches")
         for mismatch in point_mismatches:
             print("point", mismatch)
+        polar_exterior = "POLYGON((85 0,85 4,89 4,89 0,85 0))"
+        polar_hole = "POLYGON((86 1,88 1,88 3,86 3,86 1))"
+        polar_hole_reversed = "POLYGON((86 1,86 3,88 3,88 1,86 1))"
+        polar_combined = "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))"
+        polar_combined_reversed = "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,86 3,88 3,88 1,86 1))"
+        with mysql_connection.cursor() as cursor:
+            for label, ring in (("exterior", polar_exterior), ("hole", polar_hole),
+                                ("hole reversed", polar_hole_reversed),
+                                ("combined", polar_combined), ("combined reversed", polar_combined_reversed)):
+                cursor.execute(f"SELECT ST_IsValid(ST_GeomFromText('{ring}',4326))")
+                validity = cursor.fetchone()
+                assert validity == (1,), (label, validity)
+                print("polar validity", label, validity)
+        polar_expected = {
+            ("86 1.00001", "exterior"): (1, 0, 1),
+            ("86 1.00001", "hole"): (0, 0, 0),
+            ("86 1.00001", "hole reversed"): (0, 0, 0),
+            ("86 1.00001", "combined"): (0, 0, 0),
+            ("86 1.00001", "combined reversed"): (0, 0, 0),
+            ("86 2.99999", "exterior"): (1, 0, 1),
+            ("86 2.99999", "hole"): (1, 0, 1),
+            ("86 2.99999", "hole reversed"): (1, 0, 1),
+            ("86 2.99999", "combined"): (1, 0, 1),
+            ("86 2.99999", "combined reversed"): (1, 0, 1),
+        }
+        for coordinates in ("86 1.00001", "86 2.99999"):
+            for label, ring in (("exterior", polar_exterior), ("hole", polar_hole),
+                                ("hole reversed", polar_hole_reversed),
+                                ("combined", polar_combined),
+                                ("combined reversed", polar_combined_reversed)):
+                expected = point_result(mysql_connection, coordinates, ring)
+                assert expected == polar_expected[(coordinates, label)], (coordinates, label, expected)
+                print(
+                    "polar ring", coordinates, label,
+                    expected,
+                    point_result(fsdb_connection, coordinates, ring),
+                )
         exterior = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
         edge_probes = [
             ("0 -0.00000000001", "near west edge"),
