@@ -289,6 +289,22 @@ let tests =
                   for scores in [ naturalScores index query; booleanScores index query; expansionScores index query ] do
                       Expect.equal (scores |> Map.keys |> Seq.toList) expected (sprintf "MySQL search for %A" query)
 
+          testCase "general Unicode size-2 ngrams keep kana forms separate"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index =
+                  buildIndexWithDocumentSettings rules collation
+                      [ 1, rules, [ "ゝゞヽヾ"; "かな" ]
+                        2, rules, [ "ひらがなゟ"; "カタカナヿ" ]
+                        3, rules, [ "日本語日本語"; "東京" ]
+                        4, rules, [ "中文中文"; "学校" ] ]
+              for query, expected in
+                  [ "ひらがなゟ", [ 2 ]; "ゝゞ", [ 1 ]; "ヽヾ", [ 1 ]
+                    "カタカナ", [ 2 ]; "カタカナヿ", [ 2 ] ] do
+                  for scores in [ naturalScores index query; booleanScores index query; expansionScores index query ] do
+                      Expect.equal (scores |> Map.keys |> Seq.toList) expected (sprintf "MySQL search for %A" query)
+
           testCase "boolean ngram terms retain Unicode number characters"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }
