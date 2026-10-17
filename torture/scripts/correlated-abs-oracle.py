@@ -66,6 +66,28 @@ def main():
                             ("ABS(d.k)=o.x", ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
                             ("o.x=ABS(d.k)", ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
                             ("ABS(d.k)=o.x OR d.id=1", ((1, 3), (2, 1), (3, 1), (4, 1), (5, 2))),
+                            ("ABS(d.k)+0 IN (o.x,o.x+1)", ((1, 4), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0 IN (o.x,NULL)", ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0 IN (o.x,o.x)", ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0 IN (o.x,NULL) OR d.id=1", ((1, 3), (2, 1), (3, 1), (4, 1), (5, 2))),
+                            ("ABS(d.k)+0 IN (CAST(o.x AS DECIMAL(20,0)),NULL)",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0=CAST(o.x AS DECIMAL(20,0))",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0 IN (CAST(o.x AS DECIMAL(20,0))+0.5,NULL)",
+                             ((1, 0), (2, 0), (3, 0), (4, 0), (5, 0))),
+                            ("ABS(d.k)+0 IN (CAST(o.x AS DECIMAL(20,0)),CAST(o.x AS DECIMAL(20,0))+0.5)",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0=CAST(o.x AS DOUBLE)",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0 IN (CAST(o.x AS DOUBLE),NULL)",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0=CAST(o.x AS CHAR)",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0 IN (CONCAT(o.x,'e0'),NULL)",
+                             ((1, 2), (2, 0), (3, 0), (4, 0), (5, 1))),
+                            ("ABS(d.k)+0=CONCAT(o.x,'.5')",
+                             ((1, 0), (2, 0), (3, 0), (4, 0), (5, 0))),
                         ]:
                             cursor.execute(
                                 prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
@@ -73,6 +95,55 @@ def main():
                             )
                             actual = cursor.fetchall()
                             assert actual == expected, (predicate, actual, expected)
+
+                    cursor.execute("CREATE TABLE bit_bounds(id INT PRIMARY KEY,x BIGINT)")
+                    cursor.execute("INSERT INTO bit_bounds VALUES(1,1),(2,2),(3,63),(4,64),(5,NULL)")
+                    cursor.execute("INSERT INTO abs_rows VALUES(1001,NULL)")
+                    for prefix, source in [
+                        ("", "abs_rows d"),
+                        ("", "(SELECT id,k FROM abs_rows) d"),
+                        ("", "(SELECT DISTINCT id,k FROM abs_rows) d"),
+                        ("WITH materialized AS (SELECT DISTINCT id,k FROM abs_rows) ", "materialized d"),
+                    ]:
+                        for predicate, expected in [
+                            ("BIT_COUNT(d.k)=o.x", ((1, 9), (2, 36), (3, 9), (4, 1), (5, 0))),
+                            ("o.x=BIT_COUNT(d.k)", ((1, 9), (2, 36), (3, 9), (4, 1), (5, 0))),
+                            ("BIT_COUNT(d.k)=o.x OR d.id=1", ((1, 10), (2, 37), (3, 10), (4, 2), (5, 1))),
+                            ("BIT_COUNT(d.k) IN (o.x,NULL)", ((1, 9), (2, 36), (3, 9), (4, 1), (5, 0))),
+                        ]:
+                            cursor.execute(
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE " + predicate + ") FROM bit_bounds o ORDER BY o.id"
+                            )
+                            actual = cursor.fetchall()
+                            assert actual == expected, (source, predicate, actual, expected)
+
+                    cursor.execute("CREATE TABLE coalesce_bounds(id INT PRIMARY KEY,x BIGINT)")
+                    cursor.execute(
+                        "INSERT INTO coalesce_bounds VALUES"
+                        "(1,0),(2,1),(3,-1),(4,-2147483648),(5,NULL)"
+                    )
+                    for prefix, source in [
+                        ("", "abs_rows d"),
+                        ("", "(SELECT id,k FROM abs_rows) d"),
+                        ("", "(SELECT DISTINCT id,k FROM abs_rows) d"),
+                        ("WITH materialized AS (SELECT DISTINCT id,k FROM abs_rows) ", "materialized d"),
+                    ]:
+                        for predicate, expected in [
+                            ("COALESCE(d.k,0)=o.x", ((1, 2), (2, 1), (3, 1), (4, 1), (5, 0))),
+                            ("o.x=COALESCE(d.k,0)", ((1, 2), (2, 1), (3, 1), (4, 1), (5, 0))),
+                            ("IFNULL(d.k,0)=o.x", ((1, 2), (2, 1), (3, 1), (4, 1), (5, 0))),
+                            ("COALESCE(d.k,0)=o.x OR d.id=1",
+                             ((1, 3), (2, 2), (3, 2), (4, 2), (5, 1))),
+                            ("COALESCE(d.k,0) IN (o.x,NULL)",
+                             ((1, 2), (2, 1), (3, 1), (4, 1), (5, 0))),
+                        ]:
+                            cursor.execute(
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE " + predicate + ") FROM coalesce_bounds o ORDER BY o.id"
+                            )
+                            actual = cursor.fetchall()
+                            assert actual == expected, (source, predicate, actual, expected)
 
                     for index, (column_type, minimum, maximum) in enumerate([
                         ("TINYINT", -128, 127),
@@ -98,7 +169,30 @@ def main():
                         assert cursor.fetchall() == (
                             (first_bound, 1), (first_bound + 1, 1), (first_bound + 2, 0)
                         ), column_type
-                print(f"MySQL {version}: indexed, pass-through, materialized, and signed-boundary ABS counts match")
+                    cursor.execute("CREATE TABLE wide_unsigned_rows(id INT PRIMARY KEY,k BIGINT UNSIGNED)")
+                    cursor.execute("INSERT INTO wide_unsigned_rows VALUES"
+                                   "(1,9223372036854775807),(2,9223372036854775808),"
+                                   "(3,18446744073709551615)")
+                    cursor.execute("CREATE TABLE wide_decimal_bounds(id INT PRIMARY KEY,x DECIMAL(21,1))")
+                    cursor.execute("INSERT INTO wide_decimal_bounds VALUES"
+                                   "(1,9223372036854775807.0),(2,9223372036854775808.0),"
+                                   "(3,18446744073709551615.0),(4,9223372036854775808.5),"
+                                   "(5,NULL),(6,18446744073709551616.0)")
+                    for predicate in ("COALESCE(d.k,0)=o.x", "COALESCE(d.k,0) IN (o.x,o.x+0.5)"):
+                        cursor.execute(
+                            "SELECT o.id,(SELECT COUNT(*) FROM "
+                            "(SELECT DISTINCT id,k FROM wide_unsigned_rows) d "
+                            f"WHERE {predicate}) FROM wide_decimal_bounds o ORDER BY o.id"
+                        )
+                        assert cursor.fetchall() == ((1, 1), (2, 1), (3, 1), (4, 0), (5, 0), (6, 0)), predicate
+                    cursor.execute(
+                        "SELECT o.id,(SELECT COUNT(*) FROM "
+                        "(SELECT DISTINCT id,k FROM wide_unsigned_rows) d "
+                        "WHERE COALESCE(d.k,0)=CAST(o.x AS DOUBLE)) "
+                        "FROM wide_decimal_bounds o ORDER BY o.id"
+                    )
+                    assert cursor.fetchall() == ((1, 2), (2, 2), (3, 1), (4, 2), (5, 0), (6, 1))
+                print(f"MySQL {version}: indexed, pass-through, materialized, signed-boundary, and wide unsigned integer expression cases match")
             finally:
                 if connection:
                     connection.close()

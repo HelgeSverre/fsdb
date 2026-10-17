@@ -12826,6 +12826,27 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "an OR branch can match beside a NULL pattern, got %A" other
 
+                    for prefix, source in
+                        [ "", "like_codes c"
+                          "", "(SELECT id,code FROM like_codes) c"
+                          "", "(SELECT DISTINCT id,code FROM like_codes) c"
+                          "WITH codes AS (SELECT DISTINCT id,code FROM like_codes) ", "codes c" ] do
+                        calls <- 0
+                        match run store registry
+                            (prefix + "SELECT (SELECT COUNT(*) FROM " + source
+                             + " WHERE TOUCH(c.id)=c.id AND c.code NOT LIKE p.p) "
+                             + "FROM like_patterns p WHERE p.id=3") with
+                        | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                        | other -> failtestf "NULL NOT LIKE should match no rows, got %A" other
+                        Expect.isLessThan calls 60 "NULL NOT LIKE skips correlated residual rows"
+
+                        match run store registry
+                            (prefix + "SELECT (SELECT COUNT(*) FROM " + source
+                             + " WHERE c.code NOT LIKE p.p OR c.id=1) "
+                             + "FROM like_patterns p WHERE p.id=3") with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | other -> failtestf "a NOT LIKE OR branch can match beside NULL, got %A" other
+
                     calls <- 0
                     match run store registry
                         ("SELECT p.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,code FROM like_codes) c "
@@ -12950,14 +12971,197 @@ let tests =
                             | other -> failtestf "expected materialized expression matches, got %A" other
                             Expect.isLessThan calls 80 "integer expression keys bound residual work"
 
+                    for predicate, expected in
+                        [ "ABS(d.k)+0 IN (o.x,o.x+1)", [ 4; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0 IN (o.x,NULL)", [ 2; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0 IN (o.x,o.x)", [ 2; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0 IN (o.x,NULL) OR d.id=1", [ 3; 1; 1; 1; 2 ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                            + "FROM abs_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual (expected |> List.map Some) predicate
+                        | other -> failtestf "expected materialized integer IN matches, got %A" other
+                        Expect.isLessThan calls 80 "integer expression IN bounds residual work"
+
+                    for predicate, expected in
+                        [ "ABS(d.k)+0 IN (CAST(o.x AS DECIMAL(20,0)),NULL)", [ 2; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0=CAST(o.x AS DECIMAL(20,0))", [ 2; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0 IN (CAST(o.x AS DECIMAL(20,0))+0.5,NULL)", [ 0; 0; 0; 0; 0 ]
+                          "ABS(d.k)+0 IN (CAST(o.x AS DECIMAL(20,0)),CAST(o.x AS DECIMAL(20,0))+0.5)", [ 2; 0; 0; 0; 1 ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                            + "FROM abs_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual (expected |> List.map Some) predicate
+                        | other -> failtestf "expected decimal-bound integer expression result, got %A" other
+                        Expect.isLessThan calls 80 "decimal bounds narrow integer expression candidates"
+
+                    for predicate in
+                        [ "ABS(d.k)+0=CAST(o.x AS DOUBLE)"
+                          "ABS(d.k)+0 IN (CAST(o.x AS DOUBLE),NULL)" ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                            + "FROM abs_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            Expect.equal (rows |> List.map (fun row -> row.[1]))
+                                ([ 2; 0; 0; 0; 1 ] |> List.map (string >> Some)) predicate
+                        | other -> failtestf "expected double-bound integer expression result, got %A" other
+                        Expect.isLessThan calls 80 "double bounds narrow integer expression candidates"
+
+                    for predicate, expected in
+                        [ "ABS(d.k)+0=CAST(o.x AS CHAR)", [ 2; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0 IN (CONCAT(o.x,'e0'),NULL)", [ 2; 0; 0; 0; 1 ]
+                          "ABS(d.k)+0=CONCAT(o.x,'.5')", [ 0; 0; 0; 0; 0 ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                            + "FROM abs_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            Expect.equal (rows |> List.map (fun row -> row.[1]))
+                                (expected |> List.map (string >> Some)) predicate
+                        | other -> failtestf "expected numeric-string integer expression result, got %A" other
+                        Expect.isLessThan calls 80 "clean string bounds narrow integer expression candidates"
+
                     calls <- 0
                     match run store registry
                         ("SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM abs_rows) d "
-                         + "WHERE TOUCH(d.id)=d.id AND ABS(d.k)+0=CAST(o.x AS DECIMAL(10,0))) "
+                         + "WHERE TOUCH(d.id)=d.id AND ABS(d.k)+0=CONCAT(o.x,'x')) "
                          + "FROM abs_bounds o ORDER BY o.id") with
-                    | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ]; [ Some "4"; Some "0" ]; [ Some "5"; Some "1" ] ]) -> ()
-                    | other -> failtestf "expected coerced decimal equality, got %A" other
-                    Expect.isGreaterThan calls 1000 "a decimal bound retains the compatible scan path"
+                    | ResultSet(_, rows) ->
+                        Expect.equal (rows |> List.map (fun row -> row.[1]))
+                            ([ 2; 0; 0; 0; 1 ] |> List.map (string >> Some))
+                            "trailing text retains numeric-prefix comparison"
+                    | other -> failtestf "expected trailing-text integer expression result, got %A" other
+                    Expect.isGreaterThan calls 1000 "trailing text retains the scan and conversion warnings"
+
+                    runDefault store "CREATE TABLE wide_unsigned_rows(id INT PRIMARY KEY,k BIGINT UNSIGNED)" |> ignore
+                    runDefault store
+                        "INSERT INTO wide_unsigned_rows VALUES(1,9223372036854775807),(2,9223372036854775808),(3,18446744073709551615)"
+                    |> ignore
+                    runDefault store "CREATE TABLE wide_decimal_bounds(id INT PRIMARY KEY,x DECIMAL(21,1))" |> ignore
+                    runDefault store
+                        "INSERT INTO wide_decimal_bounds VALUES(1,9223372036854775807.0),(2,9223372036854775808.0),(3,18446744073709551615.0),(4,9223372036854775808.5),(5,NULL),(6,18446744073709551616.0)"
+                    |> ignore
+                    for bound, expectedId in
+                        [ "9223372036854775807.0", "1"
+                          "9223372036854775808.0", "2"
+                          "18446744073709551615.0", "3" ] do
+                        let sql = "SELECT id FROM wide_unsigned_rows WHERE k=" + bound
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal actual expectedId sql
+                        | other -> failtestf "expected exact unsigned/DECIMAL scan match, got %A" other
+                    for predicate in [ "COALESCE(d.k,0)=o.x"; "COALESCE(d.k,0) IN (o.x,o.x+0.5)" ] do
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM wide_unsigned_rows) d "
+                            + "WHERE " + predicate + ") FROM wide_decimal_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            Expect.equal (rows |> List.map (fun row -> row.[1]))
+                                ([ 1; 1; 1; 0; 0; 0 ] |> List.map (string >> Some)) predicate
+                        | other -> failtestf "expected wide unsigned decimal-bound matches, got %A" other
+                    match run store registry
+                        ("SELECT o.id,(SELECT COUNT(*) FROM "
+                         + "(SELECT DISTINCT id,k FROM wide_unsigned_rows) d "
+                         + "WHERE COALESCE(d.k,0)=CAST(o.x AS DOUBLE)) "
+                         + "FROM wide_decimal_bounds o ORDER BY o.id") with
+                    | ResultSet(_, rows) ->
+                        Expect.equal (rows |> List.map (fun row -> row.[1]))
+                            ([ 2; 2; 1; 2; 0; 1 ] |> List.map (string >> Some))
+                            "wide integer expression bounds compare in the rounded DOUBLE domain"
+                    | other -> failtestf "expected wide unsigned DOUBLE-bound matches, got %A" other
+
+                testCase "materialized correlated BIT_COUNT uses an integer expression key"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE bit_bounds(id INT PRIMARY KEY,x BIGINT)" |> ignore
+                    runDefault store "CREATE TABLE bit_rows(id INT PRIMARY KEY,k INT)" |> ignore
+                    runDefault store "INSERT INTO bit_bounds VALUES(1,1),(2,2),(3,63),(4,64),(5,NULL)" |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (id - 500))
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO bit_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO bit_rows VALUES(1000,-2147483648),(1001,NULL)" |> ignore
+
+                    for prefix, source in
+                        [ "", "(SELECT DISTINCT id,k FROM bit_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM bit_rows) ", "materialized d" ] do
+                        for predicate, expected in
+                            [ "BIT_COUNT(d.k)=o.x", [ 9; 36; 9; 1; 0 ]
+                              "o.x=BIT_COUNT(d.k)", [ 9; 36; 9; 1; 0 ]
+                              "BIT_COUNT(d.k)=o.x OR d.id=1", [ 10; 37; 10; 2; 1 ]
+                              "BIT_COUNT(d.k) IN (o.x,NULL)", [ 9; 36; 9; 1; 0 ] ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                                + "FROM bit_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, rows) ->
+                                let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                                Expect.equal actual (expected |> List.map Some) (source + " " + predicate)
+                            | other -> failtestf "expected MySQL BIT_COUNT counts, got %A" other
+                            Expect.isLessThan calls 100 "the integer expression key bounds residual work"
+
+                testCase "materialized correlated COALESCE uses an integer expression key"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE coalesce_bounds(id INT PRIMARY KEY,x BIGINT)" |> ignore
+                    runDefault store "CREATE TABLE coalesce_rows(id INT PRIMARY KEY,k INT)" |> ignore
+                    runDefault store "INSERT INTO coalesce_bounds VALUES(1,0),(2,1),(3,-1),(4,-2147483648),(5,NULL)" |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (id - 500))
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO coalesce_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO coalesce_rows VALUES(1000,-2147483648),(1001,NULL)" |> ignore
+
+                    for prefix, source in
+                        [ "", "(SELECT DISTINCT id,k FROM coalesce_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM coalesce_rows) ", "materialized d" ] do
+                        for predicate, expected in
+                            [ "COALESCE(d.k,0)=o.x", [ 2; 1; 1; 1; 0 ]
+                              "o.x=COALESCE(d.k,0)", [ 2; 1; 1; 1; 0 ]
+                              "IFNULL(d.k,0)=o.x", [ 2; 1; 1; 1; 0 ]
+                              "COALESCE(d.k,0)=o.x OR d.id=1", [ 3; 2; 2; 2; 1 ]
+                              "COALESCE(d.k,0) IN (o.x,NULL)", [ 2; 1; 1; 1; 0 ] ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                                + "FROM coalesce_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, rows) ->
+                                let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                                Expect.equal actual (expected |> List.map Some) (source + " " + predicate)
+                            | other -> failtestf "expected MySQL COALESCE counts, got %A" other
+                            Expect.isLessThan calls 100 "the integer expression key bounds residual work"
 
                 testCase "materialized correlated text expression keys use comparison collation"
                 <| fun _ ->
@@ -13003,7 +13207,7 @@ let tests =
                         | other -> failtestf "expected materialized text matches for %s, got %A" predicate other
                         Expect.isLessThan calls 80 (predicate + " must bound residual work")
 
-                testCase "materialized correlated decimal expressions key exact bounds only"
+                testCase "materialized correlated text expression ranges bound residual work"
                 <| fun _ ->
                     let mutable calls = 0
                     let registry =
@@ -13012,10 +13216,68 @@ let tests =
                             calls <- calls + 1
                             List.exactlyOne values)
                     let store = newStore ()
-                    runDefault store "CREATE TABLE decimal_bounds(id INT PRIMARY KEY,x DECIMAL(12,2),i BIGINT,f DOUBLE)" |> ignore
+                    runDefault store "CREATE TABLE text_range_bounds(id INT PRIMARY KEY,x VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "CREATE TABLE text_range_rows(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO text_range_bounds VALUES(1,'word99'),(2,'zzzz'),(3,NULL)" |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,'word%d')" id id)
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO text_range_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO text_range_rows VALUES(1000,NULL)" |> ignore
+                    for predicate, expected in
+                        [ "LOWER(d.k)>=o.x", [ 11; 0; 0 ]
+                          "LOWER(d.k)>o.x", [ 10; 0; 0 ]
+                          "o.x<=LOWER(d.k)", [ 11; 0; 0 ]
+                          "LOWER(d.k) BETWEEN o.x AND CONCAT(o.x,'9')", [ 11; 0; 0 ]
+                          "LOWER(d.k) COLLATE utf8mb4_0900_ai_ci >= o.x", [ 11; 0; 0 ]
+                          "LOWER(d.k)>=o.x OR d.id=1", [ 12; 1; 1 ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM text_range_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                            + "FROM text_range_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual (expected |> List.map Some) predicate
+                        | other -> failtestf "expected materialized text range matches for %s, got %A" predicate other
+                        Expect.isLessThan calls 80 (predicate + " must bound residual work")
+                    runDefault store "CREATE TABLE upper_bounds(id INT PRIMARY KEY,x VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO upper_bounds VALUES(1,'word1')" |> ignore
+                    calls <- 0
+                    let upperSql =
+                        "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM text_range_rows) d "
+                        + "WHERE TOUCH(d.id)=d.id AND LOWER(d.k)<o.x) FROM upper_bounds o"
+                    match run store registry upperSql with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected selective upper text bound, got %A" other
+                    Expect.isLessThan calls 20 "the strict upper text bound must avoid a scan"
+                    runDefault store "CREATE TABLE accent_bounds(id INT PRIMARY KEY,x VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "CREATE TABLE accent_rows(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO accent_bounds VALUES(1,'a')" |> ignore
+                    runDefault store "INSERT INTO accent_rows VALUES(1,'a'),(2,'Ä'),(3,'z')" |> ignore
+                    let accentSql =
+                        "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM accent_rows) d "
+                        + "WHERE LOWER(d.k) COLLATE utf8mb4_0900_ai_ci BETWEEN o.x AND o.x) "
+                        + "FROM accent_bounds o"
+                    match run store registry accentSql with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected accent-insensitive range candidates, got %A" other
+
+                testCase "materialized correlated decimal expressions key exact DOUBLE and VARCHAR bounds"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE decimal_bounds(id INT PRIMARY KEY,x DECIMAL(12,2),i BIGINT,f DOUBLE,s VARCHAR(40),sr VARCHAR(40))" |> ignore
                     runDefault store "CREATE TABLE decimal_rows(id INT PRIMARY KEY,k DECIMAL(12,2))" |> ignore
                     runDefault store
-                        "INSERT INTO decimal_bounds VALUES(1,10.25,10,10.25),(2,999.00,999,999.00),(3,NULL,NULL,NULL),(4,-10.25,-10,-10.25)"
+                        "INSERT INTO decimal_bounds VALUES(1,10.25,10,10.25,'10.25','490.25'),(2,999.00,999,999.00,'999','1479'),(3,NULL,NULL,NULL,NULL,NULL),(4,-10.25,-10,-10.25,'-10.25','469.75')"
                     |> ignore
                     [ 0..999 ]
                     |> List.map (fun id -> sprintf "(%d,%d.25)" id (id - 500))
@@ -13024,13 +13286,25 @@ let tests =
                     |> ignore
                     runDefault store "INSERT INTO decimal_rows VALUES(1000,NULL)" |> ignore
 
-                    for predicate, expected, keyed in
-                        [ "d.k+0.00=o.x", [ 1; 0; 0; 1 ], true
-                          "o.x=d.k+0.00", [ 1; 0; 0; 1 ], true
-                          "d.k*1.00=o.x", [ 1; 0; 0; 1 ], true
-                          "d.k+0.00=o.i", [ 0; 0; 0; 0 ], true
-                          "d.k+0.00=o.f", [ 1; 0; 0; 1 ], false
-                          "d.k+0.00=o.x OR d.id=12", [ 2; 1; 1; 2 ], true ] do
+                    for predicate, expected in
+                        [ "d.k+0.00=o.x", [ 1; 0; 0; 1 ]
+                          "o.x=d.k+0.00", [ 1; 0; 0; 1 ]
+                          "d.k*1.00=o.x", [ 1; 0; 0; 1 ]
+                          "d.k+0.00=o.i", [ 0; 0; 0; 0 ]
+                          "d.k+0.00=o.f", [ 1; 0; 0; 1 ]
+                          "d.k+0.00=o.s", [ 1; 0; 0; 1 ]
+                          "d.k+0.00=o.x OR d.id=12", [ 2; 1; 1; 2 ]
+                          "d.k+0.00 IN (o.x,o.x+1.00)", [ 2; 0; 0; 2 ]
+                          "d.k+0.00 IN (o.x,NULL)", [ 1; 0; 0; 1 ]
+                          "d.k+0.00 IN (o.x,o.x)", [ 1; 0; 0; 1 ]
+                          "d.k+0.00 IN (o.x,NULL) OR d.id=12", [ 2; 1; 1; 2 ]
+                          "d.k+0.00 IN (o.f,NULL)", [ 1; 0; 0; 1 ]
+                          "d.k+0.00 IN (o.s,NULL)", [ 1; 0; 0; 1 ]
+                          "d.k+0.00>o.x+480.00", [ 9; 0; 0; 30 ]
+                          "d.k+0.00 BETWEEN o.x+480.00 AND o.x+481.00", [ 2; 0; 0; 1 ]
+                          "d.k+0.00>o.x+480.00 OR d.id=12", [ 10; 1; 1; 31 ]
+                          "d.k+0.00>o.f+480e0", [ 9; 0; 0; 30 ]
+                          "d.k+0.00>o.sr", [ 9; 0; 0; 30 ] ] do
                         calls <- 0
                         let sql =
                             "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM decimal_rows) d "
@@ -13041,8 +13315,93 @@ let tests =
                             let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
                             Expect.equal actual (expected |> List.map Some) predicate
                         | other -> failtestf "expected materialized decimal matches for %s, got %A" predicate other
-                        if keyed then Expect.isLessThan calls 80 (predicate + " must bound residual work")
-                        else Expect.isGreaterThan calls 1000 "DOUBLE coercion must retain the scan"
+                        Expect.isLessThan calls 80 (predicate + " must bound residual work")
+
+                    runDefault store "CREATE TABLE wide_decimal_bounds(id INT PRIMARY KEY,lo DOUBLE,hi DOUBLE)" |> ignore
+                    runDefault store "CREATE TABLE wide_decimal_rows(id INT PRIMARY KEY,k DECIMAL(20,2))" |> ignore
+                    runDefault store
+                        "INSERT INTO wide_decimal_bounds VALUES(1,9007199254740992e0,9007199254740992e0),(2,9007199254740994e0,9007199254740994e0)"
+                    |> ignore
+                    runDefault store
+                        "INSERT INTO wide_decimal_rows VALUES(1,9007199254740991.00),(2,9007199254740992.00),(3,9007199254740993.00),(4,9007199254740994.00)"
+                    |> ignore
+                    calls <- 0
+                    let wideSql =
+                        "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM wide_decimal_rows) d "
+                        + "WHERE TOUCH(d.id)=d.id AND d.k+0.00 BETWEEN o.lo AND o.hi) "
+                        + "FROM wide_decimal_bounds o ORDER BY o.id"
+                    match run store registry wideSql with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected MySQL's rounded DOUBLE cuts over wide DECIMAL rows, got %A" other
+                    Expect.isLessThan calls 8 "approximate cuts avoid unrelated wide DECIMAL rows"
+
+                    calls <- 0
+                    let wideEqualitySql =
+                        "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM wide_decimal_rows) d "
+                        + "WHERE TOUCH(d.id)=d.id AND d.k+0.00=o.lo) "
+                        + "FROM wide_decimal_bounds o ORDER BY o.id"
+                    match run store registry wideEqualitySql with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected rounded DOUBLE equality over wide DECIMAL rows, got %A" other
+                    Expect.isLessThan calls 8 "approximate equality avoids unrelated wide DECIMAL rows"
+
+                    for predicate, expected in
+                        [ "d.k+0.00 IN (o.lo)", [ "2"; "1" ]
+                          "d.k+0.00 IN (o.lo,9007199254740993.00)", [ "2"; "2" ]
+                          "d.k+0.00 IN (9007199254740993.00,o.lo)", [ "2"; "2" ]
+                          "d.k+0.00 IN (o.lo,NULL)", [ "2"; "1" ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM wide_decimal_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                            + "FROM wide_decimal_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some "1"; Some first ]; [ Some "2"; Some second ] ]) ->
+                            Expect.equal [ first; second ] expected predicate
+                        | other -> failtestf "expected wide DECIMAL IN matches for %s, got %A" predicate other
+                        Expect.isLessThan calls 12 (predicate + " must avoid unrelated wide DECIMAL rows")
+
+                    runDefault store "CREATE TABLE wide_string_bounds(id INT PRIMARY KEY,lo VARCHAR(40),hi VARCHAR(40))" |> ignore
+                    runDefault store
+                        "INSERT INTO wide_string_bounds VALUES(1,'9007199254740993','9007199254740994'),(2,'9007199254740993x','9007199254740994x'),(3,'abc','xyz')"
+                    |> ignore
+                    for predicate, expected in
+                        [ "d.k+0.00=o.lo", [ "2"; "2"; "0" ]
+                          "d.k+0.00>=o.lo", [ "3"; "3"; "4" ]
+                          "d.k+0.00 BETWEEN o.lo AND o.hi", [ "3"; "3"; "0" ]
+                          "d.k+0.00 IN (o.lo)", [ "2"; "2"; "0" ]
+                          "d.k+0.00 IN (o.lo,9007199254740993.00)", [ "2"; "2"; "1" ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM wide_decimal_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") FROM wide_string_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            Expect.equal (rows |> List.map (fun row -> row.[1] |> Option.defaultValue "")) expected predicate
+                        | other -> failtestf "expected correlated VARCHAR/DECIMAL result, got %A" other
+
+                    for predicate, expected in
+                        [ "d.k+0.00='9007199254740993'", "1"
+                          "d.k+0.00 BETWEEN '9007199254740993' AND '9007199254740994'", "3" ] do
+                        let sql =
+                            "SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM wide_decimal_rows) d WHERE " + predicate
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal actual expected predicate
+                        | other -> failtestf "expected literal string/DECIMAL result, got %A" other
+
+                    runDefault store "CREATE TABLE mixed_decimal_bounds(id INT PRIMARY KEY,lo DECIMAL(20,2),hi DOUBLE)" |> ignore
+                    runDefault store "INSERT INTO mixed_decimal_bounds VALUES(1,9007199254740993.00,9007199254740994e0)" |> ignore
+                    for predicate, expected in
+                        [ "d.k+0.00 BETWEEN o.lo AND o.hi", "3"
+                          "d.k+0.00>=o.lo AND d.k+0.00<=o.hi", "2" ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM wide_decimal_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") FROM mixed_decimal_bounds o"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal actual expected predicate
+                        | other -> failtestf "expected mixed DECIMAL/DOUBLE range result, got %A" other
+                        Expect.isLessThan calls 8 "mixed numeric bounds retain narrow candidates"
 
                 testCase "materialized correlated finite DOUBLE expressions key numeric bounds"
                 <| fun _ ->
@@ -13074,15 +13433,22 @@ let tests =
                          + "(1002,9007199254740992),(1003,9007199254740994)")
                     |> ignore
 
-                    for predicate, expected, keyed in
-                        [ "d.k=o.x", [ 1; 0; 0; 1; 1; 1 ], true
-                          "d.k+0e0=o.x", [ 1; 0; 0; 1; 1; 1 ], true
-                          "o.x=d.k+0e0", [ 1; 0; 0; 1; 1; 1 ], true
-                          "d.k*1e0=o.x", [ 1; 0; 0; 1; 1; 1 ], true
-                          "d.k+0e0=o.d", [ 1; 0; 0; 1; 1; 1 ], true
-                          "d.k+0e0=o.i", [ 0; 0; 0; 0; 1; 1 ], true
-                          "d.k+0e0=o.s", [ 1; 0; 0; 1; 1; 1 ], false
-                          "d.k+0e0=o.x OR d.id=12", [ 2; 1; 1; 2; 2; 2 ], true ] do
+                    for predicate, expected in
+                        [ "d.k=o.x", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0=o.x", [ 1; 0; 0; 1; 1; 1 ]
+                          "o.x=d.k+0e0", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k*1e0=o.x", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0=o.d", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0=o.i", [ 0; 0; 0; 0; 1; 1 ]
+                          "d.k+0e0=o.s", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0=CAST(o.x AS CHAR)", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (CAST(o.x AS CHAR),NULL)", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (o.s,o.x)", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (o.s,o.d)", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (o.s,CAST(NULL AS DOUBLE))", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (o.s,o.s)", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 IN (o.s,o.x) OR d.id=12", [ 2; 1; 1; 2; 2; 2 ]
+                          "d.k+0e0=o.x OR d.id=12", [ 2; 1; 1; 2; 2; 2 ] ] do
                         calls <- 0
                         let sql =
                             "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
@@ -13093,8 +13459,7 @@ let tests =
                             let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
                             Expect.equal actual (expected |> List.map Some) predicate
                         | other -> failtestf "expected materialized DOUBLE matches for %s, got %A" predicate other
-                        if keyed then Expect.isLessThan calls 80 (predicate + " must bound residual work")
-                        else Expect.isGreaterThan calls 1000 "string coercion must retain the scan"
+                        Expect.isLessThan calls 80 (predicate + " must bound residual work")
 
                     for predicate, expected in
                         [ "d.k+0e0<o.x", [ 513; 1001; 0; 488; 500; 1001 ]
@@ -13104,6 +13469,8 @@ let tests =
                           "d.k+0e0>=o.i", [ 490; 2; 0; 514; 503; 2 ]
                           "d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0", [ 3; 0; 0; 3; 2; 1 ]
                           "d.k+0e0<o.s", [ 513; 1001; 0; 488; 500; 1001 ]
+                          "d.k+0e0 BETWEEN o.s AND o.s", [ 1; 0; 0; 1; 1; 1 ]
+                          "d.k+0e0 BETWEEN CAST(o.x AS CHAR) AND CAST(o.x AS CHAR)", [ 1; 0; 0; 1; 1; 1 ]
                           "d.k+0e0<o.x OR d.id=999", [ 514; 1001; 1; 489; 501; 1001 ] ] do
                         calls <- 0
                         let sql =
@@ -13117,8 +13484,64 @@ let tests =
                         | other -> failtestf "expected materialized DOUBLE range matches for %s, got %A" predicate other
                         if predicate = "d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0" then
                             Expect.isLessThan calls 80 "narrow DOUBLE range must bound residual work"
-                        if predicate = "d.k+0e0<o.s" then
-                            Expect.isGreaterThan calls 1000 "string-coerced DOUBLE range must retain the scan"
+                        if predicate = "d.k+0e0 BETWEEN o.s AND o.s"
+                           || predicate = "d.k+0e0 BETWEEN CAST(o.x AS CHAR) AND CAST(o.x AS CHAR)" then
+                            Expect.isLessThan calls 80 "clean numeric string range must bound residual work"
+
+                    for predicate in
+                        [ "d.k+0e0 NOT BETWEEN o.x-490e0 AND o.x+490e0"
+                          "d.k+0e0 NOT BETWEEN o.s-490e0 AND o.s+490e0" ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                            + "FROM double_bounds o WHERE o.id IN (1,4,5) ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual [ Some 25; Some 24; Some 23 ] predicate
+                        | other -> failtestf "expected materialized DOUBLE outside-range matches for %s, got %A" predicate other
+                        Expect.isLessThan calls 120 (predicate + " must probe only outside-range candidates")
+
+                    let nullBoundPredicate = "d.k+0e0 NOT BETWEEN o.s AND 490e0"
+                    let nullBoundSql =
+                        "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
+                        + "WHERE " + nullBoundPredicate + ") FROM double_bounds o ORDER BY o.id"
+                    match run store registry nullBoundSql with
+                    | ResultSet(_, rows) ->
+                        let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                        Expect.equal actual [ Some 525; Some 1003; Some 12; Some 500; Some 512; Some 1003 ]
+                            "NULL lower bound retains a decisive greater-than comparison"
+                    | other -> failtestf "expected materialized DOUBLE nullable-bound matches, got %A" other
+
+                    runDefault store "INSERT INTO double_bounds VALUES(7,NULL,NULL,NULL,'12.5x')" |> ignore
+                    for predicate in [ "d.k+0e0=o.s"; "d.k+0e0 BETWEEN o.s AND o.s"; "d.k+0e0 IN (o.s,o.x)" ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                            + "FROM double_bounds o WHERE o.id=7"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | other -> failtestf "expected truncated string bound to retain its result, got %A" other
+                        Expect.isGreaterThan calls 1000 "truncated numeric text retains residual evaluation"
+
+                    for bound, expected, keyed in
+                        [ "1e-500", "1", true
+                          "1e309", "0", false
+                          " 12.5 ", "1", true ] do
+                        runDefault store (sprintf "UPDATE double_bounds SET s='%s' WHERE id=7" bound) |> ignore
+                        for predicate in [ "d.k+0e0=o.s"; "d.k+0e0 IN (o.s,o.x)" ] do
+                            calls <- 0
+                            let sql =
+                                "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM double_rows) d "
+                                + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                                + "FROM double_bounds o WHERE o.id=7"
+                            match run store registry sql with
+                            | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected (bound + predicate)
+                            | other -> failtestf "expected string-bound DOUBLE result for %s, got %A" bound other
+                            if keyed then Expect.isLessThan calls 80 (bound + predicate + " uses the key")
+                            else Expect.isGreaterThan calls 1000 (bound + predicate + " retains the scan")
 
                     match runDefault store
                         ("SELECT x=i,x+0e0=i,9007199254740992e0=i,"

@@ -340,21 +340,50 @@ functional-equality profile](torture/findings/2026-10-15-correlated-materialized
 now shows six residual calls for both an exposed-column equality and its
 supported signed-integer `ABS` form. [A statement-local integer-expression key](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-integer-expression-lookup)
 reduces `ABS(d.k)+0=o.x` from 4,004 to six calls on the same profile.
+[Integer `BIT_COUNT` over stable materialized rows](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#integer-bit_count-results)
+uses that key too, reducing the audited five-bound residual from 6,018 calls
+to fewer than 100 without changing row counts.
+[Integer `COALESCE` and `IFNULL` expressions](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#integer-coalesce-and-ifnull-results)
+also use it for stable materialized rows, including a NULL fallback and complete
+OR branches.
+Positive [`IN` over stable integer expressions](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-integer-expression-lookup)
+now unions exact integer and audited DECIMAL-bound candidates from that same
+key, including fractional DECIMAL misses, NULL, duplicates, and complete OR
+branches. Finite DOUBLE bounds use a second key in the approximate comparison
+domain, including large integers that round to the same DOUBLE; string bounds
+retain the scan.
 The [matched in-memory timing](benchmarks/results/2026-10-15-materialized-integer-expression-lookup.md)
 confirms a repeated-query speedup for this shape. [Text expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-text-expression-lookup)
 use the effective comparison collation and reduce the audited `LOWER(d.k)=o.x`
-profile from 4,004 to six residual calls. [Exact decimal expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-lookup)
-reduce `d.k+0.00=o.x` from 5,005 to seven calls. [Finite DOUBLE-domain keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-lookup)
+profile from 4,004 to six residual calls. [Ordered text-expression ranges](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-text-expression-ranges)
+also reduce the audited selective `LOWER(d.k)>=o.x` probe from 4,004 to 15
+residual calls, using the comparison collation. [Exact decimal expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-lookup)
+reduce `d.k+0.00=o.x` from 5,005 to seven calls. Positive `IN` lists over
+exact DECIMAL and integer outer bounds now union candidates from that key.
+Finite DOUBLE equality and mixed exact/DOUBLE `IN` members use the ordered
+DECIMAL-expression lookup with per-member cuts. [Ordered DECIMAL-expression ranges](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-ranges)
+also narrow correlated inequalities and `BETWEEN` with exact DECIMAL or
+integer bounds, finite DOUBLE bounds, and audited row-derived VARCHAR bounds,
+while preserving source order and residual comparison. Fully numeric finite
+VARCHAR bounds use approximate cuts; malformed strings retain the scan.
+Literal strings keep MySQL's separate exact DECIMAL comparison behavior.
+[Finite DOUBLE-domain keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-lookup)
 now reduce `d.k+0e0=o.x` from 5,005 to seven calls too. DECIMAL and integer
-bounds use the same approximate comparison key, while string and non-finite
-floating lookups remain open. The audited BIGINT/DOUBLE expression-provenance
-comparison at 2⁵³ now matches MySQL.
+bounds and fully numeric finite strings use the same approximate comparison
+key; [positive `IN` lists](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#correlated-double-expression-in-candidates)
+of compatible stable outer bounds now union those keys. Malformed strings
+and non-finite floating lookups remain open. The
+audited BIGINT/DOUBLE expression-provenance comparison at 2⁵³ now matches MySQL.
 [Finite DOUBLE-expression ranges](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-ranges)
 now use ordered statement-local cuts for numeric correlated inequalities and
 BETWEEN, including complete OR branches; the narrow 1,000-row profile uses
 11 residual calls across four outer rows. The audited decimal-to-DOUBLE
-halfway bound at 2⁵³+1 also follows MySQL's single rounding. String and
-non-finite range bounds still scan.
+halfway bound at 2⁵³+1 also follows MySQL's single rounding. Fully numeric
+finite string bounds use the same cuts; malformed strings and non-finite
+range bounds still scan. The audited [materialized DOUBLE `NOT BETWEEN`
+complement](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-ranges)
+uses the existing two-range union and preserves decisive comparisons with a
+NULL opposite bound.
 
 ## 3. Built-in functions
 
@@ -1603,8 +1632,9 @@ WAL workload reaches about 2.65× the FSDB wire rate through the embedded API.
 That comparison does not isolate a server function or scheduling lock.
 
 An [audited correlated binary LIKE prefix](torture/findings/2026-10-15-correlated-like-prefix-audit.md)
-already uses the indexed range path for actual rows. A NULL outer pattern now
-supplies an empty candidate set in both metadata validation and execution.
+already uses the indexed range path for actual rows. A NULL outer pattern for
+`LIKE` or `NOT LIKE` now supplies an empty candidate set in both metadata
+validation and execution.
 
 Shared statement setup, computed scan predicates, phrase/proximity matching,
 and broader join-shaped full-text plans remain input-sensitive. Immutable
