@@ -201,6 +201,33 @@ def main():
                     cursor.execute(sql)
                     values.append(cursor.fetchone())
             print("polar component", name, "MySQL", values[0], "fsdb", values[1])
+        outer = [(85, 0), (85, 4), (89, 4), (89, 0), (85, 0)]
+        inner = [(86, 1), (88, 1), (88, 3), (86, 3), (86, 1)]
+
+        def polar_ring(points):
+            return "(" + ",".join(f"{latitude} {longitude}" for latitude, longitude in points) + ")"
+
+        for reverse_outer in (False, True):
+            for reverse_inner in (False, True):
+                shell = list(reversed(outer)) if reverse_outer else outer
+                hole = list(reversed(inner)) if reverse_inner else inner
+                polygon = "POLYGON(" + polar_ring(shell) + "," + polar_ring(hole) + ")"
+                area = f"ST_GeomFromText('{polygon}',4326)"
+                sql = (
+                    f"SELECT ST_Within({polar_point},{area}),"
+                    f"ST_Touches({polar_point},{area}),ST_Intersects({polar_point},{area}),"
+                    f"ST_Distance({polar_point},{area})"
+                )
+                values = []
+                for connection in (mysql_connection, fsdb_connection):
+                    with connection.cursor() as cursor:
+                        cursor.execute(sql)
+                        values.append(cursor.fetchone())
+                with mysql_connection.cursor() as cursor:
+                    cursor.execute(f"SELECT ST_IsValid({area})")
+                    valid = cursor.fetchone()[0]
+                print("polar orientation", reverse_outer, reverse_inner, "MySQL valid", valid,
+                      "MySQL", values[0], "fsdb", values[1])
         exterior = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
         edge_probes = [
             ("0 -0.00000000001", "near west edge"),

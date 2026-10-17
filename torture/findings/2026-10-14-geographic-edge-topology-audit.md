@@ -203,6 +203,16 @@ entire point corpus before replacing fsdb's classifier. The line/polygon
 relation differences also involve MySQL's geographic segment-intersection
 strategy, so a point-only winding change cannot be claimed to close them.
 
+The maintained oracle now reverses the exterior and hole rings independently
+for the disputed `POINT(86 1.00001)`. All four combined polygons are valid in
+MySQL 8.4.11, and ring direction changes neither engine's result: MySQL
+reports `(Within, Touches, Intersects) = (0, 0, 0)`, while fsdb reports
+`(1, 0, 1)`. Both engines return zero `ST_Distance` to the combined polygon.
+The mismatch therefore does not come from the input ring orientation, and
+zero distance is not a safe replacement for MySQL's relation result. The
+full replay remains at 12 of 412 line mismatches, one of 189 near-hole point
+mismatches, and no near-exterior point mismatches.
+
 ## Near-machine-precision hole-edge offsets
 
 A separate MySQL 8.4.11 probe placed `LINESTRING(1.5 y,3.0 y)` beside the
