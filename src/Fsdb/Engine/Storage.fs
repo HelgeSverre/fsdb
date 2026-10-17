@@ -5366,6 +5366,13 @@ let tryEqualityIndex (table: Table) (columnName: string) : EqualityIndex option 
 
 let private exactProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
     let column = table.Columns.[index]
+    let cleanDoubleString =
+        match column.Type, value with
+        | TDouble _, VString text when not (String.IsNullOrWhiteSpace text) ->
+            match Double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
+            | true, number when Double.IsFinite number -> Some(VDouble number)
+            | _ -> None
+        | _ -> None
     let integerColumn =
         match column.Type with
         | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear -> true
@@ -5407,23 +5414,24 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
         | TBigInt false, VInt _ -> Ok value
         | _ -> Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) column value)
 
-    match coerced with
-    | Ok coerced when coerced = Value.materialize value -> Some coerced
-    | Ok coerced when exactIntegralDouble ->
+    match cleanDoubleString, coerced with
+    | Some probe, _ -> Some probe
+    | None, Ok coerced when coerced = Value.materialize value -> Some coerced
+    | None, Ok coerced when exactIntegralDouble ->
         match coerced, value with
         | VInt integer, VDouble bound when Value.compareIntegerToDouble (bigint integer) bound = 0 -> Some coerced
         | VUInt integer, VDouble bound when Value.compareIntegerToDouble (bigint integer) bound = 0 -> Some coerced
         | _ -> None
-    | Ok coerced when exactIntegralDecimal ->
+    | None, Ok coerced when exactIntegralDecimal ->
         match coerced, value with
         | VInt integer, VDecimal bound when decimal integer = bound -> Some coerced
         | VUInt integer, VDecimal bound when decimal integer = bound -> Some coerced
         | _ -> None
-    | Ok coerced when exactPositiveUnsigned ->
+    | None, Ok coerced when exactPositiveUnsigned ->
         match coerced, value with
         | VInt integer, VUInt bound when integer >= 0L && uint64 integer = bound -> Some coerced
         | _ -> None
-    | Ok coerced when exactNonNegativeSigned ->
+    | None, Ok coerced when exactNonNegativeSigned ->
         match coerced, value with
         | VUInt integer, VInt bound when uint64 bound = integer -> Some coerced
         | _ -> None
