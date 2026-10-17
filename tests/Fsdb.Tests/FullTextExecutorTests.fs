@@ -449,6 +449,20 @@ let tests =
               Expect.equal (search "中ㄮ" "IN BOOLEAN MODE") [] "historical Boolean word table excludes ㄮ"
               Expect.equal (search "中ㆻ" "IN BOOLEAN MODE") [] "historical Boolean word table excludes ㆻ"
 
+          testCase "Unicode 520 ngrams keep Bopomofo extension postings distinct"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE unicode520_bopomofo(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_520_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO unicode520_bopomofo VALUES(1,'中ㄜ文'),(2,'中ㄮ文'),(3,'中ㄍ文'),(4,'中ㆣ文'),(5,'中ㆻ文')" |> ignore
+              let search term mode =
+                  let sql = $"SELECT id FROM unicode520_bopomofo WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                  ids (run store sql)
+              for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
+                  Expect.equal (search "中ㄜ" mode) [ "1" ] (mode + " preserves ㄜ")
+                  Expect.equal (search "中ㄍ" mode) [ "3"; "4" ] (mode + " preserves the older velar class")
+              Expect.equal (search "中ㄮ" "IN NATURAL LANGUAGE MODE") [ "2" ] "ㄮ has a distinct natural posting"
+              Expect.equal (search "中ㆻ" "IN NATURAL LANGUAGE MODE") [ "5" ] "ㆻ has a distinct natural posting"
+
           testCase "legacy Unicode ngrams keep later BMP ideographs distinct and share supplementary keys"
           <| fun _ ->
               let store = create ()
@@ -561,6 +575,67 @@ let tests =
                   ids (run store ($"SELECT id FROM later_symbol_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
               for term, expected in [ "❶", "1"; "➀", "2"; "➊", "3"; "⫝̸", "4"; "⫝", "5" ] do
                   Expect.equal (search term) [ expected ] (term + " keeps its own posting")
+
+          testCase "general Unicode Glagolitic and Coptic ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE coptic_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO coptic_docs VALUES(1,'中Ⰰ文'),(2,'中ⰰ文'),(3,'中⳯文'),(4,'中⳰文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM coptic_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              for term, expected in [ "Ⰰ", "1"; "ⰰ", "2"; "⳯", "3"; "⳰", "4" ] do
+                  Expect.equal (search term) [ expected ] (term + " keeps its own posting")
+
+          testCase "general Unicode Bopomofo extension ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE bopomofo_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO bopomofo_docs VALUES(1,'中ㆣ文'),(2,'中ㆻ文'),(3,'中ㆤ文'),(4,'中ㆥ文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM bopomofo_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              for term, expected in [ "ㆣ", "1"; "ㆻ", "2"; "ㆤ", "3"; "ㆥ", "4" ] do
+                  Expect.equal (search term) [ expected ] (term + " keeps its own posting")
+
+          testCase "general Unicode Bopomofo base ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE bopomofo_base_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO bopomofo_base_docs VALUES(1,'中ㄜ文'),(2,'中ㄮ文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM bopomofo_base_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "ㄜ") [ "1" ] "the older letter keeps its own posting"
+              Expect.equal (search "ㄮ") [ "2" ] "the extended base letter keeps its own posting"
+
+          testCase "general Unicode extended combining-mark ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE extended_mark_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO extended_mark_docs VALUES(1,'中᪰文'),(2,'中᪱文'),(3,'中᷀文'),(4,'中᷁文'),(5,'中⃐文'),(6,'中⃑文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM extended_mark_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "᪰") [ "1" ] "the first mark keeps its own posting"
+              Expect.equal (search "᪱") [ "2" ] "the next mark keeps its own posting"
+              Expect.equal (search "᷀") [ "3" ] "a supplemental mark keeps its own posting"
+              Expect.equal (search "᷁") [ "4" ] "the next supplemental mark keeps its own posting"
+              Expect.equal (search "⃐") [ "5" ] "a symbol mark keeps its own posting"
+              Expect.equal (search "⃑") [ "6" ] "the next symbol mark keeps its own posting"
+
+          testCase "general Unicode variation-selector ngrams retain distinct postings"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE variation_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO variation_docs VALUES(1,'中\uFE00文'),(2,'中\uFE01文'),(3,'中\uFE0E文'),(4,'中\uFE0F文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM variation_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "\uFE00") [ "1" ] "the first selector keeps its own posting"
+              Expect.equal (search "\uFE01") [ "2" ] "the next selector keeps its own posting"
+              Expect.equal (search "\uFE0E") [ "3" ] "the penultimate selector keeps its own posting"
+              Expect.equal (search "\uFE0F") [ "4" ] "the final selector keeps its own posting"
 
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->

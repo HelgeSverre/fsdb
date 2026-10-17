@@ -20807,22 +20807,28 @@ and private fullTextScoresForTable
                         |> FullText.restrictReadView Set.empty)
                     |> fun view ->
                         visibleIds |> Option.fold (fun view ids -> FullText.restrictReadView ids view) view
-                let scores =
+                let syntaxError =
                     match mode with
-                    | NaturalLanguage ->
-                        FullText.tryNaturalSingleTermScoresDictionaryInView candidateIds view queryText
-                        |> Option.map HashedScores
-                        |> Option.defaultWith (fun () ->
-                            FullText.naturalScoresInView candidateIds view queryText |> OrderedScores)
-                    | BooleanMode ->
-                        FullText.tryFlatBooleanScoresDictionaryInView candidateIds view queryText
-                        |> Option.map HashedScores
-                        |> Option.defaultWith (fun () ->
-                            FullText.booleanScoresInView candidateIds view queryText |> OrderedScores)
-                    | QueryExpansion ->
-                        FullText.expansionScoresInView candidateIds view queryText |> OrderedScores
-
-                Ok(node, mode, scores)
+                    | BooleanMode -> FullText.booleanSyntaxErrorInView view queryText
+                    | _ -> None
+                match syntaxError with
+                | Some message -> Error(1064, message)
+                | None ->
+                    let scores =
+                        match mode with
+                        | NaturalLanguage ->
+                            FullText.tryNaturalSingleTermScoresDictionaryInView candidateIds view queryText
+                            |> Option.map HashedScores
+                            |> Option.defaultWith (fun () ->
+                                FullText.naturalScoresInView candidateIds view queryText |> OrderedScores)
+                        | BooleanMode ->
+                            FullText.tryFlatBooleanScoresDictionaryInView candidateIds view queryText
+                            |> Option.map HashedScores
+                            |> Option.defaultWith (fun () ->
+                                FullText.booleanScoresInView candidateIds view queryText |> OrderedScores)
+                        | QueryExpansion ->
+                            FullText.expansionScoresInView candidateIds view queryText |> OrderedScores
+                    Ok(node, mode, scores)
             | None, _ -> Error(1191, "Can't find FULLTEXT index matching the column list")
             | _, None -> Error(1210, "Incorrect arguments to AGAINST")
         | MatchAgainst _ -> Error(1210, "Incorrect arguments to AGAINST")

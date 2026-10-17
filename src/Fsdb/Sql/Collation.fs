@@ -204,6 +204,21 @@ let private foldUnicode520MongolianSeparator (value: string) =
             | c -> result.Append(c) |> ignore
         result.ToString()
 
+// UCA 5.2 ignores the first seven combining half marks at the primary level,
+// but gives the remaining marks distinct weights. ICU ignores the whole block,
+// which otherwise merges unrelated ngram postings.
+let private foldUnicode520CombiningHalfMarks (value: string) =
+    let marker = '\uE0A2'
+    if not (value |> Seq.exists (fun c -> c = marker || (c >= '\uFE27' && c <= '\uFE2F'))) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif c >= '\uFE27' && c <= '\uFE2F' then
+                result.Append(marker).Append(char (0xE0A3 + int c - 0xFE27)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
 // ICU composes conjoining Hangul Jamo into syllables. MySQL's older Unicode
 // collations retain their individual weights; each collation decides whether
 // compatibility Jamo share them.
@@ -244,7 +259,9 @@ let private generalSyntheticPair c =
     let pair marker weight = ValueSome(struct (marker, weight))
     match c with
     | '\uE0C0' | '\uE0D0' | '\uE0E0' | '\uE300' | '\uE0F0' | '\uE600'
-    | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5' | '\uE0B6' | '\uE0B7' as marker -> pair marker marker
+    | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5'
+    | '\uE0B6' | '\uE0B7' | '\uE0B8' | '\uE0B9' | '\uE0BA' | '\uE0BB' | '\uE0BC' | '\uE0BD' as marker ->
+        pair marker marker
     // Halfwidth voicing and decomposed kana marks have their own positional weights.
     | '\uff9e' -> pair '\uE0C0' '\uE0C1'
     | '\uff9f' -> pair '\uE0C0' '\uE0C2'
@@ -259,7 +276,6 @@ let private generalSyntheticPair c =
     | '\u200d' -> pair '\uE0D0' '\uE0D6'
     | '\u2060' -> pair '\uE0D0' '\uE0D7'
     | '\u3000' -> pair '\uE0D0' '\uE0D8'
-    | '\ufe0f' -> pair '\uE0D0' '\uE0D9'
     // Decomposed accents retain their written weight, apart from Greek iota.
     | c when c >= '\u0300' && c <= '\u036f' && c <> '\u0345' ->
         pair '\uE300' (char (0xE400 + int c - 0x0300))
@@ -284,6 +300,38 @@ let private generalSyntheticPair c =
         pair '\uE0B3' (char (0xEE00 + int upper - 0x2460))
     | c when c >= '\u3001' && c <= '\u303f' ->
         pair '\uE0B4' (char (0xEF00 + int c - 0x3000))
+    // MySQL gives every vertical and small-form punctuation code point its
+    // written primary weight, including the unassigned positions in the block.
+    | c when c >= '\uFE10' && c <= '\uFE6F' ->
+        pair '\uE0B8' (char (0xF300 + int c - 0xFE10))
+    // Kanbun and Bopomofo extension letters have distinct legacy weights;
+    // ICU merges a few pairs that MySQL keeps separate.
+    | c when c >= '\u3190' && c <= '\u31BF' ->
+        pair '\uE0B9' (char (0xF400 + int c - 0x3190))
+    // The older Bopomofo block also has one weight per written code point.
+    | c when c >= '\u3100' && c <= '\u318F' ->
+        pair '\uE0BA' (char (0xF500 + int c - 0x3100))
+    // MySQL retains the written weights of later combining marks; ICU
+    // merges some of them before full-text postings are built.
+    | c when c >= '\u1AB0' && c <= '\u1AFF' ->
+        pair '\uE0BB' (char (0xF600 + int c - 0x1AB0))
+    | c when c >= '\u1DC0' && c <= '\u1DFF' ->
+        pair '\uE0BB' (char (0xF680 + int c - 0x1DC0))
+    | c when c >= '\u20D0' && c <= '\u20FF' ->
+        pair '\uE0BB' (char (0xF700 + int c - 0x20D0))
+    // Variation selectors are significant under general_ci, including FE0F.
+    | c when c >= '\uFE00' && c <= '\uFE0F' ->
+        pair '\uE0BB' (char (0xF800 + int c - 0xFE00))
+    // ICU folds several dash, quote, and script-number forms together;
+    // MySQL's legacy collation gives each of these its written weight.
+    | c when (c >= '\u2010' && c <= '\u201F')
+             || (c >= '\u2070' && c <= '\u208F')
+             || c = '\u2099' ->
+        pair '\uE0BC' (char (0xF810 + int c - 0x2000))
+    // MySQL's general collation keeps this Glagolitic/Coptic block in
+    // written-code-point order; ICU case-folds many of its letter pairs.
+    | c when c >= '\u2C00' && c <= '\u2CFF' ->
+        pair '\uE0BD' (char (0xE500 + int c - 0x2C00))
     // Letterlike symbols, number forms, and arrows retain their code-point
     // weights, except lowercase Roman numerals share uppercase weights.
     | c when c >= '\u2100' && c <= '\u21ff' ->
@@ -371,8 +419,8 @@ let private foldLegacyKanaForms (value: string) =
             | c -> result.Append(c) |> ignore
         result.ToString()
 
-// ICU merges these Bopomofo forms with older letters; MySQL's legacy
-// collation keeps them at distinct primary weights.
+// ICU merges these Bopomofo forms with older letters; MySQL's Unicode 4.0
+// and 5.2 collations keep them at distinct primary weights.
 let private foldLegacyBopomofoForms (value: string) =
     if not (value |> Seq.exists (fun c -> c = '\uE060' || c = 'ㄮ' || c = 'ㆻ')) then value
     else
@@ -502,10 +550,14 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             |> foldLegacySupplementary |> foldGeneralUnicodeJamo
             |> foldGeneralSyntheticWeights
         | "utf8mb4_0900_ai_ci"
-        | "utf8mb4_0900_as_ci"
-        | "utf8mb4_unicode_520_ci" ->
+        | "utf8mb4_0900_as_ci" ->
             value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
             |> foldCjkQuoteForms |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
+        | "utf8mb4_unicode_520_ci" ->
+            value |> foldCjkPunctuationForms true |> foldLegacyBopomofoForms
+            |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
+            |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
+            |> foldLegacyUnicodeJamo
         | "utf8mb4_unicode_ci" ->
             value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms
