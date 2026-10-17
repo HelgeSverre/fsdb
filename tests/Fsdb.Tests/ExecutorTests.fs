@@ -13133,6 +13133,64 @@ let tests =
                         | other -> failtestf "expected materialized text matches for %s, got %A" predicate other
                         Expect.isLessThan calls 80 (predicate + " must bound residual work")
 
+                testCase "materialized correlated text expression ranges bound residual work"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE text_range_bounds(id INT PRIMARY KEY,x VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "CREATE TABLE text_range_rows(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO text_range_bounds VALUES(1,'word99'),(2,'zzzz'),(3,NULL)" |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,'word%d')" id id)
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO text_range_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO text_range_rows VALUES(1000,NULL)" |> ignore
+                    for predicate, expected in
+                        [ "LOWER(d.k)>=o.x", [ 11; 0; 0 ]
+                          "LOWER(d.k)>o.x", [ 10; 0; 0 ]
+                          "o.x<=LOWER(d.k)", [ 11; 0; 0 ]
+                          "LOWER(d.k) BETWEEN o.x AND CONCAT(o.x,'9')", [ 11; 0; 0 ]
+                          "LOWER(d.k) COLLATE utf8mb4_0900_ai_ci >= o.x", [ 11; 0; 0 ]
+                          "LOWER(d.k)>=o.x OR d.id=1", [ 12; 1; 1 ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM text_range_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                            + "FROM text_range_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual (expected |> List.map Some) predicate
+                        | other -> failtestf "expected materialized text range matches for %s, got %A" predicate other
+                        Expect.isLessThan calls 80 (predicate + " must bound residual work")
+                    runDefault store "CREATE TABLE upper_bounds(id INT PRIMARY KEY,x VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO upper_bounds VALUES(1,'word1')" |> ignore
+                    calls <- 0
+                    let upperSql =
+                        "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM text_range_rows) d "
+                        + "WHERE TOUCH(d.id)=d.id AND LOWER(d.k)<o.x) FROM upper_bounds o"
+                    match run store registry upperSql with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected selective upper text bound, got %A" other
+                    Expect.isLessThan calls 20 "the strict upper text bound must avoid a scan"
+                    runDefault store "CREATE TABLE accent_bounds(id INT PRIMARY KEY,x VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "CREATE TABLE accent_rows(id INT PRIMARY KEY,k VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO accent_bounds VALUES(1,'a')" |> ignore
+                    runDefault store "INSERT INTO accent_rows VALUES(1,'a'),(2,'Ä'),(3,'z')" |> ignore
+                    let accentSql =
+                        "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM accent_rows) d "
+                        + "WHERE LOWER(d.k) COLLATE utf8mb4_0900_ai_ci BETWEEN o.x AND o.x) "
+                        + "FROM accent_bounds o"
+                    match run store registry accentSql with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected accent-insensitive range candidates, got %A" other
+
                 testCase "materialized correlated decimal expressions key exact bounds only"
                 <| fun _ ->
                     let mutable calls = 0

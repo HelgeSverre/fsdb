@@ -734,6 +734,7 @@ type private StatementMemo =
       MaterializedCorrelatedDoubleExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedDoubleRanges: Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>
       MaterializedCorrelatedTextExpressions: Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>
+      MaterializedCorrelatedTextRanges: Dictionary<FromItem, Dictionary<Expr * string, MaterializedRangeLookup option>>
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
@@ -769,6 +770,8 @@ let private freshStatementMemo () =
         Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedTextExpressions =
         Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+      MaterializedCorrelatedTextRanges =
+        Dictionary<FromItem, Dictionary<Expr * string, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedRanges =
         Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedNullBuckets =
@@ -16223,6 +16226,93 @@ and private tryMaterializedCorrelatedLookup
                     | _ -> None)
                 |> intersectSharedRows
 
+            let textExpressionRangeCandidates predicate =
+                let indexed expression =
+                    if rowLocalExpression expression
+                       && Option.isNone (tryCorrelatedInnerColumn probeSource expression) then Some expression
+                    else None
+                let bound expression =
+                    tryCorrelatedProbeValue probeSource context expression
+                    |> Option.bind (function
+                        | VString _ | VNull as value -> Some(expression, value)
+                        | _ -> None)
+
+                let rangeLookup expression (collation: Collation.Collation) =
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedTextRanges source (fun () ->
+                            Dictionary<Expr * string, MaterializedRangeLookup option>())
+                    getMemoized lookups (expression, collation.Name) (fun () ->
+                        let sourceRows = List.toArray rows
+                        let entries = ResizeArray<string * int>()
+                        let mutable compatible = true
+                        for index = 0 to sourceRows.Length - 1 do
+                            if compatible then
+                                match evalExpr (rowContext sourceRows.[index]) expression with
+                                | Ok VNull -> ()
+                                | Ok(VString value) -> entries.Add(value, index)
+                                | _ -> compatible <- false
+
+                        if not compatible then None
+                        else
+                            let entries = entries.ToArray()
+                            Array.sortInPlaceWith
+                                (fun (left, _) (right, _) -> collation.ComparePrimary left right)
+                                entries
+                            let firstMatching bound inclusive =
+                                let mutable lower, upper = 0, entries.Length
+                                while lower < upper do
+                                    let middle = lower + (upper - lower) / 2
+                                    let comparison = collation.ComparePrimary (fst entries.[middle]) bound
+                                    if comparison < 0 || (comparison = 0 && not inclusive) then
+                                        lower <- middle + 1
+                                    else
+                                        upper <- middle
+                                lower
+                            Some(fun lower upper ->
+                                let convert = function
+                                    | None -> Some None
+                                    | Some(VString value, inclusive) -> Some(Some(value, inclusive))
+                                    | Some(VNull, _) -> Some None
+                                    | _ -> None
+                                let isNull = function Some(VNull, _) -> true | _ -> false
+                                match convert lower, convert upper with
+                                | _ when isNull lower || isNull upper -> Some []
+                                | Some lower, Some upper ->
+                                    let first =
+                                        lower
+                                        |> Option.map (fun (value, inclusive) -> firstMatching value inclusive)
+                                        |> Option.defaultValue 0
+                                    let afterLast =
+                                        upper
+                                        |> Option.map (fun (value, inclusive) -> firstMatching value (not inclusive))
+                                        |> Option.defaultValue entries.Length
+                                    entries.[first .. afterLast - 1]
+                                    |> Array.map snd
+                                    |> Array.sort
+                                    |> Array.map (fun index -> sourceRows.[index])
+                                    |> Array.toList
+                                    |> Some
+                                | _ -> None))
+
+                predicate
+                |> optionalConjuncts
+                |> List.collect (rangePredicatesFor indexed bound)
+                |> List.choose (fun range ->
+                    let bounds = [ range.Lower; range.Upper ] |> List.choose id
+                    bounds
+                    |> List.tryHead
+                    |> Option.bind (fun ((boundExpression, _), _) ->
+                        resolveOperandCollation "="
+                            (collationOperand (rowContext [||]) range.Column None)
+                            (collationOperand context boundExpression (tryColumnDefForExpr context boundExpression))
+                        |> Result.toOption)
+                    |> Option.bind (fun collation ->
+                        rangeLookup range.Column collation
+                        |> Option.bind (fun lookup ->
+                            let value = Option.map (fun ((_, value), inclusive) -> value, inclusive)
+                            lookup (value range.Lower) (value range.Upper))))
+                |> intersectSharedRows
+
             let equalityCandidates predicate =
                 let equalities = correlatedProbeEqualities probeSource predicate (Some context) |> Option.defaultValue []
 
@@ -16410,6 +16500,7 @@ and private tryMaterializedCorrelatedLookup
                       doubleExpressionCandidates (Some branch)
                       doubleRangeCandidates (Some branch)
                       textExpressionCandidates (Some branch)
+                      textExpressionRangeCandidates (Some branch)
                       absoluteCandidates (Some branch)
                       affineCandidates (Some branch)
                       nullCandidates (Some branch)
@@ -16436,6 +16527,7 @@ and private tryMaterializedCorrelatedLookup
               doubleExpressionCandidates whereExpr
               doubleRangeCandidates whereExpr
               textExpressionCandidates whereExpr
+              textExpressionRangeCandidates whereExpr
               absoluteCandidates whereExpr
               affineCandidates whereExpr
               nullCandidates whereExpr

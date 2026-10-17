@@ -352,7 +352,9 @@ duplicates, and complete OR branches; DECIMAL bounds retain the scan.
 The [matched in-memory timing](benchmarks/results/2026-10-15-materialized-integer-expression-lookup.md)
 confirms a repeated-query speedup for this shape. [Text expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-text-expression-lookup)
 use the effective comparison collation and reduce the audited `LOWER(d.k)=o.x`
-profile from 4,004 to six residual calls. [Exact decimal expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-lookup)
+profile from 4,004 to six residual calls. [Ordered text-expression ranges](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-text-expression-ranges)
+also reduce the audited selective `LOWER(d.k)>=o.x` probe from 4,004 to 15
+residual calls, using the comparison collation. [Exact decimal expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-lookup)
 reduce `d.k+0.00=o.x` from 5,005 to seven calls. Positive `IN` lists over
 exact DECIMAL and integer outer bounds now union candidates from that key;
 DOUBLE members retain the scan. [Ordered DECIMAL-expression ranges](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-ranges)

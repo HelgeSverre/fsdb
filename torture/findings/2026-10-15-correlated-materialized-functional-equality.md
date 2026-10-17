@@ -109,6 +109,25 @@ FSDB agree on binary and explicit case-insensitive collation, reversed
 equality, `UPPER`, NULL bounds, and OR branches. Decimal and floating
 expression keys remained open at this point.
 
+## Statement-local text expression ranges
+
+Stable, row-local text expressions over a materialized source now also use an
+ordered statement-local lookup for correlated `<`, `<=`, `>`, `>=`, and
+`BETWEEN` bounds. The lookup evaluates each source expression once and sorts
+its non-NULL results using the effective comparison collation. It returns
+candidates in source order and retains the original SQL predicate as the
+residual check. Non-string results or bounds retain the scan. Complete OR
+branches can union this range with another candidate family.
+
+The [native MySQL 8.4.11 oracle](../scripts/correlated-materialized-text-range-oracle.py)
+and focused executor regression cover inclusive and strict cuts, reversed
+operands, `BETWEEN`, NULL, a complete OR branch, and an accent-insensitive
+explicit collation. On the 1,000-row profile, the selective
+`LOWER(d.k)>=o.x` probe fell from **4,004 to 15 residual calls** across three
+outer rows; the bounded `BETWEEN` probe also uses 15. This closes the audited
+text-expression range scale gap, while broader expression and collation
+combinations remain to audit.
+
 ## Statement-local decimal expression lookup
 
 Exact decimal results now get a statement-local equality key when the outer
