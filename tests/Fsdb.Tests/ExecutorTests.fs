@@ -13217,7 +13217,7 @@ let tests =
                           "o.x=d.k+0.00", [ 1; 0; 0; 1 ], true
                           "d.k*1.00=o.x", [ 1; 0; 0; 1 ], true
                           "d.k+0.00=o.i", [ 0; 0; 0; 0 ], true
-                          "d.k+0.00=o.f", [ 1; 0; 0; 1 ], false
+                          "d.k+0.00=o.f", [ 1; 0; 0; 1 ], true
                           "d.k+0.00=o.x OR d.id=12", [ 2; 1; 1; 2 ], true
                           "d.k+0.00 IN (o.x,o.x+1.00)", [ 2; 0; 0; 2 ], true
                           "d.k+0.00 IN (o.x,NULL)", [ 1; 0; 0; 1 ], true
@@ -13258,6 +13258,16 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected MySQL's rounded DOUBLE cuts over wide DECIMAL rows, got %A" other
                     Expect.isLessThan calls 8 "approximate cuts avoid unrelated wide DECIMAL rows"
+
+                    calls <- 0
+                    let wideEqualitySql =
+                        "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM wide_decimal_rows) d "
+                        + "WHERE TOUCH(d.id)=d.id AND d.k+0.00=o.lo) "
+                        + "FROM wide_decimal_bounds o ORDER BY o.id"
+                    match run store registry wideEqualitySql with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected rounded DOUBLE equality over wide DECIMAL rows, got %A" other
+                    Expect.isLessThan calls 8 "approximate equality avoids unrelated wide DECIMAL rows"
 
                     runDefault store "CREATE TABLE mixed_decimal_bounds(id INT PRIMARY KEY,lo DECIMAL(20,2),hi DOUBLE)" |> ignore
                     runDefault store "INSERT INTO mixed_decimal_bounds VALUES(1,9007199254740993.00,9007199254740994e0)" |> ignore

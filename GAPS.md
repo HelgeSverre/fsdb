@@ -357,7 +357,8 @@ also reduce the audited selective `LOWER(d.k)>=o.x` probe from 4,004 to 15
 residual calls, using the comparison collation. [Exact decimal expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-lookup)
 reduce `d.k+0.00=o.x` from 5,005 to seven calls. Positive `IN` lists over
 exact DECIMAL and integer outer bounds now union candidates from that key;
-DOUBLE members retain the scan. [Ordered DECIMAL-expression ranges](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-ranges)
+DOUBLE members in `IN` still scan. Finite DOUBLE equality uses the ordered
+DECIMAL-expression lookup with approximate cuts. [Ordered DECIMAL-expression ranges](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-ranges)
 also narrow correlated inequalities and `BETWEEN` with exact DECIMAL or
 integer bounds, and now finite DOUBLE bounds, while preserving source order
 and residual comparison; strings and non-finite bounds retain the scan.

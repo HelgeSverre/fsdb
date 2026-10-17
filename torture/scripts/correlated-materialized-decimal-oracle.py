@@ -107,6 +107,13 @@ def main():
                         "FROM wide_bounds o ORDER BY o.id"
                     )
                     assert cursor.fetchall() == ((1, "2,3"), (2, "4"))
+                    cursor.execute(
+                        "SELECT o.id,(SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                        "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                        "WHERE d.k+0.00=o.lo) "
+                        "FROM wide_bounds o ORDER BY o.id"
+                    )
+                    assert cursor.fetchall() == ((1, "2,3"), (2, "4"))
                     cursor.execute("CREATE TABLE mixed_bounds(id INT PRIMARY KEY,lo DECIMAL(20,2),hi DOUBLE)")
                     cursor.execute("INSERT INTO mixed_bounds VALUES(1,9007199254740993.00,9007199254740994e0)")
                     for predicate, expected in [

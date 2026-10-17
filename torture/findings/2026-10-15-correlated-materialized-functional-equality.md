@@ -165,6 +165,10 @@ original SQL predicate still decides membership. Finite DOUBLE bounds now
 use cuts over the same sorted decimal rows, comparing each key after MySQL's
 single-rounded DECIMAL-to-DOUBLE conversion. Rows that round to one DOUBLE
 key remain adjacent; the residual predicate makes the final comparison.
+Finite DOUBLE equality uses matching lower and upper cuts from this same
+lookup, including DECIMAL keys that round to the same DOUBLE near 2⁵³. The
+1,000-row profile drops from 3,008 to seven residual calls across four
+outer rows.
 Non-finite DOUBLE and string bounds, or a non-DECIMAL row result, retain the
 scan.
 

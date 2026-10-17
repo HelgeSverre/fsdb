@@ -46,3 +46,16 @@ match connection.QueryValues(doubleRange, []) with
     printfn "finite DOUBLE bound over DECIMAL expression: expected rows; residual_calls=%d" calls
 | Error error -> failwithf "Unexpected DOUBLE-bound decimal range result: %A" error
 | other -> failwithf "Unexpected DOUBLE-bound decimal range result: %A" other
+
+calls <- 0
+let doubleEquality =
+    "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM inner_rows) d "
+    + "WHERE TOUCH(d.id)=d.id AND d.k+0.00=o.f) "
+    + "FROM outer_bounds o ORDER BY o.id"
+match connection.QueryValues(doubleEquality, []) with
+| Ok(_, [ [ Some(Value.VInt 1L); Some(Value.VInt 1L) ]
+          [ Some(Value.VInt 2L); Some(Value.VInt 0L) ]
+          [ Some(Value.VInt 3L); Some(Value.VInt 0L) ]
+          [ Some(Value.VInt 4L); Some(Value.VInt 1L) ] ]) ->
+    printfn "finite DOUBLE equality over DECIMAL expression: expected rows; residual_calls=%d" calls
+| other -> failwithf "Unexpected DOUBLE-bound decimal equality result: %A" other

@@ -16137,6 +16137,17 @@ and private tryMaterializedCorrelatedLookup
                 let candidates expression =
                     let regular () = rangePredicatesFor indexed bound expression |> List.choose lookupRange
                     match expression with
+                    | BinOp(Eq, left, right) ->
+                        let approximateEquality indexedExpression boundExpression =
+                            match indexed indexedExpression, bound boundExpression with
+                            | Some indexedExpression, Some(_, VDouble number) when System.Double.IsFinite number ->
+                                rangeLookup indexedExpression
+                                |> Option.bind (fun lookup ->
+                                    lookup (Some(VDouble number, true)) (Some(VDouble number, true)))
+                            | _ -> None
+                        approximateEquality left right
+                        |> Option.orElseWith (fun () -> approximateEquality right left)
+                        |> Option.toList
                     | Between(indexedExpression, lowerExpression, upperExpression) ->
                         match indexed indexedExpression, bound lowerExpression, bound upperExpression with
                         | Some indexedExpression, Some(_, lower), Some(_, upper)
