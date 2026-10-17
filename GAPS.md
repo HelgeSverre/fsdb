@@ -864,7 +864,9 @@ write a separate physical join source beside the view, wait and rebase under
 contention, enforce CHECK OPTION atomically, and keep caller and layered
 definer grants separate; a bare assignment to a uniquely exposed outer column
 also resolves to that physical source, even if a hidden view base column shares
-its name. Wider join shapes, other multi-target writes, and
+its name. Audited two-source LEFT/RIGHT joins also update only the view target,
+with missing nullable rows left untouched. Wider outer-join shapes, outer
+joins that write the preserving table, other multi-target writes, and
 broader security-layer combinations remain open.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
 before a local upload or server-side file read; ordinary inserts remain

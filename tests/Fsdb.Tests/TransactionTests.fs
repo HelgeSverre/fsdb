@@ -2478,6 +2478,23 @@ let tests =
                   | ResultSet(_, [ [ Some "1" ] ]) -> ()
                   | result -> failtestf "expected bare outer assignment, got %A" result
                   handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              for source in
+                  [ "tx_read_joined_view v LEFT JOIN tx_read_view_outer x ON x.id=v.id"
+                    "tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id"
+                    "tx_read_joined_view v RIGHT JOIN tx_read_view_outer x ON x.id=v.id" ] do
+                  handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+                  let sql = "UPDATE " + source + " SET v.n=v.n+1 WHERE v.id=1"
+                  Expect.equal (handle session sql |> snd) (Affected 1UL) source
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "11" ] ]) -> ()
+                  | result -> failtestf "expected view target update through outer join, got %A" result
+              handle session "INSERT INTO tx_read_view_outer(id,n) VALUES(3,0)" |> ignore
+              let missingViewRow =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id "
+                  + "SET v.n=v.n+1 WHERE x.id=3"
+              Expect.equal (handle session missingViewRow |> snd) (Affected 0UL)
+                  "a nullable missing view row cannot be updated"
+              handle session "UPDATE tx_read_view_target SET n=10" |> ignore
               let owner, _ = handle (create 3 store) "BEGIN"
               let owner, ownerResult = handle owner "UPDATE tx_read_view_target SET n=n+1 WHERE id=1"
               Expect.equal ownerResult (Affected 1UL) "owner holds the view's physical row"

@@ -58,4 +58,10 @@ An unqualified assignment to a column exposed by exactly one outer physical
 source resolves to that source, even when the view's hidden base table has a
 column with the same name. A column exposed by both the view and an outer
 source remains ambiguous with error 1052. Further multi-target source kinds,
-other bare-assignment shapes, and outer joins remain to audit.
+other bare-assignment shapes, and wider outer joins remain to audit. MySQL
+also updates a writable view on either side of a two-source LEFT or RIGHT
+join. Fsdb matches the audited view-only assignments, including a missing
+nullable view row that updates nothing; the right-side LEFT join is normalized
+to its equivalent view-first RIGHT join before the view's physical sources
+are expanded. Outer joins that also write the preserving physical table still
+need a separate row-preservation audit.

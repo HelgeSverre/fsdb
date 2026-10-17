@@ -163,6 +163,22 @@ def main():
                         cursor.execute("SELECT m FROM x WHERE id=1")
                         assert cursor.fetchone() == (1,), source
                         cursor.execute("UPDATE t SET n=3 WHERE id=1")
+                    for source in (
+                        "v LEFT JOIN x ON x.id=v.id",
+                        "x LEFT JOIN v ON v.id=x.id",
+                        "v RIGHT JOIN x ON x.id=v.id",
+                    ):
+                        cursor.execute("UPDATE t SET n=3 WHERE id=1")
+                        cursor.execute("UPDATE " + source + " SET v.n=v.n+1 WHERE v.id=1")
+                        assert cursor.rowcount == 1, source
+                        cursor.execute("SELECT n FROM t WHERE id=1")
+                        assert cursor.fetchone() == (4,), source
+                    cursor.execute("INSERT INTO x(id) VALUES(3)")
+                    cursor.execute(
+                        "UPDATE x LEFT JOIN v ON v.id=x.id SET v.n=v.n+1 WHERE x.id=3"
+                    )
+                    assert cursor.rowcount == 0
+                    cursor.execute("UPDATE t SET n=3 WHERE id=1")
                     with owner.cursor() as owner_cursor:
                         owner_cursor.execute("BEGIN")
                         owner_cursor.execute("UPDATE t SET n=n+1 WHERE id=1")
@@ -332,6 +348,7 @@ def main():
 
                 print(
                     f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
+                    "two-source outer joins updated matched view rows and skipped missing nullable rows; "
                     "nested CHECK OPTION returned 1369; shared bare n returned 1052; "
                     "third-position read grants were enforced; "
                     "two-target writes rebased and kept caller/definer grants separate; "

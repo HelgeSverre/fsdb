@@ -22999,6 +22999,23 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
 
     let rec move prior remaining =
         match remaining with
+        | [ { Kind = LeftJoin; Table = FromTable source; Using = [] } as join ] when List.isEmpty prior ->
+            let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
+            match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
+            | Some view ->
+                let qualifier = source.Alias |> Option.defaultValue source.Table
+                let writesOnlyView =
+                    update.Assignments
+                    |> List.forall (fun assignment ->
+                        match assignment.Table with
+                        | Some owner -> equalsIgnoreCase owner qualifier
+                        | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+                if writesOnlyView then
+                    { update with
+                        From = source
+                        Joins = [ { join with Kind = RightJoin; Table = FromTable update.From } ] }
+                else update
+            | None -> update
         | ({ Kind = InnerJoin; Table = FromTable source; Using = [] } as join) :: rest ->
             let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
