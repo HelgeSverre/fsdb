@@ -172,7 +172,7 @@ def scores_agree(expected, actual):
     )
 
 
-def verify(size, legacy_punctuation=False, legacy_radicals=False):
+def verify(size, legacy_punctuation=False, legacy_radicals=False, collation_override=None):
     prefix = '中' * (size - 1)
     legacy_chars = (LEGACY_RADICALS if legacy_radicals else
                     LEGACY_PUNCTUATION if legacy_punctuation else None)
@@ -181,7 +181,7 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False):
     terms = ([prefix + char for char in legacy_chars]
              if legacy_chars is not None else TERMS)
     modes = MODES
-    collation = "utf8mb4_unicode_ci" if legacy_chars is not None else None
+    collation = collation_override or ("utf8mb4_unicode_ci" if legacy_chars is not None else None)
     with tempfile.TemporaryDirectory(prefix=f"fsdb-ngram-{size}-") as directory:
         root = pathlib.Path(directory)
         data = root / "mysql"
@@ -271,6 +271,7 @@ if __name__ == "__main__":
     corpus = parser.add_mutually_exclusive_group()
     corpus.add_argument("--legacy-punctuation", action="store_true")
     corpus.add_argument("--legacy-radicals", action="store_true")
+    parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci"))
     args = parser.parse_args()
     sizes = args.sizes or list(range(1, 11))
-    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals) for size in sizes) else 0)
+    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals, args.collation) for size in sizes) else 0)

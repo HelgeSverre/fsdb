@@ -192,6 +192,41 @@ let private foldCjkQuoteForms (value: string) =
             | c -> result.Append(c) |> ignore
         result.ToString()
 
+// UCA 5.2 assigns U+180E a primary weight; ICU now treats it as ignorable.
+let private foldUnicode520MongolianSeparator (value: string) =
+    if not (value.Contains('\u180e') || value.Contains('\uE0A0')) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            match c with
+            | '\u180e' -> result.Append("\uE0A0\uE0A1") |> ignore
+            | '\uE0A0' -> result.Append("\uE0A0\uE0A0") |> ignore
+            | c -> result.Append(c) |> ignore
+        result.ToString()
+
+// ICU composes conjoining Hangul Jamo into syllables. MySQL's UCA 5.2 keeps
+// their primary weights separate, while compatibility Jamo share those weights.
+let private foldUnicode520Jamo (value: string) =
+    let isJamo c = c >= '\u1100' && c <= '\u11ff'
+    let isCompatibility c =
+        (c >= '\u3130' && c <= '\u318f') || (c >= '\uffa0' && c <= '\uffdc')
+    let marker = '\uE0B0'
+    if not (value |> Seq.exists (fun c -> c = marker || isJamo c || isCompatibility c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        let appendJamo c =
+            result.Append(marker).Append(char (0xE500 + int c - 0x1100)) |> ignore
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif isJamo c then appendJamo c
+            elif isCompatibility c then
+                let decomposed = (string c).Normalize(NormalizationForm.FormKD)
+                if not (String.IsNullOrEmpty decomposed) && (decomposed |> Seq.forall isJamo) then
+                    for jamo in decomposed do appendJamo jamo
+                else result.Append(c) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
 // UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
 // newer MySQL weights fold its presentation forms.
 let private foldCjkPunctuationForms modern (value: string) =
@@ -228,9 +263,22 @@ let private foldCjkPunctuationForms modern (value: string) =
             result.ToString()
         else comma
 
+// These characters share ASCII space's primary weight in MySQL's legacy
+// Unicode collations. U+1680 and the Unicode line separators do not.
+let private legacyUnicodePadSpaces =
+    [| ' '; '\u00a0'; '\u2000'; '\u2001'; '\u2002'; '\u2003'
+       '\u2004'; '\u2005'; '\u2006'; '\u2007'; '\u2008'; '\u2009'
+       '\u200a'; '\u202f'; '\u205f'; '\u3000' |]
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
-    let trim (s: string) = if spec.PadSpace then s.TrimEnd(' ') else s
+    let trim (s: string) =
+        if not spec.PadSpace then s
+        elif name = "utf8mb4_unicode_ci" || name = "utf8mb4_unicode_520_ci" then
+            // MySQL gives these Unicode spaces the same primary weight as
+            // ASCII space, so PAD SPACE removes them at the end of a key.
+            s.TrimEnd(legacyUnicodePadSpaces)
+        else s.TrimEnd(' ')
     let charset =
         match name.IndexOf '_' with
         | -1 -> name
@@ -260,7 +308,9 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_general_ci" -> value.Replace("ß", "s").Replace("ẞ", "s")
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
-        | "utf8mb4_unicode_520_ci" -> value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
+        | "utf8mb4_unicode_520_ci" ->
+            value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
+            |> foldCjkQuoteForms |> foldUnicode520MongolianSeparator |> foldUnicode520Jamo
         | "utf8mb4_unicode_ci" -> value |> foldCjkPunctuationForms false |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
         | _ -> value
 

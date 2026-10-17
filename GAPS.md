@@ -978,6 +978,10 @@ collation behavior, and MeCab remain open.
 The [legacy CJK radical corpus](torture/findings/2026-10-17-cjk-radical-ngram.md)
 also matches MySQL for 1,635 searches at each token size from 1 through 10,
 including cross-equivalence between Kangxi radicals and NFKC Han forms.
+The [Unicode 5.2 legacy-collation probe](torture/findings/2026-10-17-unicode-520-ngram.md)
+now matches the audited spacing, format-control, and Korean Jamo ngram cases.
+The full two-column corpus matches at token sizes 1–10. Broader collation
+behavior and MeCab remain open.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
