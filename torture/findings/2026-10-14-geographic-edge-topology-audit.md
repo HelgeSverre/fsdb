@@ -228,6 +228,17 @@ whereas fsdb's sampled angle sum has no equivalent endpoint-level branch.
 The full replay still has 12 of 412 line mismatches and one of the original
 189 near-hole point mismatches.
 
+A local, uncommitted crossing-count prototype reused fsdb's Andoyer azimuth
+calculation and accumulated signed longitude crossings across the exterior
+and hole rings. It included endpoint-level side checks but omitted Boost's
+antipodal and pole-specific counter states. The same oracle worsened from
+12 to 20 line mismatches and from one to two near-hole point mismatches;
+the three-point polar-corner mismatch stayed unchanged. The candidate was
+reverted. This rules out replacing the sampled angle sum with a simple
+crossing count. A faithful implementation must carry the complete winding
+state and match Boost's side and equality decisions before it can replace
+the existing classifier.
+
 ## Near-machine-precision hole-edge offsets
 
 A separate MySQL 8.4.11 probe placed `LINESTRING(1.5 y,3.0 y)` beside the
