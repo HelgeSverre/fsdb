@@ -610,6 +610,11 @@ Row- and key-stripe waits participate in a shared wait-for graph; the request
 with the least held ownership aborts with MySQL error 1213/SQLSTATE 40001;
 equal-cost cycles choose the newest participant.
 
+`FLUSH TABLES WITH READ LOCK` leaves temporary-only writes available but
+blocks [mixed temporary/permanent writes](torture/findings/2026-10-17-temporary-global-read-lock.md)
+until `UNLOCK TABLES`, including permanent writes whose SELECT source is
+temporary. The lock owner receives 1223 for the same mixed write.
+
 XA branches use the same private snapshots and conflict validation. Prepared
 branches detach from their sessions, survive WAL recovery, remain invisible
 until completion, and retain their shared row, exclusive row, and unique-key
