@@ -2,6 +2,8 @@
 
 Build Fsdb.Cli in Release first. Requires native mysqld/mysqladmin and PyMySQL.
 Each token size uses disposable servers and data directories.
+Use --legacy-punctuation or --legacy-radicals for the expanded
+utf8mb4_unicode_ci corpora.
 """
 
 import argparse
@@ -12,6 +14,7 @@ import string
 import subprocess
 import tempfile
 import time
+import unicodedata
 
 import pymysql
 
@@ -86,6 +89,16 @@ LEGACY_PUNCTUATION = [
     if chr(code).isprintable()
 ] + list(string.punctuation)
 
+RADICALS = [
+    chr(code)
+    for start, end in ((0x2E80, 0x2F00), (0x2F00, 0x2FE0))
+    for code in range(start, end)
+    if chr(code).isprintable()
+]
+LEGACY_RADICALS = list(dict.fromkeys(
+    RADICALS + [unicodedata.normalize("NFKC", char) for char in RADICALS]
+))
+
 
 def connect(**options):
     for _ in range(100):
@@ -159,14 +172,16 @@ def scores_agree(expected, actual):
     )
 
 
-def verify(size, legacy_punctuation=False):
+def verify(size, legacy_punctuation=False, legacy_radicals=False):
     prefix = '中' * (size - 1)
-    documents = ([(prefix + char + '文', '') for char in LEGACY_PUNCTUATION]
-                 if legacy_punctuation else DOCUMENTS)
-    terms = ([prefix + char for char in LEGACY_PUNCTUATION]
-             if legacy_punctuation else TERMS)
+    legacy_chars = (LEGACY_RADICALS if legacy_radicals else
+                    LEGACY_PUNCTUATION if legacy_punctuation else None)
+    documents = ([(prefix + char + '文', '') for char in legacy_chars]
+                 if legacy_chars is not None else DOCUMENTS)
+    terms = ([prefix + char for char in legacy_chars]
+             if legacy_chars is not None else TERMS)
     modes = MODES
-    collation = "utf8mb4_unicode_ci" if legacy_punctuation else None
+    collation = "utf8mb4_unicode_ci" if legacy_chars is not None else None
     with tempfile.TemporaryDirectory(prefix=f"fsdb-ngram-{size}-") as directory:
         root = pathlib.Path(directory)
         data = root / "mysql"
@@ -209,6 +224,13 @@ def verify(size, legacy_punctuation=False):
                     }
                     matched = result(mysql_connection, prefix + "︵", "IN NATURAL LANGUAGE MODE")
                     assert representative.issubset(set(matched)), (size, matched)
+                if legacy_radicals:
+                    representative = {
+                        index for index, char in enumerate(legacy_chars, 1)
+                        if char in ("⼀", "一")
+                    }
+                    matched = result(mysql_connection, prefix + "⼀", "IN NATURAL LANGUAGE MODE")
+                    assert representative.issubset(set(matched)), (size, matched)
 
                 mismatches = []
                 for mode in modes:
@@ -246,7 +268,9 @@ if __name__ == "__main__":
         raise RuntimeError(f"Build the Release CLI first: {FSDB}")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("sizes", nargs="*", type=int)
-    parser.add_argument("--legacy-punctuation", action="store_true")
+    corpus = parser.add_mutually_exclusive_group()
+    corpus.add_argument("--legacy-punctuation", action="store_true")
+    corpus.add_argument("--legacy-radicals", action="store_true")
     args = parser.parse_args()
     sizes = args.sizes or list(range(1, 11))
-    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation) for size in sizes) else 0)
+    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals) for size in sizes) else 0)
