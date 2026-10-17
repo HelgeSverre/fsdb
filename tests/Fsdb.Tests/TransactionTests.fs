@@ -2366,21 +2366,23 @@ let tests =
 
           testCase "nested joined view updates wait for the physical target"
           <| fun _ ->
-              for fromClause, assignment, viewFirst in
-                  [ "tx_nested_target t JOIN tx_nested_internal l ON l.id=t.id", "v.n=v.n+1", true
-                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "v.n=v.n+1", true
-                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "n=n+1", true
-                    "tx_nested_target t JOIN tx_nested_internal l ON l.id=t.id", "v.n=v.n+1", false
-                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "v.n=v.n+1", false
-                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "n=n+1", false ] do
+              for fromClause, assignment, viewPosition in
+                  [ for fromClause, assignment in
+                        [ "tx_nested_target t JOIN tx_nested_internal l ON l.id=t.id", "v.n=v.n+1"
+                          "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "v.n=v.n+1"
+                          "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "n=n+1" ] do
+                        for position in 1..3 do
+                            yield fromClause, assignment, position ] do
                   let store = Fsdb.Storage.create ()
                   let setup = create 1 store
                   handle setup "CREATE TABLE tx_nested_target (id INT PRIMARY KEY, n INT)" |> ignore
                   handle setup "CREATE TABLE tx_nested_internal (id INT PRIMARY KEY)" |> ignore
                   handle setup "CREATE TABLE tx_nested_outer (id INT PRIMARY KEY)" |> ignore
+                  handle setup "CREATE TABLE tx_nested_other (id INT PRIMARY KEY)" |> ignore
                   handle setup "INSERT INTO tx_nested_target VALUES (1, 0)" |> ignore
                   handle setup "INSERT INTO tx_nested_internal VALUES (1)" |> ignore
                   handle setup "INSERT INTO tx_nested_outer VALUES (1)" |> ignore
+                  handle setup "INSERT INTO tx_nested_other VALUES (1)" |> ignore
                   handle setup ("CREATE VIEW tx_nested_view AS SELECT t.id, t.n FROM " + fromClause)
                   |> ignore
                   let owner, _ = handle (create 2 store) "BEGIN"
@@ -2388,16 +2390,20 @@ let tests =
                   Expect.equal ownerWrite (Affected 1UL) "the owner updates the base row"
                   let waiter, _ = handle (create 3 store) "BEGIN"
                   let joinedSource viewName =
-                      if viewFirst then
+                      if viewPosition = 1 then
                           viewName + " v JOIN tx_nested_outer x ON x.id=v.id"
-                      else
+                      elif viewPosition = 2 then
                           "tx_nested_outer x JOIN " + viewName + " v ON x.id=v.id"
+                      else
+                          "tx_nested_outer x JOIN tx_nested_other y ON y.id=x.id JOIN "
+                          + viewName + " v ON v.id=y.id"
                   let sql =
                       "UPDATE " + joinedSource "tx_nested_view" + " "
                       + "SET " + assignment + " WHERE v.id=1"
                   let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter sql)
                   if waiting.Wait(TimeSpan.FromMilliseconds 100.0) then
-                      failtestf "nested joined writer should wait for %s, got %A" sql waiting.Result
+                      let _, result = waiting.Result
+                      failtestf "nested joined writer should wait for %s, got %A" sql result
                   Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
                   Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the joined writer resumes"
                   let waiter, result = waiting.GetAwaiter().GetResult()
@@ -2435,9 +2441,11 @@ let tests =
               handle root "CREATE TABLE tx_nested_secure_target (id INT PRIMARY KEY, n INT)" |> ignore
               handle root "CREATE TABLE tx_nested_secure_inner (id INT PRIMARY KEY)" |> ignore
               handle root "CREATE TABLE tx_nested_secure_outer (id INT PRIMARY KEY)" |> ignore
+              handle root "CREATE TABLE tx_nested_secure_other (id INT PRIMARY KEY)" |> ignore
               handle root "INSERT INTO tx_nested_secure_target VALUES (1, 0)" |> ignore
               handle root "INSERT INTO tx_nested_secure_inner VALUES (1)" |> ignore
               handle root "INSERT INTO tx_nested_secure_outer VALUES (1)" |> ignore
+              handle root "INSERT INTO tx_nested_secure_other VALUES (1)" |> ignore
               handle root
                   "CREATE VIEW tx_nested_secure_view AS SELECT t.id,t.n FROM tx_nested_secure_target t JOIN tx_nested_secure_inner l ON l.id=t.id"
               |> ignore
@@ -2446,15 +2454,21 @@ let tests =
               let writer = { create 2 store with User = "nested_writer" }
               let sources =
                   [ "tx_nested_secure_view v JOIN tx_nested_secure_outer x ON x.id=v.id"
-                    "tx_nested_secure_outer x JOIN tx_nested_secure_view v ON x.id=v.id" ]
+                    "tx_nested_secure_outer x JOIN tx_nested_secure_view v ON x.id=v.id"
+                    "tx_nested_secure_outer x JOIN tx_nested_secure_other y ON y.id=x.id JOIN tx_nested_secure_view v ON v.id=y.id" ]
               let sql source = "UPDATE " + source + " SET v.n=v.n+1 WHERE v.id=1"
               for source in sources do
                   match handle writer (sql source) |> snd with
                   | Err(1143, _) | Err(1142, _) -> ()
                   | result -> failtestf "expected denied outer join read, got %A" result
               handle root "GRANT SELECT ON fsdb.tx_nested_secure_outer TO nested_writer" |> ignore
-              for source in sources do
+              for source in sources |> List.take 2 do
                   Expect.equal (handle writer (sql source) |> snd) (Affected 1UL) "granted lookup read permits the update"
+              match handle writer (sql sources.[2]) |> snd with
+              | Err(1143, _) | Err(1142, _) -> ()
+              | result -> failtestf "expected denied second lookup read, got %A" result
+              handle root "GRANT SELECT ON fsdb.tx_nested_secure_other TO nested_writer" |> ignore
+              Expect.equal (handle writer (sql sources.[2]) |> snd) (Affected 1UL) "both lookup reads permit the update"
 
           testCase "disjoint joined view updates do not wait for another physical row"
           <| fun _ ->

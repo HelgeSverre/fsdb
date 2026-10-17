@@ -22990,26 +22990,46 @@ let private rewriteViewExpression (view: UpdatableView) (expression: Expr) =
         | _ -> None) expression
 
 let private writableViewFirst (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
-    match update.Joins with
-    | ({ Kind = InnerJoin; Table = FromTable right } as firstJoin) :: rest
-        when tryUpdatableView store (update.From.Database |> Option.defaultValue defaultDatabase) update.From.Table |> Option.isNone ->
-        match tryUpdatableView store (right.Database |> Option.defaultValue defaultDatabase) right.Table with
-        | Some view ->
-            let qualifier = right.Alias |> Option.defaultValue right.Table
-            let writesView =
-                update.Assignments
-                |> List.exists (fun assignment ->
-                    match assignment.Table with
-                    | Some owner -> equalsIgnoreCase owner qualifier
-                    | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
-            if writesView then
-                // An inner join has the same matched rows in either source order.
-                // Put the writable view first for expansion and row claiming.
-                { update with From = right; Joins = { firstJoin with Table = FromTable update.From } :: rest }
-            else
-                update
-        | None -> update
-    | _ -> update
+    let isCte (table: TableRef) =
+        table.Database.IsNone
+        && (update.Ctes |> List.exists (fun cte -> equalsIgnoreCase cte.CteName table.Table))
+    let isPhysical (table: TableRef) =
+        not (isCte table)
+        && (physicalFastPathTable store defaultDatabase table |> Option.isSome)
+
+    let rec move prior remaining =
+        match remaining with
+        | ({ Kind = InnerJoin; Table = FromTable source; Using = [] } as join) :: rest ->
+            let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
+            match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
+            | Some view ->
+                let qualifier = source.Alias |> Option.defaultValue source.Table
+                let writesView =
+                    update.Assignments
+                    |> List.exists (fun assignment ->
+                        match assignment.Table with
+                        | Some owner -> equalsIgnoreCase owner qualifier
+                        | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+
+                if not writesView then
+                    update
+                else
+                    // All preceding sources are physical INNER JOIN operands.
+                    // Attach this join's predicate to the last old operand,
+                    // where every referenced alias is still in scope.
+                    let joins =
+                        match prior with
+                        | [] -> { join with Table = FromTable update.From } :: rest
+                        | last :: earlierReversed ->
+                            let carried = { last with On = BinOp(And, last.On, join.On) }
+                            { join with Table = FromTable update.From; On = Lit(VInt 1L) }
+                            :: (List.rev (carried :: earlierReversed) @ rest)
+                    { update with From = source; Joins = joins }
+            | None when isPhysical source -> move (join :: prior) rest
+            | None -> update
+        | _ -> update
+
+    if isPhysical update.From then move [] update.Joins else update
 
 let private targetsFirstJoinedView (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
     let update = writableViewFirst store defaultDatabase update

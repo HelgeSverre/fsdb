@@ -856,10 +856,10 @@ Audited [inner joined views used as the first source of another joined
 mutation](torture/findings/2026-10-15-nested-joined-view-mutation-source.md)
 also update the physical target with either internal source order, retain
 CHECK OPTION, and wait under contention. The [nested mutation oracle](torture/scripts/joined-view-nested-mutation-oracle.py)
-also covers a writable view on the right of a two-source inner UPDATE join;
-its physical row is claimed before the statement, and outer-table read grants
-still apply. Uniquely owned bare view-target assignments also work; ambiguous
-bare columns return 1052. Later join positions, multi-target writes, and
+also covers a writable view in the second or third position of an inner UPDATE
+join; its physical row is claimed before the statement, and outer-table read
+grants still apply. Uniquely owned bare view-target assignments also work;
+ambiguous bare columns return 1052. Wider join shapes, multi-target writes, and
 broader security-layer combinations remain open.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
 before a local upload or server-side file read; ordinary inserts remain
@@ -1663,7 +1663,7 @@ implementation effort:
    now claims and rebases its physical row; [audited inner joined view
    sources](torture/findings/2026-10-15-nested-joined-view-mutation-source.md)
    do likewise, including uniquely owned bare assignments; a writable view
-   on the right of a two-source inner join follows the same physical claim.
+   in the second or third position of an inner join follows the same physical claim.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.

@@ -50,29 +50,31 @@ def main():
                         "CREATE TABLE t(id INT PRIMARY KEY,n INT)",
                         "CREATE TABLE l(id INT PRIMARY KEY)",
                         "CREATE TABLE x(id INT PRIMARY KEY)",
+                        "CREATE TABLE y(id INT PRIMARY KEY)",
                         "INSERT INTO t VALUES(1,0)", "INSERT INTO l VALUES(1)",
-                        "INSERT INTO x VALUES(1)",
+                        "INSERT INTO x VALUES(1)", "INSERT INTO y VALUES(1)",
                     ]:
                         cursor.execute(sql)
                 waiter.select_db("probe")
                 reader.select_db("probe")
 
-                for (from_clause, assignment), view_first in itertools.product(
+                for (from_clause, assignment), view_position in itertools.product(
                     (
                         ("t JOIN l ON l.id=t.id", "v.n=v.n+1"),
                         ("l JOIN t ON l.id=t.id", "v.n=v.n+1"),
                         ("l JOIN t ON l.id=t.id", "n=n+1"),
                     ),
-                    (True, False),
+                    (1, 2, 3),
                 ):
-                    joined_source = (
-                        "v JOIN x ON x.id=v.id" if view_first
-                        else "x JOIN v ON x.id=v.id"
-                    )
-                    checked_source = (
-                        "checked JOIN x ON x.id=checked.id" if view_first
-                        else "x JOIN checked ON x.id=checked.id"
-                    )
+                    def joined_source(view_name):
+                        if view_position == 1:
+                            return f"{view_name} JOIN x ON x.id={view_name}.id"
+                        if view_position == 2:
+                            return f"x JOIN {view_name} ON x.id={view_name}.id"
+                        return (
+                            f"x JOIN y ON y.id=x.id JOIN {view_name} "
+                            f"ON {view_name}.id=y.id"
+                        )
                     with owner.cursor() as cursor:
                         cursor.execute("UPDATE t SET n=0 WHERE id=1")
                         cursor.execute("DROP VIEW IF EXISTS v")
@@ -94,7 +96,7 @@ def main():
                                 cursor.execute("BEGIN")
                                 started.set()
                                 cursor.execute(
-                                    "UPDATE " + joined_source + " "
+                                    "UPDATE " + joined_source("v") + " "
                                     "SET " + assignment + " WHERE v.id=1"
                                 )
                                 outcome["affected"] = cursor.rowcount
@@ -123,7 +125,7 @@ def main():
                         )
                         try:
                             cursor.execute(
-                                "UPDATE " + checked_source + " "
+                                "UPDATE " + joined_source("checked") + " "
                                 "SET checked.id=2 WHERE checked.id=1"
                             )
                         except pymysql.MySQLError as error:
@@ -135,14 +137,43 @@ def main():
 
                 with reader.cursor() as cursor:
                     cursor.execute("ALTER TABLE x ADD COLUMN n INT DEFAULT 0")
+                    for source in (
+                        "v JOIN x ON x.id=v.id",
+                        "x JOIN v ON x.id=v.id",
+                        "x JOIN y ON y.id=x.id JOIN v ON v.id=y.id",
+                    ):
+                        try:
+                            cursor.execute("UPDATE " + source + " SET n=n+1 WHERE v.id=1")
+                        except pymysql.MySQLError as error:
+                            assert error.args[0] == 1052, error.args
+                        else:
+                            raise AssertionError("shared bare n should be ambiguous")
+
+                    cursor.execute("CREATE USER 'view_writer'@'localhost'")
+                    cursor.execute("GRANT SELECT, UPDATE ON probe.v TO 'view_writer'@'localhost'")
+                writer = pymysql.connect(
+                    unix_socket=socket, user="view_writer", database="probe", autocommit=True
+                )
+                connections.append(writer)
+                restricted = (
+                    "UPDATE x JOIN y ON y.id=x.id JOIN v ON v.id=y.id "
+                    "SET v.n=v.n+1 WHERE v.id=1"
+                )
+                for table in ("x", "y"):
                     try:
-                        cursor.execute(
-                            "UPDATE v JOIN x ON x.id=v.id SET n=n+1 WHERE v.id=1"
-                        )
+                        with writer.cursor() as cursor:
+                            cursor.execute(restricted)
                     except pymysql.MySQLError as error:
-                        assert error.args[0] == 1052, error.args
+                        assert error.args[0] in (1142, 1143), error.args
                     else:
-                        raise AssertionError("shared bare n should be ambiguous")
+                        raise AssertionError("the outer lookup requires SELECT privilege")
+                    with reader.cursor() as cursor:
+                        cursor.execute(
+                            f"GRANT SELECT ON probe.{table} TO 'view_writer'@'localhost'"
+                        )
+                with writer.cursor() as cursor:
+                    cursor.execute(restricted)
+                    assert cursor.rowcount == 1
 
                 with owner.cursor() as cursor:
                     cursor.execute("INSERT INTO t VALUES(2,0)")
@@ -178,8 +209,9 @@ def main():
                 assert disjoint_outcome == {"affected": 1}, disjoint_outcome
 
                 print(
-                    f"MySQL {version}: both join orders and bare target waited and rebased; "
+                    f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
                     "nested CHECK OPTION returned 1369; shared bare n returned 1052; "
+                    "third-position read grants were enforced; "
                     "disjoint rows did not wait"
                 )
             finally:
