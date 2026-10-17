@@ -665,6 +665,31 @@ let tests =
                       (ResultSet([ "aid"; "shared_id" ], [ [ Some "1"; Some "1" ]; [ Some "2"; None ] ]))
                       "WAL and snapshot recovery preserve grouped column ownership"
 
+          testCase "WAL appends after a checkpoint use the rotated file"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+
+              for sql in [ "CREATE TABLE after_checkpoint (value INT)"; "INSERT INTO after_checkpoint VALUES (1)" ] do
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "%d %s" code message
+                  | _ -> ()
+
+              snapshotNow dir store
+
+              match handle session "INSERT INTO after_checkpoint VALUES (2)" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected post-checkpoint insert, got %A" other
+
+              Expect.isGreaterThan (FileInfo(walPath dir).Length) 0L "the new WAL holds the later insert"
+              let recovered = Fsdb.Session.create 2 (load dir)
+              Expect.equal
+                  (handle recovered "SELECT value FROM after_checkpoint ORDER BY value" |> snd)
+                  (ResultSet([ "value" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                  "recovery combines the checkpoint and the reopened WAL"
+
           testCase "attach + reload round-trips one value of every Value case, including datetime fractional seconds"
           <| fun _ ->
               let dir = tempDataDir ()
