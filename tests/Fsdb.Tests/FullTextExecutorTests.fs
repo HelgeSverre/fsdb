@@ -487,6 +487,16 @@ let tests =
                   let unified = score "神" mode
                   Expect.isLessThan (abs (unified / compatibility - 2.0)) 0.00001 ("MySQL 8.4 " + mode)
 
+          testCase "general Unicode square-unit ngrams retain their written symbols"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE square_units(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_general_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO square_units VALUES(1,'中㎞文'),(2,'中㏎文')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM square_units WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "中㎞") [ "1" ] "square kilometer keeps its own posting"
+              Expect.equal (search "中㏎") [ "2" ] "square uppercase kilometer keeps its own posting"
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()

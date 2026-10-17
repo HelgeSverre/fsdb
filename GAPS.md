@@ -1023,6 +1023,10 @@ two-column corpus now matches MySQL 8.4.11 in membership and relevance for
 387 searches at each ngram size 1–10; the expanded size-1 range also matches
 across 2,832 searches. Other characters, collations, and search shapes remain
 outside these audits.
+The [enclosed-CJK and square-unit probe](torture/findings/2026-10-17-general-ci-enclosed-cjk-weights.md)
+preserves MySQL's literal U+3200–U+33FF weights. Its expanded two-column lane
+now matches 3,066 searches at each of ngram sizes 1 and 2; broader CJK and
+full-text behavior remains to audit.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
