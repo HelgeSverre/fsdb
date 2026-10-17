@@ -169,6 +169,19 @@ corpus. A local coordinate exception would fit the sample but would not
 explain MySQL's overlay and relation behavior, so the point remains an
 explicit open spatial edge case.
 
+A component probe further narrows the near-polar point discrepancy. For
+`POINT(86 1.00001)` under SRID 4326, MySQL and fsdb both say the point is
+within the exterior ring considered as its own polygon and outside the hole
+considered as its own polygon; neither says it touches either component.
+For the combined polygon, MySQL says it is outside while fsdb says it is
+inside. MySQL reports zero distance to the hole ring at this point, while
+fsdb reports about 0.09536 m. The maintained oracle now prints all three
+component results. This is evidence of a geographic ring-composition or
+numeric-boundary strategy difference: replacing the combined classifier
+with independent `outer within` and `not hole within` tests would preserve
+fsdb's wrong answer, and treating zero line distance as boundary would
+contradict MySQL's `ST_Touches=0` for the hole polygon.
+
 ## Near-machine-precision hole-edge offsets
 
 A separate MySQL 8.4.11 probe placed `LINESTRING(1.5 y,3.0 y)` beside the

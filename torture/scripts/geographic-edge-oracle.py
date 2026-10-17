@@ -181,6 +181,26 @@ def main():
         print(f"{point_count} near-hole points; {len(point_mismatches)} point mismatches")
         for mismatch in point_mismatches:
             print("point", mismatch)
+        # The near-polar mismatch is not explained by classifying each ring as
+        # an independent polygon: both engines agree on those two predicates.
+        polar_point = "ST_GeomFromText('POINT(86 1.00001)',4326)"
+        polar_components = {
+            "outer": "POLYGON((85 0,85 4,89 4,89 0,85 0))",
+            "hole": "POLYGON((86 1,88 1,88 3,86 3,86 1))",
+            "combined": "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))",
+        }
+        for name, polygon in polar_components.items():
+            area = f"ST_GeomFromText('{polygon}',4326)"
+            sql = (
+                f"SELECT ST_Within({polar_point},{area}),ST_Touches({polar_point},{area}),"
+                f"ST_Distance({polar_point},ST_ExteriorRing({area}))"
+            )
+            values = []
+            for connection in (mysql_connection, fsdb_connection):
+                with connection.cursor() as cursor:
+                    cursor.execute(sql)
+                    values.append(cursor.fetchone())
+            print("polar component", name, "MySQL", values[0], "fsdb", values[1])
         exterior = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
         edge_probes = [
             ("0 -0.00000000001", "near west edge"),
