@@ -2294,6 +2294,23 @@ let tests =
                   (run store
                       "CREATE VIEW recursive_only AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) SELECT k FROM seq")
                   "create recursive-only view"
+              expectOk
+                  (run store "CREATE VIEW aggregate_cte_only AS WITH x AS (SELECT COUNT(*) AS n FROM recursive_target) SELECT n FROM x")
+                  "create aggregate CTE-only view"
+              expectOk
+                  (run store "CREATE VIEW expression_cte_only AS WITH x AS (SELECT 1 AS k) SELECT k+1 AS n FROM x")
+                  "create expression CTE-only view"
+              expectOk
+                  (run store "CREATE VIEW union_cte_only AS WITH x AS (SELECT 1 AS k UNION ALL SELECT 2) SELECT k FROM x")
+                  "create UNION CTE-only view"
+              Expect.equal
+                  (rows store
+                      "SELECT TABLE_NAME, IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_NAME IN ('recursive_only','aggregate_cte_only','expression_cte_only','union_cte_only') ORDER BY TABLE_NAME")
+                  [ [ Some "aggregate_cte_only"; Some "YES" ]
+                    [ Some "expression_cte_only"; Some "NO" ]
+                    [ Some "recursive_only"; Some "YES" ]
+                    [ Some "union_cte_only"; Some "YES" ] ]
+                  "MySQL reports direct CTE columns writable in metadata despite rejecting recursive-only UPDATE"
               match run store "UPDATE recursive_only SET k=4" with
               | Err(1288, _) -> ()
               | other -> failtestf "expected recursive-only UPDATE rejection, got %A" other
