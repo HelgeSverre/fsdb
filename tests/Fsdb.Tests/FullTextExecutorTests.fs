@@ -574,6 +574,18 @@ let tests =
               Expect.equal (search "コ") [ "2" ] "katakana posting remains separate"
               Expect.equal (search "カ") [ "3"; "4" ] "unvoiced width forms share a posting"
 
+          testCase "Japanese kana-sensitive ngrams distinguish compatibility ideographs"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE japanese_ideographs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_ja_0900_as_cs_ks,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO japanese_ideographs VALUES(1,'神'),(2,'神')" |> ignore
+              let search term mode =
+                  ids (run store ($"SELECT id FROM japanese_ideographs WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"))
+              for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
+                  Expect.equal (search "神" mode) [ "1" ] (mode + " keeps the compatibility ideograph distinct")
+                  Expect.equal (search "神" mode) [ "2" ] (mode + " keeps the unified ideograph distinct")
+
           testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
           <| fun _ ->
               let store = create ()

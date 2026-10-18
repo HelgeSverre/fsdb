@@ -19,11 +19,11 @@ python3 torture/scripts/ngram-multicol-oracle.py --collation utf8mb4_ja_0900_as_
 ```
 
 Across 387 searches per token size, the size-one mismatch count fell from
-211 to 4 and the size-two count from 57 to zero. The four remaining cases
-are relevance scores for `神` and `神` in natural and Boolean modes. MySQL
-distinguishes those characters under this collation, while fsdb still shares
-their host ICU key. A native weight probe over U+F900–U+FAFF found 396
-compatibility ideographs distinct from their NFKC forms and 64 equal to them;
-some distinct ideographs share a MySQL weight with each other. That remaining
-mapping needs an explicit collation audit rather than folding the whole block
-or adding one exception for `神`.
+211 to zero and the size-two count from 57 to zero. The final four size-one
+relevance differences involved `神` and `神` in natural and Boolean modes.
+A native weight probe over U+F900–U+FAFF found 396 compatibility ideographs
+distinct from their NFKC forms and 64 equal to them; some distinct
+ideographs share a MySQL weight with each other. Fsdb now maps those audited
+weight classes explicitly, including the distinction between `神` and `神`.
+This closes the maintained corpus only; broader Japanese collation and parser
+behavior remains open.
