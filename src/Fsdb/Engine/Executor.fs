@@ -14723,6 +14723,15 @@ and private canSplitCorrelatedExactNumericInequality source (columns: ColumnDef 
         | Some indexedType, Some(VDecimal _)
             when isExactIntegerIndexType indexedType -> true
         | Some(TDecimal _), Some(VNull | VInt _ | VUInt _ | VDecimal _) -> true
+        | Some(TDouble _), Some VNull -> true
+        | Some(TDouble _), Some(VString text) when not (System.String.IsNullOrWhiteSpace text) ->
+            match System.Double.TryParse(
+                text,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture
+            ) with
+            | true, number -> System.Double.IsFinite number
+            | _ -> false
         | _ -> false
 
     compatible left right || compatible right left

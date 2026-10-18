@@ -32,3 +32,14 @@ overflowing text still declines the index and scans. In the focused regression,
 the clean-string probe falls from 2,004 to fewer than 80 residual calls across
 direct and pass-through physical sources. The native MySQL 8.4.11 oracle
 matches the audited row counts for each string form.
+
+## Selective inequality
+
+The physical `<>` planner can split a clean finite string bound against a
+`DOUBLE` key into two strict indexed ranges. A NULL outer bound also splits
+to two empty ranges, avoiding a full scan during the scalar subquery's
+metadata probe. On 1,001 inner rows with 1,000 copies of `12.5`, a correlated
+`d.k<>o.s` probe for `o.s='12.5'` now checks fewer than 80 rows through direct
+and pass-through sources, versus 1,004 residual calls before the change.
+The original predicate still decides row membership. The MySQL 8.4.11 oracle
+also checks the NULL-bound zero result.

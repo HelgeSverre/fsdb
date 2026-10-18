@@ -13608,7 +13608,7 @@ let tests =
                     runDefault store "CREATE TABLE physical_double_bounds(id INT PRIMARY KEY,s VARCHAR(32))" |> ignore
                     runDefault store "CREATE TABLE physical_double_rows(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))" |> ignore
                     runDefault store
-                        "INSERT INTO physical_double_bounds VALUES(1,'12.5'),(2,'-12.5'),(3,'999'),(4,'12.5x'),(5,'1e-500'),(6,' 12.5 '),(7,'1e309')"
+                        "INSERT INTO physical_double_bounds VALUES(1,'12.5'),(2,'-12.5'),(3,'999'),(4,'12.5x'),(5,'1e-500'),(6,' 12.5 '),(7,'1e309'),(8,NULL)"
                     |> ignore
                     [ 0..999 ]
                     |> List.map (fun id -> sprintf "(%d,%d.5)" id (id - 500))
@@ -13637,6 +13637,25 @@ let tests =
                             | other -> failtestf "expected physical DOUBLE result for %s, got %A" predicate other
                             if keyed then Expect.isLessThan calls 80 (source + " must use the index")
                             else Expect.isGreaterThan calls 900 "truncated numeric text retains a scan"
+
+                    runDefault store "CREATE TABLE physical_double_repeated(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))" |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,12.5)" id)
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO physical_double_repeated VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO physical_double_repeated VALUES(1000,13.5)" |> ignore
+                    for source in [ "physical_double_repeated d"; "(SELECT id,k FROM physical_double_repeated) d" ] do
+                        for boundId, expected in [ 1, "1"; 8, "0" ] do
+                            calls <- 0
+                            let sql =
+                                "SELECT (SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND d.k<>o.s) "
+                                + "FROM physical_double_bounds o WHERE o.id=" + string boundId
+                            match run store registry sql with
+                            | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected "DOUBLE <> result"
+                            | other -> failtestf "expected DOUBLE <> result, got %A" other
+                            Expect.isLessThan calls 80 (source + " must use strict ranges for <>")
 
                 testCase "physical correlated ABS equality probes indexed signed keys"
                 <| fun _ ->
