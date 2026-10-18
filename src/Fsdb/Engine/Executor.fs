@@ -4845,7 +4845,7 @@ let private disjuncts (expr: Expr) : Expr list =
 
 let private optionalConjuncts = Option.map conjuncts >> Option.defaultValue []
 
-/// Inequality and `NOT BETWEEN` are unions of strict ranges under SQL's
+/// Inequality, single-value `NOT IN`, and `NOT BETWEEN` are unions of strict ranges under SQL's
 /// three-valued comparison rules. The original expression remains the filter.
 let private candidateDisjuncts canSplitInequality expression =
     disjuncts expression
@@ -4855,6 +4855,8 @@ let private candidateDisjuncts canSplitInequality expression =
         | BinOp(Neq, left, right)
         | Not(BinOp(Eq, left, right)) when canSplitInequality left right ->
             [ BinOp(Lt, left, right); BinOp(Gt, left, right) ]
+        | Not(In(value, [ bound ])) when canSplitInequality value bound ->
+            [ BinOp(Lt, value, bound); BinOp(Gt, value, bound) ]
         | branch -> [ branch ])
 
 /// An OR narrows candidates only when every branch has a safe lookup.

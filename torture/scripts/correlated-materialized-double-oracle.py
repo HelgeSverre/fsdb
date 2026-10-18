@@ -187,7 +187,7 @@ def main():
                     cursor.execute("ALTER TABLE outer_bounds ADD COLUMN hi VARCHAR(32)")
                     cursor.execute("UPDATE outer_bounds SET s='12.5',hi='13.5' WHERE id=7")
                     for source in ("repeated_rows d", "(SELECT id,k FROM repeated_rows) d"):
-                        for predicate in ("d.k<>o.s", "d.k NOT BETWEEN o.s AND o.s",
+                        for predicate in ("d.k<>o.s", "d.k NOT IN(o.s)", "d.k NOT BETWEEN o.s AND o.s",
                                           "d.k NOT BETWEEN o.s AND o.hi"):
                             cursor.execute(
                                 f"SELECT (SELECT COUNT(*) FROM {source} WHERE {predicate}) "
