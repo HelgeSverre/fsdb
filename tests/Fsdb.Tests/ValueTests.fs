@@ -1894,6 +1894,14 @@ let tests =
                             Expect.isTrue (col.ComparePrimary "𛄟" "𛄢" < 0) (name + " implicit weight order")
                             Expect.isFalse (col.Equals "𛄟" "\uE0B2\uE71F") (name + " marker cannot alias source text")
 
+                testTheory "Kana Extended-B small letters retain implicit primary weights"
+                    [ "utf8mb4_unicode_520_ci"; "utf8mb4_0900_ai_ci"; "utf8mb4_0900_as_ci" ]
+                    <| fun name ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        for left, right in [ "𛄲", "𛅕"; "𛅐", "𛅤"; "𛅑", "𛅥"; "𛅒", "𛅦" ] do
+                            Expect.isFalse (col.Equals left right) (name + " distinguishes " + left + " and " + right)
+                            Expect.isTrue (col.ComparePrimary left right < 0) (name + " follows implicit weight order")
+
                 testTheory
                     "collations identify when equality fixes one full-order position"
                     [ "utf8mb4_0900_bin", true

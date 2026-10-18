@@ -479,6 +479,22 @@ let tests =
                       Expect.equal (search "中𛄟" mode) [ "1" ] (collation + " Hiragana WU")
                       Expect.equal (search "中𛄢" mode) [ "2" ] (collation + " Katakana WU")
 
+          testCase "Unicode 5.2 and 9.0 ngrams distinguish Kana Extended-B small letters"
+          <| fun _ ->
+              for collation in [ "utf8mb4_unicode_520_ci"; "utf8mb4_0900_ai_ci" ] do
+                  let store = create ()
+                  run store
+                      ("CREATE TABLE extended_kana_docs(id INT PRIMARY KEY,body TEXT COLLATE " + collation
+                       + ",FULLTEXT KEY ft(body) WITH PARSER ngram)")
+                  |> ignore
+                  run store "INSERT INTO extended_kana_docs VALUES(1,'中𛄲文'),(2,'中𛅕文')" |> ignore
+                  let search term mode =
+                      let sql = $"SELECT id FROM extended_kana_docs WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                      ids (run store sql)
+                  for mode in [ "IN NATURAL LANGUAGE MODE"; "WITH QUERY EXPANSION" ] do
+                      Expect.equal (search "中𛄲" mode) [ "1" ] (collation + " Hiragana small KO")
+                      Expect.equal (search "中𛅕" mode) [ "2" ] (collation + " Katakana small KO")
+
           testCase "legacy Unicode ngrams keep later BMP ideographs distinct and share supplementary keys"
           <| fun _ ->
               let store = create ()

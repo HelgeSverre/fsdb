@@ -32,3 +32,21 @@ positive-control assertion confirms that the supplementary-kana corpus
 produces actual matches. This is an audited ngram and equality result for
 this Unicode span; exact `WEIGHT_STRING` bytes and other untested collations
 remain outside the claim.
+
+## Kana Extended-B follow-up
+
+An additional two-column corpus over assigned U+1B130–U+1B16F characters
+found 48 membership or relevance differences at token size 1 and 64 at
+size 2 under `utf8mb4_unicode_520_ci`. Fsdb merged small hiragana and
+katakana pairs such as U+1B132 and U+1B155 into one ICU key. Native MySQL
+8.4.11 gives all nine assigned characters in this span distinct implicit
+weights in both Unicode 5.2 and 9.0; the pair above has weights `FBC3B132`
+and `FBC3B155`.
+
+The same escaped synthetic key now covers this assigned span. The maintained
+oracle reports zero differences across 54 natural, Boolean, and
+query-expansion searches at each of token sizes 1, 2, and 3 under each of
+`utf8mb4_unicode_520_ci` and `utf8mb4_0900_ai_ci`. Focused collation and
+full-text regressions pin the small-kana distinction. The earlier U+1B000–
+U+1B12F counts above describe the original corpus; broader Unicode blocks
+and exact weight-byte reproduction remain open.

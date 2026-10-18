@@ -219,10 +219,10 @@ let private foldUnicode520CombiningHalfMarks (value: string) =
             else result.Append(c) |> ignore
         result.ToString()
 
-// MySQL's Unicode 5.2 collation gives supplementary kana U+1B000–U+1B12F
-// distinct implicit weights. Its 9.0 collation gives the first two explicit
-// weights and the remaining scalars distinct implicit weights. ICU merges
-// some Hiragana/Katakana spellings (notably the two archaic WU letters).
+// MySQL's Unicode 5.2 collation gives assigned supplementary kana in
+// U+1B000–U+1B16F distinct implicit weights. Its 9.0 collation gives the
+// first two explicit weights and the remaining scalars distinct implicit
+// weights. ICU merges some Hiragana/Katakana spellings, notably archaic WU.
 let private foldSupplementaryKanaImplicit unicode520 (value: string) =
     let marker = '\uE0B2'
     if not (value.Contains marker || value.Contains '\uD82C') then value
@@ -236,7 +236,7 @@ let private foldSupplementaryKanaImplicit unicode520 (value: string) =
             elif c = '\uD82C' && index + 1 < value.Length
                  && Char.IsLowSurrogate value.[index + 1] then
                 let scalar = Char.ConvertToUtf32(c, value.[index + 1])
-                if scalar >= 0x1B000 && scalar < 0x1B130
+                if scalar >= 0x1B000 && scalar < 0x1B170
                    && (unicode520 || scalar >= 0x1B002) then
                     result.Append(marker).Append(char (0xE600 + scalar - 0x1B000)) |> ignore
                     index <- index + 1
