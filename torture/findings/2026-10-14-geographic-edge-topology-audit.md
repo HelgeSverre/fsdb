@@ -242,6 +242,14 @@ point against one standalone-hole ring direction. Distance therefore has a
 separate ring-order sensitivity and cannot be used to infer the missing
 containment or intersection decision.
 
+A trial taking the minimum of forward and reverse point-to-segment distances
+removed that 0.09536 m polar discrepancy without changing the 12 line or
+one point relation mismatches. It failed an existing MySQL point-to-line
+regression for `POINT(-20 100)` against `LINESTRING(-10 90,-30 110)`, whose
+native distance is about 71,223.12146 m. The trial was reverted. Globally
+symmetrizing the segment distance would change other MySQL-compatible cases;
+the polar ring-order result needs a narrower explanation.
+
 A 49-point grid around the combined polar polygon found only the known
 `POINT(86 1.00001)` disagreement. A finer 35-point corner grid found four
 disagreements, all at latitude 86 and longitudes `1.000001`, `1.000002`,
