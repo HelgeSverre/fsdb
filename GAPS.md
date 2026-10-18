@@ -1113,6 +1113,13 @@ now matches the audited spacing, format-control, and Korean Jamo ngram cases
 under both `utf8mb4_unicode_ci` and `utf8mb4_unicode_520_ci`. The full
 two-column corpus matches at token sizes 1–10 for each collation. Broader
 collation behavior and MeCab remain open.
+compatibility-ideograph searches under `utf8mb4_unicode_ci` and the full
+two-column corpus under `utf8mb4_0900_as_cs` also match the audited MySQL
+membership and relevance. [Curly quote forms in U+2000–U+206F](torture/findings/2026-10-17-general-punctuation-ngram.md)
+now have distinct legacy ngram keys; 426 searches per token size from 1
+through 10 match MySQL in membership and relevance. Broader collation
+behavior and MeCab remain open.
+
 The [Unicode 5.2 Bopomofo audit](torture/findings/2026-10-17-unicode520-bopomofo-ngram.md)
 keeps the measured extension letters distinct; the U+3100–U+31FF ngram corpus
 now matches MySQL at all ten token sizes under `utf8mb4_unicode_520_ci`.

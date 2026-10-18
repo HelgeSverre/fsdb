@@ -1908,6 +1908,15 @@ let tests =
                         for left, right in [ "〝", "〞"; "〞", "〟" ] do
                             Expect.isLessThan (col.ComparePrimary left right) 0 (name + " quote weight order")
                         Expect.isFalse (col.Equals "〝" "\uE020\uE021") (name + " literal marker cannot alias a quote")
+                        let curlySingles = [ "‘"; "’"; "‚"; "‛" ]
+                        let curlyDoubles = [ "“"; "”"; "„"; "‟" ]
+                        for forms, ordinary in [ curlySingles, "'"; curlyDoubles, "\"" ] do
+                            Expect.equal (forms |> List.map col.KeyOf |> List.distinct |> List.length) 4 (name + " distinct curly keys")
+                            for form in forms do
+                                Expect.isFalse (col.Equals form ordinary) (name + " distinct curly quote " + form)
+                            for left, right in forms |> List.pairwise do
+                                Expect.isLessThan (col.ComparePrimary left right) 0 (name + " curly quote order")
+                        Expect.isFalse (col.Equals "‘" "\uE020\uE024") (name + " literal marker cannot alias a curly quote")
 
                 testCase "legacy vertical punctuation keeps MySQL implicit-weight order"
                 <| fun _ ->
