@@ -6344,8 +6344,20 @@ let private geometryDistanceSphereFn: Scalar =
 
         let radius = suppliedRadius |> Option.defaultWith (fun () -> defaultRadius functionName first.Srid)
 
-        sphericalPointSetDistance radius (coordinates functionName first) (coordinates functionName second)
-        |> Option.map VDouble
+        // SRID 0 is reinterpreted using pi/180; geographic WKB is decoded
+        // using the SRS's stored angular unit. The tiny difference matters
+        // near the poles, where cos(latitude) is close to zero.
+        let toRadians =
+            if first.Srid = 0 then
+                fun degrees -> degrees * Math.PI / 180.0
+            else
+                fun degrees -> degrees * 0.017453292519943278
+
+        sphericalPointSetDistance radius toRadians (coordinates functionName first) (coordinates functionName second)
+        |> Option.map (fun distance ->
+            if Double.IsInfinity distance then
+                raise (SqlError(3049, "Overflow error: INFINITY in function st_distance_sphere."))
+            VDouble distance)
         |> Option.defaultValue VNull
 
     function

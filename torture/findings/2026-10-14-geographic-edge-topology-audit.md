@@ -169,6 +169,118 @@ corpus. A local coordinate exception would fit the sample but would not
 explain MySQL's overlay and relation behavior, so the point remains an
 explicit open spatial edge case.
 
+## Geographic strategy follow-up
+
+The [MySQL 8.4.11 intersects functor](https://dev.mysql.com/doc/dev/mysql-server/8.4.11/intersects__functor_8h_source.html)
+declares Boost's `geographic_winding` strategy for point/area relations and
+`geographic_segments` for line/area relations. The
+[bundled Boost 1.84 geographic winding implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/strategies/geographic/point_in_poly_winding.hpp)
+uses a longitude-crossing winding counter with an Andoyer-azimuth geographic
+side strategy, rather than the sampled spherical-angle sum in fsdb's
+`geographicRingContains`. This difference is a plausible cause of the
+latitude-sensitive point result, but the current evidence does not prove it
+explains the line relations too.
+The winding counter treats segments crossing the query longitude and its
+antimeridian separately, and the geographic side test compares the Andoyer
+azimuth from a segment start to the query with the azimuth along the segment.
+That side test is applied at a crossing, not at each sampled arc point. A
+replacement therefore needs the crossing/count state and azimuth side rule
+together; changing only the side calculation inside fsdb's angle sum would
+still be a different algorithm. The standalone-hole/combined-polygon results
+below also require validating polygon composition after a ring-level port.
+
+The [bundled winding base implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/strategies/spherical/point_in_poly_winding.hpp)
+checks aligned endpoints and meridian segments before counting crossings.
+It gives a crossing at an endpoint a signed count of one, an interior
+longitude crossing a signed count of two, and keeps separate ordinary and
+antipodal counts for pole-wrap decisions. Its aligned-endpoint side check
+constructs a short east/west segment before applying the geographic azimuth
+strategy. A direct port therefore needs those count and touch states as well
+as the side formula; merely replacing fsdb's sampled arc angles with one
+side test would miss the endpoint and pole cases. This is the upstream Boost
+implementation, not yet a proof of which branch of MySQL's full polygon
+relation produces the observed near-polar combined-ring result.
+
+The maintained 412-line oracle now records `ST_Distance` alongside each
+mismatch's relation and intersection geometry. MySQL and fsdb return zero
+distance for all 12 mismatches. In the near-polar case, MySQL still reports
+`ST_Intersects=0` while returning both zero distance and an intersection
+point. Distance and overlay output therefore cannot safely substitute for
+MySQL's relation strategy. The next candidate fix should reproduce the
+geographic winding and segment-relation decisions, then pass the entire
+line/point corpus; changing only a tolerance or sampled step is unsupported.
+
+A follow-up after fixing `ST_DISTANCE_SPHERE` tested whether MySQL's stored
+geographic angular unit (`0.017453292519943278` radians per degree for EPSG
+4326), rather than `pi / 180`, also explains this point/ring discrepancy.
+Using that unit in fsdb's spherical ring vectors left the differential oracle
+unchanged: 12 line mismatches among 412 pairs, one near-hole point mismatch
+among 189, and zero near-exterior control mismatches. The trial was reverted.
+The relation gap still requires the geographic winding/overlay strategy rather
+than this coordinate-conversion adjustment alone.
+
+The near-polar point has a further ring-composition wrinkle. MySQL 8.4.11
+reports `POINT(86 1.00001)` inside the standalone exterior polygon and
+outside the standalone hole polygon, yet outside their combined polygon.
+At `POINT(86 2.99999)`, it reports the point inside both standalone polygons
+and inside the combined polygon. Reversing either standalone hole or the
+combined hole ring leaves those results unchanged. MySQL calls all five
+polygons valid. Fsdb agrees on the exterior and on the first standalone-hole
+result, but not on the combined result; it also differs on the second
+standalone-hole result while matching the combined result. The maintained
+oracle now pins MySQL's validity and point relations for these isolated and
+combined rings. This rules out fixing the polar discrepancy by changing only
+the standalone hole-ring membership test; the full polygon relation must be
+validated as a unit.
+
+The native oracle also pins `ST_Distance(point, polygon)=0` for both polar
+points against the exterior, the standalone hole in either ring direction,
+and the combined polygon in either direction. That includes cases where
+MySQL reports the point outside and `ST_Intersects=0`. Fsdb likewise returns
+zero for most of these cases but reports about 0.09536 m for the outside
+point against one standalone-hole ring direction. Distance therefore has a
+separate ring-order sensitivity and cannot be used to infer the missing
+containment or intersection decision.
+
+An initial F# translation of the longitude-crossing counter in MySQL 8.4.11's
+[bundled Boost 1.84 winding strategy](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/strategies/spherical/point_in_poly_winding.hpp),
+using fsdb's current Andoyer azimuth helper for its geographic side test,
+increased the near-hole relation mismatches from one to two of 189. It made
+the combined-polygon `POINT(88 1.00001)` result diverge while leaving the 12 line
+and 34 point-distance mismatches unchanged. The trial was reverted. The
+remaining mismatch is not resolved by a counter translation alone: the
+geographic side calculation and MySQL's combined-ring relation path both
+need independent checks against the bundled implementation.
+
+A trial taking the minimum of forward and reverse point-to-segment distances
+removed that 0.09536 m polar discrepancy without changing the 12 line or
+one point relation mismatches. It failed an existing MySQL point-to-line
+regression for `POINT(-20 100)` against `LINESTRING(-10 90,-30 110)`, whose
+native distance is about 71,223.12146 m. The trial was reverted. Globally
+symmetrizing the segment distance would change other MySQL-compatible cases;
+the polar ring-order result needs a narrower explanation.
+
+A broader point-distance replay now compares all 189 near-hole points in the
+maintained oracle with a `0.01` metre tolerance. The unchanged implementation
+has 34 distance mismatches, alongside the previously known one relation
+mismatch; the line relation corpus remains at 12 of 412. A polygon-only trial
+that took the minimum of each ring's forward and reversed segment distances
+still had 34 point-distance mismatches. It removed the standalone polar-ring
+`0.09536` metre error, but at `(73, 2.99999)` and `(83, 2.99999)` it changed
+nonzero distances to zero while MySQL reports approximately `0.31618` and
+`0.13485` metres. That trial was also reverted. The expanded distance corpus
+now exposes these tradeoffs before another geographic strategy change.
+
+A 49-point grid around the combined polar polygon found only the known
+`POINT(86 1.00001)` disagreement. A finer 35-point corner grid found four
+disagreements, all at latitude 86 and longitudes `1.000001`, `1.000002`,
+`1.000005`, and `1.00001`. MySQL calls each outside and disjoint; fsdb calls
+each inside and intersecting. The adjacent sampled longitudes `1.00002`
+through `1.0001`, and latitudes `85.9999`, `85.99999`, `86.00001`, and
+`86.0001`, agree. This confines the sampled divergence to a narrow polar
+corner band, but the standalone/combined relation contradiction above still
+precludes a simple hole-membership or tolerance patch. The maintained
+`geographic-edge-oracle.py` reports both grids for future strategy work.
 A component probe further narrows the near-polar point discrepancy. For
 `POINT(86 1.00001)` under SRID 4326, MySQL and fsdb both say the point is
 within the exterior ring considered as its own polygon and outside the hole

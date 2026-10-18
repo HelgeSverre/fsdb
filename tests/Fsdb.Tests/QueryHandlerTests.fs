@@ -3023,6 +3023,17 @@ let tests =
                           sql
                   | _, result -> failtestf "expected DOUBLE cast result for %s, got %A" sql result
 
+          testCase "out-of-range exponential literals fail before expression evaluation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in
+                  [ "SELECT 1e309"
+                    "SELECT -1e309"
+                    "SELECT ST_DISTANCE_SPHERE(ST_GeomFromText('POINT(0 0)',4326),ST_GeomFromText('POINT(0 0)',4326),1e309)" ] do
+                  match handle session sql |> snd with
+                  | Err(1367, "Illegal double '1e309' value found during parsing") -> ()
+                  | result -> failtestf "expected invalid DOUBLE literal for %s, got %A" sql result
+
           testCase "DECIMAL casts clamp finite text outside System.Decimal range"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
