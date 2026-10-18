@@ -648,11 +648,50 @@ def main():
                 finally:
                     waiter.close()
 
+                for verb in ("UPDATE", "DELETE"):
+                    for predicate in ("rank_value=NULL", "rank_value<>NULL", "NULL<rank_value"):
+                        waiter = connect(socket)
+                        try:
+                            with owner.cursor() as cursor:
+                                cursor.execute("DROP TABLE IF EXISTS target")
+                                cursor.execute("CREATE TABLE target(id INT PRIMARY KEY,n INT,rank_value INT,KEY ix_rank(rank_value))")
+                                cursor.execute("INSERT INTO target VALUES(1,0,1),(2,0,2),(3,0,3)")
+                                cursor.execute("BEGIN")
+                                cursor.execute("INSERT INTO target VALUES(4,0,0)")
+                            with waiter.cursor() as cursor:
+                                cursor.execute("USE probe")
+                                cursor.execute("BEGIN")
+                            action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
+                            statement = f"{action} WHERE {predicate} ORDER BY rank_value LIMIT 2"
+                            started = threading.Event()
+                            outcome = {}
+
+                            def impossible_write():
+                                try:
+                                    with waiter.cursor() as cursor:
+                                        started.set()
+                                        cursor.execute(statement)
+                                        outcome["affected"] = cursor.rowcount
+                                        cursor.execute("COMMIT")
+                                except Exception as error:
+                                    outcome["error"] = error
+
+                            thread = threading.Thread(target=impossible_write, daemon=True)
+                            thread.start()
+                            assert started.wait(2), statement
+                            thread.join(0.2)
+                            assert not thread.is_alive(), (statement, "impossible predicate waited")
+                            assert outcome == {"affected": 0}, (statement, outcome)
+                            owner.rollback()
+                        finally:
+                            waiter.close()
+
                 print(f"MySQL {version}: {cases} ordered LIMIT 1/2/3 writes reselected after updates/deletes; "
                       f"{len(insert_cases) * 4} integer, {len(date_cases) * 2} DATE, "
                       f"{len(composite_cases) * 2} composite, {text_case_count} text, "
                       f"{composite_text_count} composite text, and {len(secondary_cases) * 2} secondary-order "
-                      "pending-insert cases covered ordered frontiers; equal secondary inserts stayed independent")
+                      "pending-insert cases covered ordered frontiers; six literal-NULL comparisons "
+                      "skipped pending inserts; equal secondary inserts stayed independent")
             finally:
                 if owner is not None:
                     owner.close()

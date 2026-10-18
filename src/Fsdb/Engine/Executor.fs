@@ -30052,6 +30052,11 @@ let transactionWriteTargets
                         where
                         |> optionalConjuncts
                         |> List.exists (function
+                            // Ordinary comparisons to a literal NULL can never be WHERE-true.
+                            // This excludes pending rows without relying on their key values.
+                            | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), left, right)
+                                when (right = Lit VNull && (columnName left |> Option.isSome))
+                                     || (left = Lit VNull && (columnName right |> Option.isSome)) -> true
                             | BinOp(operation, left, right) ->
                                 let excludes column literal reverse =
                                     match columnName column, comparableLiteral literal with

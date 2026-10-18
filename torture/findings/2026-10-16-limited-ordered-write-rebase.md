@@ -219,6 +219,16 @@ scheduler now excludes the claim when its known key is non-NULL. The native
 oracle and focused transaction regression cover ascending and descending
 orders, affected counts, and final rows.
 
+A literal NULL in an ordinary indexed comparison (`=`, `<>`, or an ordering
+comparison) cannot make any row match a WHERE clause. MySQL 8.4.11 therefore
+finishes `UPDATE` and `DELETE` with `ORDER BY rank_value LIMIT 2` without
+waiting for a pending insert, even when that insert sorts ahead of visible
+rows. Fsdb previously waited for the ordered-key claim. The scheduler now
+excludes it for these comparisons, while leaving NULL-safe equality to its
+separate semantics. The native oracle and focused transaction regression
+cover `rank_value=NULL`, `rank_value<>NULL`, and `NULL<rank_value` for both
+write verbs.
+
 ## Equal secondary-key frontiers
 
 A pending row can enter a limited write even when its secondary ordering key

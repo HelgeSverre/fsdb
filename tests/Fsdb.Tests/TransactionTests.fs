@@ -2466,6 +2466,35 @@ let tests =
                       Expect.equal rows expected "secondary LIMIT two write reselects after insert"
                   | other -> failtestf "expected secondary LIMIT two rows, got %A" other
 
+          testCase "impossible NULL comparison skips pending ordered insert"
+          <| fun _ ->
+              for verb in [ "UPDATE"; "DELETE" ] do
+                for predicate in [ "rank_value=NULL"; "rank_value<>NULL"; "NULL<rank_value" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_null_order(id INT PRIMARY KEY,n INT,rank_value INT,KEY ix_rank(rank_value))" |> ignore
+                  handle setup "INSERT INTO tx_null_order VALUES(1,0,1),(2,0,2),(3,0,3)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted = handle owner "INSERT INTO tx_null_order VALUES(4,0,0)"
+                  Expect.equal inserted (Affected 1UL) "owner inserts an ordered candidate"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let action =
+                              if verb = "UPDATE" then "UPDATE tx_null_order SET n=n+1"
+                              else "DELETE FROM tx_null_order"
+                          handle waiter (action + " WHERE " + predicate + " ORDER BY rank_value LIMIT 2"))
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "NULL comparison writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "ROLLBACK" |> snd) (Affected 0UL) "owner rolls back the insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "NULL comparison writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.isFalse blocked "impossible NULL comparison must not wait"
+                  Expect.equal result (Affected 0UL) "impossible NULL comparison affects no rows"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+
           testCase "limited secondary ordered write waits through MySQL's short-table frontier"
           <| fun _ ->
               let cases =

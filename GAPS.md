@@ -1672,7 +1672,9 @@ implementation effort:
    [audited secondary-index orderings](torture/findings/2026-10-16-limited-ordered-write-rebase.md#secondary-index-ordered-frontiers)
    also wait for crossing pending inserts without serializing equal-key
    inserts, while unrelated inserts beyond uniform-order frontiers remain
-   concurrent.
+   concurrent. [Literal NULL comparisons](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
+   on an indexed filter also exclude pending ordered inserts without waiting,
+   because no row can satisfy those WHERE predicates.
    Broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in
