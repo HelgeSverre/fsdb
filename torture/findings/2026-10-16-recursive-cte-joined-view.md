@@ -71,7 +71,7 @@ that only depend on already bound columns. Non-shadowing local CTEs inside
 `LATERAL` now carry the outer recursive binding through one or two dependent
 layers. A volatile comparison against the outer source confirms that the
 nested wrapper shares the statement-local rowset. Local recursive CTEs,
-complex shadowing scopes, and UNION order/limit expressions with subqueries
+complex shadowing scopes and other UNION order/limit subquery expressions
 still need separate binding-scope audits. MySQL 8.4 rejects a JSON_TABLE
 input with a scalar subquery during view creation (1210), so that shape is
 not a writable-view parity target.
@@ -89,9 +89,12 @@ also leave the physical target writable. Fsdb now wraps their
 branches in the outer recursive scope and discovers re-reads across both
 branches as one statement-local rowset. The deduplicating case compares a
 volatile value to catch independent CTE evaluation. Ordered and limited local
-UNION bodies also keep the physical target writable when their order/limit
-expressions contain no subqueries; the oracle includes a volatile
-`LIMIT 1 OFFSET 0` case.
+UNION bodies also keep the physical target writable; the oracle includes a
+volatile `LIMIT 1 OFFSET 0` case. An ordered UNION can contain a scalar
+subquery in its order expression, including one that re-reads the outer
+recursive CTE. Fsdb checks the nested source scope before moving the binding
+and rewrites the order expression inside that scope. Both engines mark the two
+new views updatable and increment the physical target once.
 
 MySQL labels a recursive-only view `IS_UPDATABLE=YES` but rejects its UPDATE
 with 1288. The expanded oracle distinguishes direct recursive projections,
@@ -120,7 +123,7 @@ Two declaration-order follow-ups put `copied` before the local recursive
 it and recursively reads itself. The second case carries `RAND()` through the
 outer CTE and compares it during the re-read, detecting a separate outer
 materialization. MySQL 8.4.11 and fsdb both mark these views updatable and
-change the target once; the maintained oracle now covers 42 layouts.
+change the target once; the maintained oracle now covers 44 layouts.
 
 More complex recursive/dependent source compositions, layered security, and
 other concurrent write shapes still need separate audits.

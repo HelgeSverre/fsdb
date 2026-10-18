@@ -1893,7 +1893,9 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                                     UnionSelect(
                                         expandSelect bodyNames true first,
                                         rest |> List.map (fun (kind, nested) -> kind, expandSelect bodyNames true nested),
-                                        orderBy, limit, offset
+                                        orderBy |> List.map (fun (expression, direction) -> expandExpression bodyNames expression, direction),
+                                        limit |> Option.map (expandExpression bodyNames),
+                                        offset |> Option.map (expandExpression bodyNames)
                                     ) }
                     expanded, Map.remove (cte.CteName.ToLowerInvariant()) visibleNames) activeNames
             { body with
@@ -1977,9 +1979,11 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
              && (match cte.Body with
                  | PlainSelect nested -> canWrapNestedSelect nested
                  | UnionSelect(first, rest, orderBy, limit, offset) ->
-                     (orderBy |> List.forall (fst >> Expression.collectSubqueries >> List.isEmpty))
-                     && (limit |> Option.forall (Expression.collectSubqueries >> List.isEmpty))
-                     && (offset |> Option.forall (Expression.collectSubqueries >> List.isEmpty))
+                     let canWrapExpression expression =
+                         Expression.collectSubqueries expression |> List.forall canWrapNestedSelect
+                     (orderBy |> List.forall (fst >> canWrapExpression))
+                     && (limit |> Option.forall canWrapExpression)
+                     && (offset |> Option.forall canWrapExpression)
                      && canWrapNestedSelect first
                      && (rest |> List.forall (snd >> canWrapNestedSelect))
                  )))

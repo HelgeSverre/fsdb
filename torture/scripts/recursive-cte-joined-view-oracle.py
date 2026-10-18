@@ -234,6 +234,20 @@ def main():
                          "UNION ALL SELECT k FROM seq WHERE k=s.k ORDER BY k LIMIT 1) "
                          "SELECT k AS lookup_key FROM copied) l ON TRUE "
                          "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_ordered_union_subquery_cte",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH copied AS (SELECT k FROM seq WHERE k=s.k "
+                         "UNION ALL SELECT k FROM seq WHERE k=s.k "
+                         "ORDER BY (SELECT 1) LIMIT 1) "
+                         "SELECT k AS lookup_key FROM copied) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_ordered_union_reread_cte",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH copied AS (SELECT k FROM seq WHERE k=s.k "
+                         "UNION ALL SELECT k FROM seq WHERE k=s.k "
+                         "ORDER BY (SELECT MAX(k) FROM seq) LIMIT 1) "
+                         "SELECT k AS lookup_key FROM copied) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
                         ("recursive_lateral_volatile_limited_union_cte",
                          "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
                          "SELECT k+1,r FROM seq WHERE k<3) "
