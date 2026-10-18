@@ -29878,8 +29878,25 @@ let transactionWriteTargets
                             (fun indexColumn (orderedColumn, _) -> equalsIgnoreCase indexColumn orderedColumn)
                             (indexColumns |> List.take orderedColumns.Length)
                             orderedColumns)
+            let primaryColumns =
+                Storage.orderedIndexKeyColumns table
+                |> List.tryPick (fun (name, names) ->
+                    if equalsIgnoreCase name "PRIMARY" then Some names else None)
+                |> Option.defaultValue []
+            let primaryKeyTypes =
+                primaryColumns
+                |> List.map (fun name ->
+                    table.Columns
+                    |> List.find (fun column -> equalsIgnoreCase column.Name name)
+                    |> fun column -> column.Type)
             if orderedIndex.IsNone then
-                []
+                // Filesort expressions can scan past the visible LIMIT
+                // frontier. MySQL waits for pending primary-key inserts on
+                // either side of that frontier before choosing its rows.
+                if orderBy.IsEmpty || primaryColumns.IsEmpty then []
+                else
+                    Storage.activeOrderedKeyClaims store database tableRef.Table "PRIMARY" primaryKeyTypes primaryKeyTypes
+                    |> List.map (fun (_, _, claim) -> claim)
             else
                 let indexName, indexColumns = Option.get orderedIndex
                 let columnIndices =
@@ -29887,17 +29904,6 @@ let transactionWriteTargets
                     |> List.map (fun name -> table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name))
                 let keyTypes =
                     indexColumns
-                    |> List.map (fun name ->
-                        table.Columns
-                        |> List.find (fun column -> equalsIgnoreCase column.Name name)
-                        |> fun column -> column.Type)
-                let primaryColumns =
-                    Storage.orderedIndexKeyColumns table
-                    |> List.tryPick (fun (name, names) ->
-                        if equalsIgnoreCase name "PRIMARY" then Some names else None)
-                    |> Option.defaultValue []
-                let primaryKeyTypes =
-                    primaryColumns
                     |> List.map (fun name ->
                         table.Columns
                         |> List.find (fun column -> equalsIgnoreCase column.Name name)

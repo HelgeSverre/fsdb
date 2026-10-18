@@ -167,6 +167,59 @@ def main():
                             finally:
                                 waiter.close()
 
+                filesort_cases = 0
+                for inserted_id in (0, 100):
+                    for verb in ("UPDATE", "DELETE"):
+                        waiter = connect(socket)
+                        try:
+                            with owner.cursor() as cursor:
+                                cursor.execute("DROP TABLE IF EXISTS target")
+                                cursor.execute("CREATE TABLE target(id INT PRIMARY KEY,n INT)")
+                                cursor.execute("INSERT INTO target VALUES(1,0),(2,0)")
+                                cursor.execute("BEGIN")
+                                cursor.execute(f"INSERT INTO target VALUES({inserted_id},0)")
+                            with waiter.cursor() as cursor:
+                                cursor.execute("USE probe")
+                                cursor.execute("BEGIN")
+                            action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
+                            statement = action + " WHERE n>=0 ORDER BY id+0 LIMIT 1"
+                            started = threading.Event()
+                            outcome = {}
+
+                            def filesort_write():
+                                try:
+                                    with waiter.cursor() as cursor:
+                                        started.set()
+                                        cursor.execute(statement)
+                                        outcome["affected"] = cursor.rowcount
+                                        cursor.execute("COMMIT")
+                                except Exception as error:
+                                    outcome["error"] = error
+
+                            thread = threading.Thread(target=filesort_write, daemon=True)
+                            thread.start()
+                            assert started.wait(2), statement
+                            thread.join(0.2)
+                            assert thread.is_alive(), (statement, inserted_id, "writer did not wait")
+                            with owner.cursor() as cursor:
+                                cursor.execute("COMMIT")
+                            thread.join(5)
+                            assert not thread.is_alive(), (statement, "writer did not resume")
+                            assert outcome == {"affected": 1}, (statement, outcome)
+                            with owner.cursor() as cursor:
+                                cursor.execute("SELECT id,n FROM target ORDER BY id")
+                                actual = cursor.fetchall()
+                            changed_id = 0 if inserted_id == 0 else 1
+                            expected = tuple(
+                                (id, 1 if verb == "UPDATE" and id == changed_id else 0)
+                                for id in sorted((1, 2, inserted_id))
+                                if verb == "UPDATE" or id != changed_id
+                            )
+                            assert actual == expected, (statement, inserted_id, actual)
+                            filesort_cases += 1
+                        finally:
+                            waiter.close()
+
                 insert_cases = (
                     ("ASC", 0, True, (0,), 0, (1, 2), 1),
                     ("ASC", 100, False, (1,), 0, (1, 2), 1),
@@ -687,6 +740,7 @@ def main():
                             waiter.close()
 
                 print(f"MySQL {version}: {cases} ordered LIMIT 1/2/3 writes reselected after updates/deletes; "
+                      f"{filesort_cases} filesort-expression pending-insert waits; "
                       f"{len(insert_cases) * 4} integer, {len(date_cases) * 2} DATE, "
                       f"{len(composite_cases) * 2} composite, {text_case_count} text, "
                       f"{composite_text_count} composite text, and {len(secondary_cases) * 2} secondary-order "

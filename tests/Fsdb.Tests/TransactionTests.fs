@@ -2151,6 +2151,48 @@ let tests =
                   | ResultSet(_, rows) -> Expect.equal rows expectedRows statement
                   | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
 
+          testCase "limited filesort write waits for pending inserts on either side of the frontier"
+          <| fun _ ->
+              for verb in [ "UPDATE"; "DELETE" ] do
+                  for insertedId in [ 0; 100 ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      handle setup "CREATE TABLE tx_limited_expression(id INT PRIMARY KEY,n INT)" |> ignore
+                      handle setup "INSERT INTO tx_limited_expression VALUES(1,0),(2,0)" |> ignore
+                      let owner, _ = handle (create 2 store) "BEGIN"
+                      let owner, inserted =
+                          handle owner (sprintf "INSERT INTO tx_limited_expression VALUES(%d,0)" insertedId)
+                      Expect.equal inserted (Affected 1UL) "owner inserts a pending key"
+                      let waiter, _ = handle (create 3 store) "BEGIN"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let action =
+                          if verb = "UPDATE" then "UPDATE tx_limited_expression SET n=n+1"
+                          else "DELETE FROM tx_limited_expression"
+                      let statement = action + " WHERE n>=0 ORDER BY id+0 LIMIT 1"
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              handle waiter statement)
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "filesort writer starts"
+                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "filesort writer resumes"
+                      let waiter, result = waiting.Result
+                      Expect.isTrue blocked (statement + " waits for the pending insert")
+                      Expect.equal result (Affected 1UL) "filesort writer changes one row"
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "filesort writer commits"
+                      let expected =
+                          if insertedId = 0 then
+                              if verb = "UPDATE" then
+                                  [ [ Some "0"; Some "1" ]; [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ]
+                              else [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ]
+                          elif verb = "UPDATE" then
+                              [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ]; [ Some "100"; Some "0" ] ]
+                          else [ [ Some "2"; Some "0" ]; [ Some "100"; Some "0" ] ]
+                      match handle setup "SELECT id,n FROM tx_limited_expression ORDER BY id" |> snd with
+                      | ResultSet(_, rows) -> Expect.equal rows expected statement
+                      | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
+
           testCase "limited ordered write respects DATE primary-key insert frontiers"
           <| fun _ ->
               for verb, direction, insertedId, shouldWait, changedId in

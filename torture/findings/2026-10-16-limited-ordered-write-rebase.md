@@ -264,3 +264,19 @@ the maintained [insert profile](../scripts/ordered-secondary-insert-profile.fsx)
 allows a larger follow-up. Expressions, invisible or prefix indexes, other
 order terms, and insert values unknown until later preparation remain outside
 this audit.
+
+## Filesort expression order
+
+MySQL 8.4.11 waits for an uncommitted primary-key insert when a limited write
+orders by `id+0`, even when the inserted key sorts beyond the first visible
+row. Starting with keys 1 and 2, inserts of either 0 or 100 block both
+`UPDATE ... ORDER BY id+0 LIMIT 1` and the equivalent DELETE. After commit,
+the write selects key 0 in the first case and key 1 in the second. The native
+oracle and focused transaction regression cover the four wait, affected-row,
+and final-row outcomes.
+
+Fsdb previously recognized only direct indexed ORDER BY columns and completed
+the key-zero case before the insert committed. Unsupported filesort expressions
+now conservatively wait for active primary-key insert claims before choosing
+limited rows. This reproduces the measured behavior for `id+0`; more complex
+expressions and non-primary insert claims still need separate audits.
