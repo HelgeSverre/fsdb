@@ -35,7 +35,7 @@ keeps the existing physical row-lock path for that shape.
 
 ## Nested and dependent read sources
 
-The native oracle now covers 38 writable layouts. A recursive CTE can feed a
+The native oracle covers nested and dependent writable layouts. A recursive CTE can feed a
 nested derived table or a joined derived source inside a dependent CTE. It can
 also be followed directly by a FROM-less dependent `LATERAL` projection or a
 `JSON_TABLE` whose input reads the recursive source's exposed column. MySQL
@@ -71,7 +71,7 @@ that only depend on already bound columns. Non-shadowing local CTEs inside
 `LATERAL` now carry the outer recursive binding through one or two dependent
 layers. A volatile comparison against the outer source confirms that the
 nested wrapper shares the statement-local rowset. Local recursive CTEs,
-complex shadowing scopes, and UNION order/limit expressions with subqueries
+complex shadowing scopes and other UNION order/limit subquery expressions
 still need separate binding-scope audits. MySQL 8.4 rejects a JSON_TABLE
 input with a scalar subquery during view creation (1210), so that shape is
 not a writable-view parity target.
@@ -89,11 +89,54 @@ also leave the physical target writable. Fsdb now wraps their
 branches in the outer recursive scope and discovers re-reads across both
 branches as one statement-local rowset. The deduplicating case compares a
 volatile value to catch independent CTE evaluation. Ordered and limited local
-UNION bodies also keep the physical target writable when their order/limit
-expressions contain no subqueries; the oracle includes a volatile
-`LIMIT 1 OFFSET 0` case.
+UNION bodies also keep the physical target writable; the oracle includes a
+volatile `LIMIT 1 OFFSET 0` case. An ordered UNION can contain a scalar
+subquery in its order expression, including one that re-reads the outer
+recursive CTE. Fsdb checks the nested source scope before moving the binding
+and rewrites the order expression inside that scope. Both engines mark the two
+new views updatable and increment the physical target once.
 
 MySQL labels a recursive-only view `IS_UPDATABLE=YES` but rejects its UPDATE
+with 1288. The expanded oracle distinguishes direct recursive projections,
+two references joined together, and a nested derived reference (all `YES`)
+from computed projections, `DISTINCT`, and grouping in the outer view query
+(all `NO`). A grouped or distinct nested derived source still reports `YES`
+when the outer projection is direct. Fsdb now matches that metadata while
+retaining error 1288 for the read-only sources.
+An explicit `ALGORITHM=TEMPTABLE` changes the same recursive-only view's
+metadata to `NO` in MySQL 8.4.11; `MERGE` and `UNDEFINED` remain `YES`.
+An outer direct view inherits each result. Fsdb previously reported `YES`
+for the TEMPTABLE case because its metadata classifier inspected only the
+definition text. It now checks the saved algorithm at every view layer.
+A local recursive CTE inside a dependent `LATERAL` source also leaves the
+physical target writable. The native oracle now covers both a local recursive
+`seq` that shadows the outer recursive `seq` and a differently named local
+recursive `local`; both report `IS_UPDATABLE=YES` and update the target once.
+Fsdb previously classified the shadowed form as non-updatable. The view
+rewrite now admits the local recursive source and removes its own binding
+name from the outer rewrite scope while expanding its seed and recursive
+branch. The focused regression checks metadata, UPDATE, and the accumulated
+physical row value for both variants.
+
+Two declaration-order follow-ups put `copied` before the local recursive
+`seq`. The first CTE re-reads the outer binding, while the later CTE shadows
+it and recursively reads itself. The second case carries `RAND()` through the
+outer CTE and compares it during the re-read, detecting a separate outer
+materialization. MySQL 8.4.11 and fsdb both mark these views updatable and
+change the target once; the maintained oracle now covers 44 layouts.
+
+Four further layouts read the outer recursive CTE only inside a derived
+source, with no direct outer reference: a plain SELECT, a UNION ALL, an
+ordered/limited UNION whose order expression re-reads the recursive CTE, and
+a local dependent CTE within the derived SELECT. MySQL 8.4.11 marks all four
+joined views updatable and increments the physical target once. Fsdb's CTE
+reference discovery now visits nested source branches and local CTE bodies in
+declaration order. Its write rewrite carries the binding into plain and UNION
+derived sources, including their order expressions, while respecting local
+shadowing. The native oracle now covers 48 writable layouts.
+
+More complex recursive/dependent source compositions, layered security, and
+other concurrent write shapes still need separate audits.
 with 1288. An additional MySQL 8.4.11 check showed the same metadata rule for
 a direct column projection from a nonrecursive CTE whose body is an aggregate
 or UNION; a projected expression instead reports `NO`. FSDB now bases this

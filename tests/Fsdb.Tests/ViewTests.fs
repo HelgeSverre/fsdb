@@ -2145,6 +2145,33 @@ let tests =
                   Expect.equal (rows store "SELECT n FROM composed_target WHERE id=1") [ [ Some "1" ] ] "rejected update leaves target unchanged"
                   expectOk (run store "DROP VIEW composed_checked") "drop checked composed view"
 
+          testCase "layered lateral and aggregate view checks retain the renamed target"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE layered_lateral_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE layered_lateral_source(id INT,flag INT)"
+                    "CREATE TABLE layered_lateral_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO layered_lateral_target VALUES(1,0),(2,0)"
+                    "INSERT INTO layered_lateral_source VALUES(1,7),(1,8)"
+                    "INSERT INTO layered_lateral_aux VALUES(1,9)"
+                    "CREATE VIEW lateral_checked_inner AS SELECT a.id AS target_id,a.n AS metric,d.flag,e.x FROM (SELECT id,SUM(flag) flag FROM layered_lateral_source GROUP BY id) d JOIN LATERAL (SELECT d.id x) e ON TRUE JOIN layered_lateral_target a ON a.id=e.x WHERE a.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW lateral_checked_outer AS SELECT iv.target_id AS id,iv.metric AS n,s.aux FROM lateral_checked_inner iv JOIN (SELECT id,SUM(aux) aux FROM layered_lateral_aux GROUP BY id) s ON s.id=iv.target_id WHERE iv.metric<s.aux WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='lateral_checked_outer'")
+                  [ [ Some "YES" ] ]
+                  "the layered composed view remains updatable"
+              Expect.equal (run store "UPDATE lateral_checked_outer SET n=1 WHERE id=1") (Affected 1UL) "renamed target updates"
+              for value in [ -1; 10 ] do
+                  match run store (sprintf "UPDATE lateral_checked_outer SET n=%d WHERE id=1" value) with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected checked update %d to fail with 1369, got %A" value other
+              Expect.equal
+                  (rows store "SELECT id,n FROM layered_lateral_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
+                  "both rejected writes leave the target unchanged"
+
           testCase "independent lateral source before a view target remains writable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -2579,6 +2606,30 @@ let tests =
                     recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
                     + "(WITH seq AS (SELECT s.k AS k) SELECT k AS lookup_key FROM seq) l ON TRUE "
                     + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "lateral_recursive_shadowed_local_cte",
+                    recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                    + "(WITH RECURSIVE seq(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM seq WHERE k<s.k) "
+                    + "SELECT k AS lookup_key FROM seq ORDER BY k LIMIT 1) l ON TRUE "
+                    + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "lateral_recursive_local_cte",
+                    recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                    + "(WITH RECURSIVE local(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM local WHERE k<s.k) "
+                    + "SELECT k AS lookup_key FROM local ORDER BY k LIMIT 1) l ON TRUE "
+                    + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "lateral_recursive_late_shadowed_cte",
+                    recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                    + "(WITH RECURSIVE copied AS (SELECT k FROM seq WHERE k=s.k), "
+                    + "seq(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM seq WHERE k<s.k) "
+                    + "SELECT copied.k AS lookup_key FROM copied JOIN seq ON seq.k=copied.k) l ON TRUE "
+                    + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "lateral_recursive_late_shadowed_volatile_cte",
+                    "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
+                    + "SELECT k+1,r FROM seq WHERE k<3) "
+                    + "SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                    + "(WITH RECURSIVE copied AS (SELECT k FROM seq WHERE k=s.k AND r=s.r), "
+                    + "seq(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM seq WHERE k<s.k) "
+                    + "SELECT copied.k AS lookup_key FROM copied JOIN seq ON seq.k=copied.k) l ON TRUE "
+                    + "JOIN recursive_target t ON t.id=l.lookup_key"
                     "lateral_late_shadowed_local_cte",
                     recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
                     + "(WITH copied AS (SELECT k FROM seq WHERE k=s.k), "
@@ -2599,6 +2650,22 @@ let tests =
                     + "UNION ALL SELECT k FROM seq WHERE k=s.k AND FALSE) "
                     + "SELECT k AS lookup_key FROM copied) l ON TRUE "
                     + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "union_derived_source",
+                    recursive + " SELECT t.id,t.n FROM "
+                    + "(SELECT k FROM seq UNION ALL SELECT k FROM seq WHERE k=0) d "
+                    + "JOIN recursive_target t ON t.id=d.k"
+                    "ordered_union_derived_source",
+                    recursive + " SELECT t.id,t.n FROM "
+                    + "(SELECT k FROM seq UNION ALL SELECT k FROM seq WHERE k=0 "
+                    + "ORDER BY (SELECT MAX(k) FROM seq) LIMIT 3) d "
+                    + "JOIN recursive_target t ON t.id=d.k"
+                    "plain_derived_source",
+                    recursive + " SELECT t.id,t.n FROM "
+                    + "(SELECT k FROM seq) d JOIN recursive_target t ON t.id=d.k"
+                    "local_cte_derived_source",
+                    recursive + " SELECT t.id,t.n FROM "
+                    + "(WITH copied AS (SELECT k FROM seq) SELECT k FROM copied) d "
+                    + "JOIN recursive_target t ON t.id=d.k"
                     "lateral_volatile_union_cte",
                     "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
                     + "SELECT k+1,r FROM seq WHERE k<3) "
@@ -2611,6 +2678,19 @@ let tests =
                     recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
                     + "(WITH copied AS (SELECT k FROM seq WHERE k=s.k "
                     + "UNION ALL SELECT k FROM seq WHERE k=s.k ORDER BY k LIMIT 1) "
+                    + "SELECT k AS lookup_key FROM copied) l ON TRUE "
+                    + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "lateral_ordered_union_subquery_cte",
+                    recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                    + "(WITH copied AS (SELECT k FROM seq WHERE k=s.k "
+                    + "UNION ALL SELECT k FROM seq WHERE k=s.k ORDER BY (SELECT 1) LIMIT 1) "
+                    + "SELECT k AS lookup_key FROM copied) l ON TRUE "
+                    + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "lateral_ordered_union_reread_cte",
+                    recursive + " SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                    + "(WITH copied AS (SELECT k FROM seq WHERE k=s.k "
+                    + "UNION ALL SELECT k FROM seq WHERE k=s.k "
+                    + "ORDER BY (SELECT MAX(k) FROM seq) LIMIT 1) "
                     + "SELECT k AS lookup_key FROM copied) l ON TRUE "
                     + "JOIN recursive_target t ON t.id=l.lookup_key"
                     "lateral_volatile_limited_union_cte",
@@ -2639,7 +2719,7 @@ let tests =
 
               Expect.equal
                   (rows store "SELECT n FROM recursive_target WHERE id=2")
-                  [ [ Some "58" ] ]
+                  [ [ Some "68" ] ]
                   "dependent, derived, lateral, JSON, and repeated recursive rows each update once"
 
               expectOk
@@ -2654,6 +2734,30 @@ let tests =
                   (run store
                       "CREATE VIEW recursive_only AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) SELECT k FROM seq")
                   "create recursive-only view"
+              Expect.equal
+                  (rows store "SELECT IS_UPDATABLE FROM information_schema.views WHERE table_name='recursive_only'")
+                  [ [ Some "YES" ] ]
+                  "MySQL reports recursive-only view metadata as updatable"
+              for suffix, body, expected in
+                  [ "expression", "SELECT k+1 AS x FROM seq", "NO"
+                    "distinct", "SELECT DISTINCT k FROM seq", "NO"
+                    "group", "SELECT k,COUNT(*) AS c FROM seq GROUP BY k", "NO"
+                    "join", "SELECT a.k FROM seq a JOIN seq b ON a.k=b.k", "YES"
+                    "derived", "SELECT d.k FROM (SELECT k FROM seq) d", "YES"
+                    "derived_group", "SELECT d.k FROM (SELECT COUNT(*) AS k FROM seq) d", "YES"
+                    "derived_distinct", "SELECT d.k FROM (SELECT DISTINCT k FROM seq) d", "YES" ] do
+                  let name = "recursive_only_" + suffix
+                  expectOk
+                      (run store ($"CREATE VIEW {name} AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) {body}"))
+                      ("create " + name)
+                  Expect.equal
+                      (rows store ($"SELECT IS_UPDATABLE FROM information_schema.views WHERE table_name='{name}'"))
+                      [ [ Some expected ] ]
+                      (name + " metadata matches MySQL")
+                  if expected = "YES" then
+                      match run store ($"UPDATE {name} SET k=4") with
+                      | Err(1288, _) -> ()
+                      | other -> failtestf "expected %s UPDATE rejection, got %A" name other
               expectOk
                   (run store "CREATE VIEW aggregate_cte_only AS WITH x AS (SELECT COUNT(*) AS n FROM recursive_target) SELECT n FROM x")
                   "create aggregate CTE-only view"
@@ -2675,6 +2779,21 @@ let tests =
               | Err(1288, _) -> ()
               | other -> failtestf "expected recursive-only UPDATE rejection, got %A" other
 
+              for algorithm, expected in [ "MERGE", "YES"; "TEMPTABLE", "NO"; "UNDEFINED", "YES" ] do
+                  let name = "recursive_algorithm_" + algorithm.ToLowerInvariant()
+                  expectOk
+                      (run store ($"CREATE ALGORITHM={algorithm} VIEW {name} AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) SELECT k FROM seq"))
+                      ("create " + name)
+                  Expect.equal
+                      (rows store ($"SELECT IS_UPDATABLE FROM information_schema.views WHERE table_name='{name}'"))
+                      [ [ Some expected ] ]
+                      (name + " metadata matches MySQL")
+                  let outer = "recursive_outer_" + algorithm.ToLowerInvariant()
+                  expectOk (run store ($"CREATE VIEW {outer} AS SELECT k FROM {name}")) ("create " + outer)
+                  Expect.equal
+                      (rows store ($"SELECT IS_UPDATABLE FROM information_schema.views WHERE table_name='{outer}'"))
+                      [ [ Some expected ] ]
+                      (outer + " metadata inherits the algorithm boundary")
           testCase "read-only derived and CTE sources retain MySQL's updatable metadata"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
