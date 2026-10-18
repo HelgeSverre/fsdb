@@ -17004,7 +17004,8 @@ and private tryCorrelatedSourceLookup
 
         let direct =
             match equality with
-            | Some(_, rows) when rows.Length <= 1 -> equality
+            // A pair is cheaper to filter than to probe through every other eligible index.
+            | Some(_, rows) when rows.Length <= 2 -> equality
             | _ ->
                 let equalityUnion = tryCorrelatedEqualityUnionLookup store dbName table whereExpr outer
                 let projectedUnion =
@@ -17028,7 +17029,7 @@ and private tryCorrelatedSourceLookup
 
         (if physicalFastPath then
              (match direct with
-              | Some(_, rows) when rows.Length <= 1 -> None
+              | Some(_, rows) when rows.Length <= 2 -> None
               | Some _ -> physicalIntersection ()
               | None when hasMultipleConjunctiveRanges || (hasMembershipPredicate && hasRangePredicate) || hasNullTestPredicate -> physicalIntersection ()
               | None -> None)

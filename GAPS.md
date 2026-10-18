@@ -1549,7 +1549,8 @@ The [correlated functional-key profile](benchmarks/results/2bb13632-quick.md)
 extends that coverage to compatible unary and composed expression indexes.
 Direct physical sources and pass-through projections now probe the maintained
 bucket; collation-changing comparisons and embedding overrides retain ordinary
-row evaluation.
+row evaluation. A [two-row correlated equality control](torture/findings/2026-10-17-correlated-functional-probe-budget.md)
+skips a redundant broad functional bucket and records the remaining residual cost.
 
 The [numeric functional-range profile](benchmarks/results/04686720-quick.md)
 covers direct and correlated `ABS`/length-result bounds. The maintained ordered
