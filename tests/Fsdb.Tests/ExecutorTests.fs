@@ -4956,6 +4956,22 @@ let tests =
                     Expect.equal betweenOrderPlan.Key (Some "ix_tenant_bucket") "BETWEEN uses the composite index"
                     Expect.equal betweenOrderPlan.EstimatedRows (Some "3") "BETWEEN estimates the bounded prefix slice"
 
+                testCase "mixed-case suffix range bounds stay together in index-owned grouping"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed(id INT PRIMARY KEY,tenant_id INT,bucket INT,KEY ix_tenant_bucket(tenant_id,bucket))" |> ignore
+                    runDefault store "CREATE TABLE scanned(id INT PRIMARY KEY,tenant_id INT,bucket INT)" |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES(1,1,1),(2,1,2),(3,1,2),(4,1,3),(5,1,4)" table) |> ignore
+
+                    let result table =
+                        runDefault store (sprintf "SELECT bucket,COUNT(*) FROM %s WHERE tenant_id=1 AND bucket>=2 AND BUCKET<4 GROUP BY bucket" table)
+
+                    let expected = ResultSet([ "bucket"; "COUNT(*)" ], [ [ Some "2"; Some "2" ]; [ Some "3"; Some "1" ] ])
+                    Expect.equal (result "scanned") expected "the scan obeys both bounds"
+                    Expect.equal (result "indexed") expected "the indexed grouped count obeys both bounds"
+
                 testCase "string fixed prefixes require order and equality to share an equivalence class"
                 <| fun _ ->
                     let store = newStore ()
