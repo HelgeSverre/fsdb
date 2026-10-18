@@ -23039,9 +23039,10 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                 if not writesView then
                     update
                 else
-                    // Preceding sources are independent INNER JOIN operands.
-                    // Attach this join's predicate to the last old operand,
-                    // where every referenced alias is still in scope.
+                    // Keep the old first source before its prior joins, so
+                    // LATERAL and JSON_TABLE dependencies remain in scope.
+                    // Attach this join's predicate to the last prior operand,
+                    // where every referenced alias has been bound.
                     let joins =
                         match prior with
                         | [] -> { join with Table = FromTable update.From } :: rest
@@ -23052,7 +23053,7 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                     { update with From = source; Joins = joins }
             | None when isPhysical source -> move (join :: prior) rest
             | None -> update
-        | ({ Kind = InnerJoin; Table = FromSubquery _; Using = [] } as join) :: rest ->
+        | ({ Kind = InnerJoin; Table = (FromSubquery _ | FromLateral _ | FromJsonTable _); Using = [] } as join) :: rest ->
             move (join :: prior) rest
         | _ -> update
 
@@ -23108,6 +23109,8 @@ let private freshenViewAliases (store: Store) (defaultDatabase: string) (update:
              |> List.choose (function
                  | FromTable table -> Some(qualifier table)
                  | FromSubquery(_, alias) -> Some alias
+                 | FromLateral(_, alias) -> Some alias
+                 | FromJsonTable(_, _, _, alias) -> Some alias
                  | _ -> None)))
         |> List.distinct
         |> List.choose (fun name ->
@@ -23125,10 +23128,20 @@ let private freshenViewAliases (store: Store) (defaultDatabase: string) (update:
     if aliases.IsEmpty then view
     else
         let renamed (name: string) = Map.tryFind (name.ToLowerInvariant()) aliases
-        let rewrite expression =
-            Expression.rewrite (function
-                | QualifiedCol(owner, column) -> renamed owner |> Option.map (fun fresh -> QualifiedCol(fresh, column))
-                | _ -> None) expression
+        let replace = function
+            | QualifiedCol(owner, column) -> renamed owner |> Option.map (fun fresh -> QualifiedCol(fresh, column))
+            | _ -> None
+        let rewrite expression = Expression.rewrite replace expression
+        let rewriteLateralSelect = Expression.rewriteSelectOuterAliases aliases
+        let rewriteBody = function
+            | PlainSelect select -> PlainSelect(rewriteLateralSelect select)
+            | UnionSelect(first, rest, orderBy, limit, offset) ->
+                UnionSelect(
+                    rewriteLateralSelect first,
+                    rest |> List.map (fun (kind, select) -> kind, rewriteLateralSelect select),
+                    orderBy |> List.map (fun (expression, direction) -> rewrite expression, direction),
+                    limit |> Option.map rewrite,
+                    offset |> Option.map rewrite)
         let rec rewriteSource = function
             | FromTable table ->
                 match renamed (qualifier table) with
@@ -23136,8 +23149,11 @@ let private freshenViewAliases (store: Store) (defaultDatabase: string) (update:
                 | None -> FromTable table
             | FromSubquery(select, alias) ->
                 FromSubquery(select, renamed alias |> Option.defaultValue alias)
+            | FromLateral(select, alias) ->
+                FromLateral(rewriteBody select, renamed alias |> Option.defaultValue alias)
+            | FromJsonTable(expression, path, columns, alias) ->
+                FromJsonTable(rewrite expression, path, columns, renamed alias |> Option.defaultValue alias)
             | FromJoinGroup(source, joins) -> FromJoinGroup(rewriteSource source, joins |> List.map rewriteJoin)
-            | source -> source
         and rewriteJoin join =
             { join with Table = rewriteSource join.Table; On = rewrite join.On }
         let rewriteTarget (target: ViewColumnTarget) =

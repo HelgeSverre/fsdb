@@ -266,7 +266,11 @@ let rewrite (replace: Expr -> Expr option) (expression: Expr) : Expr =
 
 type private RewriteRules =
     { Replace: Expr -> Expr option
-      Projection: Projection -> Projection }
+      Projection: Projection -> Projection
+      EnterSelect: SelectStmt -> RewriteRules option }
+
+let private plainRewriteRules replace projection =
+    { Replace = replace; Projection = projection; EnterSelect = fun _ -> None }
 
 /// Rewrites an expression and every expression inside its subqueries.
 let rec private rewriteTreeWith (rules: RewriteRules) (expression: Expr) : Expr =
@@ -316,6 +320,7 @@ and private rewriteJoin rules (join: Join) =
         On = rewriteTreeWith rules join.On }
 
 and private rewriteSelect rules (select: SelectStmt) =
+    let rules = rules.EnterSelect select |> Option.defaultValue rules
     let rewriteOrderKey (expression, direction) = rewriteTreeWith rules expression, direction
 
     { select with
@@ -417,15 +422,38 @@ let rec private rewriteStatementWith rules =
 
 /// Rewrites expressions without changing projection aliases.
 let rewriteTree replace expression =
-    rewriteTreeWith { Replace = replace; Projection = id } expression
+    rewriteTreeWith (plainRewriteRules replace id) expression
 
 /// Rewrites every expression inside a SELECT, including nested query bodies.
 let rewriteSelectExpressions replace select =
-    rewriteSelect { Replace = replace; Projection = id } select
+    rewriteSelect (plainRewriteRules replace id) select
+
+/// Rewrites qualified references to outer aliases while respecting aliases
+/// declared by each nested SELECT, including expression and FROM subqueries.
+let rewriteSelectOuterAliases (aliases: Map<string, string>) select =
+    let rec rulesFor shadowed =
+        { Replace =
+            (function
+            | QualifiedCol(owner, column) when not (Set.contains (owner.ToLowerInvariant()) shadowed) ->
+                aliases
+                |> Map.tryFind (owner.ToLowerInvariant())
+                |> Option.map (fun fresh -> QualifiedCol(fresh, column))
+            | _ -> None)
+          Projection = id
+          EnterSelect =
+            fun nested ->
+                let locals =
+                    ((nested.From |> Option.toList) @ (nested.Joins |> List.map _.Table))
+                    |> List.collect FromItem.leaves
+                    |> List.choose FromItem.tryQualifier
+                    |> List.map _.ToLowerInvariant()
+                    |> Set.ofList
+                Some(rulesFor (Set.union shadowed locals)) }
+    rewriteSelect (rulesFor Set.empty) select
 
 /// Rewrites every executable expression position in a statement.
 let rewriteStatement replace statement =
-    rewriteStatementWith { Replace = replace; Projection = id } statement
+    rewriteStatementWith (plainRewriteRules replace id) statement
 
 /// Names unaliased projections from their original expressions before rewriting.
 let rewriteStatementWithProjectionNames projectionName replace statement =
@@ -434,11 +462,11 @@ let rewriteStatementWithProjectionNames projectionName replace statement =
             projection.Alias |> Option.orElseWith (fun () ->
                 if projection.SourceName.IsSome then None else projectionName projection.Expression)
         { projection with Alias = alias }
-    rewriteStatementWith { Replace = replace; Projection = retainName } statement
+    rewriteStatementWith (plainRewriteRules replace retainName) statement
 
 /// Maps projections throughout a statement, including nested query bodies.
 let mapStatementProjections map statement =
-    rewriteStatementWith { Replace = (fun _ -> None); Projection = map } statement
+    rewriteStatementWith (plainRewriteRules (fun _ -> None) map) statement
 
 let iterStatement visit statement =
     statement

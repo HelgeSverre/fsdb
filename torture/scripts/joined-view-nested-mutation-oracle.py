@@ -820,6 +820,98 @@ def main():
                     assert cursor.rowcount == 2, "reversed derived-view order"
                     cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
                     assert cursor.fetchone() == (16, 26)
+                    cursor.execute(
+                        "CREATE VIEW dual_va_lateral AS SELECT a.id,a.n,r.link_id FROM dual_a a "
+                        "JOIN LATERAL (SELECT a.id AS link_id) r ON TRUE"
+                    )
+                    cursor.execute(
+                        "CREATE VIEW dual_vb_lateral AS SELECT b.id,b.n,r.link_id FROM dual_b b "
+                        "JOIN LATERAL (SELECT b.id AS link_id) r ON TRUE"
+                    )
+                    for source, expected in (
+                        ("dual_va_lateral va JOIN dual_vb_lateral vb ON va.link_id=vb.link_id", (17, 27)),
+                        ("dual_vb_lateral vb JOIN dual_va_lateral va ON va.id=vb.id", (18, 28)),
+                    ):
+                        cursor.execute(
+                            "UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1"
+                        )
+                        assert cursor.rowcount == 2, "two lateral read sources share alias r"
+                        cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                        assert cursor.fetchone() == expected
+                    cursor.execute(
+                        "CREATE VIEW dual_va_json AS SELECT a.id,a.n,r.link_id FROM dual_a a "
+                        "JOIN JSON_TABLE(CONCAT('[',a.id,']'),'$[*]' COLUMNS(link_id INT PATH '$')) r ON TRUE"
+                    )
+                    cursor.execute(
+                        "CREATE VIEW dual_vb_json AS SELECT b.id,b.n,r.link_id FROM dual_b b "
+                        "JOIN JSON_TABLE(CONCAT('[',b.id,']'),'$[*]' COLUMNS(link_id INT PATH '$')) r ON TRUE"
+                    )
+                    for source, expected in (
+                        ("dual_va_json va JOIN dual_vb_json vb ON va.link_id=vb.link_id", (19, 29)),
+                        ("dual_vb_json vb JOIN dual_va_json va ON va.id=vb.id", (20, 30)),
+                    ):
+                        cursor.execute(
+                            "UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1"
+                        )
+                        assert cursor.rowcount == 2, "two JSON_TABLE read sources share alias r"
+                        cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                        assert cursor.fetchone() == expected
+                    cursor.execute(
+                        "CREATE VIEW dual_vb_lateral_same AS SELECT a.id,a.n,r.link_id FROM dual_b a "
+                        "JOIN LATERAL (SELECT a.id AS link_id) r ON TRUE"
+                    )
+                    for source, expected in (
+                        ("dual_va_lateral va JOIN dual_vb_lateral_same vb ON va.link_id=vb.link_id", (21, 31)),
+                        ("dual_vb_lateral_same vb JOIN dual_va_lateral va ON va.id=vb.id", (22, 32)),
+                    ):
+                        cursor.execute("UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1")
+                        assert cursor.rowcount == 2, "base and lateral aliases collide across views"
+                        cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                        assert cursor.fetchone() == expected
+                    cursor.execute(
+                        "CREATE VIEW dual_checked_lateral AS SELECT a.id,a.n,r.link_id FROM dual_a a "
+                        "JOIN LATERAL (SELECT a.id AS link_id) r ON TRUE WHERE a.id=1 "
+                        "WITH CASCADED CHECK OPTION"
+                    )
+                    try:
+                        cursor.execute(
+                            "UPDATE dual_checked_lateral va JOIN dual_vb_lateral_same vb "
+                            "ON va.link_id=vb.link_id SET va.id=2,vb.n=vb.n+1"
+                        )
+                        raise AssertionError("dependent joined CHECK OPTION accepted an invalid update")
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                    cursor.execute("SELECT a.id,a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (1, 22, 32)
+                    cursor.execute(
+                        "CREATE VIEW dual_vb_lateral_shadow AS SELECT a.id,a.n,r.link_id FROM dual_b a "
+                        "JOIN LATERAL (SELECT a.id AS link_id FROM (SELECT 2 AS id) a) r ON TRUE"
+                    )
+                    cursor.execute(
+                        "UPDATE dual_va_lateral va JOIN dual_vb_lateral_shadow vb "
+                        "ON va.id=vb.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.link_id=2"
+                    )
+                    assert cursor.rowcount == 2, "local lateral alias a shadows the writable base alias"
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (23, 33)
+                    cursor.execute(
+                        "UPDATE dual_vb_lateral_shadow vb JOIN dual_va_lateral va "
+                        "ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1 WHERE vb.link_id=2"
+                    )
+                    assert cursor.rowcount == 2, "reversed local lateral shadow stayed scoped"
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (24, 34)
+                    cursor.execute(
+                        "CREATE VIEW dual_vb_lateral_nested_shadow AS SELECT a.id,a.n,r.link_id FROM dual_b a "
+                        "JOIN LATERAL (SELECT (SELECT a.id FROM (SELECT 2 AS id) a) AS link_id) r ON TRUE"
+                    )
+                    cursor.execute(
+                        "UPDATE dual_vb_lateral_nested_shadow vb JOIN dual_va_lateral va "
+                        "ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1 WHERE vb.link_id=2"
+                    )
+                    assert cursor.rowcount == 2, "nested local lateral alias shadows the writable base alias"
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (25, 35)
 
                 print(
                     f"MySQL {version}: view-first, second, and third positions and bare targets waited and rebased; "
@@ -834,7 +926,9 @@ def main():
                     "four- and five-source CHECK OPTION rejected atomically; "
                     "two writable views with matching internal aliases updated both physical targets in both orders; "
                     "their CHECK OPTION rejected atomically; shared physical target aliases updated both targets in both orders; "
-                    "shared derived read aliases updated both targets in both orders"
+                    "shared derived, lateral, and JSON_TABLE read aliases updated both targets in both orders; "
+                    "colliding writable and dependent lateral aliases stayed scoped; "
+                    "dependent joined CHECK OPTION rejected atomically; local and nested lateral shadows stayed scoped"
                 )
             finally:
                 for connection in connections:

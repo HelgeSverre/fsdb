@@ -61,8 +61,22 @@ unchanged after this rewrite. Two views with independent derived read sources
 may also reuse the same alias `r`: the rewrite now renames that outer derived
 alias and can promote the second writable view past the first view's derived
 source. The oracle and regression cover both view orders and an exposed
-`r.id` join key. Dependent `LATERAL`, `JSON_TABLE`, and grouped non-table
-sources remain to audit.
+`r.id` join key. The same promotion now passes a dependent `LATERAL` or
+`JSON_TABLE` read source while preserving its preceding writable table. Its
+view-local alias is freshened when both views use `r`; the dependent
+`JSON_TABLE` expression follows any renamed outer alias. MySQL 8.4.11 and
+the focused regression update both physical targets in both view orders for
+each source type. A further `LATERAL` case gives both writable tables the
+same internal alias `a` and still updates both targets correctly. A checked
+dependent view rejects an invalid two-target assignment with error 1369 and
+leaves both physical rows unchanged. A lateral body that declares its own
+local `a` alias also stays scoped in both view orders. A stronger native
+control gives that local alias the value 2 while the writable row's
+`a.id` is 1. It exposed a false zero-row UPDATE when the locally declared
+alias was rewritten as the view's outer `a`; the SELECT rewriter now carries
+the shadowed-alias set into expression and FROM subqueries. The joined UPDATE
+matches MySQL's two affected rows with `WHERE vb.link_id=2`. Grouped non-table
+sources and broader dependency compositions remain to audit.
 
 ## A physical target beside the writable view
 

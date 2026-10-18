@@ -2525,6 +2525,120 @@ let tests =
               match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
               | ResultSet(_, [ [ Some "16"; Some "26" ] ]) -> ()
               | result -> failtestf "expected reversed derived-source view targets to change, got %A" result
+              for sql in
+                  [ "CREATE VIEW tx_dual_va_lateral AS SELECT a.id,a.n,r.link_id FROM tx_dual_a a JOIN LATERAL (SELECT a.id AS link_id) r ON TRUE"
+                    "CREATE VIEW tx_dual_vb_lateral AS SELECT b.id,b.n,r.link_id FROM tx_dual_b b JOIN LATERAL (SELECT b.id AS link_id) r ON TRUE" ] do
+                  match handle session sql |> snd with
+                  | Affected 0UL -> ()
+                  | result -> failtestf "expected lateral view creation, got %A" result
+              for name in [ "tx_dual_va_lateral"; "tx_dual_vb_lateral" ] do
+                  match handle session ("SELECT id,n,link_id FROM " + name) |> snd with
+                  | ResultSet(_, [ [ Some "1"; Some _; Some "1" ] ]) -> ()
+                  | result -> failtestf "expected lateral view rows for %s, got %A" name result
+                  match handle session ("UPDATE " + name + " SET n=n WHERE id=1") |> snd with
+                  | Affected 0UL -> ()
+                  | result -> failtestf "expected standalone lateral view update for %s, got %A" name result
+              for source, left, right in
+                  [ "tx_dual_va_lateral va JOIN tx_dual_vb_lateral vb ON va.link_id=vb.link_id", "17", "27"
+                    "tx_dual_vb_lateral vb JOIN tx_dual_va_lateral va ON va.id=vb.id", "18", "28" ] do
+                  Expect.equal
+                      (handle session ("UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                      (Affected 2UL)
+                      "two lateral read sources may share view-local alias r"
+                  match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+                  | ResultSet(_, [ [ Some actualLeft; Some actualRight ] ]) ->
+                      Expect.equal (actualLeft, actualRight) (left, right)
+                          "both lateral-source view targets change"
+                  | result -> failtestf "expected lateral-source view targets, got %A" result
+              for sql in
+                  [ "CREATE VIEW tx_dual_va_json AS SELECT a.id,a.n,r.link_id FROM tx_dual_a a JOIN JSON_TABLE(CONCAT('[',a.id,']'),'$[*]' COLUMNS(link_id INT PATH '$')) r ON TRUE"
+                    "CREATE VIEW tx_dual_vb_json AS SELECT b.id,b.n,r.link_id FROM tx_dual_b b JOIN JSON_TABLE(CONCAT('[',b.id,']'),'$[*]' COLUMNS(link_id INT PATH '$')) r ON TRUE" ] do
+                  match handle session sql |> snd with
+                  | Affected 0UL -> ()
+                  | result -> failtestf "expected JSON_TABLE view creation, got %A" result
+              for source, left, right in
+                  [ "tx_dual_va_json va JOIN tx_dual_vb_json vb ON va.link_id=vb.link_id", "19", "29"
+                    "tx_dual_vb_json vb JOIN tx_dual_va_json va ON va.id=vb.id", "20", "30" ] do
+                  Expect.equal
+                      (handle session ("UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                      (Affected 2UL)
+                      "two JSON_TABLE read sources may share view-local alias r"
+                  match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+                  | ResultSet(_, [ [ Some actualLeft; Some actualRight ] ]) ->
+                      Expect.equal (actualLeft, actualRight) (left, right)
+                          "both JSON_TABLE-source view targets change"
+                  | result -> failtestf "expected JSON_TABLE-source view targets, got %A" result
+              match handle session
+                  "CREATE VIEW tx_dual_vb_lateral_same AS SELECT a.id,a.n,r.link_id FROM tx_dual_b a JOIN LATERAL (SELECT a.id AS link_id) r ON TRUE"
+                  |> snd with
+              | Affected 0UL -> ()
+              | result -> failtestf "expected same-base-alias lateral view, got %A" result
+              for source, left, right in
+                  [ "tx_dual_va_lateral va JOIN tx_dual_vb_lateral_same vb ON va.link_id=vb.link_id", "21", "31"
+                    "tx_dual_vb_lateral_same vb JOIN tx_dual_va_lateral va ON va.id=vb.id", "22", "32" ] do
+                  Expect.equal
+                      (handle session ("UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                      (Affected 2UL)
+                      "writable base and dependent lateral aliases stay view-local"
+                  match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+                  | ResultSet(_, [ [ Some actualLeft; Some actualRight ] ]) ->
+                      Expect.equal (actualLeft, actualRight) (left, right)
+                          "both same-alias lateral targets change"
+                  | result -> failtestf "expected same-alias lateral targets, got %A" result
+              match handle session
+                  ("CREATE VIEW tx_dual_checked_lateral AS SELECT a.id,a.n,r.link_id FROM tx_dual_a a "
+                   + "JOIN LATERAL (SELECT a.id AS link_id) r ON TRUE WHERE a.id=1 "
+                   + "WITH CASCADED CHECK OPTION")
+                  |> snd with
+              | Affected 0UL -> ()
+              | result -> failtestf "expected checked lateral view creation, got %A" result
+              match handle session
+                  ("UPDATE tx_dual_checked_lateral va JOIN tx_dual_vb_lateral_same vb "
+                   + "ON va.link_id=vb.link_id SET va.id=2,vb.n=vb.n+1") |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected dependent CHECK OPTION error 1369, got %A" result
+              match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "22"; Some "32" ] ]) -> ()
+              | result -> failtestf "dependent CHECK OPTION must preserve both targets, got %A" result
+              match handle session
+                  ("CREATE VIEW tx_dual_vb_lateral_shadow AS SELECT a.id,a.n,r.link_id FROM tx_dual_b a "
+                   + "JOIN LATERAL (SELECT a.id AS link_id FROM (SELECT 2 AS id) a) r ON TRUE")
+                  |> snd with
+              | Affected 0UL -> ()
+              | result -> failtestf "expected locally shadowed lateral view, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_va_lateral va JOIN tx_dual_vb_lateral_shadow vb "
+                       + "ON va.id=vb.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.link_id=2") |> snd)
+                  (Affected 2UL)
+                  "local lateral alias must not be renamed with the writable base"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "23"; Some "33" ] ]) -> ()
+              | result -> failtestf "locally shadowed lateral view must update both targets, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_vb_lateral_shadow vb JOIN tx_dual_va_lateral va "
+                       + "ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1 WHERE vb.link_id=2") |> snd)
+                  (Affected 2UL)
+                  "reversed locally shadowed lateral view updates both targets"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "24"; Some "34" ] ]) -> ()
+              | result -> failtestf "reversed locally shadowed lateral view must update both targets, got %A" result
+              match handle session
+                  ("CREATE VIEW tx_dual_vb_lateral_nested_shadow AS SELECT a.id,a.n,r.link_id FROM tx_dual_b a "
+                   + "JOIN LATERAL (SELECT (SELECT a.id FROM (SELECT 2 AS id) a) AS link_id) r ON TRUE")
+                  |> snd with
+              | Affected 0UL -> ()
+              | result -> failtestf "expected nested lateral shadow view, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_vb_lateral_nested_shadow vb JOIN tx_dual_va_lateral va "
+                       + "ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1 WHERE vb.link_id=2") |> snd)
+                  (Affected 2UL)
+                  "nested local lateral alias must not be renamed with the writable base"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "25"; Some "35" ] ]) -> ()
+              | result -> failtestf "nested lateral shadow must update both targets, got %A" result
 
           testCase "joined view can supply read rows while another source is updated"
           <| fun _ ->
