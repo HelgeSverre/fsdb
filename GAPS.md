@@ -970,6 +970,11 @@ The [U+FE10–U+FE6F legacy vertical-form audit](torture/findings/2026-10-18-leg
 also now matches 504 MySQL searches per token size at sizes 1–10, after
 preserving UCA 4.0's distinct U+FE1A–U+FE1F and U+FE24–U+FE2F weights.
 
+The [Nüshu U+1B170–U+1B2FF audit](torture/findings/2026-10-18-nushu-ngram-audit.md)
+finds no two-column membership or relevance differences in 7,128 general-ci
+searches at token sizes 1–3 or 2,376 searches each for Unicode 5.2 and 9.0
+at size 1. MeCab and other untested Unicode ranges remain open.
+
 [Assigned supplementary kana in U+1B000–U+1B16F](torture/findings/2026-10-18-supplementary-kana-ngram.md)
 now retain distinct Unicode 5.2 and 9.0 implicit weights for equality and
 ngram postings. The audited size 1–3 corpus agrees with MySQL across natural,
