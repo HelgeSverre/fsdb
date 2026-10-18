@@ -8532,6 +8532,48 @@ let tests =
                         ))
                         "the residual functional predicate still filters the ordinary index pair"
 
+                testCase "correlated functional equality competes with a broader ordinary bucket"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values |> List.head)
+
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE competing_names (id INT PRIMARY KEY, grp INT, name VARCHAR(30), KEY ix_grp(grp), KEY ix_lower ((LOWER(name))))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE requested_name (name VARCHAR(30))" |> ignore
+                    runDefault store "INSERT INTO requested_name VALUES ('rare'), ('common')" |> ignore
+
+                    let values =
+                        [ for id in 1 .. 16 ->
+                              sprintf "(%d, %d, '%s')" id ((id - 1) / 8) (if id = 9 then "rare" else "common") ]
+                        |> String.concat ", "
+
+                    runDefault store ("INSERT INTO competing_names VALUES " + values) |> ignore
+
+                    let actual =
+                        run
+                            store
+                            registry
+                            "SELECT o.name, (SELECT COUNT(*) FROM competing_names i WHERE i.grp = 1 AND LOWER(i.name) = LOWER(o.name) AND TOUCH(i.id) = i.id) AS matches FROM requested_name o ORDER BY o.name DESC"
+
+                    Expect.equal
+                        actual
+                        (ResultSet(
+                            [ "name"; "matches" ],
+                            [ [ Some "rare"; Some "1" ]; [ Some "common"; Some "7" ] ]
+                        ))
+                        "both functional and ordinary candidates preserve correlated counts"
+                    Expect.isLessThan calls 12 "the selective functional bucket and ordinary group both bound residual work"
+
                 testCase "functional equality and range probes use expression indexes"
                 <| fun _ ->
                     let mutable calls = 0

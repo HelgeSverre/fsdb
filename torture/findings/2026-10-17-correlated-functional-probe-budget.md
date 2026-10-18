@@ -34,3 +34,20 @@ four-row variant with two different names in one group. The Expecto regression
 preserves that residual-filter behavior. Larger ordinary candidate sets still
 use the existing candidate comparison; this change does not claim a general
 functional-probe budget.
+
+## Larger ordinary buckets
+
+With eight rows per `grp` instead of two, the two-row shortcut does not apply.
+The same 1,000-row query and shared functional key returned `3996972`. Warm
+samples on the native Release server were 574, 538, 540, and 542 ms before
+comparing functional row IDs with the ordinary candidate. After the change and
+runtime warm-up, six samples were 83, 85, 84, 85, 82, and 82 ms. The
+ordinary-equality-only control was about 29 ms before and 33 ms after.
+
+The planner now intersects functional row-ID sets first. It loads functional
+rows only when their combined set is smaller than the best ordinary candidate;
+the full WHERE predicate still decides membership. A separate 16-row oracle
+has one rare name and seven common names in an eight-row group. MySQL 8.4.11
+and fsdb both return counts of one and seven, respectively. The focused
+regression also checks that the selective functional bucket still bounds
+residual evaluation.
