@@ -1647,19 +1647,12 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     let outputNames = if view.Columns.IsEmpty then projected |> List.map (fun (name, _, _) -> name) else view.Columns
 
-                    let rejectsNestedCheckOption =
-                        underlying
-                        |> Option.exists (fun nested ->
-                            not nested.UpdateJoins.IsEmpty
-                            && not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase)))
-
                     if
                         unresolvedStar
                         || dependentProjection
                         || dependentPredicate
                         || not (namesMatchProjections outputNames projected)
                         || not (hasWritableProjection projected)
-                        || rejectsNestedCheckOption
                     then
                         None
                     else
