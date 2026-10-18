@@ -1054,6 +1054,9 @@ collation behavior and MeCab remain open.
 The [`utf8mb4_general_ci` supplementary-key probe](torture/findings/2026-10-17-general-ci-supplementary-ngram.md)
 now shares MySQL's sampled fallback weight across supplementary scalars;
 broader `general_ci` ngram and relevance differences remain.
+The [general-collation Jamo probe](torture/findings/2026-10-17-general-ci-jamo-ngram.md)
+also preserves conjoining Jamo's distinct weights without equating
+compatibility Jamo, resolving the audited size-5 Boolean short-term mismatch.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
