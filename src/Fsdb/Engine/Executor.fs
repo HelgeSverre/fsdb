@@ -22996,6 +22996,44 @@ let evaluateRowPredicate
     |> Result.map (truthy >> (=) (Some true))
     |> Result.mapError Err
 
+/// Uses the primary key as the final ordering key when a limited write scans
+/// a complete visible index order.
+let private mutationPrimaryTieOrder (table: Table option) qualifier (orderBy: OrderKey list) limit =
+    match table, orderBy, limit with
+    | Some table, (_ :: _), Some _ ->
+        let named =
+            orderBy
+            |> List.choose (function
+                | Col name, direction -> Some(name, direction)
+                | QualifiedCol(owner, name), direction when equalsIgnoreCase owner qualifier ->
+                    Some(name, direction)
+                | _ -> None)
+        if named.Length <> orderBy.Length then []
+        else
+            let direction = named.Head |> snd
+            if named |> List.exists (fun (_, other) -> other <> direction) then []
+            else
+                let orderedNames = named |> List.map fst
+                let indexes = Storage.orderedIndexKeyColumns table
+                let matches (indexNames: string list) =
+                    indexNames.Length >= orderedNames.Length
+                    && List.forall2 equalsIgnoreCase
+                        (indexNames |> List.take orderedNames.Length) orderedNames
+                let completeOrder =
+                    indexes
+                    |> List.exists (fun (indexName, indexNames) ->
+                        matches indexNames
+                        && (equalsIgnoreCase indexName "PRIMARY"
+                            || indexNames.Length = orderedNames.Length))
+                if not completeOrder then []
+                else
+                    indexes
+                    |> List.tryPick (fun (indexName, names) ->
+                        if equalsIgnoreCase indexName "PRIMARY" then Some names else None)
+                    |> Option.defaultValue []
+                    |> List.map (fun name -> Col name, direction)
+    | _ -> []
+
 /// The physical rows a single-table `UPDATE`/`DELETE` actually mutates,
 /// retaining their stable identifiers for the storage write:
 /// every row `matches` (the `WHERE`, or everything when there's none),
@@ -23012,6 +23050,7 @@ let private selectMutationTargets
     (rows: (RowId * Value[]) seq)
     (matches: Value[] -> Result<bool, EvalError>)
     (orderBy: OrderKey list)
+    (tieOrder: OrderKey list)
     (limit: int option)
     : Result<(RowId * Value[]) list, EvalError> =
     let rows = trackExaminedRows rows
@@ -23031,14 +23070,23 @@ let private selectMutationTargets
         matchedRows ()
         |> Result.bind (fun matched ->
             let dirs = orderBy |> List.map snd
+            let tieDirs = tieOrder |> List.map snd
 
             matched
             |> traverse (fun ((_, row) as positioned) ->
                 orderBy
                 |> traverse (fun (e, _) -> evalOrderKey (ctxFor row) e)
-                |> Result.map (fun keys -> keys, positioned))
+                |> Result.bind (fun keys ->
+                    tieOrder
+                    |> traverse (fun (e, _) -> evalOrderKey (ctxFor row) e)
+                    |> Result.map (fun tieKeys -> keys, tieKeys, positioned)))
             |> Result.map (fun keyed ->
-                let ordered = keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) |> List.map snd
+                let ordered =
+                    keyed
+                    |> List.sortWith (fun (ka, ta, _) (kb, tb, _) ->
+                        let order = compareByOrderKeys dirs ka kb
+                        if order <> 0 then order else compareByOrderKeys tieDirs ta tb)
+                    |> List.map (fun (_, _, positioned) -> positioned)
 
                 match limit with
                 | Some count -> ordered |> List.truncate (max 0 count)
@@ -29679,7 +29727,8 @@ let rec executeAs
                 with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
-                    match selectMutationTargets ctxFor positionedRows check updateStmt.OrderBy (Option.map rowCount updateStmt.Limit) with
+                    let tieOrder = mutationPrimaryTieOrder tableRoot tableAlias updateStmt.OrderBy updateStmt.Limit
+                    match selectMutationTargets ctxFor positionedRows check updateStmt.OrderBy tieOrder (Option.map rowCount updateStmt.Limit) with
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok targetRows ->
                         let targetImages = targetRows |> Map.ofList
@@ -30091,7 +30140,8 @@ let rec executeAs
             match withSourceMetadataProbe (fun () -> whereMatches ctxFor probePredicate (probeRow columns)) with
             | Error(code, message) -> ids, Err(code, message)
             | Ok _ ->
-                match selectMutationTargets ctxFor positionedRows check deleteStmt.OrderBy (Option.map rowCount deleteStmt.Limit) with
+                let tieOrder = mutationPrimaryTieOrder tableRoot tableAlias deleteStmt.OrderBy deleteStmt.Limit
+                match selectMutationTargets ctxFor positionedRows check deleteStmt.OrderBy tieOrder (Option.map rowCount deleteStmt.Limit) with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok targetRows ->
                     let targetImages = targetRows |> Map.ofList
@@ -30557,6 +30607,276 @@ let transactionWriteTargets
         |> Result.toOption
         |> Option.bind (insertTargets tableName columns)
 
+    let pendingOrderedInsertKeys (tableRef: TableRef) where orderBy limit =
+        let database = tableRef.Database |> Option.defaultValue dbName
+        let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+        match limit, physicalFastPathTable store dbName tableRef with
+        | Some limitExpr, Some table when rowCount limitExpr > 0 ->
+            let orderedColumns =
+                orderBy
+                |> List.choose (fun (expression, direction) ->
+                    match expression with
+                    | Col name -> Some(name, direction)
+                    | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some(name, direction)
+                    | _ -> None)
+            let orderedIndex =
+                if orderedColumns.IsEmpty || orderedColumns.Length <> orderBy.Length then None
+                else
+                    Storage.orderedIndexKeyColumns table
+                    |> List.tryFind (fun (_, indexColumns) ->
+                        indexColumns.Length >= orderedColumns.Length
+                        && List.forall2
+                            (fun indexColumn (orderedColumn, _) -> equalsIgnoreCase indexColumn orderedColumn)
+                            (indexColumns |> List.take orderedColumns.Length)
+                            orderedColumns)
+            let primaryColumns =
+                Storage.orderedIndexKeyColumns table
+                |> List.tryPick (fun (name, names) ->
+                    if equalsIgnoreCase name "PRIMARY" then Some names else None)
+                |> Option.defaultValue []
+            let primaryKeyTypes =
+                primaryColumns
+                |> List.map (fun name ->
+                    table.Columns
+                    |> List.find (fun column -> equalsIgnoreCase column.Name name)
+                    |> fun column -> column.Type)
+            if orderedIndex.IsNone then
+                // Filesort expressions can scan past the visible LIMIT
+                // frontier. MySQL waits for pending primary-key inserts on
+                // either side of that frontier before choosing its rows.
+                if orderBy.IsEmpty || primaryColumns.IsEmpty then []
+                else
+                    Storage.activeOrderedKeyClaims store database tableRef.Table "PRIMARY" primaryKeyTypes primaryKeyTypes
+                    |> List.map (fun (_, _, claim) -> claim)
+            else
+                let indexName, indexColumns = Option.get orderedIndex
+                let columnIndices =
+                    orderedColumns |> List.map fst
+                    |> List.map (fun name -> table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name))
+                let keyTypes =
+                    indexColumns
+                    |> List.map (fun name ->
+                        table.Columns
+                        |> List.find (fun column -> equalsIgnoreCase column.Name name)
+                        |> fun column -> column.Type)
+                let primaryColumnIndices =
+                    primaryColumns
+                    |> List.map (fun name ->
+                        table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name))
+                let directions = orderedColumns |> List.map snd
+                let comparePart left right =
+                    match left, right with
+                    | OrderedNull, OrderedNull -> 0
+                    | OrderedNull, _ -> -1
+                    | _, OrderedNull -> 1
+                    | OrderedNumber a, OrderedNumber b -> Operators.compare a b
+                    | OrderedText a, OrderedText b -> System.String.CompareOrdinal(a, b)
+                    | _ -> 0
+                let rec compareOrdered left right directions =
+                    match left, right, directions with
+                    | a :: restA, b :: restB, direction :: restDirections ->
+                        let order = comparePart a b
+                        if order = 0 then compareOrdered restA restB restDirections
+                        elif direction = Asc then order
+                        else -order
+                    | _ -> 0
+                let orderedValue (column: ColumnDef) value =
+                    match value with
+                    | VNull -> Some OrderedNull
+                    | VInt integer -> Some(OrderedNumber(decimal integer))
+                    | VUInt integer
+                    | VBit(_, integer) -> Some(OrderedNumber(decimal integer))
+                    | VDate date -> Some(OrderedNumber(decimal date.DayNumber))
+                    | VString text when (match column.Type with TChar _ | TVarchar _ -> true | _ -> false) ->
+                        Some(OrderedText((column.Collation |> Collation.findOrDefault).KeyOf text))
+                    | VEncodedString(charset, bytes)
+                        when (match column.Type with TChar _ | TVarchar _ -> true | _ -> false) ->
+                        let text = Charset.decodeBytes charset bytes
+                        Some(OrderedText((column.Collation |> Collation.findOrDefault).KeyOf text))
+                    | _ -> None
+                let storedKey (row: Value[]) =
+                    let values =
+                        columnIndices
+                        |> List.choose (fun index -> orderedValue table.Columns.[index] row.[index])
+                    if values.Length = columnIndices.Length then Some values else None
+                let storedPrimaryKey (row: Value[]) =
+                    let values =
+                        primaryColumnIndices
+                        |> List.choose (fun index -> orderedValue table.Columns.[index] row.[index])
+                    if values.Length = primaryColumnIndices.Length && not values.IsEmpty then Some values
+                    else None
+                let pending =
+                    Storage.activeOrderedKeyClaims store database tableRef.Table indexName keyTypes primaryKeyTypes
+                    |> List.map (fun (key, primaryKey, claim) ->
+                        key |> List.take columnIndices.Length, primaryKey, claim)
+                if pending.IsEmpty then []
+                else
+                    let mixedDirections =
+                        match directions with
+                        | first :: rest -> rest |> List.exists (fun direction -> direction <> first)
+                        | [] -> false
+                    let completeIndexOrder =
+                        equalsIgnoreCase indexName "PRIMARY" || orderedColumns.Length = indexColumns.Length
+                    let primaryDirections = List.replicate primaryColumns.Length directions.Head
+                    let compareEntry (leftKey, leftPrimary) (rightKey, rightPrimary) =
+                        let order = compareOrdered leftKey rightKey directions
+                        if order <> 0 || not completeIndexOrder then order
+                        else
+                            match leftPrimary, rightPrimary with
+                            | Some left, Some right -> compareOrdered left right primaryDirections
+                            | _ -> 0
+                    let hasRuntimeEffects =
+                        where
+                        |> Option.exists (Expression.exists (function
+                            | FuncCall _ | UserVariable _ | AssignUserVariable _ | SystemVariable _
+                            | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _
+                            | MatchAgainst _ | WindowOver _ | Placeholder _ -> true
+                            | _ -> false))
+                    let indexedNames =
+                        (table.Columns |> List.filter _.PrimaryKey |> List.map _.Name)
+                        @ (Storage.orderedIndexKeyColumns table |> List.collect snd)
+                    let hasIndexedFilter =
+                        where
+                        |> Option.exists (Expression.exists (function
+                            | Col name | QualifiedCol(_, name) ->
+                                indexedNames |> List.exists (equalsIgnoreCase name)
+                            | _ -> false))
+
+                    let keyFor name ordered primary =
+                        let lookup names keys =
+                            List.zip names keys
+                            |> List.tryPick (fun (column, key) ->
+                                if equalsIgnoreCase name column then Some key else None)
+                        lookup (orderedColumns |> List.map fst) ordered
+                        |> Option.orElseWith (fun () ->
+                            primary |> Option.bind (lookup primaryColumns))
+
+                    let keyComparison name key bound =
+                        match key, bound with
+                        | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) ->
+                            Some(Value.compare (VDecimal number) bound)
+                        | OrderedText key, VString text ->
+                            table.Columns
+                            |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+                            |> Option.map (fun column ->
+                                let other = (column.Collation |> Collation.findOrDefault).KeyOf text
+                                System.String.CompareOrdinal(key, other))
+                        | _ -> None
+
+                    let comparisonIsFalse operation comparison =
+                        match operation with
+                        | Eq -> comparison <> 0
+                        | Neq -> comparison = 0
+                        | Lt -> comparison >= 0
+                        | Lte -> comparison > 0
+                        | Gt -> comparison <= 0
+                        | Gte -> comparison < 0
+                        | _ -> false
+
+                    let excludesPending ordered primary =
+                        let comparableLiteral = function
+                            | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VString _ as value) -> Some value
+                            | _ -> None
+                        let columnName = function
+                            | Col name -> Some name
+                            | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some name
+                            | _ -> None
+                        let excludesIn column candidates negated =
+                            match columnName column with
+                            | Some name ->
+                                match keyFor name ordered primary with
+                                | Some key ->
+                                    let comparison candidate =
+                                        comparableLiteral candidate
+                                        |> Option.bind (keyComparison name key)
+                                    if negated then
+                                        candidates |> List.exists (fun candidate -> comparison candidate = Some 0)
+                                    else
+                                        not candidates.IsEmpty
+                                        && (candidates
+                                            |> List.forall (fun candidate ->
+                                                comparison candidate |> Option.exists ((<>) 0)))
+                                | None -> false
+                            | None -> false
+                        let excludesNonNull column =
+                            columnName column
+                            |> Option.bind (fun name -> keyFor name ordered primary)
+                            |> Option.exists (function OrderedNull -> true | _ -> false)
+                        let excludesNull column =
+                            columnName column
+                            |> Option.bind (fun name -> keyFor name ordered primary)
+                            |> Option.exists (function OrderedNull -> false | _ -> true)
+                        where
+                        |> optionalConjuncts
+                        |> List.exists (function
+                            // Ordinary comparisons to a literal NULL can never be WHERE-true.
+                            // This excludes pending rows without relying on their key values.
+                            | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), left, right)
+                                when (right = Lit VNull && (columnName left |> Option.isSome))
+                                     || (left = Lit VNull && (columnName right |> Option.isSome)) -> true
+                            | BinOp(operation, left, right) ->
+                                let excludes column literal reverse =
+                                    match columnName column, comparableLiteral literal with
+                                    | Some name, Some bound ->
+                                        keyFor name ordered primary
+                                        |> Option.bind (fun key -> keyComparison name key bound)
+                                        |> Option.exists (fun comparison ->
+                                            comparisonIsFalse operation (if reverse then -comparison else comparison))
+                                    | _ -> false
+                                excludes left right false || excludes right left true
+                            | In(column, candidates) -> excludesIn column candidates false
+                            | Not(In(column, candidates)) -> excludesIn column candidates true
+                            | IsNotNull column -> excludesNonNull column
+                            | IsNull column -> excludesNull column
+                            | _ -> false)
+
+                    let pending =
+                        if hasIndexedFilter then
+                            pending |> List.filter (fun (ordered, primary, _) -> not (excludesPending ordered primary))
+                        else pending
+                    let allKeys = pending |> List.map (fun (_, _, claim) -> claim)
+
+                    // The audited mixed-direction order waits even beyond the visible frontier.
+                    if mixedDirections || hasRuntimeEffects then allKeys
+                    else
+                        let columns = table.Columns
+                        let ctxFor =
+                            contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None
+                        let matched = ResizeArray<OrderedIndexKeyPart list * OrderedIndexKeyPart list option>()
+                        let mutable valid = true
+
+                        Diagnostics.suppress (fun () ->
+                            for _, row in table.RowsArray.Indexed do
+                                if valid then
+                                    match storedKey row with
+                                    | Some key ->
+                                        match whereMatches ctxFor where row with
+                                        | Ok true -> matched.Add(key, storedPrimaryKey row)
+                                        | Ok false -> ()
+                                        | Error _ -> valid <- false
+                                    | _ -> valid <- false)
+
+                        let count = rowCount limitExpr
+                        // InnoDB's audited secondary-index ordered write still
+                        // observes a pending insert past the selected frontier
+                        // while fewer than two LIMIT-sized visible matches exist.
+                        if not valid || matched.Count < count
+                           || (not (equalsIgnoreCase indexName "PRIMARY")
+                               && not hasIndexedFilter && matched.Count / 2 < count) then allKeys
+                        else
+                            let ordered = matched |> Seq.sortWith compareEntry |> Seq.toArray
+                            let frontier = ordered.[count - 1]
+                            pending
+                            |> List.choose (fun (key, primary, claim) ->
+                                let order = compareOrdered key (fst frontier) directions
+                                if order < 0 then Some claim
+                                elif order > 0 then None
+                                elif not completeIndexOrder then Some claim
+                                elif primary.IsNone || (snd frontier).IsNone then Some claim
+                                elif compareEntry (key, primary) frontier < 0 then Some claim
+                                else None)
+        | _ -> []
+
     let joinedTargets (from: TableRef) (joins: Join list) (names: string list) predicate =
         let joinedTables =
             joins
@@ -30611,7 +30931,11 @@ let transactionWriteTargets
                 else
                     joinedTargets view.UpdateFrom view.UpdateJoins [ target.Qualifier ] predicate
             | _ -> []
-        | None -> targets update.From update.Where |> Option.toList
+        | None ->
+            let keys = pendingOrderedInsertKeys update.From update.Where update.OrderBy update.Limit
+            targets update.From update.Where
+            |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
+            |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
         let viewDatabase = update.From.Database |> Option.defaultValue dbName
 
@@ -30749,7 +31073,11 @@ let transactionWriteTargets
                 |> combineViewPredicate view.Predicate
 
             targets view.UpdateFrom predicate |> Option.toList
-        | _ -> targets delete.From delete.Where |> Option.toList
+        | _ ->
+            let keys = pendingOrderedInsertKeys delete.From delete.Where delete.OrderBy delete.Limit
+            targets delete.From delete.Where
+            |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
+            |> Option.toList
     | Delete delete when not delete.Joins.IsEmpty ->
         joinedTargets delete.From delete.Joins delete.Targets delete.Where
     | Insert(tableName, columns, rows, _, _)

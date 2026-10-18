@@ -1875,11 +1875,15 @@ implementation effort:
    from MySQL past small data.
 
 2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements,
-   plus [ordered `LIMIT 1` and `LIMIT 2` UPDATE and DELETE re-selection after a contended
-   first candidate stops matching or moves behind later candidates, including
-   two successive owner waits](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
-   with and without a secondary predicate index,
-   plus audited joined UPDATE and DELETE statements with named physical targets,
+   plus [ordered `LIMIT 1`, `LIMIT 2`, and `LIMIT 3` UPDATE and DELETE re-selection after a contended
+   first candidate stops matching, moves behind another candidate, or is
+   deleted](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
+   with and without a secondary predicate index, including two successive owner waits, plus pending inserts across
+   integer, valid `DATE`, [text](torture/findings/2026-10-16-limited-ordered-write-rebase.md#text-primary-keys),
+   audited two-part integer, and [text-plus-integer](torture/findings/2026-10-16-limited-ordered-write-rebase.md#composite-text-and-integer-primary-keys) primary-key order
+   frontiers, plus [filesort `id+0` ordering at LIMIT 1–3](torture/findings/2026-10-16-limited-ordered-write-rebase.md#filesort-expression-order)
+   that waits for pending primary-key inserts, plus audited joined UPDATE and DELETE statements with named
+   physical targets,
    [audited single-table updatable-view UPDATE and DELETE statements and joined-view
    UPDATE statements with one writable physical target](torture/findings/2026-10-15-view-write-rebase.md),
    and joined UPDATEs with uniquely owned bare assignments, including
