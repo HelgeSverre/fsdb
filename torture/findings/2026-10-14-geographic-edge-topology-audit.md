@@ -174,7 +174,7 @@ explicit open spatial edge case.
 The [MySQL 8.4.11 intersects functor](https://dev.mysql.com/doc/dev/mysql-server/8.4.11/intersects__functor_8h_source.html)
 declares Boost's `geographic_winding` strategy for point/area relations and
 `geographic_segments` for line/area relations. The
-[Boost geographic winding implementation](https://codebrowser.dev/boost/boost/libs/geometry/include/boost/geometry/strategies/geographic/point_in_poly_winding.hpp.html)
+[bundled Boost 1.84 geographic winding implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/strategies/geographic/point_in_poly_winding.hpp)
 uses a longitude-crossing winding counter with an Andoyer-azimuth geographic
 side strategy, rather than the sampled spherical-angle sum in fsdb's
 `geographicRingContains`. This difference is a plausible cause of the
@@ -189,7 +189,7 @@ together; changing only the side calculation inside fsdb's angle sum would
 still be a different algorithm. The standalone-hole/combined-polygon results
 below also require validating polygon composition after a ring-level port.
 
-The [winding base implementation](https://codebrowser.dev/boost/boost/libs/geometry/include/boost/geometry/strategies/spherical/point_in_poly_winding.hpp.html)
+The [bundled winding base implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/strategies/spherical/point_in_poly_winding.hpp)
 checks aligned endpoints and meridian segments before counting crossings.
 It gives a crossing at an endpoint a signed count of one, an interior
 longitude crossing a signed count of two, and keeps separate ordinary and
@@ -241,6 +241,16 @@ zero for most of these cases but reports about 0.09536 m for the outside
 point against one standalone-hole ring direction. Distance therefore has a
 separate ring-order sensitivity and cannot be used to infer the missing
 containment or intersection decision.
+
+An initial F# translation of the longitude-crossing counter in MySQL 8.4.11's
+[bundled Boost 1.84 winding strategy](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/strategies/spherical/point_in_poly_winding.hpp),
+using fsdb's current Andoyer azimuth helper for its geographic side test,
+increased the near-hole relation mismatches from one to two of 189. It made
+the combined-polygon `POINT(88 1.00001)` result diverge while leaving the 12 line
+and 34 point-distance mismatches unchanged. The trial was reverted. The
+remaining mismatch is not resolved by a counter translation alone: the
+geographic side calculation and MySQL's combined-ring relation path both
+need independent checks against the bundled implementation.
 
 A trial taking the minimum of forward and reverse point-to-segment distances
 removed that 0.09536 m polar discrepancy without changing the 12 line or
