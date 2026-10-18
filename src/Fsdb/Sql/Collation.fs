@@ -298,6 +298,41 @@ let private foldLegacySupplementary (value: string) =
             index <- index + 1
         result.ToString()
 
+// UCA 5.2 assigns U+180E a primary weight; ICU now treats it as ignorable.
+let private foldUnicode520MongolianSeparator (value: string) =
+    if not (value.Contains('\u180e') || value.Contains('\uE0A0')) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            match c with
+            | '\u180e' -> result.Append("\uE0A0\uE0A1") |> ignore
+            | '\uE0A0' -> result.Append("\uE0A0\uE0A0") |> ignore
+            | c -> result.Append(c) |> ignore
+        result.ToString()
+
+// ICU composes conjoining Hangul Jamo into syllables. MySQL's UCA 5.2 keeps
+// their primary weights separate, while compatibility Jamo share those weights.
+let private foldUnicode520Jamo (value: string) =
+    let isJamo c = c >= '\u1100' && c <= '\u11ff'
+    let isCompatibility c =
+        (c >= '\u3130' && c <= '\u318f') || (c >= '\uffa0' && c <= '\uffdc')
+    let marker = '\uE0B0'
+    if not (value |> Seq.exists (fun c -> c = marker || isJamo c || isCompatibility c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        let appendJamo c =
+            result.Append(marker).Append(char (0xE500 + int c - 0x1100)) |> ignore
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif isJamo c then appendJamo c
+            elif isCompatibility c then
+                let decomposed = (string c).Normalize(NormalizationForm.FormKD)
+                if not (String.IsNullOrEmpty decomposed) && (decomposed |> Seq.forall isJamo) then
+                    for jamo in decomposed do appendJamo jamo
+                else result.Append(c) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
 // UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
 // newer MySQL weights fold its presentation forms.
 let private foldCjkPunctuationForms modern (value: string) =
@@ -334,6 +369,21 @@ let private foldCjkPunctuationForms modern (value: string) =
             result.ToString()
         else comma
 
+// Legacy Unicode collations treat these separator forms as an ordinary space
+// and these format controls as ignorable at the primary weight level.
+let private foldLegacySpace (value: string) =
+    let isSpace = function
+        | '\u00a0' | '\u202f' | '\u205f' | '\u3000' -> true
+        | c when c >= '\u2000' && c <= '\u200a' -> true
+        | _ -> false
+    if not (value |> Seq.exists (fun c -> isSpace c || c = '\u200c' || c = '\u200d' || c = '\u2060')) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if isSpace c then result.Append(' ') |> ignore
+            elif c <> '\u200c' && c <> '\u200d' && c <> '\u2060' then result.Append(c) |> ignore
+        result.ToString()
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) = if spec.PadSpace then s.TrimEnd(' ') else s
@@ -366,16 +416,18 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_general_ci" -> value.Replace("ß", "s").Replace("ẞ", "s")
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
-        | "utf8mb4_unicode_520_ci" -> value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
+        | "utf8mb4_unicode_520_ci" ->
+            value |> foldLegacySpace |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
+            |> foldCjkQuoteForms |> foldUnicode520MongolianSeparator |> foldUnicode520Jamo
         | "utf8mb4_unicode_ci" ->
-            value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
+            value |> foldLegacySpace |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms
                   |> foldLegacyCompatibilityIdeographs
                   |> foldLegacySupplementary
                   |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
         | _ -> value
 
-    let primaryText (s: string) = trim s |> foldText
+    let primaryText (s: string) = s |> foldText |> trim
     let substringFold =
         if spec.Fold.HasFlag CompareOptions.IgnoreCase then
             CompareOptions.IgnoreCase

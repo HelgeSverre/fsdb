@@ -170,6 +170,30 @@ let tests =
                   Expect.equal (booleanScores changed "ORCH*" |> Map.keys |> Seq.toList) [ 1 ] "mutation removes normalized prefixes"
                   Expect.equal (naturalScores changed "Orchard" |> Map.keys |> Seq.toList) [ 1 ] "mutation removes normalized exact postings"
 
+          testCase "Unicode 5.2 ngrams share padded space keys but retain Mongolian separator weight"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get
+              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let characters = [ "\u3000"; "\u00a0"; "\u200c"; "\u200d"; "\u2060"; "\u180e"; " " ]
+              let documents =
+                  characters
+                  |> List.mapi (fun index character -> index + 1, rules, [ "生" + character + "日"; "" ])
+              let index = buildIndexWithDocumentSettings rules collation documents
+              let ids scores = scores |> Map.keys |> Seq.toList
+              let spaceScores = naturalScores index "生\u3000日"
+              Expect.equal (ids spaceScores) [ 1; 2; 3; 4; 5 ] "space and ignorable-form ngrams share one posting"
+              Expect.isGreaterThan spaceScores.[1] spaceScores.[3] "both matching space ngrams outrank one shared posting"
+              Expect.equal (ids (naturalScores index "生\u180e日")) [ 6 ] "weighted separator has distinct ngrams"
+              Expect.equal (ids (booleanScores index "生\u3000日")) [ 1; 2; 3; 4; 5 ] "Boolean lookup uses the same padded keys"
+
+          testCase "Unicode 5.2 Boolean ngrams do not compose Korean Jamo into short terms"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get
+              let rules = { Tokenizer = Ngrams 5; Stopwords = StopwordPolicy.BuiltIn }
+              let index = buildIndexWithDocumentSettings rules collation
+                              [ 1, rules, [ "하늘하늘"; "한글" ] ]
+              Expect.isEmpty (booleanScores index "하늘") "short composed query does not address a Jamo ngram"
+
           testCase "boolean ngram terms retain Unicode number characters"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }
