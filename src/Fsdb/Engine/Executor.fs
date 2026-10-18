@@ -11580,7 +11580,10 @@ and private streamFilteredSourceRows
     let matches = prepareWhereMatches context (Some predicate)
 
     seq {
+        let mutable inspected = 0
         for row in rows do
+            Limits.checkQueryCancellation inspected
+            inspected <- inspected + 1
             match matches row with
             | Ok true -> yield row
             | Ok false -> ()

@@ -4442,6 +4442,54 @@ let tests =
                     runCancelled 300L "SELECT COUNT(*) FROM aggregate_cancel WHERE ARM(id) = id"
                     runCancelled 1L "SELECT SUM(ARM(id)), AVG(ARM(id)) FROM aggregate_cancel" ]
 
+          testCase "limited indexed joins observe cancellation while filters reject source rows"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE filter_base (n INT)" |> ignore
+              runDefault store "CREATE TABLE filter_partner (id INT, KEY (id))" |> ignore
+              runDefault store "INSERT INTO filter_partner VALUES (-1),(601)" |> ignore
+              runDefault store "INSERT INTO filter_base VALUES (-1)" |> ignore
+
+              [ 1 .. 600 ]
+              |> List.map (sprintf "(%d)")
+              |> String.concat ","
+              |> sprintf "INSERT INTO filter_base VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              runDefault store "INSERT INTO filter_base VALUES (601)" |> ignore
+
+              Expect.equal
+                  (runDefault store "SELECT a.n FROM filter_base a JOIN filter_partner b ON a.n = b.id WHERE a.n > 600 LIMIT 1")
+                  (ResultSet([ "n" ], [ [ Some "601" ] ]))
+                  "the pushed filter still yields the first matching row"
+
+              runDefault store "DELETE FROM filter_partner WHERE id = 601" |> ignore
+
+              for predicate in [ "a.n < 0"; "a.n BETWEEN -10 AND -1"; "n < 0"; "a.n + 0 < 0" ] do
+                  use cancellation = new System.Threading.CancellationTokenSource()
+                  let mutable armCalls = 0
+                  let cancelOnFirstMatch =
+                      function
+                      | [ VInt -1L ] ->
+                          armCalls <- armCalls + 1
+                          cancellation.Cancel()
+                          VInt 0L
+                      | _ -> VInt 0L
+                  let registry = builtins |> registerScalar "ARM_CANCEL" cancelOnFirstMatch
+                  Fsdb.Limits.queryCancellation.Value <- cancellation.Token
+
+                  try
+                      Expect.throwsT<System.OperationCanceledException>
+                          (fun () ->
+                              run store registry
+                                  (sprintf "SELECT a.n FROM filter_base a JOIN filter_partner b ON a.n = b.id WHERE %s AND ARM_CANCEL(b.id) = 1 LIMIT 1" predicate)
+                              |> ignore)
+                          (predicate + " observes cancellation")
+                      Expect.equal armCalls 1 "the joined row arms cancellation before the remaining filtered scan"
+                  finally
+                      Fsdb.Limits.queryCancellation.Value <- System.Threading.CancellationToken.None
+
           testList
               "table-qualified columns are checked against the FROM's alias-or-table, not silently accepted from anywhere"
               [ testCase "a qualifier that doesn't match the table in scope is a 1054 unknown-column error, not a resultset"
