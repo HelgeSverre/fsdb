@@ -561,6 +561,9 @@ still need a row representation that retains their raw bytes.
 Named CHECK constraints support enforcement state
 and `ALTER` validation, and ENUM or SET values enforce membership. Adding a
 unique key over colliding data returns 1062 without publishing a corrupt index.
+[Repeated plain columns in one index](torture/findings/2026-10-17-duplicate-index-parts.md)
+are rejected with MySQL's 1060 diagnostic across CREATE and ALTER forms;
+distinct functional parts remain permitted.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
