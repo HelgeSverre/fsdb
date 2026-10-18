@@ -1679,36 +1679,34 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
 
     let rec sourceReferences name = function
         | FromTable table ->
-            if table.Database.IsNone && eqI table.Table name then 1 else 0
+            table.Database.IsNone && eqI table.Table name
         | FromJoinGroup(first, joins) ->
             sourceReferences name first
-            + (joins |> List.sumBy (fun join -> sourceReferences name join.Table))
+            || (joins |> List.exists (fun join -> sourceReferences name join.Table))
         | FromSubquery(query, _) | FromLateral(query, _) -> queryReferences name query
-        | _ -> 0
+        | _ -> false
 
     and selectReferences name (body: SelectStmt) =
         let cteReferences, shadowsOuter =
             body.Ctes
-            |> List.fold (fun (count, shadowed) cte ->
+            |> List.fold (fun (found, shadowed) cte ->
                 // Earlier definitions can still read the outer binding before
                 // a later local CTE with the same name shadows it.
                 let shadowsBody = shadowed || (cte.Recursive && eqI cte.CteName name)
-                let references = if shadowsBody then 0 else queryReferences name cte.Body
-                count + references, shadowed || eqI cte.CteName name) (0, false)
-        let sourceCount =
-            if shadowsOuter then 0
-            else
-                (body.From |> Option.map (sourceReferences name) |> Option.defaultValue 0)
-                + (body.Joins |> List.sumBy (fun join -> sourceReferences name join.Table))
-        cteReferences + sourceCount
+                let references = not shadowsBody && queryReferences name cte.Body
+                found || references, shadowed || eqI cte.CteName name) (false, false)
+        cteReferences
+        || (not shadowsOuter
+            && ((body.From |> Option.exists (sourceReferences name))
+                || (body.Joins |> List.exists (fun join -> sourceReferences name join.Table))))
 
     and queryReferences name = function
         | PlainSelect body -> selectReferences name body
         | UnionSelect(first, rest, _, _, _) ->
             selectReferences name first
-            + (rest |> List.sumBy (snd >> selectReferences name))
+            || (rest |> List.exists (snd >> selectReferences name))
 
-    let referenceCount name = sources |> List.sumBy (sourceReferences name)
+    let referencesCte name = sources |> List.exists (sourceReferences name)
 
     let rec expandedProjections knownCtes (body: SelectStmt) =
         let hasStar =
@@ -1784,7 +1782,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         match cte.Body with
         | PlainSelect body
             when not cte.Recursive
-                 && referenceCount cte.CteName > 0
+                 && referencesCte cte.CteName
                  && body.Ctes.IsEmpty
                  && (body.From |> Option.exists independent)
                  && (body.Joins |> List.forall (_.Table >> independent)) ->
@@ -1809,7 +1807,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             tryInlineBody cte |> Option.map (fun body -> cte.CteName.ToLowerInvariant(), body))
 
     let referencedCtes =
-        select.Ctes |> List.filter (fun cte -> referenceCount cte.CteName > 0)
+        select.Ctes |> List.filter (fun cte -> referencesCte cte.CteName)
     let hasRecursiveCte = select.Ctes |> List.exists _.Recursive
 
     let recursiveNames =
@@ -1868,19 +1866,10 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                       Offset = None
                       Locking = [] }
                 FromSubquery(PlainSelect wrapper, table.Alias |> Option.defaultValue table.Table)
-            | FromSubquery(PlainSelect body, alias) ->
-                FromSubquery(PlainSelect(expandSelect activeNames rewriteExpressions body), alias)
-            | FromSubquery(UnionSelect(first, rest, orderBy, limit, offset), alias) ->
-                FromSubquery(
-                    UnionSelect(
-                        expandSelect activeNames true first,
-                        rest |> List.map (fun (kind, body) -> kind, expandSelect activeNames true body),
-                        orderBy |> List.map (fun (expression, direction) -> expandExpression activeNames expression, direction),
-                        limit |> Option.map (expandExpression activeNames),
-                        offset |> Option.map (expandExpression activeNames)
-                    ), alias)
+            | FromSubquery(query, alias) ->
+                FromSubquery(expandQuery activeNames rewriteExpressions query, alias)
             | FromLateral(PlainSelect body, alias) ->
-                FromLateral(PlainSelect(expandSelect activeNames rewriteExpressions body), alias)
+                FromLateral(expandQuery activeNames rewriteExpressions (PlainSelect body), alias)
             | FromJoinGroup(first, joins) ->
                 FromJoinGroup(
                     expand activeNames rewriteExpressions first,
@@ -1898,6 +1887,17 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             | _ -> None
 
         and expandExpression activeNames expression = Expression.rewriteTree (replaceExpression activeNames) expression
+
+        and expandQuery activeNames rewriteExpressions = function
+            | PlainSelect body -> PlainSelect(expandSelect activeNames rewriteExpressions body)
+            | UnionSelect(first, rest, orderBy, limit, offset) ->
+                UnionSelect(
+                    expandSelect activeNames true first,
+                    rest |> List.map (fun (kind, body) -> kind, expandSelect activeNames true body),
+                    orderBy |> List.map (fun (expression, direction) -> expandExpression activeNames expression, direction),
+                    limit |> Option.map (expandExpression activeNames),
+                    offset |> Option.map (expandExpression activeNames)
+                )
 
         and expandSelect activeNames rewriteExpressions body =
             let localNames =
@@ -1919,19 +1919,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                     let bodyNames =
                         if cte.Recursive then Map.remove (cte.CteName.ToLowerInvariant()) visibleNames
                         else visibleNames
-                    let expanded =
-                        match cte.Body with
-                        | PlainSelect nested -> { cte with Body = PlainSelect(expandSelect bodyNames true nested) }
-                        | UnionSelect(first, rest, orderBy, limit, offset) ->
-                            { cte with
-                                Body =
-                                    UnionSelect(
-                                        expandSelect bodyNames true first,
-                                        rest |> List.map (fun (kind, nested) -> kind, expandSelect bodyNames true nested),
-                                        orderBy |> List.map (fun (expression, direction) -> expandExpression bodyNames expression, direction),
-                                        limit |> Option.map (expandExpression bodyNames),
-                                        offset |> Option.map (expandExpression bodyNames)
-                                    ) }
+                    let expanded = { cte with Body = expandQuery bodyNames true cte.Body }
                     expanded, Map.remove (cte.CteName.ToLowerInvariant()) visibleNames) activeNames
             { body with
                 Projections = directExpressions.Projections
