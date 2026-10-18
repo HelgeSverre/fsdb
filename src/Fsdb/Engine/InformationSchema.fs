@@ -2088,15 +2088,34 @@ let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) 
               Fsdb.Parser.parse view.Definition with
         | true, _ -> false
         | _, Ok(Select parsed) ->
-            let select = parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
+            // Direct CTE projections have MySQL's updatable metadata even when
+            // the source CTE itself is read-only.
+            let directCteSource =
+                parsed.Joins.IsEmpty
+                && (match parsed.From with
+                    | Some(FromTable table) when table.Database.IsNone ->
+                        parsed.Ctes
+                        |> List.exists (fun cte -> cte.CteName.Equals(table.Table, StringComparison.OrdinalIgnoreCase))
+                    | _ -> false)
+            let select =
+                if directCteSource then { parsed with Ctes = [] }
+                else parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
             match select.From with
             | Some source ->
                 let sourceAllowsUpdates = function
+                    | FromTable table when
+                        table.Database.IsNone
+                        && (select.Ctes |> List.exists (fun cte -> eqI cte.CteName table.Table)) -> true
                     | FromTable table -> sourceAllowsUpdates table
+                    // MySQL's view metadata treats a derived or CTE source as
+                    // updatable when the outer SELECT exposes its columns, even
+                    // when the source itself cannot accept a write.
+                    | FromSubquery _ -> true
                     | _ -> false
                 let sourceOrderAllowsUpdates =
                     match source, select.Joins with
                     | FromTable _, _ -> true
+                    | FromSubquery _, [] -> true
                     | (FromSubquery _ | FromLateral _ | FromJsonTable _), _ :: _ ->
                         tryLeadingReadOnlyWritableTarget source select.Joins |> Option.isSome
                     | _ -> false
@@ -2122,15 +2141,16 @@ let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) 
                         |> List.exists (fun { Expression = expression } ->
                             match expression with
                             | Col _
-                            | QualifiedCol _ -> true
+                            | QualifiedCol _
+                            | Star _ -> true
                             | _ -> false))
 
                 let writableSource =
                     sourceAllowsUpdates source
                     || (select.Joins |> List.exists (fun join -> sourceAllowsUpdates join.Table))
                 let ordinaryShape =
-                    ((select.Joins.IsEmpty && match source with FromTable _ -> true | _ -> false)
-                     || (sourceOrderAllowsUpdates && joinsSupported && not select.Joins.IsEmpty))
+                    sourceOrderAllowsUpdates
+                    && joinsSupported
                     && select.Ctes.IsEmpty
                     && writableSource
                 // MySQL reports a direct outer projection over a recursive
@@ -2142,7 +2162,7 @@ let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) 
                 if not queryAllowsUpdates then
                     false
                 else
-                    ordinaryShape || recursiveReadOnlyShape
+                    ordinaryShape || recursiveReadOnlyShape || directCteSource
             | _ -> false
         | _ -> false
 

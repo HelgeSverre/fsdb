@@ -697,6 +697,27 @@ let tests =
                       "an outer-dependent CTE is rebuilt for each outer row"
               | other -> failtestf "expected correlated CTE results, got %A" other
 
+          testCase "materialized correlated equality respects the effective collation"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_labels (id INT PRIMARY KEY, label VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci)" |> ignore
+              runDefault store "CREATE TABLE inner_labels (label VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_bin)" |> ignore
+              runDefault store "INSERT INTO outer_labels VALUES (1, 'A'), (2, 'B')" |> ignore
+              runDefault store "INSERT INTO inner_labels VALUES ('a')" |> ignore
+
+              for source in [ "(SELECT label FROM inner_labels) d"; "labels d" ] do
+                  let prefix =
+                      if source = "labels d" then
+                          "WITH labels AS (SELECT label FROM inner_labels) "
+                      else
+                          ""
+                  let sql =
+                      prefix + "SELECT o.id, (SELECT COUNT(*) FROM " + source
+                      + " WHERE d.label = o.label) FROM outer_labels o ORDER BY o.id"
+                  match runDefault store sql with
+                  | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]) -> ()
+                  | other -> failtestf "expected Unicode comparison collation for %s, got %A" source other
+
           testCase "correlated materialized lookup combines equality columns"
           <| fun _ ->
               let store = newStore ()
@@ -2061,6 +2082,48 @@ let tests =
               | other -> failtestf "expected ignored-index NULL-safe count, got %A" other
               Expect.isGreaterThan touches 900 "ignoring the key restores the scan"
 
+          testCase "materialized correlated byte equality uses exact byte keys"
+          <| fun _ ->
+              let mutable touches = 0
+              let registry =
+                  registerScalar "TOUCH" (fun values ->
+                      touches <- touches + 1
+                      List.head values) builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE byte_inner(id INT PRIMARY KEY,k VARBINARY(8))" |> ignore
+              runDefault store "CREATE TABLE byte_outer(id INT PRIMARY KEY,k VARBINARY(8))" |> ignore
+              runDefault store "INSERT INTO byte_outer VALUES(1,X'0001'),(2,X'03E8'),(3,NULL),(4,X'FFFF')" |> ignore
+              [ 1..1000 ]
+              |> List.map (fun id -> sprintf "(%d,X'%04X')" id id)
+              |> String.concat ","
+              |> sprintf "INSERT INTO byte_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              let sql =
+                  "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM byte_inner) d "
+                  + "WHERE TOUCH(d.id)=d.id AND d.k=o.k) FROM byte_outer o ORDER BY o.id"
+              match run store registry sql with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows
+                      [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]
+                        [ Some "3"; Some "0" ]; [ Some "4"; Some "0" ] ]
+                      "byte equality preserves exact values and NULL behavior"
+              | other -> failtestf "expected MySQL byte equality counts, got %A" other
+              Expect.isLessThan touches 30 "two matching byte keys avoid scanning 1,000 materialized rows per outer row"
+
+              runDefault store "CREATE TABLE byte_text_outer(id INT PRIMARY KEY,k VARCHAR(8))" |> ignore
+              runDefault store "INSERT INTO byte_text_outer VALUES(1,'A'),(2,NULL)" |> ignore
+              runDefault store "INSERT INTO byte_inner VALUES(1001,X'41')" |> ignore
+              touches <- 0
+              let mixedSql =
+                  "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM byte_inner) d "
+                  + "WHERE TOUCH(d.id)=d.id AND d.k=o.k) FROM byte_text_outer o ORDER BY o.id"
+              match run store registry mixedSql with
+              | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]) -> ()
+              | other -> failtestf "expected byte/string comparison fallback, got %A" other
+              Expect.isGreaterThan touches 900 "mixed byte/string coercion retains the residual scan"
+
           testCase "materialized correlated decimal IN probes preserve exact keys"
           <| fun _ ->
               let mutable touches = 0
@@ -2211,6 +2274,22 @@ let tests =
 
                   Expect.isLessThan touches 10 "the numeric bound is narrower than the equality key"
 
+          testCase "correlated indexed ranges respect the comparison collation"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_bound (bound VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+              runDefault store "CREATE TABLE inner_values (value VARCHAR(10) COLLATE utf8mb4_0900_ai_ci, KEY ix_value(value))" |> ignore
+              runDefault store "INSERT INTO outer_bound VALUES ('a')" |> ignore
+              runDefault store "INSERT INTO inner_values VALUES ('Z'), ('b')" |> ignore
+
+              for source in [ "inner_values i"; "(SELECT value FROM inner_values) i" ] do
+                  let sql =
+                      "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE i.value < o.bound) FROM outer_bound o"
+                  match runDefault store sql with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected binary comparison ordering for %s, got %A" source other
+
           testCase "correlated text ranges use the materialized source collation"
           <| fun _ ->
               let mutable touches = 0
@@ -2281,7 +2360,10 @@ let tests =
                   touches <- touches + 1
                   List.head values
 
-              let registry = registerScalar "TOUCH" touch builtins
+              let registry =
+                  builtins
+                  |> registerScalar "TOUCH" touch
+                  |> registerExtension (ScalarFunction.create "TOUCH" (fun _ values -> touch values))
               let store = newStore ()
               runDefault store "CREATE TABLE outer_rows (id INT)" |> ignore
               runDefault store "CREATE TABLE inner_rows (id INT)" |> ignore
