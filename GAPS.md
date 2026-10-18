@@ -204,6 +204,9 @@ matching-collation text `IN` lists bound to direct outer columns or literals
 reuse statement-local equality keys. [Multiple compatible materialized `IN`
 predicates](torture/findings/2026-10-15-correlated-materialized-in-intersection.md)
 intersect their candidate rows before residual evaluation.
+[Composite left-prefix text joins](torture/findings/2026-10-17-folded-composite-join.md)
+retain folded-equal leading keys and check later bound key parts, including
+descending indexes.
 The [correlated `COUNT(*)` shortcut](torture/findings/2026-10-17-correlated-count-coverage.md)
 reads index cardinality only when distinct, complete stored key parts cover
 every equality; prefix collisions and uncovered predicates retain row filtering.

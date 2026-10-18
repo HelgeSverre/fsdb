@@ -12247,6 +12247,62 @@ let tests =
                         ()
                     | other -> failtestf "expected a composite indexed join plan, got %A" other
 
+                testCase "a composite left-prefix join keeps collation-equal rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE folded_left (name VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE folded_right (id INT PRIMARY KEY, name VARCHAR(20), sequence_no INT, KEY ix_name_sequence(name, sequence_no))" |> ignore
+                    runDefault store "INSERT INTO folded_left VALUES ('foo')" |> ignore
+                    let values =
+                        "(1,'FOO',1)"
+                        :: [ for id in 2 .. 501 -> sprintf "(%d,'z%03d',%d)" id id id ]
+                        |> String.concat ","
+                    runDefault store ("INSERT INTO folded_right VALUES " + values) |> ignore
+
+                    match runDefault store
+                        "SELECT r.id FROM folded_left l STRAIGHT_JOIN folded_right r ON r.name = l.name" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "the indexed join must find the folded-equal row, got %A" other
+
+                    match runDefault store
+                        "SELECT r.id FROM folded_left l LEFT JOIN folded_right r ON r.name = l.name" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "LEFT JOIN must not emit a NULL-padded row, got %A" other
+
+                    let plan =
+                        runDefault store
+                            "EXPLAIN SELECT r.id FROM folded_left l STRAIGHT_JOIN folded_right r ON r.name = l.name"
+                        |> explainRows
+                        |> List.item 1
+                    Expect.equal plan.AccessType (Some "ref") "the right side uses its composite-prefix index"
+                    Expect.equal plan.Key (Some "ix_name_sequence") "the named key drives the join"
+
+                testCase "a folded first key still checks later composite join keys"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE folded_pair_left (name VARCHAR(20), sequence_no INT)" |> ignore
+                    runDefault store "CREATE TABLE folded_pair_right (id INT PRIMARY KEY, name VARCHAR(20), sequence_no INT, marker INT, KEY ix_name_sequence_marker(name DESC, sequence_no DESC, marker))" |> ignore
+                    runDefault store "INSERT INTO folded_pair_left VALUES ('foo', 1)" |> ignore
+                    let values =
+                        [ "(1,'FOO',1,0)"; "(2,'FOO',2,0)"; "(3,'foo',1,0)"; "(4,'bar',1,0)" ]
+                        @ [ for id in 5 .. 504 -> sprintf "(%d,'z%03d',1,0)" id id ]
+                        |> String.concat ","
+                    runDefault store ("INSERT INTO folded_pair_right VALUES " + values) |> ignore
+
+                    match runDefault store
+                        ("SELECT r.id FROM folded_pair_left l STRAIGHT_JOIN folded_pair_right r "
+                         + "ON r.name = l.name AND r.sequence_no = l.sequence_no ORDER BY r.id") with
+                    | ResultSet(_, [ [ Some "1" ]; [ Some "3" ] ]) -> ()
+                    | other -> failtestf "folded and later integer keys must both match, got %A" other
+
+                    let plan =
+                        runDefault store
+                            ("EXPLAIN SELECT r.id FROM folded_pair_left l STRAIGHT_JOIN folded_pair_right r "
+                             + "ON r.name = l.name AND r.sequence_no = l.sequence_no")
+                        |> explainRows
+                        |> List.item 1
+                    Expect.equal plan.Key (Some "ix_name_sequence_marker") "the descending composite key is probed"
+
                 testCase "an indexed INNER JOIN probes a composite left prefix"
                 <| fun _ ->
                     let store = newStore ()
