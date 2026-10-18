@@ -11,10 +11,10 @@ let db =
         calls <- calls + 1
         List.head values)
 let connection = Db.connect db
-connection.Query "CREATE TABLE outer_bounds(id INT PRIMARY KEY,x DOUBLE,d DECIMAL(12,2),i BIGINT)" |> ignore
+connection.Query "CREATE TABLE outer_bounds(id INT PRIMARY KEY,x DOUBLE,d DECIMAL(12,2),i BIGINT,s VARCHAR(32))" |> ignore
 connection.Query "CREATE TABLE inner_rows(id INT PRIMARY KEY,k DOUBLE)" |> ignore
 connection.Query
-    "INSERT INTO outer_bounds VALUES(1,12.5,12.50,12),(2,999.0,999.00,999),(3,NULL,NULL,NULL),(4,-12.5,-12.50,-12)"
+    "INSERT INTO outer_bounds VALUES(1,12.5,12.50,12,'12.5'),(2,999.0,999.00,999,'999'),(3,NULL,NULL,NULL,NULL),(4,-12.5,-12.50,-12,'-12.5')"
 |> ignore
 
 [ 0..999 ]
@@ -42,3 +42,12 @@ let rangeSql =
 match connection.QueryValues(rangeSql, []) with
 | Ok(_, rows) -> printfn "narrow DOUBLE range: rows=%A residual_calls=%d" rows calls
 | Error error -> failwithf "narrow DOUBLE range: %A" error
+
+calls <- 0
+let inSql =
+    "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM inner_rows) d "
+    + "WHERE TOUCH(d.id)=d.id AND d.k+0e0 IN (o.s,o.x)) "
+    + "FROM outer_bounds o ORDER BY o.id"
+match connection.QueryValues(inSql, []) with
+| Ok(_, rows) -> printfn "clean string DOUBLE IN: rows=%A residual_calls=%d" rows calls
+| Error error -> failwithf "clean string DOUBLE IN: %A" error

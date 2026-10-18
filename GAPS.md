@@ -141,7 +141,7 @@ refuses it through the prepared-statement protocol.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Grouped join operands | nested table references preserve join association and inner ON scope | association, merged-column ownership, scoped binding, mutations, locks, and source metadata are covered; grouped LATERAL/JSON_TABLE sources receive preceding rows, and direct and grouped dependent mutations retain target identities; nested derived sources retain enclosing query context; broader correlated-source/metadata combinations remain ([oracle](torture/findings/2026-10-07-grouped-joins.md)) | medium | partial |
-| Locking-read granularity | row and next-key locks over the selected access path | `FOR UPDATE`, `FOR SHARE`, `LOCK IN SHARE MODE`, `OF`, `NOWAIT`, and `SKIP LOCKED` hold shared or exclusive row-stripe ownership until transaction end; direct indexed single-table predicates narrow their targets, while joins and scan-shaped reads conservatively lock every row in each named physical source; no next-key/gap locks | low | divergence |
+| Locking-read granularity | row and next-key locks over the selected access path | `FOR UPDATE`, `FOR SHARE`, `LOCK IN SHARE MODE`, `OF`, `NOWAIT`, and `SKIP LOCKED` hold shared or exclusive row-stripe ownership until transaction end; direct indexed single-table predicates narrow their targets, while joins and scan-shaped reads conservatively lock every row in each named physical source, including [grouped join operands](torture/findings/2026-10-17-grouped-locking-read.md); no next-key/gap locks | low | divergence |
 The expression grammar includes:
 
 - comparison, logical, and arithmetic operators, including `<=>`, `XOR`, and
@@ -182,6 +182,9 @@ strong observed reduction; otherwise the narrowest single index remains
 cheaper in the in-memory row store.
 Compatible `ORDER BY` suffixes continue streaming the same composite slice
 rather than sorting the narrowed rows again.
+[Indexed text ranges](torture/findings/2026-10-17-text-range-primary-boundaries.md)
+include every member of a folded collation equivalence class at their bounds,
+including `BETWEEN` and supported text-result functional indexes.
 
 Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership
@@ -193,12 +196,24 @@ Correlated equality probes use single keys, complete composite keys, or safe
 ordered left prefixes through direct tables and pass-through derived tables or
 CTEs. Materialized derived tables and stable CTEs build statement-local composite
 equality keys from their usable correlated predicates. Outer values and literals
-may bind different key parts. Numeric and matching-collation text ranges over
-materialized sources use statement-local ordered lookups. Numeric and
+may bind different key parts. [Exact byte equality](torture/findings/2026-10-16-correlated-materialized-byte-equality.md)
+now keys materialized `BINARY`, `VARBINARY`, and `BLOB` values while mixed
+byte/string probes retain their scan fallback. Numeric and matching-collation
+text ranges over materialized sources use statement-local ordered lookups. Numeric and
 matching-collation text `IN` lists bound to direct outer columns or literals
 reuse statement-local equality keys. [Multiple compatible materialized `IN`
 predicates](torture/findings/2026-10-15-correlated-materialized-in-intersection.md)
 intersect their candidate rows before residual evaluation.
+[Routine-variable shadowing](torture/findings/2026-10-17-routine-variable-index-probes.md)
+now keeps bare names out of physical index pins and pass-through derived
+projections when a stored-routine parameter or local has that name; qualified
+column references remain eligible.
+[Composite left-prefix text joins](torture/findings/2026-10-17-folded-composite-join.md)
+retain folded-equal leading keys and check later bound key parts, including
+descending indexes.
+The [correlated `COUNT(*)` shortcut](torture/findings/2026-10-17-correlated-count-coverage.md)
+reads index cardinality only when distinct, complete stored key parts cover
+every equality; prefix collisions and uncovered predicates retain row filtering.
 [Correlated `ABS` equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-abs.md)
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete
 OR branches and exact `INT` minimum magnitude, while other operand types retain
@@ -292,6 +307,18 @@ near `2^53` remain a narrow row-membership divergence.
 Other approximate numeric combinations, text, and functional-expression
 bounds retain their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
+[Side-effecting correlated function calls](torture/findings/2026-10-17-correlated-function-stability.md)
+remain row-by-row: stored SQL functions and unannotated custom scalars do not
+become index probe keys, while known-pure built-ins and deterministic
+extensions retain their compatible indexed paths.
+
+[Grouped outer-join functional dependencies](torture/findings/2026-10-17-outer-join-group-dependencies.md)
+now follow LEFT/RIGHT join direction, including `USING` and `NATURAL`
+equalities. A nullable unique key on the null-complemented side contributes a
+dependency when an `ON` equality rules out NULL in matched rows; extra
+preserved-side `ON` inputs must be fixed by the group before dependencies
+cross the join. Physical unique keys inside parenthesized joined operands also
+participate in this inference.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
 multi-column `COUNT(DISTINCT ...)`, the `GROUP_CONCAT` byte ceiling,
@@ -306,7 +333,7 @@ or locking retain the general SELECT pipeline.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Secondary-index access paths | ref/eq_ref/range/index-merge scans feed joins, DML, ORDER BY, GROUP BY | common complete-key and safe left-prefix equality, literal membership, direct and negated-comparison ranges, join, ordering, grouping, supported unary functional compositions, compatible functional-result ranges, [audited binary-collated `CHAR`, `VARCHAR`, and `TEXT` family and byte-valued `BINARY`, `VARBINARY`, and `BLOB` family `LIKE` prefixes, including Unicode, escapes, exact, safe constant expression patterns, and matching explicit binary collations](torture/findings/2026-10-12-like-prefix-range.md), fully covered OR unions, and cost-effective AND intersections use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
+| Secondary-index access paths | ref/eq_ref/range/index-merge scans feed joins, DML, ORDER BY, GROUP BY | common complete-key and safe left-prefix equality, literal membership, direct and negated-comparison ranges, join, ordering, grouping, supported unary functional compositions, compatible functional-result ranges, [audited binary-collated `CHAR`, `VARCHAR`, and `TEXT` family and byte-valued `BINARY`, `VARBINARY`, and `BLOB` family `LIKE` prefixes, including Unicode, escapes, exact, safe constant expression patterns, and matching explicit binary collations](torture/findings/2026-10-12-like-prefix-range.md), fully covered OR unions, and cost-effective AND intersections use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort. [MySQL 8.4.11 also omits collation-expansion matches through a truncated text prefix key](torture/findings/2026-10-17-prefix-collation-expansion-oracle.md), while a forced scan finds them; this is a reference-server indexed-versus-scan behavior, not an fsdb parity gap | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; competing access families, complete OR unions, and selective AND intersections use observed cardinalities; literal numeric arithmetic, original indexed built-ins, literal `COALESCE`, `IFNULL`, `IF`, `NULLIF`, `GREATEST`, `LEAST`, and `CASE` bounds, and [audited `MOD`, `TRUNCATE`, `POW`, `POWER`, `BIT_COUNT`, `CRC32`, and nested `PI()` bounds](torture/findings/2026-10-10-numeric-constant-bounds.md) with literal comparisons and Boolean tests use maintained indexes; [pure constant numeric functional bounds](torture/findings/2026-10-10-numeric-functional-bounds.md) serve equality and `IN` through exact, rounded, and double-result keys; local STRAIGHT_JOIN constraints permit independent selective joins to move earlier; audited two-table left joins with indexed null-rejecting WHERE filters, including safe OR and integer-inequality unions, literal IN, BETWEEN, and negated range bounds, become inner joins driven by the selective side; broader expression folding, outer/lateral join reordering, ambiguous bare references, and plans needing persisted statistics retain conservative execution | medium | divergence |
 | Optimizer hints | query-block, table, and index target resolution with ordered diagnostics and plan controls | shared ordered syntax parsing, audited timeout/geometry effects and nested SET_VAR precedence, SELECT and audited mutation table/query-block/index resolution, family conflicts, audited CTE instantiation, lexical scope and repeated syntax warnings, diagnostic ordering, preparation warning lifetimes, and audited bound-query join-hint elimination and [merged/materialized source warning ownership](torture/findings/2026-10-08-join-hint-merging.md) work; table `USE`/`FORCE`/`IGNORE INDEX` now controls simple JOIN-scope equality, membership, range, and index-merge access, including alternate eligible keys, single-source ORDER/GROUP index selection, and direct joined-table equality probes (and the [measured `IGNORE INDEX` case](benchmarks/results/2026-10-10-functional-bound-pipeline.md)); unknown named keys return 1176 for SELECT/EXPLAIN on physical tables, views, and metadata tables, single-table UPDATE, and joined UPDATE/DELETE; `USE INDEX` range cost decisions, multi-source ORDER/GROUP plans, broader join access, other mutation forms, optimizer_switch configuration, broader hint combinations, stored-program contexts, and other physical plan controls remain incomplete ([SELECT cases](torture/findings/2026-10-08-hint-families.md), [mutation cases](torture/findings/2026-10-08-mutation-hints.md)) | medium | divergence |
 | Mixed-type join filters | numeric `IN` conditions can move between collation-equivalent text keys as join order changes | the [audited two-source equality joins](torture/findings/2026-10-07-fulltext-join-bounds.md#mixed-type-in-across-equality-joins) transfer literal multi-value `IN` when STRAIGHT_JOIN or MATCH identifies the owner; simple costed two-source plans cover the smaller unindexed base and audited singleton-source choices, including competing-index controls; a [connection-sensitive equal-cardinality counterexample](torture/findings/2026-10-07-fulltext-join-bounds.md#connection-sensitive-result-on-2026-10-12) still differs on the creating connection, and other costed shapes, broader join graphs, and physical-plan reporting remain incomplete | medium (result membership) | divergence |
@@ -340,21 +367,40 @@ functional-equality profile](torture/findings/2026-10-15-correlated-materialized
 now shows six residual calls for both an exposed-column equality and its
 supported signed-integer `ABS` form. [A statement-local integer-expression key](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-integer-expression-lookup)
 reduces `ABS(d.k)+0=o.x` from 4,004 to six calls on the same profile.
+[Exact integer `COALESCE` and `IFNULL` expressions](torture/findings/2026-10-16-correlated-integer-fallback-lookup.md)
+also reuse that key over stable materialized rows, including NULL fallback
+and multi-argument `COALESCE`; the audited profile uses six residual calls.
 The [matched in-memory timing](benchmarks/results/2026-10-15-materialized-integer-expression-lookup.md)
 confirms a repeated-query speedup for this shape. [Text expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-text-expression-lookup)
 use the effective comparison collation and reduce the audited `LOWER(d.k)=o.x`
-profile from 4,004 to six residual calls. [Exact decimal expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-lookup)
+profile from 4,004 to six residual calls.
+Stable materialized [text-expression ranges](torture/findings/2026-10-17-correlated-materialized-text-range.md)
+now use ordered statement-local cuts under the effective comparison
+collation for inequalities and BETWEEN, including complete OR branches;
+the selective 1,004-row fixture reduces a residual from 6,030 calls to
+fewer than 80. [Exact decimal expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-lookup)
 reduce `d.k+0.00=o.x` from 5,005 to seven calls. [Finite DOUBLE-domain keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-lookup)
 now reduce `d.k+0e0=o.x` from 5,005 to seven calls too. DECIMAL and integer
-bounds use the same approximate comparison key, while string and non-finite
-floating lookups remain open. The audited BIGINT/DOUBLE expression-provenance
-comparison at 2⁵³ now matches MySQL.
+bounds and fully numeric finite strings use the same approximate comparison
+key; [positive `IN` lists](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#correlated-double-expression-in-candidates)
+of compatible stable outer bounds now union those keys. Malformed strings
+and non-finite floating lookups remain open. The
+audited BIGINT/DOUBLE expression-provenance comparison at 2⁵³ now matches MySQL.
 [Finite DOUBLE-expression ranges](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-ranges)
 now use ordered statement-local cuts for numeric correlated inequalities and
 BETWEEN, including complete OR branches; the narrow 1,000-row profile uses
 11 residual calls across four outer rows. The audited decimal-to-DOUBLE
-halfway bound at 2⁵³+1 also follows MySQL's single rounding. String and
-non-finite range bounds still scan.
+halfway bound at 2⁵³+1 also follows MySQL's single rounding. Fully numeric
+finite string bounds use the same cuts; malformed strings and non-finite
+range bounds still scan.
+[Indexed physical and pass-through DOUBLE columns](torture/findings/2026-10-17-correlated-physical-double-string.md)
+also use fully numeric finite correlated string bounds for equality,
+narrow ranges, and [positive `IN` lists](torture/findings/2026-10-17-correlated-physical-double-string.md#correlated-positive-in-bounds),
+leaving the original predicate to decide row membership.
+The [indexed malformed and overflowing string comparison follow-up](torture/findings/2026-10-17-correlated-physical-double-string.md#numeric-conversion-warnings-and-indexed-malformed-bounds)
+also matches audited plan-dependent warning counts and maximum-DOUBLE row
+membership for equality and positive `IN`; ambiguous overflow text and non-finite ranges retain
+the conservative scan path.
 
 ## 3. Built-in functions
 
@@ -547,6 +593,9 @@ still need a row representation that retains their raw bytes.
 Named CHECK constraints support enforcement state
 and `ALTER` validation, and ENUM or SET values enforce membership. Adding a
 unique key over colliding data returns 1062 without publishing a corrupt index.
+[Repeated plain columns in one index](torture/findings/2026-10-17-duplicate-index-parts.md)
+are rejected with MySQL's 1060 diagnostic across CREATE and ALTER forms;
+distinct functional parts remain permitted.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -610,6 +659,11 @@ Row- and key-stripe waits participate in a shared wait-for graph; the request
 with the least held ownership aborts with MySQL error 1213/SQLSTATE 40001;
 equal-cost cycles choose the newest participant.
 
+`FLUSH TABLES WITH READ LOCK` leaves temporary-only writes available but
+blocks [mixed temporary/permanent writes](torture/findings/2026-10-17-temporary-global-read-lock.md)
+until `UNLOCK TABLES`, including permanent writes whose SELECT source is
+temporary. The lock owner receives 1223 for the same mixed write.
+
 XA branches use the same private snapshots and conflict validation. Prepared
 branches detach from their sessions, survive WAL recovery, remain invisible
 until completion, and retain their shared row, exclusive row, and unique-key
@@ -639,6 +693,12 @@ A [post-preview.11 durability-matched checkpoint](benchmarks/results/2026-10-15-
 again measures about 0.43× MySQL throughput at one writer and 0.27× at eight;
 the recent correctness and planning merges did not change the wire-write
 scaling gap.
+A [current-head repeat](benchmarks/results/2026-10-17-keyless-write-scaling-checkpoint.md)
+measures 0.39× and 0.25× at one and eight writers. Its in-memory control has
+the same weak worker-scaling slope, so WAL work alone is not the full cause.
+A [same-run stage profile](benchmarks/results/2026-10-17-keyless-write-handler-stage-profile.md)
+locates eight-writer growth in both durable acknowledgement and execution work
+outside that acknowledgement; it does not yet isolate the latter's cause.
 
 ## 8. Persistence and durability
 
@@ -705,6 +765,9 @@ persist and compose through nested views.
 Uncorrelated scalar projection subqueries preserve updateability but not
 insertability, dependent projection subqueries refuse writes, and subqueries
 inside view predicates lower with the base-table write.
+[Read-only derived and CTE sources](torture/findings/2026-10-17-derived-source-view-metadata.md)
+now follow MySQL's permissive outer-view `IS_UPDATABLE` metadata, including a
+recursive-only view that reports `YES` but still rejects UPDATE with 1288.
 
 Direct physical inner-join views can update one component table per statement
 and insert through explicit target columns into one insertable component.
@@ -744,9 +807,10 @@ ordering across multi-source layers remains open.
 now report 1356 for revoked source grants before a physical target join-key
 denial; a revoked target read alone still reports 1143. An audited
 parenthesized inner-join operand containing a derived and physical source is
-also writable and preserves their distinct 1356/1143 grant diagnostics. Other
-The target-first correlated `LATERAL` source under two definers also remains
-writable and reports 1356 for either revoked source read. Other derived,
+also writable and preserves their distinct 1356/1143 grant diagnostics.
+Target-first and aggregate-derived-first dependent `LATERAL` sources under two
+definers also remain writable. The latter reports 1356 for a revoked read on
+either source and 1143 for a revoked writable-target read. Other derived,
 lateral, and grouped grant paths remain unaudited.
 Joined UPDATE also reaches a mergeable component view with a distinct definer.
 The outer definer must retain access to the component view, while that view's
@@ -844,6 +908,10 @@ write-grant denials. Broader join-source reorderings and layered
 authorization for those chains remain open. [Native MySQL 8.4.11 reports
 audited left- and right-outer-join views as non-updatable](torture/findings/2026-10-15-outer-join-view-updateability.md),
 even when the projection exposes only columns from the preserved side.
+[Grouped derived sources with a HAVING aggregate whose argument shares an
+output alias](torture/findings/2026-10-16-having-aggregate-shadow-view.md)
+now retain MySQL's source-column binding, view rows, and physical-target
+UPDATE behavior.
 
 Multi-component writes, outer-join view writes, and join-view DELETE/REPLACE
 are refused with MySQL-compatible errors for the audited shapes.
@@ -886,7 +954,7 @@ trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; `INSERT ... SET`, `IGNORE`, ODKU, and audited component CHECK OPTION cases work; audited three-layer outer views and renamed column grants work; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, outer view layers, and aggregate/UNION/`JSON_TABLE` read-only join components compose writable targets; audited independent and [recursive/dependent CTE](torture/findings/2026-10-16-recursive-cte-joined-view.md) read sources also precede a joined UPDATE target; broader layered joins, CTE compositions, and remaining expression shapes stay open | medium | subset |
+| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; `INSERT ... SET`, `IGNORE`, ODKU, and audited component CHECK OPTION cases work; audited three-layer outer views and renamed column grants work; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, [a checked single-source layer above a joined view](torture/findings/2026-10-17-checked-layered-join-view.md), and [audited joined layers over a joined writable source](torture/findings/2026-10-17-nested-joined-view-source.md), including private inner aliases reused by outer joins, qualified inner `JSON_TABLE` joins and inner `LATERAL` joins with qualified references or unambiguous bare local or known preceding-source columns, including LATERAL outputs, and a nested target after multiple read-only derived sources, compose writable targets; aggregate/UNION/`JSON_TABLE` read-only join components and audited independent and [recursive/dependent CTE](torture/findings/2026-10-16-recursive-cte-joined-view.md) read sources also precede a joined UPDATE target; additional layered source orders, security combinations, CTE compositions, and expression shapes stay open | medium | subset |
 | View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 
 ## 10. Stored routines, events, schedulers
@@ -914,7 +982,9 @@ oracle-verified TF × IDF² scoring with its epsilon floor and built-in stopword
 list. Word stopwords are filtered when indexing; ordinary queries can still
 match surviving collation-equivalent or historical postings
 ([oracle evidence](torture/findings/2026-10-07-fulltext-word-stopword-postings.md)). Boolean syntax covers
-`+ - > < ~ word* "phrases" @N proximity ()` with depth cap; blind
+`+ - > < ~ word* "phrases" @N proximity ()` with depth cap; [unbalanced
+word-parser groups](torture/findings/2026-10-17-word-boolean-group-syntax.md)
+raise MySQL error 1064 while ngram groups return no matches; blind
 relevance-feedback expansion and bare WHERE-MATCH relevance ordering are also
 supported.
 
@@ -953,12 +1023,65 @@ range, and spatial candidates before scoring. Inner joins also propagate compati
 bounds through equality chains without shrinking the relevance corpus. Multi-table
 UPDATE/DELETE score each physical source before evaluating joins, predicates,
 and assignments.
+[Boolean exclusion terms](torture/findings/2026-10-17-negative-fulltext-candidates.md)
+now skip posting traversal when no positive term or candidate can match,
+including the repeated CJK ngram path; mixed-term exclusions scan the smaller
+of their posting and matched rows.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, indexed `IN`, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; implicit relevance ordering can drive either side of a qualified two-table inner join when the other side is an exact unique probe; [equality chains](torture/findings/2026-10-07-fulltext-join-bounds.md) propagate compatible equality, range, and literal `IN` bounds across inner/cross joins without shrinking the relevance corpus; mixed comparison domains and broader join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
 | Transaction relevance | MySQL uses an approximate global table-row estimate for ranking | visibility cases agree; fsdb uses the committed corpus count rather than estimates that remain changed after rollback until ANALYZE ([controlled oracle](torture/findings/2026-10-07-fulltext-transaction-visibility.md#relevance-and-implementation-boundary)); follows the deliberate statistics policy in section 16 | high (relevance correctness) | deliberate divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | ngram DDL, search modes, stopword and phrase boundaries, mutation, startup token sizes, and preserved postings across WAL/snapshot recovery are implemented; common metadata-only MODIFY/CHANGE column definitions also preserve historical postings ([recovery oracle](torture/findings/2026-10-07-ngram-startup-sizing.md)); [multi-column searches and relevance at startup sizes 1–10](torture/findings/2026-10-07-ngram-fulltext.md) match the audited default-collation MySQL corpus, including Unicode formatting and zero-width controls, combining-mark boundaries, decomposed and voiced kana, width and script variants, compatibility ideographs, ideographic variation selectors, CJK punctuation presentation forms, and numeric symbols, within score tolerance; [legacy `utf8mb4_unicode_ci` punctuation](torture/findings/2026-10-15-legacy-ngram-punctuation.md), [enclosed CJK forms](torture/findings/2026-10-17-enclosed-cjk-legacy-ngram.md), and [U+2100–U+21FF letterlike symbols](torture/findings/2026-10-17-letterlike-legacy-ngram.md), and [U+3000–U+31FF kana and Bopomofo forms](torture/findings/2026-10-17-kana-extension-legacy-ngram.md) match their audited MySQL ngram and equality cases; [later compatibility ideographs and sampled supplementary scalars](torture/findings/2026-10-17-compatibility-ideograph-audit.md) now match their audited native-MySQL cases; exact legacy weight bytes, broader legacy-collation behavior, and MeCab remain open | medium (for CJK) | partial |
+
+The [remaining supplementary compatibility-ideograph block](torture/findings/2026-10-17-compatibility-ideograph-audit.md)
+also matches 1,716 native-MySQL ngram searches at each of startup sizes 1–10.
+A [legacy-collation selector and CJK punctuation audit](torture/findings/2026-10-18-legacy-cjk-selector-audit.md)
+found no membership or relevance differences across 4,800 additional
+two-column ngram queries at token sizes 1–10. This narrows the sampled
+legacy-collation gap; MeCab and unsampled weight families remain open.
+The [U+FE10–U+FE6F legacy vertical-form audit](torture/findings/2026-10-18-legacy-vertical-half-mark-ngram.md)
+also now matches 504 MySQL searches per token size at sizes 1–10, after
+preserving UCA 4.0's distinct U+FE1A–U+FE1F and U+FE24–U+FE2F weights.
+
+The [Nüshu U+1B170–U+1B2FF audit](torture/findings/2026-10-18-nushu-ngram-audit.md)
+finds no two-column membership or relevance differences in 7,128 general-ci
+searches at token sizes 1–3 or 2,376 searches each for Unicode 5.2 and 9.0
+at size 1. MeCab and other untested Unicode ranges remain open.
+The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
+likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
+plus 1,464 legacy Unicode searches over its later part at size 1.
+
+[Assigned supplementary kana in U+1B000–U+1B16F](torture/findings/2026-10-18-supplementary-kana-ngram.md)
+now retain distinct Unicode 5.2 and 9.0 implicit weights for equality and
+ngram postings. The audited size 1–3 corpus agrees with MySQL across natural,
+Boolean, and query-expansion searches under both collations and the older
+`utf8mb4_unicode_ci` fallback. The assigned U+1B130–U+1B16F extension also
+matches audited size-1 through size-3 searches under Unicode 5.2 and 9.0.
+The [U+1F100–U+1F1FF enclosed alphanumeric audit](torture/findings/2026-10-18-enclosed-alphanumeric-520-ngram.md)
+also preserves 193 distinct Unicode 5.2 implicit-weight scalars in
+collation keys and two-column ngram postings; the maintained range oracle
+checks natural, Boolean, and expansion searches across startup token sizes
+1–10. Unicode 9.0 keeps its separate expansion behavior.
+
+The [general Unicode letterlike-symbol audit](torture/findings/2026-10-17-general-ci-letterlike-weights.md)
+matches MySQL's U+2100–U+21FF primary-weight classes in two-column
+ngram searches at token sizes 1–10. Broader collation and parser behavior
+remains open.
+A current-head rerun of the maintained two-column `utf8mb4_general_ci`
+corpus matches MySQL 8.4.11 in all 387 searches at each of sizes 1–5;
+the range-specific audits below retain their separate coverage boundaries.
+The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
+also matches MySQL's distinct U+2200–U+22FF primary weights in the same
+two-column ngram lane at token sizes 1–10.
+The [dingbat and supplemental-operator audit](torture/findings/2026-10-17-general-ci-later-symbol-weights.md)
+likewise preserves literal U+2700–U+27FF and U+2A00–U+2AFF weights, including
+decorated number forms that ICU had merged.
+[Japanese kana-sensitive ngrams](torture/findings/2026-10-17-ja-kana-sensitive-ngram.md)
+now keep hiragana and katakana postings separate under
+`utf8mb4_ja_0900_as_cs_ks`; the audited size-one and size-two corpora match
+MySQL after accounting for compatibility ideograph weight classes. Broader
+Japanese collation and parser behavior remains open.
 
 The [Boolean query Unicode character-table gap](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md)
 is closed for audited cases: Boolean word and phrase boundaries now use
@@ -989,12 +1112,114 @@ The [legacy Unicode collation probe](torture/findings/2026-10-17-unicode-520-ngr
 now matches the audited spacing, format-control, and Korean Jamo ngram cases
 under both `utf8mb4_unicode_ci` and `utf8mb4_unicode_520_ci`. The full
 two-column corpus matches at token sizes 1–10 for each collation. Broader
+collation behavior and MeCab remain open.
 compatibility-ideograph searches under `utf8mb4_unicode_ci` and the full
 two-column corpus under `utf8mb4_0900_as_cs` also match the audited MySQL
 membership and relevance. [Curly quote forms in U+2000–U+206F](torture/findings/2026-10-17-general-punctuation-ngram.md)
 now have distinct legacy ngram keys; 426 searches per token size from 1
 through 10 match MySQL in membership and relevance. Broader collation
 behavior and MeCab remain open.
+
+The [Unicode 5.2 Bopomofo audit](torture/findings/2026-10-17-unicode520-bopomofo-ngram.md)
+keeps the measured extension letters distinct; the U+3100–U+31FF ngram corpus
+now matches MySQL at all ten token sizes under `utf8mb4_unicode_520_ci`.
+The [`utf8mb4_general_ci` supplementary-key probe](torture/findings/2026-10-17-general-ci-supplementary-ngram.md)
+now shares MySQL's sampled fallback weight across supplementary scalars;
+broader `general_ci` ngram and relevance differences remain.
+The [general-collation Jamo probe](torture/findings/2026-10-17-general-ci-jamo-ngram.md)
+also preserves conjoining Jamo's distinct weights without equating
+compatibility Jamo, resolving the audited size-5 Boolean short-term mismatch.
+The [Hangul-syllable probe](torture/findings/2026-10-17-general-ci-hangul-syllable-ngram.md)
+also matches 1,551 two-column searches per token size from 1–10 over
+U+AC00–U+ACFF with decomposed and compatibility Jamo controls.
+The complete U+AC00–U+D7A3 syllabary has distinct literal MySQL weights.
+Additional U+AD00–U+ADFF, U+C100–U+C1FF, and U+D600–U+D6FF corpora each
+match 1,536 searches per size across the same ten token sizes.
+The [halfwidth voicing-mark probe](torture/findings/2026-10-17-general-ci-halfwidth-marks.md)
+keeps mark positions in `utf8mb4_general_ci` keys; the audited two-column
+ngram corpus now matches MySQL at token sizes 6–10, while smaller sizes retain
+other collation and relevance differences.
+The [format-control probe](torture/findings/2026-10-17-general-ci-format-controls.md)
+also keeps nine audited format/space characters distinct. The corpus now
+matches at token sizes 5–10; smaller sizes and broader collation behavior
+remain open.
+The [decomposed-kana probe](torture/findings/2026-10-17-general-ci-kana-marks.md)
+keeps combining voicing marks distinct from precomposed kana under
+`utf8mb4_general_ci`; the audited corpus now matches at sizes 4–10.
+The [radical-weight probe](torture/findings/2026-10-17-general-ci-radical-weights.md)
+also preserves the distinct primary weights of assigned CJK radicals; the
+audited general-collation corpus now matches at ngram sizes 3–10.
+The [combining-accent probe](torture/findings/2026-10-17-general-ci-combining-accents.md)
+keeps decomposed accents in positional keys and removes the audited size-2
+short Boolean false positives; kana forms and query expansion remain open.
+The [kana-weight probe](torture/findings/2026-10-17-general-ci-kana-weights.md)
+also preserves assigned fullwidth and halfwidth kana weights; the two-column
+general-collation ngram corpus now has only four size-1 relevance differences,
+with sizes 2–10 matching all audited searches.
+The [compatibility-ideograph probe](torture/findings/2026-10-17-general-ci-compatibility-ideographs.md)
+separates U+F900–U+FAFF from unified Han in `utf8mb4_general_ci`. The maintained
+two-column corpus now matches MySQL 8.4.11 in membership and relevance for
+387 searches at each ngram size 1–10; the expanded size-1 range also matches
+across 2,832 searches. Other characters, collations, and search shapes remain
+outside these audits.
+The [enclosed-CJK and square-unit probe](torture/findings/2026-10-17-general-ci-enclosed-cjk-weights.md)
+preserves MySQL's literal U+3200–U+33FF weights. Its expanded two-column lane
+now matches 3,066 searches at each of ngram sizes 1 and 2; broader CJK and
+full-text behavior remains to audit.
+The [enclosed-alphanumeric probe](torture/findings/2026-10-17-general-ci-enclosed-alphanumerics.md)
+preserves U+2460–U+24FF written weights while retaining MySQL's circled-letter
+case pairs; its expanded ngram lane matches at sizes 1 and 2.
+The [CJK-symbol probe](torture/findings/2026-10-17-general-ci-cjk-symbol-weights.md)
+preserves MySQL's distinct U+3000–U+303F weights; its expanded ngram lane
+matches at sizes 1 and 2.
+The [vertical and small-form punctuation probe](torture/findings/2026-10-17-general-ci-vertical-small-forms.md)
+preserves distinct U+FE10–U+FE6F weights; its expanded two-column ngram lane
+matches MySQL at sizes 1 and 2.
+The [punctuation and script-number probe](torture/findings/2026-10-17-general-ci-punctuation-script-numbers.md)
+preserves distinct dash, quote, superscript, and subscript weights that ICU
+otherwise merges; the U+2000–U+20FF ngram lane matches at sizes 1 and 2.
+The [adjacent symbol-block audit](torture/findings/2026-10-17-general-ci-adjacent-symbol-blocks.md)
+found no additional membership or relevance differences across eight
+U+2300–U+2AFF blocks at sizes 1 and 2. The U+2800–U+28FF block also matches
+at sizes 3–10, with literal, distinct MySQL weights throughout.
+The [Glagolitic and Coptic block probe](torture/findings/2026-10-17-general-ci-glagolitic-coptic.md)
+preserves MySQL's distinct U+2C00–U+2CFF weights; its expanded ngram lane
+matches at sizes 1 and 2.
+The [adjacent U+2D00–U+2DFF probe](torture/findings/2026-10-17-general-ci-2d00-boolean-boundary.md)
+now matches at sizes 1–10. It corrected 152 Boolean-mode membership or
+relevance differences at size 2 while preserving historical short postings;
+adjacent U+2B00 and U+2E00 controls match at sizes 1 and 2.
+The [Bopomofo and Kanbun probe](torture/findings/2026-10-17-general-ci-bopomofo-weights.md)
+preserves distinct U+3100–U+31BF primary weights; the extension-block ngram
+lane matches MySQL at sizes 1–10 (288 searches per size), as does the
+base-block lane (822 searches per size). The adjacent U+31C0–U+31FF control
+also matches (330 searches per size) without an override.
+The [Han extension and Hangul Jamo audit](torture/findings/2026-10-18-general-ci-han-jamo-audit.md)
+matches MySQL across 7,356 additional two-column ngram searches at sizes 1
+and 2, covering sampled Extension A/B ideographs and both Jamo extension
+blocks without a code override.
+The [extended combining-mark probe](torture/findings/2026-10-17-general-ci-extended-combining-marks.md)
+preserves distinct U+1AB0–U+1AFF, U+1DC0–U+1DFF, and U+20D0–U+20FF
+weights in CJK text. The adjacent U+FE20–U+FE2F block needs no override.
+Their expanded ngram lanes match MySQL at sizes 1–10 (186, 384, 198, and 96
+searches per size, respectively).
+For `utf8mb4_unicode_520_ci`, [combining half marks](torture/findings/2026-10-18-unicode-520-combining-half-marks.md)
+retain the UCA 5.2 split between primary-ignorable U+FE20–U+FE26 and
+distinct U+FE27–U+FE2F weights. The [extended mark block](torture/findings/2026-10-18-unicode-520-extended-combining-marks.md)
+also keeps the 80 distinct U+1AB0–U+1AFF implicit weights. The half-mark
+two-column ngram probe matches MySQL at sizes 1 and 2; the extended-mark
+probe matches at sizes 1–10. The [supplemental mark block](torture/findings/2026-10-18-unicode-520-supplemental-combining-marks.md)
+retains its ignorable, explicit, and implicit weight classes, including
+U+1DCA's equivalence to U+036C; its expanded ngram probe also matches at
+sizes 1–10. Other Unicode 5.2 blocks remain to audit.
+For the older `utf8mb4_unicode_ci`, the [UCA 4.0 mark probe](torture/findings/2026-10-18-unicode-400-combining-marks.md)
+keeps U+1AB0–U+1AFF and U+1DC0–U+1DFF implicit weights distinct, and
+separates U+20EB–U+20F0 from the preceding ignorable marks. Its expanded
+ngram corpora match MySQL at sizes 1–10.
+[General Unicode variation selectors](torture/findings/2026-10-17-general-ci-variation-selectors.md)
+now retain their distinct written weights across U+FE00–U+FE0F, including
+U+FE0F, in equality keys and ngram postings. The two-column corpus matches
+MySQL at token sizes 1–10 (96 searches per size).
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
@@ -1498,7 +1723,8 @@ The [correlated functional-key profile](benchmarks/results/2bb13632-quick.md)
 extends that coverage to compatible unary and composed expression indexes.
 Direct physical sources and pass-through projections now probe the maintained
 bucket; collation-changing comparisons and embedding overrides retain ordinary
-row evaluation.
+row evaluation. A [two-row correlated equality control](torture/findings/2026-10-17-correlated-functional-probe-budget.md)
+skips a redundant broad functional bucket and records the remaining residual cost.
 
 The [numeric functional-range profile](benchmarks/results/04686720-quick.md)
 covers direct and correlated `ABS`/length-result bounds. The maintained ordered
@@ -1656,10 +1882,15 @@ implementation effort:
    from MySQL past small data.
 
 2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements,
-   plus [ordered `LIMIT 1` UPDATE and DELETE re-selection after a contended
-   first candidate stops matching or moves behind another candidate](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
-   with and without a secondary predicate index,
-   plus audited joined UPDATE and DELETE statements with named physical targets,
+   plus [ordered `LIMIT 1`, `LIMIT 2`, and `LIMIT 3` UPDATE and DELETE re-selection after a contended
+   first candidate stops matching, moves behind another candidate, or is
+   deleted](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
+   with and without a secondary predicate index, including two successive owner waits, plus pending inserts across
+   integer, valid `DATE`, [text](torture/findings/2026-10-16-limited-ordered-write-rebase.md#text-primary-keys),
+   audited two-part integer, and [text-plus-integer](torture/findings/2026-10-16-limited-ordered-write-rebase.md#composite-text-and-integer-primary-keys) primary-key order
+   frontiers, plus [filesort `id+0` ordering at LIMIT 1–3](torture/findings/2026-10-16-limited-ordered-write-rebase.md#filesort-expression-order)
+   that waits for pending primary-key inserts, plus audited joined UPDATE and DELETE statements with named
+   physical targets,
    [audited single-table updatable-view UPDATE and DELETE statements and joined-view
    UPDATE statements with one writable physical target](torture/findings/2026-10-15-view-write-rebase.md),
    and joined UPDATEs with uniquely owned bare assignments, including
@@ -1688,6 +1919,13 @@ implementation effort:
    A [completion-option check](benchmarks/results/2026-10-14-write-completion-check.md)
    likewise found no eight-writer gain from changing group-commit task
    continuations; the candidate was reverted.
+   A [fixed group-commit batch-window check](benchmarks/results/2026-10-17-group-commit-batch-window-check.md)
+   on the retained-WAL-stream branch found a clear one-writer regression from
+   a 50 microsecond leader delay. Eight-writer controls drifted, so the
+   candidate was reverted without a scheduling-policy change.
+   Its conditional 25 microsecond follow-up measured larger eight-writer
+   batches but no throughput gain against same-run MySQL controls; it too was
+   reverted.
    A [WAL queue and batch-stage profile](benchmarks/results/2026-10-15-wal-queue-stage-profile.md)
    found queue admission small relative to completion and measured per-batch
    file-open and flush costs. A retained-handle prototype removed the open
@@ -1757,8 +1995,17 @@ implementation effort:
    [EPSG 4030](torture/findings/2026-10-11-unspecified-wgs84-datum.md) uses
    WGS 84 ellipsoidal operations but refuses cross-SRS transforms without a
    datum shift. [Inverse projected longitude wrapping](torture/findings/2026-10-11-projected-longitude-wrap.md)
-   follows MySQL across geographic and projected targets. Geographic
-   [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
+   follows MySQL across geographic and projected targets.
+   Geographic [`ST_IsValid` for points, linework, and simple single-ring polygons](torture/findings/2026-10-16-geographic-validity.md)
+   now accepts the audited geographic shapes, including collections of them;
+   polygons with holes and multipolygons still need geodesic validity rules.
+   [Global and antipodal containment counterexamples](torture/findings/2026-10-16-geographic-global-containment.md)
+   now use Boost-shaped geographic winding and ring orientation; 3,600 random
+   global point probes and 1,200 random, vertex, and antipodal probes matched
+   MySQL 8.4.11. Two global `ST_IsValid` disagreements in the larger corpus
+   remain open, so broader geographic polygon validity still needs separate
+   validation.
+   Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)
    are covered for audited cases. [Point-to-polygon distance](torture/findings/2026-10-11-geographic-point-polygon-distance.md)
    covers audited holes, antimeridian crossings, and polar caps. [Line-to-polygon distance](torture/findings/2026-10-11-geographic-line-polygon-distance.md)

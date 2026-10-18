@@ -33,12 +33,15 @@ through a second definer layer. With `target` before the lateral source and
 the source reading `aux` by `target.id`, MySQL and FSDB both mark the outer
 view updatable and change one target row. Revoking the inner definer's
 `SELECT` on either `aux` or `target` makes the layered update return 1356 in
-both engines. This audits one target-first lateral join; other lateral
-arrangements remain open.
+both engines. A separate shape puts an aggregate-derived `flags` source and a
+dependent lateral `aux` source before the writable `target`. MySQL and FSDB
+both mark the outer layer updatable, change one target row, and report 1356
+when either read source loses `SELECT` or 1143 when the target loses it.
+Other lateral arrangements remain open.
 
 The [native oracle](../scripts/layered-derived-view-oracle.py) starts disposable
 MySQL and FSDB servers, checks the MySQL version, and compares metadata, error
 codes, affected rows, and final data. A focused `ViewTests` regression pins the
 grant sequence. This covers the audited flat and parenthesized joins under two
-definers, plus the target-first lateral join; other derived, lateral, and
-grouped grant paths remain to be audited.
+definers, plus target-first and target-last lateral joins; other derived,
+lateral, and grouped grant paths remain to be audited.

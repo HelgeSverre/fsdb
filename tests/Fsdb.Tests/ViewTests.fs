@@ -42,6 +42,40 @@ let tests =
                   [ [ Some "Acme"; Some "2"; Some "50.00" ] ]
                   "the view reevaluates its stored SELECT"
 
+          testCase "a grouped derived source keeps its source column inside HAVING aggregates"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE grouped_source (k INT,z INT)") "create source"
+              expectOk (run store "CREATE TABLE grouped_target (id INT PRIMARY KEY,k INT,val INT)") "create target"
+              expectOk (run store "INSERT INTO grouped_source VALUES (1,10),(1,5),(2,20),(3,-10),(3,-20)") "seed source"
+              expectOk (run store "INSERT INTO grouped_target VALUES (1,1,5),(2,2,7)") "seed target"
+              expectOk
+                  (run store "CREATE VIEW grouped_having_view AS SELECT t.id,t.val,d.z FROM (SELECT k,MAX(z) AS z FROM grouped_source GROUP BY k HAVING MAX(z)>0) d JOIN grouped_target t ON t.k=d.k")
+                  "create joined view"
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='grouped_having_view'")
+                  [ [ Some "YES" ] ]
+                  "the physical target remains writable"
+              Expect.equal
+                  (rows store "SELECT id,val,z FROM grouped_having_view ORDER BY id")
+                  [ [ Some "1"; Some "5"; Some "10" ]; [ Some "2"; Some "7"; Some "20" ] ]
+                  "the derived HAVING uses the source column"
+              expectOk (run store "UPDATE grouped_having_view SET val=val+1 WHERE id=1") "update through the view"
+              Expect.equal
+                  (rows store "SELECT id,val FROM grouped_target ORDER BY id")
+                  [ [ Some "1"; Some "6" ]; [ Some "2"; Some "7" ] ]
+                  "the joined write reaches the base table"
+
+              Expect.equal
+                  (rows store "SELECT k,MIN(z) AS z FROM grouped_source GROUP BY k HAVING ABS(z)>15 ORDER BY k")
+                  [ [ Some "2"; Some "20" ]; [ Some "3"; Some "-20" ] ]
+                  "outside an aggregate, HAVING still resolves the output alias first"
+
+              match run store "SELECT k,MAX(z) AS mz FROM grouped_source GROUP BY k HAVING MAX(mz)>0" with
+              | Err(1111, _) -> ()
+              | other -> failtestf "expected nested aggregate alias rejection, got %A" other
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()
@@ -569,6 +603,201 @@ let tests =
                   [ [ Some "1"; Some "14" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]
                   "nested join writes persist"
 
+          testCase "a checked single-source outer view can update a joined view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE layer_target(id INT PRIMARY KEY,n INT NOT NULL)") "create target"
+              expectOk (run store "CREATE TABLE layer_aux(id INT PRIMARY KEY,v INT NOT NULL)") "create aux"
+              expectOk (run store "INSERT INTO layer_target VALUES (1,10)") "seed target"
+              expectOk (run store "INSERT INTO layer_aux VALUES (1,1)") "seed aux"
+              expectOk
+                  (run store "CREATE VIEW layer_base AS SELECT t.id,t.n,a.v FROM layer_target t JOIN layer_aux a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create inner joined view"
+              expectOk
+                  (run store "CREATE VIEW layer_outer AS SELECT id,n FROM layer_base WHERE n>v+1 WITH CASCADED CHECK OPTION")
+                  "create checked outer view"
+              expectOk (run store "UPDATE layer_outer SET n=11 WHERE id=1") "update nested target"
+              match run store "UPDATE layer_outer SET n=2 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM layer_target WHERE id=1") [ [ Some "11" ] ] "rejected write is atomic"
+
+          testCase "checked joined layers can update a target inside a joined view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE layered_target(id INT PRIMARY KEY,n INT NOT NULL)") "create target"
+              expectOk (run store "CREATE TABLE layered_aux(id INT PRIMARY KEY,v INT NOT NULL)") "create aux"
+              expectOk (run store "INSERT INTO layered_target VALUES (1,10)") "seed target"
+              expectOk (run store "INSERT INTO layered_aux VALUES (1,1)") "seed aux"
+              expectOk
+                  (run store "CREATE VIEW layered_base AS SELECT t.id,t.n,a.v FROM layered_target t JOIN layered_aux a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create inner joined view"
+              let cases =
+                  [ "layered_lateral",
+                    "SELECT b.id,b.n,x.min_n FROM layered_base b JOIN LATERAL (SELECT b.v+1 AS min_n) x ON TRUE WHERE b.n>x.min_n"
+                    "layered_json",
+                    "SELECT b.id,b.n,j.jv FROM layered_base b JOIN JSON_TABLE(JSON_ARRAY(b.v),'$[*]' COLUMNS(jv INT PATH '$')) j WHERE b.n>j.jv"
+                    "layered_derived",
+                    "SELECT b.id,b.n,y.v AS aux_v FROM layered_base b JOIN (SELECT id,v FROM layered_aux) y ON y.id=b.id WHERE b.n>y.v" ]
+              for name, definition in cases do
+                  expectOk
+                      (run store $"CREATE VIEW {name} AS {definition} WITH CASCADED CHECK OPTION")
+                      $"create {name}"
+                  Expect.equal
+                      (rows store $"SELECT is_updatable FROM information_schema.views WHERE table_schema='fsdb' AND table_name='{name}'")
+                      [ [ Some "YES" ] ]
+                      $"{name} is updatable"
+                  expectOk (run store $"UPDATE {name} SET n=n+1 WHERE id=1") $"update through {name}"
+                  match run store $"UPDATE {name} SET n=0 WHERE id=1" with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected CHECK OPTION rejection through %s, got %A" name other
+                  Expect.equal (rows store "SELECT n FROM layered_target WHERE id=1") [ [ Some "11" ] ] "rejected write is atomic"
+                  expectOk (run store "UPDATE layered_target SET n=10 WHERE id=1") "reset target"
+
+              expectOk
+                  (run store "CREATE VIEW layered_component AS SELECT b.id,b.n,b.v,y.v AS marker FROM layered_base b JOIN (SELECT id,v FROM layered_aux) y ON y.id=b.id WHERE b.n>y.v WITH CASCADED CHECK OPTION")
+                  "create view exposing the joined component"
+              expectOk (run store "UPDATE layered_component SET v=2 WHERE id=1") "update the joined component"
+              match run store "UPDATE layered_component SET v=12 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected joined component CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT v FROM layered_aux WHERE id=1") [ [ Some "2" ] ] "joined component write and rejection persist"
+
+              expectOk
+                  (run store "CREATE VIEW layered_aggregate_base AS SELECT t.id,t.n,x.v FROM (SELECT id,v FROM layered_aux GROUP BY id,v) x JOIN layered_target t ON t.id=x.id WHERE t.n>x.v WITH CASCADED CHECK OPTION")
+                  "create inner view with a derived source"
+              expectOk
+                  (run store "CREATE VIEW layered_aggregate_outer AS SELECT b.id,b.n,y.v AS aux_v FROM layered_aggregate_base b JOIN (SELECT id,v FROM layered_aux) y ON y.id=b.id WHERE b.n>y.v WITH CASCADED CHECK OPTION")
+                  "create outer view with a derived source"
+              expectOk (run store "UPDATE layered_aggregate_outer SET n=n+1 WHERE id=1") "update through derived layers"
+              match run store "UPDATE layered_aggregate_outer SET n=0 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection through derived layers, got %A" other
+              Expect.equal (rows store "SELECT n FROM layered_target WHERE id=1") [ [ Some "11" ] ] "derived-layer rejection is atomic"
+
+          testCase "joined view layers keep their inner aliases private"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE alias_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE alias_companion(id INT PRIMARY KEY,v INT)"
+                    "CREATE TABLE alias_extra(id INT PRIMARY KEY,z INT)"
+                    "INSERT INTO alias_target VALUES(1,10)"
+                    "INSERT INTO alias_companion VALUES(1,1)"
+                    "INSERT INTO alias_extra VALUES(1,1)" ] do
+                  expectOk (run store sql) sql
+
+              expectOk
+                  (run store "CREATE VIEW alias_inner AS SELECT t.id,t.n,a.v FROM alias_target t JOIN alias_companion a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create inner joined view"
+              expectOk
+                  (run store "CREATE VIEW alias_outer AS SELECT iv.id,iv.n,iv.v FROM alias_inner iv JOIN alias_extra a ON a.id=iv.id")
+                  "create outer view reusing the hidden inner alias"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_schema='fsdb' AND table_name='alias_outer'")
+                  [ [ Some "YES" ] ]
+                  "MySQL 8.4 reports the outer view as updatable"
+              expectOk (run store "UPDATE alias_outer SET n=11 WHERE id=1") "update through alias collision"
+              expectOk (run store "UPDATE alias_outer SET v=2 WHERE id=1") "update the inner joined component"
+              match run store "UPDATE alias_outer SET v=12 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected inner CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM alias_target") [ [ Some "11" ] ] "the physical target changes"
+              Expect.equal (rows store "SELECT v FROM alias_companion") [ [ Some "2" ] ] "the rejected component write is atomic"
+
+          testCase "a derived source can precede a joined writable view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE using_target(id INT PRIMARY KEY,n INT NOT NULL)") "create target"
+              expectOk (run store "CREATE TABLE using_aux(id INT PRIMARY KEY,v INT NOT NULL)") "create aux"
+              expectOk (run store "INSERT INTO using_target VALUES (1,10)") "seed target"
+              expectOk (run store "INSERT INTO using_aux VALUES (1,1)") "seed aux"
+              expectOk
+                  (run store "CREATE VIEW using_base AS SELECT t.id,t.n,a.v FROM using_target t JOIN using_aux a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create inner joined view"
+              expectOk
+                  (run store "CREATE VIEW using_outer AS SELECT b.id,b.n,y.v AS aux_v FROM (SELECT id,v FROM using_aux GROUP BY id,v) y JOIN using_base b USING(id) WHERE b.n>y.v WITH CASCADED CHECK OPTION")
+                  "create outer joined view"
+              expectOk (run store "UPDATE using_outer SET n=n+1 WHERE id=1") "update nested target"
+              match run store "UPDATE using_outer SET n=0 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM using_target WHERE id=1") [ [ Some "11" ] ] "rejected write is atomic"
+
+          testCase "two read-only sources can precede a joined writable view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE two_source_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE two_source_aux(id INT PRIMARY KEY,v INT)"
+                    "INSERT INTO two_source_target VALUES(1,10)"
+                    "INSERT INTO two_source_aux VALUES(1,1)" ] do
+                  expectOk (run store sql) sql
+              expectOk
+                  (run store "CREATE VIEW two_source_inner AS SELECT t.id,t.n,a.v FROM two_source_target t JOIN two_source_aux a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create inner joined view"
+              expectOk
+                  (run store "CREATE VIEW two_source_outer AS SELECT iv.id,iv.n,x.k AS xk,y.k AS yk FROM (SELECT 1 AS k) x JOIN (SELECT 1 AS k) y ON y.k=x.k JOIN two_source_inner iv ON iv.id=x.k AND iv.id=y.k WITH CASCADED CHECK OPTION")
+                  "create outer view after two read-only sources"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_schema='fsdb' AND table_name='two_source_outer'")
+                  [ [ Some "YES" ] ]
+                  "MySQL 8.4 reports the outer view as updatable"
+              expectOk (run store "UPDATE two_source_outer SET n=11 WHERE id=1") "update the nested physical target"
+              match run store "UPDATE two_source_outer SET n=0 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM two_source_target") [ [ Some "11" ] ] "the rejected write is atomic"
+
+          testCase "an unchecked outer join enforces only the inner view check"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE inner_check_target(id INT PRIMARY KEY,n INT NOT NULL)") "create target"
+              expectOk (run store "CREATE TABLE inner_check_aux(id INT PRIMARY KEY,v INT NOT NULL)") "create aux"
+              expectOk (run store "INSERT INTO inner_check_target VALUES (1,10)") "seed target"
+              expectOk (run store "INSERT INTO inner_check_aux VALUES (1,1)") "seed aux"
+              expectOk
+                  (run store "CREATE VIEW inner_checked AS SELECT t.id,t.n,a.v FROM inner_check_target t JOIN inner_check_aux a ON a.id=t.id WHERE t.n>a.v WITH CASCADED CHECK OPTION")
+                  "create checked inner view"
+              expectOk
+                  (run store "CREATE VIEW outer_unchecked AS SELECT b.id,b.n FROM inner_checked b JOIN (SELECT 1 AS k) x ON x.k=b.id WHERE b.n>5")
+                  "create unchecked outer view"
+              expectOk (run store "UPDATE outer_unchecked SET n=3 WHERE id=1") "leave the unchecked outer view"
+              Expect.equal (rows store "SELECT n FROM inner_check_target WHERE id=1") [ [ Some "3" ] ] "outer predicate does not constrain the new value"
+              expectOk (run store "UPDATE inner_check_target SET n=10 WHERE id=1") "reset target"
+              match run store "UPDATE outer_unchecked SET n=1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected inner CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM inner_check_target WHERE id=1") [ [ Some "10" ] ] "inner rejection is atomic"
+
+          testCase "joined layers retain a component view's definer grant boundary"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE layered_grant_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE layered_grant_aux(id INT PRIMARY KEY,v INT)"
+                    "INSERT INTO layered_grant_target VALUES(1,10)"
+                    "INSERT INTO layered_grant_aux VALUES(1,1)"
+                    "CREATE USER layered_inner_owner"
+                    "CREATE USER layered_outer_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.layered_grant_target TO layered_inner_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.layered_grant_aux TO layered_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO layered_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO layered_outer_owner"
+                    "CREATE DEFINER='layered_inner_owner'@'%' SQL SECURITY DEFINER VIEW layered_grant_inner AS SELECT t.id,t.n AS metric,a.v FROM layered_grant_target t JOIN layered_grant_aux a ON a.id=t.id"
+                    "GRANT SELECT,UPDATE ON fsdb.layered_grant_inner TO layered_outer_owner"
+                    "CREATE DEFINER='layered_outer_owner'@'%' SQL SECURITY DEFINER VIEW layered_grant_outer AS SELECT b.id,b.metric AS n FROM layered_grant_inner b JOIN (SELECT 1 AS k) x ON x.k=b.id" ] do
+                  expectOk (run store sql) sql
+              expectOk (run store "UPDATE layered_grant_outer SET n=n+1 WHERE id=1") "write through two definers"
+              expectOk (run store "REVOKE UPDATE ON fsdb.layered_grant_inner FROM layered_outer_owner") "revoke component write grant"
+              match run store "UPDATE layered_grant_outer SET n=n+1 WHERE id=1" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected revoked inner-view grant to block the outer write, got %A" other
+              Expect.equal (rows store "SELECT n FROM layered_grant_target") [ [ Some "11" ] ] "denied write changes nothing"
+              expectOk (run store "GRANT UPDATE(metric) ON fsdb.layered_grant_inner TO layered_outer_owner") "grant the exposed column"
+              expectOk (run store "UPDATE layered_grant_outer SET n=n+1 WHERE id=1") "column grant permits the renamed write"
+              Expect.equal (rows store "SELECT n FROM layered_grant_target") [ [ Some "12" ] ] "column-authorized write persists"
+
           testCase "joined view outer layers preserve invoker and definer grants"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -853,6 +1082,171 @@ let tests =
                   Expect.stringContains message "json_layer_outer_owner" "the outer definer is the effective invoker"
                   Expect.stringContains message "column 'id'" "the join key is denied first"
               | other -> failtestf "expected the inner view's effective invoker to lose its join grant, got %A" other
+
+          testCase "joined outer views inline a qualified inner JSON_TABLE source"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for sql in
+                  [ "CREATE TABLE nested_json_target(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO nested_json_target VALUES(1,0),(2,0)"
+                    "CREATE VIEW nested_json_inner AS SELECT a.id,a.n,j.x FROM nested_json_target a JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id WHERE a.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_json_outer AS SELECT v.id,v.n,v.x,j.k FROM nested_json_inner v JOIN (SELECT 1 AS k) j ON j.k=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_json_outer'")
+                  [ [ Some "YES" ] ]
+                  "the layered JSON_TABLE target remains updatable despite the private alias collision"
+              Expect.equal (run store "UPDATE nested_json_outer SET n=1 WHERE id=1") (Affected 1UL) "the joined layer updates the physical row"
+
+              for rejected in [ -1; 10 ] do
+                  match run store (sprintf "UPDATE nested_json_outer SET n=%d WHERE id=1" rejected) with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected CHECK OPTION rejection for %d, got %A" rejected other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_json_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
+                  "both rejected writes leave the accepted value intact"
+
+          testCase "joined outer views rebind qualified inner LATERAL references"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for sql in
+                  [ "CREATE TABLE nested_lateral_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE nested_lateral_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO nested_lateral_target VALUES(1,0),(2,0)"
+                    "INSERT INTO nested_lateral_aux VALUES(1,7)"
+                    "CREATE VIEW nested_lateral_inner AS SELECT t.id,t.n,d.aux FROM nested_lateral_target t JOIN LATERAL (SELECT a.aux FROM nested_lateral_aux a WHERE a.id=t.id) d ON d.aux>0 WHERE t.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_lateral_outer AS SELECT v.id,v.n,v.aux,q.mark FROM nested_lateral_inner v JOIN (SELECT 1 AS mark) q ON q.mark=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_lateral_outer'")
+                  [ [ Some "YES" ] ]
+                  "the qualified dependent source leaves the joined layer writable"
+              Expect.equal (run store "UPDATE nested_lateral_outer SET n=7 WHERE id=1") (Affected 1UL) "the layer updates its matched row"
+
+              for rejected in [ -1; 10 ] do
+                  match run store (sprintf "UPDATE nested_lateral_outer SET n=%d WHERE id=1" rejected) with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected CHECK OPTION rejection for %d, got %A" rejected other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_lateral_target ORDER BY id")
+                  [ [ Some "1"; Some "7" ]; [ Some "2"; Some "0" ] ]
+                  "the accepted value survives both rejected writes"
+
+          testCase "joined outer views retain bare local columns in inner LATERAL sources"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for sql in
+                  [ "CREATE TABLE nested_lateral_bare_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE nested_lateral_bare_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO nested_lateral_bare_target VALUES(1,0)"
+                    "INSERT INTO nested_lateral_bare_aux VALUES(1,7)"
+                    "CREATE VIEW nested_lateral_bare_inner AS SELECT t.id,t.n,d.aux FROM nested_lateral_bare_target t JOIN LATERAL (SELECT aux FROM nested_lateral_bare_aux a WHERE a.id=t.id) d ON d.aux>0 WHERE t.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_lateral_bare_outer AS SELECT v.id,v.n,v.aux,q.mark FROM nested_lateral_bare_inner v JOIN (SELECT 1 AS mark) q ON q.mark=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_lateral_bare_outer'")
+                  [ [ Some "YES" ] ]
+                  "a bare local LATERAL column does not make the outer view read-only"
+              Expect.equal
+                  (run store "UPDATE nested_lateral_bare_outer SET n=7 WHERE id=1")
+                  (Affected 1UL)
+                  "the outer layer updates its target"
+
+              match run store "UPDATE nested_lateral_bare_outer SET n=10 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_lateral_bare_target")
+                  [ [ Some "1"; Some "7" ] ]
+                  "the rejected write preserves the accepted value"
+
+              for sql in
+                  [ "CREATE TABLE nested_lateral_bare_shadow(id INT PRIMARY KEY,aux INT,n INT)"
+                    "INSERT INTO nested_lateral_bare_shadow VALUES(1,7,-1)"
+                    "CREATE VIEW nested_lateral_shadow_inner AS SELECT t.id,t.n,d.aux FROM nested_lateral_bare_target t JOIN LATERAL (SELECT a.aux FROM nested_lateral_bare_shadow a WHERE a.id=t.id AND n>=0) d ON d.aux>0 WHERE t.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_lateral_shadow_outer AS SELECT v.id,v.n,v.aux,q.mark FROM nested_lateral_shadow_inner v JOIN (SELECT 1 AS mark) q ON q.mark=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_lateral_shadow_outer'")
+                  [ [ Some "YES" ] ]
+                  "the local column shadows the preceding target column"
+              Expect.equal
+                  (run store "UPDATE nested_lateral_shadow_outer SET n=8 WHERE id=1")
+                  (Affected 0UL)
+                  "the local negative value excludes the row despite the target's positive value"
+
+          testCase "joined outer views rebind bare outer columns in inner LATERAL sources"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for sql in
+                  [ "CREATE TABLE nested_lateral_outer_bare_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE nested_lateral_outer_bare_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO nested_lateral_outer_bare_target VALUES(1,0)"
+                    "INSERT INTO nested_lateral_outer_bare_aux VALUES(1,7)"
+                    "CREATE VIEW nested_lateral_outer_bare_inner AS SELECT t.id,t.n,d.aux FROM nested_lateral_outer_bare_target t JOIN LATERAL (SELECT a.aux FROM nested_lateral_outer_bare_aux a WHERE a.id=t.id AND n>=0) d ON d.aux>0 WHERE t.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_lateral_outer_bare_outer AS SELECT v.id,v.n,v.aux,q.mark FROM nested_lateral_outer_bare_inner v JOIN (SELECT 1 AS mark) q ON q.mark=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_lateral_outer_bare_outer'")
+                  [ [ Some "YES" ] ]
+                  "the bare outer target reference is rebound under the joined layer"
+              Expect.equal
+                  (run store "UPDATE nested_lateral_outer_bare_outer SET n=7 WHERE id=1")
+                  (Affected 1UL)
+                  "the outer layer updates the target"
+
+              match run store "UPDATE nested_lateral_outer_bare_outer SET n=10 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_lateral_outer_bare_target")
+                  [ [ Some "1"; Some "7" ] ]
+                  "the rejected write preserves the accepted value"
+
+          testCase "joined outer views rebind bare references to preceding LATERAL columns"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for sql in
+                  [ "CREATE TABLE nested_lateral_chain_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE nested_lateral_chain_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO nested_lateral_chain_target VALUES(1,0)"
+                    "INSERT INTO nested_lateral_chain_aux VALUES(1,7)"
+                    "CREATE VIEW nested_lateral_chain_inner AS SELECT t.id,t.n,d.aux,e.bump FROM nested_lateral_chain_target t JOIN LATERAL (SELECT a.aux FROM nested_lateral_chain_aux a WHERE a.id=t.id) d ON d.aux>0 JOIN LATERAL (SELECT aux+1 AS bump) e ON e.bump>0 WHERE t.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_lateral_chain_outer AS SELECT v.id,v.n,v.aux,v.bump,d.mark FROM nested_lateral_chain_inner v JOIN (SELECT 1 AS mark) d ON d.mark=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_lateral_chain_outer'")
+                  [ [ Some "YES" ] ]
+                  "a preceding LATERAL output can own the bare column"
+              Expect.equal
+                  (run store "UPDATE nested_lateral_chain_outer SET n=7 WHERE id=1")
+                  (Affected 1UL)
+                  "the joined layer updates its target after alias rebinding"
+
+              match run store "UPDATE nested_lateral_chain_outer SET n=10 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_lateral_chain_target")
+                  [ [ Some "1"; Some "7" ] ]
+                  "the rejected write preserves the accepted value"
 
           testCase "layered JSON_TABLE chains retain writable target grants across source orders"
           <| fun _ ->
@@ -2260,9 +2654,56 @@ let tests =
                   (run store
                       "CREATE VIEW recursive_only AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) SELECT k FROM seq")
                   "create recursive-only view"
+              expectOk
+                  (run store "CREATE VIEW aggregate_cte_only AS WITH x AS (SELECT COUNT(*) AS n FROM recursive_target) SELECT n FROM x")
+                  "create aggregate CTE-only view"
+              expectOk
+                  (run store "CREATE VIEW expression_cte_only AS WITH x AS (SELECT 1 AS k) SELECT k+1 AS n FROM x")
+                  "create expression CTE-only view"
+              expectOk
+                  (run store "CREATE VIEW union_cte_only AS WITH x AS (SELECT 1 AS k UNION ALL SELECT 2) SELECT k FROM x")
+                  "create UNION CTE-only view"
+              Expect.equal
+                  (rows store
+                      "SELECT TABLE_NAME, IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_NAME IN ('recursive_only','aggregate_cte_only','expression_cte_only','union_cte_only') ORDER BY TABLE_NAME")
+                  [ [ Some "aggregate_cte_only"; Some "YES" ]
+                    [ Some "expression_cte_only"; Some "NO" ]
+                    [ Some "recursive_only"; Some "YES" ]
+                    [ Some "union_cte_only"; Some "YES" ] ]
+                  "MySQL reports direct CTE columns writable in metadata despite rejecting recursive-only UPDATE"
               match run store "UPDATE recursive_only SET k=4" with
               | Err(1288, _) -> ()
               | other -> failtestf "expected recursive-only UPDATE rejection, got %A" other
+
+          testCase "read-only derived and CTE sources retain MySQL's updatable metadata"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE metadata_target (id INT PRIMARY KEY)") "create metadata source"
+              expectOk (run store "INSERT INTO metadata_target VALUES (1)") "insert metadata source row"
+              let recursive =
+                  "WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) "
+
+              for name, definition, expected in
+                  [ "derived_constant", "SELECT d.k FROM (SELECT 1 k) d", "YES"
+                    "derived_grouped", "SELECT d.id FROM (SELECT id FROM metadata_target GROUP BY id) d", "YES"
+                    "derived_union", "SELECT d.k FROM (SELECT 1 k UNION ALL SELECT 2) d", "YES"
+                    "cte_constant", "WITH c(k) AS (SELECT 1) SELECT k FROM c", "YES"
+                    "recursive_simple", recursive + "SELECT k FROM seq", "YES"
+                    "recursive_star", recursive + "SELECT * FROM seq", "YES"
+                    "recursive_ordered", recursive + "SELECT k FROM seq ORDER BY k", "YES"
+                    "recursive_expression", recursive + "SELECT k+0 AS k FROM seq", "NO"
+                    "recursive_distinct", recursive + "SELECT DISTINCT k FROM seq", "NO"
+                    "recursive_grouped", recursive + "SELECT k FROM seq GROUP BY k", "NO"
+                    "recursive_limited", recursive + "SELECT k FROM seq LIMIT 2", "NO" ] do
+                  let view = "metadata_" + name
+                  expectOk (run store ($"CREATE VIEW {view} AS {definition}")) ("create " + view)
+                  Expect.equal
+                      (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{view}'"))
+                      [ [ Some expected ] ]
+                      (view + " metadata")
+                  match run store ($"UPDATE {view} SET " + (if name = "derived_grouped" then "id=4" else "k=4")) with
+                  | Err(1288, _) -> ()
+                  | result -> failtestf "expected %s UPDATE rejection, got %A" view result
 
           testCase "joined views update a target after read-only CTE derived sources"
           <| fun _ ->
