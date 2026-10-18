@@ -312,7 +312,7 @@ let private foldUnicode520MongolianSeparator (value: string) =
 
 // ICU composes conjoining Hangul Jamo into syllables. MySQL's UCA 5.2 keeps
 // their primary weights separate, while compatibility Jamo share those weights.
-let private foldUnicode520Jamo (value: string) =
+let private foldLegacyUnicodeJamo (value: string) =
     let isJamo c = c >= '\u1100' && c <= '\u11ff'
     let isCompatibility c =
         (c >= '\u3130' && c <= '\u318f') || (c >= '\uffa0' && c <= '\uffdc')
@@ -418,13 +418,14 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->
             value |> foldLegacySpace |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
-            |> foldCjkQuoteForms |> foldUnicode520MongolianSeparator |> foldUnicode520Jamo
+            |> foldCjkQuoteForms |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
         | "utf8mb4_unicode_ci" ->
             value |> foldLegacySpace |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms
                   |> foldLegacyCompatibilityIdeographs
                   |> foldLegacySupplementary
                   |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
+                  |> foldLegacyUnicodeJamo
         | _ -> value
 
     let primaryText (s: string) = s |> foldText |> trim
