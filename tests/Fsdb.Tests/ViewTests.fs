@@ -2315,6 +2315,36 @@ let tests =
               | Err(1288, _) -> ()
               | other -> failtestf "expected recursive-only UPDATE rejection, got %A" other
 
+          testCase "read-only derived and CTE sources retain MySQL's updatable metadata"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE metadata_target (id INT PRIMARY KEY)") "create metadata source"
+              expectOk (run store "INSERT INTO metadata_target VALUES (1)") "insert metadata source row"
+              let recursive =
+                  "WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) "
+
+              for name, definition, expected in
+                  [ "derived_constant", "SELECT d.k FROM (SELECT 1 k) d", "YES"
+                    "derived_grouped", "SELECT d.id FROM (SELECT id FROM metadata_target GROUP BY id) d", "YES"
+                    "derived_union", "SELECT d.k FROM (SELECT 1 k UNION ALL SELECT 2) d", "YES"
+                    "cte_constant", "WITH c(k) AS (SELECT 1) SELECT k FROM c", "YES"
+                    "recursive_simple", recursive + "SELECT k FROM seq", "YES"
+                    "recursive_star", recursive + "SELECT * FROM seq", "YES"
+                    "recursive_ordered", recursive + "SELECT k FROM seq ORDER BY k", "YES"
+                    "recursive_expression", recursive + "SELECT k+0 AS k FROM seq", "NO"
+                    "recursive_distinct", recursive + "SELECT DISTINCT k FROM seq", "NO"
+                    "recursive_grouped", recursive + "SELECT k FROM seq GROUP BY k", "NO"
+                    "recursive_limited", recursive + "SELECT k FROM seq LIMIT 2", "NO" ] do
+                  let view = "metadata_" + name
+                  expectOk (run store ($"CREATE VIEW {view} AS {definition}")) ("create " + view)
+                  Expect.equal
+                      (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{view}'"))
+                      [ [ Some expected ] ]
+                      (view + " metadata")
+                  match run store ($"UPDATE {view} SET " + (if name = "derived_grouped" then "id=4" else "k=4")) with
+                  | Err(1288, _) -> ()
+                  | result -> failtestf "expected %s UPDATE rejection, got %A" view result
+
           testCase "joined views update a target after read-only CTE derived sources"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -734,6 +734,9 @@ persist and compose through nested views.
 Uncorrelated scalar projection subqueries preserve updateability but not
 insertability, dependent projection subqueries refuse writes, and subqueries
 inside view predicates lower with the base-table write.
+[Read-only derived and CTE sources](torture/findings/2026-10-17-derived-source-view-metadata.md)
+now follow MySQL's permissive outer-view `IS_UPDATABLE` metadata, including a
+recursive-only view that reports `YES` but still rejects UPDATE with 1288.
 
 Direct physical inner-join views can update one component table per statement
 and insert through explicit target columns into one insertable component.
