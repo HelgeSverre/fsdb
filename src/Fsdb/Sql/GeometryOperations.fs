@@ -41,11 +41,11 @@ let internal planarPointDistance (firstX: float, firstY: float) (secondX: float,
     let deltaX, deltaY = secondX - firstX, secondY - firstY
     sqrt (deltaX * deltaX + deltaY * deltaY)
 
-let private sphericalPointDistance radius (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
-    let latitudeDelta = radians (secondLatitude - firstLatitude)
-    let longitudeDelta = radians (secondLongitude - firstLongitude)
-    let firstLatitude = radians firstLatitude
-    let secondLatitude = radians secondLatitude
+let private sphericalPointDistance radius toRadians (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
+    let firstLatitude, secondLatitude = toRadians firstLatitude, toRadians secondLatitude
+    let firstLongitude, secondLongitude = toRadians firstLongitude, toRadians secondLongitude
+    let latitudeDelta = secondLatitude - firstLatitude
+    let longitudeDelta = secondLongitude - firstLongitude
     let haversine angle = sin (angle / 2.0) ** 2.0
 
     let centralHaversine =
@@ -66,8 +66,8 @@ let internal minimumPointSetDistance pointDistance firstPoints secondPoints =
         secondPoints
         |> List.fold (fun minimum second -> pointDistance first second |> nearer minimum) minimum) None
 
-let internal sphericalPointSetDistance radius firstPoints secondPoints =
-    minimumPointSetDistance (sphericalPointDistance radius) firstPoints secondPoints
+let internal sphericalPointSetDistance radius toRadians firstPoints secondPoints =
+    minimumPointSetDistance (sphericalPointDistance radius toRadians) firstPoints secondPoints
 
 /// MySQL delegates geographic point distance to Boost.Geometry's first-order
 /// Andoyer strategy; more exact geodesic formulae produce observably different

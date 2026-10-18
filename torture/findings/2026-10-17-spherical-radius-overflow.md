@@ -37,9 +37,14 @@ coordinate-pair discrepancy, repeated at four radius values and mirrored at
 the south pole. For `POINT(89.999999 0)` and
 `POINT(89.999999 179.999999)` at radius `1e300`, MySQL returns
 `3.4906587964907284e292` and fsdb returns `3.4906584856282815e292`,
-about `8.9e-8` lower. The same relative difference occurs at radii
-`5e307`, `5.7e307`, and `1e308`. The other 71 cases match within the
-oracle's `1e-13` relative tolerance. The oracle checks this divergence
-explicitly so that future numerical changes cannot silently erase or widen
-it. Its cause and the appropriate compatibility fix remain open; the
-large-radius overflow fix above is unaffected.
+about `8.9e-8` lower. The same relative difference occurred at radii
+`5e307`, `5.7e307`, and `1e308`; the other 71 cases matched within the
+oracle's `1e-13` relative tolerance.
+
+The difference came from conversion of geographic coordinates to radians.
+MySQL uses the SRS's stored angular unit (`0.017453292519943278` for WGS 84),
+while fsdb used `pi / 180`. SRID 0 uses the latter conversion in MySQL too,
+and already matched fsdb. Fsdb now uses the geographic angular unit for the
+built-in geographic SRS definitions and subtracts converted coordinates as
+MySQL's haversine strategy does. All 79 oracle cases now match, including the
+eight near-pole combinations.

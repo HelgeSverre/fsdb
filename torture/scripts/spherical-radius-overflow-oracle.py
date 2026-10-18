@@ -112,37 +112,22 @@ def main():
                     ):
                         for radius in ("1e300", "5e307", "5.7e307", "1e308"):
                             cases.append((first, second, radius))
-                known_polar_rounding = 0
                 for first, second, radius in cases:
                     expected = run(mysql_connection, first, second, radius)
                     actual = run(fsdb_connection, first, second, radius)
                     if isinstance(expected, tuple):
                         assert actual == expected, (first, second, radius, expected, actual)
                     else:
-                        if (first, second) in (
-                            ("POINT(89.999999 0)", "POINT(89.999999 179.999999)"),
-                            ("POINT(-89.999999 0)", "POINT(-89.999999 -179.999999)"),
-                        ):
-                            # This near-pole rounding divergence is documented separately.
-                            assert 8.8e-8 < abs(actual / expected - 1) < 9.0e-8, (
-                                first, second, radius, expected, actual
-                            )
-                            known_polar_rounding += 1
-                        else:
-                            assert math.isclose(actual, expected, rel_tol=1e-13, abs_tol=0), (
-                                first, second, radius, expected, actual
-                            )
+                        assert math.isclose(actual, expected, rel_tol=1e-13, abs_tol=0), (
+                            first, second, radius, expected, actual
+                        )
                 for sql in ("SELECT 1e309", "SELECT -1e309"):
                     expected = run_statement(mysql_connection, sql)
                     actual = run_statement(fsdb_connection, sql)
                     assert expected == actual == (
                         "error", (1367, "Illegal double '1e309' value found during parsing")
                     ), (sql, expected, actual)
-                print(
-                    f"MySQL {version}: {len(cases) - known_polar_rounding} radius cases matched, "
-                    f"{known_polar_rounding} known near-pole rounding differences, "
-                    "and two bare literal errors matched"
-                )
+                print(f"MySQL {version}: {len(cases)} radius cases and two bare literal errors matched")
             finally:
                 if fsdb_connection:
                     fsdb_connection.close()

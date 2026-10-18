@@ -1076,6 +1076,16 @@ let tests =
 
                     let wgsOrigin = call "ST_GeomFromText" [ VString "POINT(0 0)"; VInt 4326L ]
                     let wgsEast = call "ST_GeomFromText" [ VString "POINT(0 1)"; VInt 4326L ]
+                    let wgsNearPole = call "ST_GeomFromText" [ VString "POINT(89.999999 0)"; VInt 4326L ]
+                    let wgsNearPoleOpposite =
+                        call "ST_GeomFromText" [ VString "POINT(89.999999 179.999999)"; VInt 4326L ]
+
+                    let polarDistance = distance [ wgsNearPole; wgsNearPoleOpposite; VDouble 1e300 ]
+
+                    Expect.isLessThan
+                        (abs (polarDistance / 1e292 - 3.4906587964907284))
+                        1e-12
+                        "geographic angular units preserve near-pole distance"
 
                     Expect.isLessThan
                         (abs (distance [ wgsOrigin; wgsEast ] - 111195.07973463146))
