@@ -428,6 +428,8 @@ corner; adjacent grid points agree.
 [`ST_DISTANCE_SPHERE` with a large finite radius](torture/findings/2026-10-17-spherical-radius-overflow.md)
 now retains finite and zero point-set distances and reports MySQL error 3049
 when the final distance overflows; the native oracle covers the numeric edge.
+A deterministic 319-case WGS 84 sweep and twelve SRID 0/4030/4258/4269
+polar and near-antipodal cases also match the audited precision tolerance.
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones

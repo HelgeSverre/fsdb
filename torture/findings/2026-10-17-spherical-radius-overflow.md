@@ -48,3 +48,12 @@ and already matched fsdb. Fsdb now uses the geographic angular unit for the
 built-in geographic SRS definitions and subtracts converted coordinates as
 MySQL's haversine strategy does. All 79 oracle cases now match, including the
 eight near-pole combinations.
+
+A deterministic follow-up adds 240 point pairs at radius `1e300`, including
+near-polar and opposite-meridian pairs. All 319 WGS 84
+cases match MySQL 8.4.11 within `1e-13` relative tolerance. Twelve further
+cases cover the same polar and near-antipodal patterns in SRID 0, EPSG 4030,
+4258, and 4269; all match. SRID 0 uses longitude/latitude WKT order, while
+the audited geographic systems use their latitude/longitude axis order.
+This strengthens the spherical-distance precision check; it does not resolve
+the separate geographic point/ring topology discrepancies.

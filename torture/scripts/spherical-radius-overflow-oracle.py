@@ -6,6 +6,7 @@ Both servers and their data directories are disposable.
 
 import math
 import pathlib
+import random
 import socket
 import subprocess
 import tempfile
@@ -36,11 +37,11 @@ def run_statement(connection, sql):
         return "error", error.args
 
 
-def run(connection, first, second, radius):
+def run(connection, first, second, radius, srid=4326):
     sql = (
         "SELECT ST_DISTANCE_SPHERE("
-        f"ST_GeomFromText('{first}',4326),"
-        f"ST_GeomFromText('{second}',4326),{radius})"
+        f"ST_GeomFromText('{first}',{srid}),"
+        f"ST_GeomFromText('{second}',{srid}),{radius})"
     )
     return run_statement(connection, sql)
 
@@ -112,6 +113,23 @@ def main():
                     ):
                         for radius in ("1e300", "5e307", "5.7e307", "1e308"):
                             cases.append((first, second, radius))
+                random_cases = random.Random(20261018)
+                for _ in range(240):
+                    near_pole = random_cases.random() < 0.5
+                    if near_pole:
+                        pole = 1 if random_cases.random() < 0.5 else -1
+                        first_latitude = pole * (90 - 10 ** random_cases.uniform(-8, -3))
+                        second_latitude = pole * (90 - 10 ** random_cases.uniform(-8, -3))
+                        first_longitude = random_cases.uniform(-180, 180)
+                        second_longitude = ((-first_longitude + random_cases.uniform(-0.01, 0.01) + 180) % 360) - 180
+                    else:
+                        first_latitude = random_cases.uniform(-89.9, 89.9)
+                        second_latitude = random_cases.uniform(-89.9, 89.9)
+                        first_longitude = random_cases.uniform(-180, 180)
+                        second_longitude = random_cases.uniform(-180, 180)
+                    first = f"POINT({first_latitude:.12f} {first_longitude:.12f})"
+                    second = f"POINT({second_latitude:.12f} {second_longitude:.12f})"
+                    cases.append((first, second, "1e300"))
                 for first, second, radius in cases:
                     expected = run(mysql_connection, first, second, radius)
                     actual = run(fsdb_connection, first, second, radius)
@@ -121,13 +139,36 @@ def main():
                         assert math.isclose(actual, expected, rel_tol=1e-13, abs_tol=0), (
                             first, second, radius, expected, actual
                         )
+                geographic_pairs = (
+                    ("POINT(89.999999 0)", "POINT(89.999999 179.999999)"),
+                    ("POINT(-89.999999 0)", "POINT(-89.999999 -179.999999)"),
+                    ("POINT(0 0)", "POINT(0 179.999999)"),
+                )
+                srid_zero_pairs = (
+                    ("POINT(0 89.999999)", "POINT(179.999999 89.999999)"),
+                    ("POINT(0 -89.999999)", "POINT(-179.999999 -89.999999)"),
+                    ("POINT(0 0)", "POINT(179.999999 0)"),
+                )
+                srs_cases = (
+                    [(0, first, second, "1e300") for first, second in srid_zero_pairs]
+                    + [(srid, first, second, "1e300")
+                       for srid in (4030, 4258, 4269)
+                       for first, second in geographic_pairs]
+                )
+                for srid, first, second, radius in srs_cases:
+                    expected = run(mysql_connection, first, second, radius, srid)
+                    actual = run(fsdb_connection, first, second, radius, srid)
+                    assert math.isclose(actual, expected, rel_tol=1e-13, abs_tol=0), (
+                        srid, first, second, radius, expected, actual
+                    )
                 for sql in ("SELECT 1e309", "SELECT -1e309"):
                     expected = run_statement(mysql_connection, sql)
                     actual = run_statement(fsdb_connection, sql)
                     assert expected == actual == (
                         "error", (1367, "Illegal double '1e309' value found during parsing")
                     ), (sql, expected, actual)
-                print(f"MySQL {version}: {len(cases)} radius cases and two bare literal errors matched")
+                print(f"MySQL {version}: {len(cases)} WGS84 radius cases, {len(srs_cases)} other-SRS cases, "
+                      "and two bare literal errors matched")
             finally:
                 if fsdb_connection:
                     fsdb_connection.close()
