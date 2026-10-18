@@ -32,6 +32,12 @@ samples of U+20000–U+200FF, U+1F600–U+1F6FF, and U+2F900–U+2F9FF have
 zero differences. The older U+F900–U+F9FF, kana/Bopomofo, and enclosed-CJK
 size-two lanes remain at zero. The full fsdb suite passes 3,717 tests.
 
+A later current-head run covers the remaining U+2F900–U+2FA1F compatibility
+ideographs in the same two-column oracle. At each of ngram sizes 1–10, all
+1,716 natural, Boolean, and query-expansion searches match native MySQL
+8.4.11 on both membership and relevance. This extends the measured
+supplementary compatibility range beyond the earlier adjacent samples.
+
 Direct equality checks additionally compare the shared supplementary key
 with U+10000, a musical symbol, a variation selector, and U+10FFFD.
 
