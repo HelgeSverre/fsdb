@@ -948,6 +948,50 @@ let tests =
                     expectError 1235 (fun () -> call "ST_Union" [ geographic; geographic ])
                     expectError 1235 (fun () -> call "ST_Buffer" [ geographic; VInt 1L ])
 
+                testCase "geographic polygon excludes its antipodal exterior"
+                <| fun _ ->
+                    let geography text = call "ST_GeomFromText" [ VString text; VInt 4326L ]
+                    let square = geography "POLYGON((0 0,0 10,10 10,10 0,0 0))"
+                    let reversed = geography "POLYGON((0 0,10 0,10 10,0 10,0 0))"
+                    let center = geography "POINT(5 5)"
+                    let antipode = geography "POINT(-5 -175)"
+
+                    for polygon in [ square; reversed ] do
+                        Expect.equal (call "ST_Within" [ center; polygon ]) (VInt 1L) "square center"
+                        Expect.equal (call "ST_Within" [ antipode; polygon ]) (VInt 0L) "antipodal exterior"
+                        Expect.equal (call "ST_Intersects" [ antipode; polygon ]) (VInt 0L) "antipodal disjointness"
+
+                testCase "global geographic rings use MySQL geodesic winding"
+                <| fun _ ->
+                    let geography text = call "ST_GeomFromText" [ VString text; VInt 4326L ]
+                    let first =
+                        geography
+                            "POLYGON((55.095784 43.215101,-1.549061 -106.976186,25.691447 176.152400,-77.605773 8.784222,55.095784 43.215101))"
+                    let second =
+                        geography
+                            "POLYGON((-49.39793223 39.25611065,18.32056422 148.75405757,-69.02455409 -117.92274540,55.83993074 -88.64082883,-49.39793223 39.25611065))"
+                    let firstReversed =
+                        geography
+                            "POLYGON((55.095784 43.215101,-77.605773 8.784222,25.691447 176.152400,-1.549061 -106.976186,55.095784 43.215101))"
+                    let triangle =
+                        geography
+                            "POLYGON((21.909158 172.938139,28.962876 174.095155,26.699045 174.007825,21.909158 172.938139))"
+                    for polygon, pointText, expected in
+                        [ first, "POINT(0 0)", 1L
+                          first, "POINT(-20 0)", 1L
+                          first, "POINT(80 0)", 0L
+                          first, "POINT(21.909158 172.938139)", 0L
+                          second, "POINT(47.61723855 -61.46703001)", 1L ] do
+                        let point = geography pointText
+                        Expect.equal
+                            (call "ST_Within" [ point; polygon ])
+                            (VInt expected)
+                            (sprintf "MySQL global containment for %s" pointText)
+                    for polygon in [ first; firstReversed ] do
+                        Expect.equal (call "ST_Within" [ geography "POINT(0 0)"; polygon ]) (VInt 1L) "ring direction"
+                        Expect.equal (call "ST_Intersects" [ polygon; triangle ]) (VInt 0L) "separate global components"
+                        Expect.equal (call "ST_Within" [ triangle; polygon ]) (VInt 0L) "triangle outside global polygon"
+
                 testCase "envelopes and MBR predicates preserve planar bounds"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]
@@ -987,7 +1031,8 @@ let tests =
                     Expect.equal (call "ST_Distance" [ geographicLine; geographicLine ]) (VDouble 0.0) "identical geographic lines have zero distance"
                     Expect.equal (call "ST_Distance" [ geographicPolygon; geographicLine ]) (VDouble 0.0) "a line on a geographic polygon has zero distance"
                     expectError 1235 (fun () -> call "ST_Envelope" [ geographic ])
-                    expectError 1235 (fun () -> call "ST_IsValid" [ geographic ])
+                    Expect.equal (call "ST_IsValid" [ geographic ]) (VInt 1L) "geographic point is valid"
+                    Expect.equal (call "ST_IsValid" [ geographicPolygon ]) (VInt 1L) "simple geographic triangle is valid"
 
                 testCase "geographic points use WGS 84 axes, domains, and linear units"
                 <| fun _ ->
@@ -1142,6 +1187,60 @@ let tests =
                         "a separate component may occupy another component's hole"
                     Expect.equal (valid "MULTIPOINT((0 0),(0 0))") (VInt 1L) "duplicate point"
                     Expect.equal (valid "LINESTRING(0 0,-0.00 0,0.0 0)") (VInt 0L) "line without distinct points"
+
+                testCase "ST_IsValid checks geographic points and linework"
+                <| fun _ ->
+                    let valid text =
+                        let geometry = call "ST_GeomFromText" [ VString text; VInt 4326L ]
+                        call "ST_IsValid" [ geometry ]
+
+                    Expect.equal (valid "POINT(89 179)") (VInt 1L) "geographic point"
+                    Expect.equal
+                        (call "ST_IsValid" [ call "ST_GeomFromText" [ VString "LINESTRING(0 0,0 0)"; VInt 4258L ] ])
+                        (VInt 0L)
+                        "ETRS89 line uses the same distinct-point rule"
+                    Expect.equal (valid "LINESTRING(0 179,0 -179)") (VInt 1L) "antimeridian line"
+                    Expect.equal (valid "LINESTRING(0 0,0 0)") (VInt 0L) "zero-length line"
+                    Expect.equal (valid "MULTIPOINT((0 0),(0 0))") (VInt 1L) "duplicate multipoint"
+                    Expect.equal (valid "MULTILINESTRING((0 0,1 1),(1 1,2 2))") (VInt 1L) "multiline"
+                    Expect.equal (valid "MULTILINESTRING((0 0,0 0))") (VInt 0L) "invalid multiline member"
+                    Expect.equal (valid "GEOMETRYCOLLECTION EMPTY") (VInt 1L) "empty collection"
+                    Expect.equal
+                        (valid "GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(0 0,1 1))")
+                        (VInt 1L)
+                        "linear collection"
+                    Expect.equal
+                        (valid "GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(0 0,0 0))")
+                        (VInt 0L)
+                        "invalid linear collection member"
+
+                testCase "ST_IsValid uses geodesic crossings for simple geographic polygons"
+                <| fun _ ->
+                    let valid text =
+                        call "ST_IsValid" [ call "ST_GeomFromText" [ VString text; VInt 4326L ] ]
+                    Expect.equal (valid "POLYGON((0 0,0 2,2 2,2 0,0 0))") (VInt 1L) "simple square"
+                    Expect.equal (valid "POLYGON((0 0,2 2,0 2,2 0,0 0))") (VInt 0L) "crossed ring"
+                    Expect.equal (valid "POLYGON((0 179,1 -179,2 179,0 179))") (VInt 1L) "antimeridian triangle"
+                    Expect.equal (valid "POLYGON((0 0,0 2,0 2,2 2,2 0,0 0))") (VInt 1L) "adjacent duplicate vertex"
+                    Expect.equal (valid "POLYGON((0 0,0 2,2 2,0 2,2 0,0 0))") (VInt 0L) "nonadjacent duplicate vertex"
+                    Expect.equal (valid "POLYGON((0 0,0 2,0 1,2 0,0 0))") (VInt 0L) "adjacent edges must not backtrack"
+                    Expect.equal (valid "POLYGON((0 0,1 1,2 2,0 0))") (VInt 1L) "collinear ring"
+                    Expect.equal
+                        (valid "POLYGON((-61.89917942 -72.77188666,-2.52611056 -49.81594459,-2.21090959 136.19729698,-36.61698428 -114.44363263,-61.89917942 -72.77188666))")
+                        (VInt 0L)
+                        "ellipsoidal crossing near a long edge"
+                    Expect.equal
+                        (valid "GEOMETRYCOLLECTION(POINT(0 0),POLYGON((0 0,0 2,2 0,0 0)))")
+                        (VInt 1L)
+                        "collection of supported shapes"
+                    for unsupported in
+                        [ "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,2 1,1 2,1 1))"
+                          "MULTIPOLYGON(((0 0,0 2,2 0,0 0)))" ] do
+                        try
+                            valid unsupported |> ignore
+                            failtest "geographic holes and multipolygons remain unsupported"
+                        with
+                        | Fsdb.Functions.SqlError(1235, _) -> ()
 
                 testCase "geometry validity rejects malformed in-memory component shapes"
                 <| fun _ ->
@@ -1513,6 +1612,69 @@ let tests =
                     for left, right in forms |> List.pairwise do
                         Expect.isLessThan (col.ComparePrimary left right) 0 "vertical forms follow their implicit-weight order"
                     Expect.isFalse (col.Equals "︒" "\uE011\uE013") "a literal private-use marker cannot alias a vertical form"
+
+                testCase "legacy enclosed CJK implicit weights stay distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in
+                        [ "㉆", "㊥"; "㉆", "文"; "㉊", "㉚"; "㉊", "30"
+                          "㉋", "㊵"; "㉌", "㊿"; "㈎", "(가)"
+                          "㉮", "가"; "㉼", "참고" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
+                    Expect.isTrue (col.Equals "㊥" "中") "circled centre retains its MySQL expansion"
+                    Expect.isTrue (col.Equals "㋐" "ア") "enclosed katakana expands to its base character"
+                    Expect.isTrue (col.Equals "㌀" "アパート") "square unit forms expand under legacy UCA"
+                    for left, right in [ "㊥", "中"; "㋐", "ア"; "㌀", "アパート" ] do
+                        Expect.equal (col.KeyOf left) (col.KeyOf right) (left + " shares an index key with " + right)
+                        Expect.equal (col.HashOf left) (col.HashOf right) (left + " shares a hash with " + right)
+                    for left, right in [ "㉊", "㉋"; "㉋", "㉌" ] do
+                        Expect.isLessThan (col.ComparePrimary left right) 0 "implicit weights follow codepoint order"
+                    Expect.isFalse (col.Equals "㉆" "\uE030\uE146") "literal private-use text cannot alias an enclosed ideograph"
+
+                testCase "legacy letterlike and number forms retain MySQL distinctions"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in
+                        [ "ℼ", "π"; "ℼ", "ℿ"; "ℏ", "ℎ"; "℁", "⅍"
+                          "Ⅎ", "ⅎ"; "Ↄ", "ↄ"; "⅐", "1⁄7"
+                          "⅑", "1⁄9"; "⅒", "1⁄10"; "↉", "0⁄3" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
+                    Expect.isTrue (col.Equals "ℋ" "ℌ") "the equal script-H group remains folded"
+                    for left, right in [ "℁", "a/s"; "ℏ", "ħ"; "ℿ", "Π" ] do
+                        Expect.isTrue (col.Equals left right) (left + " retains its MySQL expansion")
+                    Expect.isFalse (col.Equals "ℼ" "\uE040\uE23C") "literal marker cannot alias pi symbol"
+
+                testCase "legacy kana extensions and ligatures expand before kana folding"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in [ "ゟ", "より"; "ヿ", "コト"; "ゟ", "ヨリ"
+                                         "ㇰ", "ク"; "ㇵ", "ハ"; "ㇿ", "ロ" ] do
+                        Expect.isTrue (col.Equals left right) (left + " matches " + right)
+                        Expect.equal (col.KeyOf left) (col.KeyOf right) (left + " shares its index key")
+
+                testCase "legacy Bopomofo forms keep MySQL primary weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    Expect.isTrue (col.Equals "ㄍ" "ㆣ") "the older velar forms remain equal"
+                    for left, right in [ "ㄮ", "ㄜ"; "ㆻ", "ㄍ"; "ㆻ", "ㆣ" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
+                    Expect.isFalse (col.Equals "ㄮ" "\uE060\uE061") "the marker cannot alias a Bopomofo form"
+
+                testCase "legacy compatibility ideographs preserve measured UCA classes"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    for left, right in [ "郞", "郞"; "並", "並"; "丽", "丽" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct key")
+                    for left, right in [ "逸", "逸"; "艹", "艹"
+                                         "丽", "丸"; "丽", "𠀀"; "丽", "😀" ] do
+                        Expect.isTrue (col.Equals left right) (left + " matches " + right)
+                        Expect.equal (col.KeyOf left) (col.KeyOf right) (left + " shares a key")
+                    Expect.isFalse (col.Equals "並" "\uE070\uE370") "BMP marker cannot alias a compatibility form"
+                    Expect.isFalse (col.Equals "丽" "\uE090\uE091") "supplementary marker cannot alias source text"
 
                 testTheory
                     "MySQL 8.4 hiragana and katakana equality follows collation sensitivity"
