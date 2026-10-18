@@ -1,0 +1,25 @@
+# Correlated text NOT IN over indexed and materialized sources
+
+An indexed, binary-collated physical text column still scanned for a
+correlated `NOT IN` bound. On 1,001 rows with 1,000 copies of `a010` and one
+`a999`, `d.code NOT IN(u.lo)` evaluated the leading residual 2,004 times
+across the outer probe, even though the matching `a010` rows can be excluded
+with two strict index ranges.
+
+The planner now admits text exclusions when the bound is a string whose
+effective comparison collation matches the stored key collation. It reuses
+the existing complete-OR candidate union: each list member supplies the
+rows below or above its key, the smallest union is chosen, and the original
+`NOT IN` predicate decides final membership. Nullable bounds may produce an
+empty candidate range. Mixed-collation or otherwise unsafe bounds still
+decline this narrowing path.
+
+The [native MySQL 8.4.11 oracle](../scripts/correlated-text-range-or-oracle.py)
+confirms one row for one- and two-member lists, including the selective
+second-member order; a NULL member returns zero rows, and a complete OR with
+`d.id=1` returns two. Direct physical, pass-through, and stable materialized
+sources agree. The focused regression checks the same counts and fewer than
+80 residual calls per shape. The original physical baseline exceeded 2,000
+calls for the one-member direct source. An explicit, different comparison
+collation keeps the correct row and scans rather than applying the stored
+key's order. Functional text expressions remain separate planner work.

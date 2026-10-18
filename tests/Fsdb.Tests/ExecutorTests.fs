@@ -14090,6 +14090,79 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "4" ]; [ Some "2"; Some "4" ] ]) -> ()
                     | other -> failtestf "an uncovered OR branch must retain its rows, got %A" other
 
+                testCase "correlated text NOT IN uses selective indexed exclusions"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store
+                        "CREATE TABLE text_exclusion_bounds(id INT PRIMARY KEY,lo VARCHAR(8) COLLATE utf8mb4_bin,hi VARCHAR(8) COLLATE utf8mb4_bin)"
+                    |> ignore
+                    runDefault store
+                        "INSERT INTO text_exclusion_bounds VALUES(1,'a010','a020'),(2,'a020','a010'),(3,NULL,'a010')"
+                    |> ignore
+                    runDefault store
+                        "CREATE TABLE text_exclusion_rows(id INT PRIMARY KEY,code VARCHAR(8) COLLATE utf8mb4_bin,KEY ix_code(code))"
+                    |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,'a010')" id)
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO text_exclusion_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO text_exclusion_rows VALUES(1000,'a999')" |> ignore
+
+                    for source in
+                        [ "text_exclusion_rows d"
+                          "(SELECT id,code FROM text_exclusion_rows) d"
+                          "(SELECT id,CONCAT(code,'') AS code FROM text_exclusion_rows LIMIT 1001) d" ] do
+                        for predicate in
+                            [ "d.code NOT IN(u.lo)"
+                              "d.code NOT IN(u.lo,u.hi)"
+                              "d.code NOT IN(u.hi,u.lo)" ] do
+                            calls <- 0
+                            let sql =
+                                "SELECT (SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                                + "FROM text_exclusion_bounds u WHERE u.id=1"
+                            match run store registry sql with
+                            | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count "1" predicate
+                            | other -> failtestf "expected text exclusion count, got %A" other
+                            Expect.isLessThan calls 80 (source + " narrows " + predicate)
+
+                        calls <- 0
+                        let sql =
+                            "SELECT (SELECT COUNT(*) FROM " + source
+                            + " WHERE TOUCH(d.id)=d.id AND d.code NOT IN(u.lo,u.hi)) "
+                            + "FROM text_exclusion_bounds u WHERE u.id=3"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                        | other -> failtestf "NULL list member must exclude every row, got %A" other
+                        Expect.isLessThan calls 80 "NULL text exclusion can use an empty range"
+
+                        calls <- 0
+                        let sql =
+                            "SELECT (SELECT COUNT(*) FROM " + source
+                            + " WHERE TOUCH(d.id)=d.id AND (d.code NOT IN(u.hi,u.lo) OR d.id=1)) "
+                            + "FROM text_exclusion_bounds u WHERE u.id=1"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                        | other -> failtestf "text exclusion OR must retain both rows, got %A" other
+                        Expect.isLessThan calls 80 "complete text exclusion OR remains bounded"
+
+                        calls <- 0
+                        let mismatchedCollation =
+                            "SELECT (SELECT COUNT(*) FROM " + source
+                            + " WHERE TOUCH(d.id)=d.id AND d.code NOT IN(u.lo COLLATE utf8mb4_0900_ai_ci)) "
+                            + "FROM text_exclusion_bounds u WHERE u.id=1"
+                        match run store registry mismatchedCollation with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | other -> failtestf "explicit comparison collation must retain its result, got %A" other
+                        Expect.isGreaterThan calls 900 "a different comparison collation declines the stored-key range"
+
                 testCase "fully covered correlated counts use index cardinality"
                 <| fun _ ->
                     let mutable calls = 0

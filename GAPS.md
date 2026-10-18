@@ -280,6 +280,12 @@ uses the narrowest member's strict-range union for direct and pass-through
 physical sources, retaining the full predicate for multi-member and NULL-list
 semantics. A complete OR can also union that exclusion with another safe
 branch lookup. Bounds that cannot be compared safely keep the scan path.
+[Matching-collation correlated text `NOT IN` bounds](torture/findings/2026-10-18-correlated-text-not-in.md)
+now also use the narrowest strict-range union on indexed direct and
+pass-through physical sources and stable materialized sources, including
+NULL lists and complete OR branches;
+the original predicate remains the membership filter. Functional text
+expressions and mismatched comparison collations retain their prior paths.
 [Correlated integer inequality predicates](torture/findings/2026-10-15-correlated-integer-inequality.md)
 likewise union strict ranges for a stable integer bound, including complete OR
 branches. [Exact DECIMAL inequalities](torture/findings/2026-10-15-correlated-decimal-inequality.md)

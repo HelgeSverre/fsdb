@@ -14717,11 +14717,11 @@ and private correlatedBinaryLikePrefixes store source context columns predicate 
                     | _ -> None))
         | _ -> None)
 
-and private canSplitCorrelatedExactNumericInequality source (columns: ColumnDef list) outer left right =
+and private canSplitCorrelatedInequality store source (columns: ColumnDef list) outer left right =
     let innerColumn expression =
         tryCorrelatedInnerColumn source expression
         |> Option.bind (resolveColumn columns >> Result.toOption)
-        |> Option.map (fun index -> columns.[index].Type)
+        |> Option.map (fun index -> columns.[index])
 
     let boundValue expression =
         match expression with
@@ -14730,19 +14730,29 @@ and private canSplitCorrelatedExactNumericInequality source (columns: ColumnDef 
 
     let compatible indexed bound =
         match innerColumn indexed, boundValue bound with
-        | Some indexedType, Some(VNull | VInt _ | VUInt _ | VBit _)
-            when isExactIntegerIndexType indexedType -> true
-        | Some indexedType, Some(VDecimal _)
-            when isExactIntegerIndexType indexedType -> true
-        | Some(TDecimal _), Some(VNull | VInt _ | VUInt _ | VDecimal _) -> true
-        | Some(TDouble _), Some VNull -> true
-        | Some(TDouble _), Some(VString text) when not (System.String.IsNullOrWhiteSpace text) ->
+        | Some column, Some(VNull | VInt _ | VUInt _ | VBit _)
+            when isExactIntegerIndexType column.Type -> true
+        | Some column, Some(VDecimal _)
+            when isExactIntegerIndexType column.Type -> true
+        | Some { Type = TDecimal _ }, Some(VNull | VInt _ | VUInt _ | VDecimal _) -> true
+        | Some { Type = TDouble _ }, Some VNull -> true
+        | Some { Type = TDouble _ }, Some(VString text) when not (System.String.IsNullOrWhiteSpace text) ->
             match System.Double.TryParse(
                 text,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture
             ) with
             | true, number -> System.Double.IsFinite number
+            | _ -> false
+        | Some column, Some value ->
+            match equalityMembershipDomain store column, value, outer with
+            | Some(TextMembership _), VNull, _ -> true
+            | Some(TextMembership stored), VString _, Some context ->
+                comparisonCollation
+                    context "<" (Col column.Name) (Some column)
+                    bound (tryColumnDefForExpr context bound)
+                |> Result.toOption
+                |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)
             | _ -> false
         | _ -> false
 
@@ -15740,7 +15750,7 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
 
             tryCompleteOrCandidates
                 whereExpr
-                (canSplitCorrelatedExactNumericInequality probeSource projection.OutputColumns outer)
+                (canSplitCorrelatedInequality store probeSource projection.OutputColumns outer)
                 branchCandidates
                 merge
                 (snd >> List.length)))
@@ -16773,7 +16783,7 @@ and private tryMaterializedCorrelatedLookup
 
                 tryCompleteOrCandidates
                     whereExpr
-                    (canSplitCorrelatedExactNumericInequality probeSource columns (Some context))
+                    (canSplitCorrelatedInequality store probeSource columns (Some context))
                     branchCandidates
                     merge
                     List.length
