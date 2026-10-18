@@ -2498,6 +2498,30 @@ let tests =
                   "CTE-first update reaches both later writable views"
               Expect.equal (handle session (cteFirstTwoViews "-1") |> snd) (Affected 2UL)
                   "CTE-first update restores both view rows"
+              for source in
+                  [ "WITH c AS (SELECT id FROM tx_dual_link) UPDATE c "
+                    + "JOIN LATERAL (SELECT c.id AS link_id) q ON TRUE "
+                    + "JOIN tx_dual_va va ON q.link_id=va.link_id "
+                    + "JOIN LATERAL (SELECT va.link_id AS next_id) r ON TRUE "
+                    + "JOIN tx_dual_vb vb ON r.next_id=vb.link_id"
+                    "WITH c AS (SELECT id FROM tx_dual_link) UPDATE c "
+                    + "JOIN tx_dual_va va ON c.id=va.link_id "
+                    + "JOIN JSON_TABLE(JSON_ARRAY(va.link_id),'$[*]' COLUMNS(next_id INT PATH '$')) r ON TRUE "
+                    + "JOIN tx_dual_vb vb ON r.next_id=vb.link_id" ] do
+                  let update delta =
+                      source + " SET va.n=va.n" + delta + ",vb.n=vb.n" + delta + " WHERE c.id=1"
+                  Expect.equal (handle session (update "+1") |> snd) (Affected 2UL)
+                      "dependent source reaches both writable views"
+                  Expect.equal (handle session (update "-1") |> snd) (Affected 2UL)
+                      "dependent source restores both view rows"
+              let shadowedLateral =
+                  "WITH c AS (SELECT id FROM tx_dual_link) UPDATE c "
+                  + "JOIN tx_dual_va va ON c.id=va.link_id "
+                  + "JOIN LATERAL (SELECT va.link_id AS next_id FROM (SELECT 99 AS link_id) va) r ON TRUE "
+                  + "JOIN tx_dual_vb vb ON r.next_id=vb.link_id "
+                  + "SET va.n=va.n+1,vb.n=vb.n+1 WHERE c.id=1"
+              Expect.equal (handle session shadowedLateral |> snd) (Affected 0UL)
+                  "the lateral body's local va alias shadows the writable view"
               let aggregateFirstTwoViews delta =
                   "UPDATE tx_dual_read_counts rc JOIN tx_dual_va va ON rc.id=va.link_id "
                   + "LEFT JOIN tx_dual_vb vb ON va.link_id=vb.link_id "

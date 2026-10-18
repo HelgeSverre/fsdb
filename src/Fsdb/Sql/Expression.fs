@@ -428,16 +428,12 @@ let rewriteTree replace expression =
 let rewriteSelectExpressions replace select =
     rewriteSelect (plainRewriteRules replace id) select
 
-/// Rewrites qualified references to outer aliases while respecting aliases
-/// declared by each nested SELECT, including expression and FROM subqueries.
-let rewriteSelectOuterAliases (aliases: Map<string, string>) select =
+let private outerQualifiedRules replace =
     let rec rulesFor shadowed =
         { Replace =
             (function
-            | QualifiedCol(owner, column) when not (Set.contains (owner.ToLowerInvariant()) shadowed) ->
-                aliases
-                |> Map.tryFind (owner.ToLowerInvariant())
-                |> Option.map (fun fresh -> QualifiedCol(fresh, column))
+            | QualifiedCol(owner, _) as reference when not (Set.contains (owner.ToLowerInvariant()) shadowed) ->
+                replace reference
             | _ -> None)
           Projection = id
           EnterSelect =
@@ -449,7 +445,23 @@ let rewriteSelectOuterAliases (aliases: Map<string, string>) select =
                     |> List.map _.ToLowerInvariant()
                     |> Set.ofList
                 Some(rulesFor (Set.union shadowed locals)) }
-    rewriteSelect (rulesFor Set.empty) select
+    rulesFor Set.empty
+
+/// Rewrites qualified outer references in a FROM source while preserving
+/// aliases shadowed inside dependent LATERAL and JSON_TABLE subqueries.
+let rewriteFromItemOuterReferences replace source =
+    rewriteFromItem (outerQualifiedRules replace) source
+
+/// Rewrites qualified references to outer aliases while respecting aliases
+/// declared by each nested SELECT, including expression and FROM subqueries.
+let rewriteSelectOuterAliases (aliases: Map<string, string>) select =
+    let replace = function
+        | QualifiedCol(owner, column) ->
+            aliases
+            |> Map.tryFind (owner.ToLowerInvariant())
+            |> Option.map (fun fresh -> QualifiedCol(fresh, column))
+        | _ -> None
+    rewriteSelect (outerQualifiedRules replace) select
 
 /// Rewrites every executable expression position in a statement.
 let rewriteStatement replace statement =

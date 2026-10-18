@@ -1,13 +1,13 @@
 # Two writable joined views under outer UPDATE joins
 
 The [native MySQL 8.4.11 differential oracle](../scripts/two-joined-view-outer-oracle.py)
-compares nineteen UPDATE statements against fsdb. Two independently
+compares twenty-three UPDATE statements against fsdb. Two independently
 writable inner-join views share their internal physical/read aliases. The
 matrix uses both LEFT and RIGHT outer joins, with a fully matched row and
 rows missing from either view. A second pair of views joins grouped read
 sources and dependent `LATERAL` projections before the outer UPDATE join.
 
-All nineteen statements match MySQL's affected-row count and the resulting rows
+All twenty-three statements match MySQL's affected-row count and the resulting rows
 in both physical target tables. A `CASCADED CHECK OPTION` on the grouped
 lateral view also rejects an invalid two-target update with error 1369 and
 leaves both tables unchanged. This extends the existing inner two-view and
@@ -73,6 +73,16 @@ the matrix includes matched rows, a missing optional view row, a right-only
 view row, and an assignment to only the second view. Two extra contention
 checks hold the first target with no optional row and hold the second target
 when it is the sole assignment. Both wait, rebase, and commit as MySQL does.
+
+A dependent source between the two writable views exposed a separate 1054:
+`WITH c ... UPDATE c JOIN LATERAL (...) q JOIN va JOIN LATERAL
+(SELECT va.link_id ...) r JOIN vb ...` lost `va.link_id` when the first view
+was expanded. The same issue affected `JSON_TABLE(JSON_ARRAY(va.link_id),...)`.
+The view rewrite now updates qualified outer references inside dependent
+source bodies as well as join conditions. It respects a local `va` alias
+declared inside a lateral body, which must shadow the outer writable view.
+The three ordinary cases and two contended rebases holding `vb` match MySQL;
+the focused F# regression covers both dependent source forms and shadowing.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:

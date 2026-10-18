@@ -29334,8 +29334,17 @@ let rec executeAs
                 if targets.Length > 1 then
                     ids, Err(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName)
                 else
+                    let rewriteDependentSource =
+                        Expression.rewriteFromItemOuterReferences (function
+                            | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier viewQualifier ->
+                                Map.tryFind (name.ToLowerInvariant()) runtimeView.Expressions
+                                |> Option.map qualifyView
+                            | _ -> None)
                     let externalJoins =
-                        updateStmt.Joins |> List.map (Join.mapConditions rewrite)
+                        updateStmt.Joins
+                        |> List.map (fun join ->
+                            { Join.mapConditions rewrite join with
+                                Table = rewriteDependentSource join.Table })
                     let viewPredicate = runtimeView.Predicate |> Option.map qualifyView
                     let externalJoins, globalViewPredicate =
                         match externalJoins, viewPredicate with

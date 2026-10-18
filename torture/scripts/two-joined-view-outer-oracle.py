@@ -118,6 +118,24 @@ def main():
                     expected, actual = (execute(connection, sql) for connection in connections)
                     assert actual == expected and not isinstance(expected, tuple), (sql, expected, actual)
                 cases = [
+                    "WITH c AS (SELECT id FROM link) UPDATE c "
+                    "JOIN LATERAL (SELECT c.id AS link_id) q ON TRUE "
+                    "JOIN va ON q.link_id=va.link_id SET va.n=va.n+1 WHERE c.id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c "
+                    "JOIN LATERAL (SELECT c.id AS link_id) q ON TRUE "
+                    "JOIN va ON q.link_id=va.link_id "
+                    "JOIN LATERAL (SELECT va.link_id AS next_id) r ON TRUE "
+                    "JOIN vb ON r.next_id=vb.link_id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE c.id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c "
+                    "JOIN va ON c.id=va.link_id "
+                    "JOIN JSON_TABLE(JSON_ARRAY(va.link_id),'$[*]' COLUMNS(next_id INT PATH '$')) r ON TRUE "
+                    "JOIN vb ON r.next_id=vb.link_id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE c.id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
+                    "JOIN LATERAL (SELECT va.link_id AS next_id FROM (SELECT 99 AS link_id) va) r ON TRUE "
+                    "JOIN vb ON r.next_id=vb.link_id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE c.id=1",
                     "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
                     "SET va.n=va.n+1 WHERE c.id=1",
                     "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
@@ -189,6 +207,16 @@ def main():
                     expected, actual = (execute(connection, query) for connection in connections)
                     assert actual == expected, (rejected, query, expected, actual)
                 contended = [
+                    ("b", 1, "WITH c AS (SELECT id FROM link) UPDATE c "
+                     "JOIN LATERAL (SELECT c.id AS link_id) q ON TRUE "
+                     "JOIN va ON q.link_id=va.link_id "
+                     "JOIN LATERAL (SELECT va.link_id AS next_id) r ON TRUE "
+                     "JOIN vb ON r.next_id=vb.link_id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE c.id=1"),
+                    ("b", 1, "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
+                     "JOIN JSON_TABLE(JSON_ARRAY(va.link_id),'$[*]' COLUMNS(next_id INT PATH '$')) r ON TRUE "
+                     "JOIN vb ON r.next_id=vb.link_id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE c.id=1"),
                     ("a", 1, "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
                      "SET va.n=va.n+1 WHERE c.id=1"),
                     ("a", 1, "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
