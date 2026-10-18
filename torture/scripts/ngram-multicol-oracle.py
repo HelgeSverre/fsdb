@@ -251,6 +251,9 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     }
                     matched = result(mysql_connection, prefix + "⼀", "IN NATURAL LANGUAGE MODE")
                     assert representative.issubset(set(matched)), (size, matched)
+                if legacy_range == (0x1B000, 0x1B130):
+                    matched = result(mysql_connection, prefix + "𛀀", "IN NATURAL LANGUAGE MODE")
+                    assert 1 in matched, (size, matched)
 
                 mismatches = []
                 for mode in modes:
@@ -292,7 +295,7 @@ if __name__ == "__main__":
     corpus.add_argument("--legacy-punctuation", action="store_true")
     corpus.add_argument("--legacy-radicals", action="store_true")
     corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
-    parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci"))
+    parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci"))
     args = parser.parse_args()
     legacy_range = None
     if args.legacy_range:

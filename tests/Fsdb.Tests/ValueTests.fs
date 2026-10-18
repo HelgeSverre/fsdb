@@ -1880,6 +1880,20 @@ let tests =
                             Expect.equal (col.KeyOf left) (col.KeyOf right) (name + " index key")
                             Expect.equal (col.HashOf left) (col.HashOf right) (name + " hash")
 
+                testTheory "supplementary archaic WU keys follow MySQL Unicode generations"
+                    [ "utf8mb4_unicode_ci", true
+                      "utf8mb4_general_ci", true
+                      "utf8mb4_unicode_520_ci", false
+                      "utf8mb4_0900_ai_ci", false
+                      "utf8mb4_0900_as_ci", false ]
+                    <| fun (name, equal) ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.equal (col.Equals "𛄟" "𛄢") equal name
+                        Expect.equal (col.KeyOf "𛄟" = col.KeyOf "𛄢") equal (name + " canonical keys")
+                        if not equal then
+                            Expect.isTrue (col.ComparePrimary "𛄟" "𛄢" < 0) (name + " implicit weight order")
+                            Expect.isFalse (col.Equals "𛄟" "\uE0B2\uE71F") (name + " marker cannot alias source text")
+
                 testTheory
                     "collations identify when equality fixes one full-order position"
                     [ "utf8mb4_0900_bin", true

@@ -463,6 +463,22 @@ let tests =
               Expect.equal (search "中ㄮ" "IN NATURAL LANGUAGE MODE") [ "2" ] "ㄮ has a distinct natural posting"
               Expect.equal (search "中ㆻ" "IN NATURAL LANGUAGE MODE") [ "5" ] "ㆻ has a distinct natural posting"
 
+          testCase "Unicode 5.2 and 9.0 ngrams distinguish archaic WU scripts"
+          <| fun _ ->
+              for collation in [ "utf8mb4_unicode_520_ci"; "utf8mb4_0900_ai_ci"; "utf8mb4_0900_as_ci" ] do
+                  let store = create ()
+                  run store
+                      ("CREATE TABLE archaic_wu_docs(id INT PRIMARY KEY,body TEXT COLLATE " + collation
+                       + ",FULLTEXT KEY ft(body) WITH PARSER ngram)")
+                  |> ignore
+                  run store "INSERT INTO archaic_wu_docs VALUES(1,'中𛄟文'),(2,'中𛄢文')" |> ignore
+                  let search term mode =
+                      let sql = $"SELECT id FROM archaic_wu_docs WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                      ids (run store sql)
+                  for mode in [ "IN NATURAL LANGUAGE MODE"; "WITH QUERY EXPANSION" ] do
+                      Expect.equal (search "中𛄟" mode) [ "1" ] (collation + " Hiragana WU")
+                      Expect.equal (search "中𛄢" mode) [ "2" ] (collation + " Katakana WU")
+
           testCase "legacy Unicode ngrams keep later BMP ideographs distinct and share supplementary keys"
           <| fun _ ->
               let store = create ()

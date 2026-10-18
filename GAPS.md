@@ -970,6 +970,12 @@ The [U+FE10–U+FE6F legacy vertical-form audit](torture/findings/2026-10-18-leg
 also now matches 504 MySQL searches per token size at sizes 1–10, after
 preserving UCA 4.0's distinct U+FE1A–U+FE1F and U+FE24–U+FE2F weights.
 
+[Supplementary kana U+1B000–U+1B12F](torture/findings/2026-10-18-supplementary-kana-ngram.md)
+now retain distinct Unicode 5.2 and 9.0 implicit weights for equality and
+ngram postings. The audited size 1–3 corpus agrees with MySQL across natural,
+Boolean, and query-expansion searches under both collations and the older
+`utf8mb4_unicode_ci` fallback.
+
 The [general Unicode letterlike-symbol audit](torture/findings/2026-10-17-general-ci-letterlike-weights.md)
 matches MySQL's U+2100–U+21FF primary-weight classes in two-column
 ngram searches at token sizes 1–10. Broader collation and parser behavior
