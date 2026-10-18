@@ -1047,6 +1047,67 @@ let tests =
 
               handle a "ROLLBACK" |> ignore
 
+          testCase "a qualified foreign key doesn't serialize writes to an unrelated database"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql in
+                  [ "CREATE DATABASE fk_parent_db"
+                    "CREATE DATABASE fk_child_db"
+                    "CREATE DATABASE fk_unrelated_db"
+                    "CREATE TABLE fk_parent_db.parent (id INT PRIMARY KEY)"
+                    "CREATE TABLE fk_child_db.child (parent_id INT, FOREIGN KEY (parent_id) REFERENCES fk_parent_db.parent (id))"
+                    "CREATE TABLE fk_unrelated_db.t (id INT PRIMARY KEY)"
+                    "INSERT INTO fk_parent_db.parent VALUES (1)" ] do
+                  match handle setup sql |> snd with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+
+              let parentSlot = store.Databases.["fk_parent_db"]
+              use entered = new Threading.ManualResetEventSlim(false)
+              use release = new Threading.ManualResetEventSlim(false)
+              let blocker =
+                  Threading.Tasks.Task.Run(fun () ->
+                      lock parentSlot (fun () ->
+                          entered.Set()
+                          release.Wait()))
+
+              Expect.isTrue (entered.Wait(TimeSpan.FromSeconds 1.0)) "the parent slot is held"
+              let writer =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle (create 2 store) "INSERT INTO fk_unrelated_db.t VALUES (1)" |> snd)
+
+              let completedWhileBlocked = writer.Wait(TimeSpan.FromSeconds 1.0)
+              let transaction =
+                  Threading.Tasks.Task.Run(fun () ->
+                      let session, _ = handle (create 3 store) "BEGIN"
+                      let session, inserted = handle session "INSERT INTO fk_unrelated_db.t VALUES (2)"
+                      let _, committed = handle session "COMMIT"
+                      inserted, committed)
+              let transactionCompletedWhileBlocked = transaction.Wait(TimeSpan.FromSeconds 1.0)
+              use childStarted = new Threading.ManualResetEventSlim(false)
+              let childWriter =
+                  Threading.Tasks.Task.Run(fun () ->
+                      childStarted.Set()
+                      handle (create 4 store) "INSERT INTO fk_child_db.child VALUES (1)" |> snd)
+              let childStartedWhileBlocked = childStarted.Wait(TimeSpan.FromSeconds 1.0)
+              let childCompletedWhileBlocked =
+                  try
+                      childStartedWhileBlocked && childWriter.Wait(TimeSpan.FromMilliseconds 100.0)
+                  finally
+                      release.Set()
+              Expect.isTrue (blocker.Wait(TimeSpan.FromSeconds 5.0)) "the blocker exits"
+              Expect.isTrue (writer.Wait(TimeSpan.FromSeconds 5.0)) "the writer exits"
+              Expect.isTrue (transaction.Wait(TimeSpan.FromSeconds 5.0)) "the transaction exits"
+              Expect.isTrue (childWriter.Wait(TimeSpan.FromSeconds 5.0)) "the child writer exits"
+              Expect.isTrue completedWhileBlocked "the unrelated write completes without the parent slot"
+              Expect.isTrue transactionCompletedWhileBlocked "the unrelated transaction commits without the parent slot"
+              Expect.isTrue childStartedWhileBlocked "the child write starts"
+              Expect.isFalse childCompletedWhileBlocked "the child write waits for the parent slot"
+              Expect.equal writer.Result (Affected 1UL) "the unrelated write succeeds"
+              Expect.equal transaction.Result (Affected 1UL, Affected 0UL) "the unrelated transaction succeeds"
+              Expect.equal childWriter.Result (Affected 1UL) "the child write succeeds after the parent slot releases"
+
           testCase "row locks in separate databases use separate namespaces"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -1983,43 +2044,19 @@ let tests =
           testCase "limited ordered writes reselect after a contended predicate or sort key changes"
           <| fun _ ->
               for indexed in [ false; true ] do
-                  for initialRows, ownerWrite, statement, expectedRows, affected in
+                  for initialRows, ownerWrite, statement, expectedRows in
                       [ "(1,0),(2,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
                         "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 1",
-                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ] ], 1UL
+                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ] ]
                         "(1,0),(2,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
                         "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 1",
-                        [ [ Some "1"; Some "-1" ] ], 1UL
+                        [ [ Some "1"; Some "-1" ] ]
                         "(1,0),(2,1)", "UPDATE tx_limited_rebase SET n=2 WHERE id=1",
                         "UPDATE tx_limited_rebase SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 1",
-                        [ [ Some "1"; Some "2" ]; [ Some "2"; Some "11" ] ], 1UL
+                        [ [ Some "1"; Some "2" ]; [ Some "2"; Some "11" ] ]
                         "(1,0),(2,1)", "UPDATE tx_limited_rebase SET n=2 WHERE id=1",
                         "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 1",
-                        [ [ Some "1"; Some "2" ] ], 1UL
-                        "(1,0),(2,0),(3,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
-                        "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 2",
-                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ] ], 2UL
-                        "(1,0),(2,0),(3,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
-                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 2",
-                        [ [ Some "1"; Some "-1" ] ], 2UL
-                        "(1,0),(2,1),(3,2)", "UPDATE tx_limited_rebase SET n=3 WHERE id=1",
-                        "UPDATE tx_limited_rebase SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 2",
-                        [ [ Some "1"; Some "3" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "12" ] ], 2UL
-                        "(1,0),(2,1),(3,2)", "UPDATE tx_limited_rebase SET n=3 WHERE id=1",
-                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 2",
-                        [ [ Some "1"; Some "3" ] ], 2UL
-                        "(1,0),(2,0),(3,0),(4,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
-                        "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 3",
-                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ]; [ Some "4"; Some "1" ] ], 3UL
-                        "(1,0),(2,0),(3,0),(4,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
-                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 3",
-                        [ [ Some "1"; Some "-1" ] ], 3UL
-                        "(1,0),(2,1),(3,2),(4,3)", "UPDATE tx_limited_rebase SET n=4 WHERE id=1",
-                        "UPDATE tx_limited_rebase SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 3",
-                        [ [ Some "1"; Some "4" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "12" ]; [ Some "4"; Some "13" ] ], 3UL
-                        "(1,0),(2,1),(3,2),(4,3)", "UPDATE tx_limited_rebase SET n=4 WHERE id=1",
-                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 3",
-                        [ [ Some "1"; Some "4" ] ], 3UL ] do
+                        [ [ Some "1"; Some "2" ] ] ] do
                       let store = Fsdb.Storage.create ()
                       let setup = create 1 store
                       let index = if indexed then ", KEY ix_n(n)" else ""
@@ -2040,10 +2077,102 @@ let tests =
                       Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes"
                       let waiter, result = waiting.Result
                       Expect.isTrue blocked "limited writer waits for the first candidate"
-                      Expect.equal result (Affected affected) "limited writer changes the rebased targets"
+                      Expect.equal result (Affected 1UL) "limited writer changes one rebased target"
                       Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
                       match handle setup "SELECT id,n FROM tx_limited_rebase ORDER BY id" |> snd with
                       | ResultSet(_, rows) -> Expect.equal rows expectedRows (statement + $" (indexed={indexed})")
+                      | actual -> failtestf "expected a result set after %s, got %A" statement actual
+
+          testCase "limited ordered writes reselect two rows after contention"
+          <| fun _ ->
+              let cases =
+                  [ "(1,0),(2,0),(3,3)", -1, "id", "n=n+1",
+                    [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "4" ] ],
+                    [ [ Some "1"; Some "-1" ] ]
+                    "(1,0),(2,1),(3,3)", 2, "n,id", "n=n+10",
+                    [ [ Some "1"; Some "12" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "3" ] ],
+                    [ [ Some "3"; Some "3" ] ]
+                    "(1,0),(2,1),(3,2)", 3, "n,id", "n=n+10",
+                    [ [ Some "1"; Some "3" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "12" ] ],
+                    [ [ Some "1"; Some "3" ] ] ]
+
+              for indexed in [ false; true ] do
+                  for initialRows, ownerValue, ordering, increment, updatedRows, remainingRows in cases do
+                      for update in [ true; false ] do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          let index = if indexed then ", KEY ix_n(n)" else ""
+                          handle setup ("CREATE TABLE tx_limited_rebase_two (id INT PRIMARY KEY, n INT" + index + ")") |> ignore
+                          handle setup ("INSERT INTO tx_limited_rebase_two VALUES " + initialRows) |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let owner, firstWrite =
+                              handle owner ($"UPDATE tx_limited_rebase_two SET n={ownerValue} WHERE id=1")
+                          Expect.equal firstWrite (Affected 1UL) "the owner changes the first candidate"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          let action =
+                              if update then $"UPDATE tx_limited_rebase_two SET {increment}"
+                              else "DELETE FROM tx_limited_rebase_two"
+                          let statement = $"{action} WHERE n>=0 ORDER BY {ordering} LIMIT 2"
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes"
+                          let waiter, result = waiting.Result
+                          Expect.isTrue blocked "limited writer waits for the first candidate"
+                          Expect.equal result (Affected 2UL) "limited writer changes two rebased targets"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                          match handle setup "SELECT id,n FROM tx_limited_rebase_two ORDER BY id" |> snd with
+                          | ResultSet(_, rows) ->
+                              Expect.equal rows (if update then updatedRows else remainingRows) (statement + $" (indexed={indexed})")
+                          | actual -> failtestf "expected a result set after %s, got %A" statement actual
+
+          testCase "limited ordered writes reselect after two owners commit"
+          <| fun _ ->
+              for indexed in [ false; true ] do
+                  for update in [ true; false ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      let index = if indexed then ", KEY ix_n(n)" else ""
+                      handle setup ("CREATE TABLE tx_limited_two_waits (id INT PRIMARY KEY, n INT" + index + ")") |> ignore
+                      handle setup "INSERT INTO tx_limited_two_waits VALUES (1,0),(2,1),(3,2),(4,3)" |> ignore
+                      let first, _ = handle (create 2 store) "BEGIN"
+                      let second, _ = handle (create 3 store) "BEGIN"
+                      let first, firstWrite = handle first "UPDATE tx_limited_two_waits SET n=-1 WHERE id=1"
+                      Expect.equal firstWrite (Affected 1UL) "first owner changes its row"
+                      let second, secondWrite = handle second "UPDATE tx_limited_two_waits SET n=-2 WHERE id=2"
+                      Expect.equal secondWrite (Affected 1UL) "second owner changes its row"
+                      let waiter, _ = handle (create 4 store) "BEGIN"
+                      let action =
+                          if update then "UPDATE tx_limited_two_waits SET n=n+10"
+                          else "DELETE FROM tx_limited_two_waits"
+                      let statement = $"{action} WHERE n>=0 ORDER BY id LIMIT 2"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              handle waiter statement)
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                      let firstWait = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "first owner commits"
+                      let secondWait = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "second owner commits"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes after both commits"
+                      let waiter, result = waiting.Result
+                      Expect.isTrue firstWait "limited writer waits for the first owner"
+                      Expect.isTrue secondWait "limited writer waits for the second owner"
+                      Expect.equal result (Affected 2UL) "limited writer changes two reselected rows"
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                      let expected =
+                          if update then
+                              [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "-2" ]; [ Some "3"; Some "12" ]; [ Some "4"; Some "13" ] ]
+                          else [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "-2" ] ]
+                      match handle setup "SELECT id,n FROM tx_limited_two_waits ORDER BY id" |> snd with
+                      | ResultSet(_, rows) -> Expect.equal rows expected (statement + $" (indexed={indexed})")
                       | actual -> failtestf "expected a result set after %s, got %A" statement actual
 
           testCase "limited ordered writes reselect after a contended first row is deleted"
