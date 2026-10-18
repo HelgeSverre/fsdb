@@ -898,6 +898,10 @@ now update both physical targets even when their read-side internal table
 aliases, writable physical target aliases, or independent derived read-source
 aliases match; [dependent `LATERAL` and `JSON_TABLE` read aliases](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
 also remain scoped across both writable views in audited two-target UPDATEs.
+An [outer-join two-view oracle](torture/findings/2026-10-18-two-joined-view-outer-writes.md)
+now also matches MySQL for eight LEFT/RIGHT UPDATE cases with matched or
+missing view rows, shared internal aliases, grouped lateral read sources,
+and atomic `CHECK OPTION` rejection.
 Grouped derived aliases and dependent `LATERAL` aliases now also stay scoped
 across both writable views, including an atomic CHECK OPTION rejection and a
 contended two-target rebase; broader grouped dependency trees remain unaudited.
