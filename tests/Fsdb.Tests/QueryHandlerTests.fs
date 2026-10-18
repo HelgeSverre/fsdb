@@ -8579,6 +8579,43 @@ let tests =
               | Err(1146, _) -> ()
               | other -> failtestf "expected temporary tables to stay outside FLUSH locking, got %A" other
 
+          testCase "global FLUSH read lock blocks permanent writes sourced from temporary tables"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE mixed_flush_target (n INT)"
+              let worker, _ = handle (create 2 store) "CREATE TEMPORARY TABLE mixed_flush_source (n INT)"
+              let worker, _ = handle worker "INSERT INTO mixed_flush_source VALUES (7)"
+              let holder, locked = handle (create 3 store) "FLUSH TABLES WITH READ LOCK"
+              Expect.equal locked (Affected 0UL) "global read lock acquired"
+              let holder, _ = handle holder "CREATE TEMPORARY TABLE mixed_flush_owner (n INT)"
+              let holder, _ = handle holder "INSERT INTO mixed_flush_owner VALUES (9)"
+
+              match handle holder "INSERT INTO mixed_flush_target SELECT n FROM mixed_flush_owner" |> snd with
+              | Err(1223, _) -> ()
+              | other -> failtestf "expected the lock owner's mixed permanent write to fail, got %A" other
+
+              let worker, temporaryWrite = handle worker "INSERT INTO mixed_flush_source VALUES (8)"
+              Expect.equal temporaryWrite (Affected 1UL) "temporary writes stay available"
+
+              let mixedWrite =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle worker "INSERT INTO mixed_flush_target SELECT n FROM mixed_flush_source")
+
+              try
+                  Expect.isFalse
+                      (mixedWrite.Wait(TimeSpan.FromMilliseconds 100.0))
+                      "a permanent write sourced from a temporary table waits for the global read lock"
+              finally
+                  handle holder "UNLOCK TABLES" |> ignore
+
+              Expect.isTrue (mixedWrite.Wait(TimeSpan.FromSeconds 2.0)) "the mixed write continues after unlock"
+              Expect.equal (mixedWrite.Result |> snd) (Affected 2UL) "both temporary rows reach the permanent table"
+
+              match handle setup "SELECT n FROM mixed_flush_target ORDER BY n" |> snd with
+              | ResultSet(_, [ [ Some "7" ]; [ Some "8" ] ]) -> ()
+              | other -> failtestf "unexpected permanent rows after unlock: %A" other
+
           testCase "global FLUSH read locks block permanent writes and survive transaction start"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
