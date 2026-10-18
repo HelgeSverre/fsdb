@@ -412,6 +412,26 @@ let tests =
               Expect.equal (booleanScores replaced "生*" |> ids) [ 3 ] "replacement clears the old generation"
               Expect.equal (naturalScores replaced "中文检" |> ids) [ 1 ] "replacement uses the current generation"
 
+          testCase "ngram exclusions without positive terms never score postings"
+          <| fun _ ->
+              let index =
+                  buildIndexWithTokenizer (Ngrams 2) defaultCollation
+                      [ 1, "生日快乐"; 2, "生日"; 3, "中文生日" ]
+
+              for query in [ "-生日"; "-生日 -生日"; "-生日 -中文" ] do
+                  Expect.isEmpty (booleanScores index query) (query + " has no positive match")
+                  Expect.isEmpty
+                      (tryFlatBooleanScoresDictionary index query |> Option.get)
+                      (query + " has no flat-score candidate")
+
+              Expect.equal
+                  (booleanScores index "生日 -中文" |> Map.keys |> Seq.toList)
+                  [ 1; 2 ]
+                  "a mixed query still excludes matching ngram rows"
+              Expect.isNone
+                  (tryFlatBooleanScoresDictionary index "-\"生日快乐\"")
+                  "a negative phrase still uses the general scorer"
+
           testCase "full-text terms follow collation case and accent sensitivity"
           <| fun _ ->
               let aiCi = tryFind "utf8mb4_0900_ai_ci" |> Option.get
@@ -722,10 +742,19 @@ let tests =
                   [ "database concurrency -security"
                     ">database <concurrency ~tutorial"
                     "-database"
+                    "-database -security"
+                    "missing -database"
+                    "security -database"
+                    "security -concurrency"
                     "data* concur*" ] do
                   let expected = booleanScores index query
                   let actual = tryFlatBooleanScoresDictionary index query |> Option.get |> asMap
                   Expect.equal actual expected (sprintf "flat scoring matches for %s" query)
+
+              for query in [ "-database -security"; "database -security" ] do
+                  Expect.isEmpty
+                      (tryFlatBooleanScoresDictionaryWithin (Some Set.empty) index query |> Option.get)
+                      (sprintf "empty candidate scope avoids matches for %s" query)
 
               Expect.isNone (tryFlatBooleanScoresDictionary index "\"database concurrency\"") "phrases use general scoring"
               Expect.isNone (tryFlatBooleanScoresDictionary index "(+database +concurrency)") "groups use general scoring"
