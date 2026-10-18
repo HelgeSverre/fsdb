@@ -192,6 +192,255 @@ let private foldCjkQuoteForms (value: string) =
             | c -> result.Append(c) |> ignore
         result.ToString()
 
+// UCA 5.2 assigns U+180E a primary weight; ICU now treats it as ignorable.
+let private foldUnicode520MongolianSeparator (value: string) =
+    if not (value.Contains('\u180e') || value.Contains('\uE0A0')) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            match c with
+            | '\u180e' -> result.Append("\uE0A0\uE0A1") |> ignore
+            | '\uE0A0' -> result.Append("\uE0A0\uE0A0") |> ignore
+            | c -> result.Append(c) |> ignore
+        result.ToString()
+
+// UCA 5.2 ignores the first seven combining half marks at the primary level,
+// but gives the remaining marks distinct weights. ICU ignores the whole block,
+// which otherwise merges unrelated ngram postings.
+let private foldUnicode520CombiningHalfMarks (value: string) =
+    let marker = '\uE0A2'
+    if not (value |> Seq.exists (fun c -> c = marker || (c >= '\uFE27' && c <= '\uFE2F'))) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif c >= '\uFE27' && c <= '\uFE2F' then
+                result.Append(marker).Append(char (0xE0A3 + int c - 0xFE27)) |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
+let private foldSupplementaryImplicit (marker: char) (highSurrogate: char) firstScalar firstWeight hasWeight (value: string) =
+    if not (value.Contains marker || value.Contains highSurrogate) then value
+    else
+        let result = StringBuilder(value.Length)
+        let mutable index = 0
+        while index < value.Length do
+            let c = value.[index]
+            if c = marker then
+                result.Append(marker).Append(marker) |> ignore
+            elif c = highSurrogate && index + 1 < value.Length
+                 && Char.IsLowSurrogate value.[index + 1] then
+                let scalar = Char.ConvertToUtf32(c, value.[index + 1])
+                if hasWeight scalar then
+                    result.Append(marker).Append(char (firstWeight + scalar - firstScalar)) |> ignore
+                    index <- index + 1
+                else
+                    result.Append(c).Append(value.[index + 1]) |> ignore
+                    index <- index + 1
+            else result.Append(c) |> ignore
+            index <- index + 1
+        result.ToString()
+
+// MySQL's Unicode 5.2 collation gives assigned supplementary kana in
+// U+1B000–U+1B16F distinct implicit weights. Its 9.0 collation gives the
+// first two explicit weights and the remaining scalars distinct implicit
+// weights. ICU merges some Hiragana/Katakana spellings, notably archaic WU.
+let private foldSupplementaryKanaImplicit unicode520 value =
+    let hasWeight scalar =
+        scalar >= 0x1B000 && scalar < 0x1B170
+        && (unicode520 || scalar >= 0x1B002)
+    foldSupplementaryImplicit '\uE0B2' '\uD82C' 0x1B000 0xE600 hasWeight value
+
+// UCA 5.2 gives these enclosed alphanumeric scalars implicit, distinct
+// weights. Newer ICU folds many of them into letters or other enclosed forms.
+// The ranges are the scalars whose MySQL 8.4 unicode_520_ci WEIGHT_STRING is
+// FBC3 followed by the low 16 bits of the scalar.
+let private unicode520EnclosedImplicitRanges =
+    [| 0x1F10B, 0x1F10F; 0x1F12F, 0x1F130; 0x1F132, 0x1F13C
+       0x1F13E, 0x1F13E; 0x1F140, 0x1F141; 0x1F143, 0x1F145
+       0x1F147, 0x1F149; 0x1F14F, 0x1F156; 0x1F158, 0x1F15E
+       0x1F160, 0x1F178; 0x1F17A, 0x1F17A; 0x1F17D, 0x1F17E
+       0x1F180, 0x1F189; 0x1F18E, 0x1F18F; 0x1F191, 0x1F1FF |]
+
+let private foldUnicode520EnclosedImplicit value =
+    let hasWeight scalar =
+        unicode520EnclosedImplicitRanges
+        |> Array.exists (fun (first, last) -> scalar >= first && scalar <= last)
+    foldSupplementaryImplicit '\uE0BE' '\uD83C' 0x1F100 0xEA00 hasWeight value
+
+// MySQL's UCA 4.0 and 5.2 tables retain implicit primary weights for marks
+// assigned later. UCA 4.0 gives all of U+1DC0–U+1DFF distinct weights; 5.2
+// assigns some explicit or ignorable weights instead. UCA 4.0 also keeps
+// U+20EB–U+20F0 distinct where 5.2 treats them as ignorable. In 5.2, U+1DCA
+// shares U+036C's weight while ICU merges it with the distinct U+1DE3.
+// Escape the marker so literal private-use text cannot alias a generated weight.
+let private foldLegacyExtendedCombiningMarks unicode520 (value: string) =
+    let marker = '\uE0AE'
+    let needsFold c =
+        (c >= '\u1AB0' && c <= '\u1AFF')
+        || (if unicode520 then
+                (c >= '\u1DE7' && c <= '\u1DFC') || c = '\u1DCA' || c = '\u1DE3'
+            else (c >= '\u1DC0' && c <= '\u1DFF') || (c >= '\u20EB' && c <= '\u20F0'))
+    if not (value |> Seq.exists (fun c -> c = marker || needsFold c)) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif c >= '\u1AB0' && c <= '\u1AFF' then
+                result.Append(marker).Append(char (0xE400 + int c - 0x1AB0)) |> ignore
+            elif not unicode520 && c >= '\u1DC0' && c <= '\u1DFF' then
+                result.Append(marker).Append(char (0xE500 + int c - 0x1DC0)) |> ignore
+            elif not unicode520 && c >= '\u20EB' && c <= '\u20F0' then
+                result.Append(marker).Append(char (0xE580 + int c - 0x20EB)) |> ignore
+            elif unicode520 && c >= '\u1DE7' && c <= '\u1DFC' then
+                result.Append(marker).Append(char (0xE480 + int c - 0x1DE7)) |> ignore
+            elif unicode520 && c = '\u1DCA' then result.Append('\u036C') |> ignore
+            elif unicode520 && c = '\u1DE3' then result.Append(marker).Append('\uE4A0') |> ignore
+            else result.Append(c) |> ignore
+        result.ToString()
+
+// ICU composes conjoining Hangul Jamo into syllables. MySQL's older Unicode
+// collations retain their individual weights; each collation decides whether
+// compatibility Jamo share them.
+let private foldUnicodeJamo compatibility (value: string) =
+    let isJamo c = c >= '\u1100' && c <= '\u11ff'
+    let marker = '\uE0B0'
+    if not (value |> Seq.exists (fun c -> c = marker || isJamo c || (compatibility c |> Option.isSome))) then value
+    else
+        let result = StringBuilder(value.Length)
+        let appendJamo c =
+            result.Append(marker).Append(char (0xE500 + int c - 0x1100)) |> ignore
+        for c in value do
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif isJamo c then appendJamo c
+            else
+                match compatibility c with
+                | Some decomposed -> for jamo in decomposed do appendJamo jamo
+                | None -> result.Append(c) |> ignore
+        result.ToString()
+
+let private foldLegacyUnicodeJamo (value: string) =
+    let compatibility c =
+        if (c >= '\u3130' && c <= '\u318f') || (c >= '\uffa0' && c <= '\uffdc') then
+            let decomposed = (string c).Normalize(NormalizationForm.FormKD)
+            if not (String.IsNullOrEmpty decomposed)
+               && (decomposed |> Seq.forall (fun jamo -> jamo >= '\u1100' && jamo <= '\u11ff')) then
+                Some decomposed
+            else None
+        else None
+    foldUnicodeJamo compatibility value
+
+// general_ci leaves compatibility Jamo distinct from conjoining Jamo.
+let private foldGeneralUnicodeJamo (value: string) = foldUnicodeJamo (fun _ -> None) value
+
+// Every synthetic key has a private-use marker. Literal markers double so
+// they cannot alias a generated weight, including beside other private-use text.
+let private generalSyntheticPair c =
+    let pair marker weight = ValueSome(struct (marker, weight))
+    match c with
+    | '\uE0C0' | '\uE0D0' | '\uE0E0' | '\uE300' | '\uE0F0' | '\uE600'
+    | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5'
+    | '\uE0B6' | '\uE0B7' | '\uE0B8' | '\uE0B9' | '\uE0BA' | '\uE0BB' | '\uE0BC' | '\uE0BD' as marker ->
+        pair marker marker
+    // Halfwidth voicing and decomposed kana marks have their own positional weights.
+    | '\uff9e' -> pair '\uE0C0' '\uE0C1'
+    | '\uff9f' -> pair '\uE0C0' '\uE0C2'
+    | '\u3099' -> pair '\uE0E0' '\uE0E1'
+    | '\u309a' -> pair '\uE0E0' '\uE0E2'
+    // ICU ignores or merges these format controls; MySQL keeps them distinct.
+    | '\u034f' -> pair '\uE0D0' '\uE0D1'
+    | '\u00a0' -> pair '\uE0D0' '\uE0D2'
+    | '\u180e' -> pair '\uE0D0' '\uE0D3'
+    | '\u200b' -> pair '\uE0D0' '\uE0D4'
+    | '\u200c' -> pair '\uE0D0' '\uE0D5'
+    | '\u200d' -> pair '\uE0D0' '\uE0D6'
+    | '\u2060' -> pair '\uE0D0' '\uE0D7'
+    | '\u3000' -> pair '\uE0D0' '\uE0D8'
+    // Decomposed accents retain their written weight, apart from Greek iota.
+    | c when c >= '\u0300' && c <= '\u036f' && c <> '\u0345' ->
+        pair '\uE300' (char (0xE400 + int c - 0x0300))
+    // Assigned CJK radicals do not share the corresponding ideograph weight.
+    | c when (c >= '\u2e80' && c <= '\u2e99')
+             || (c >= '\u2e9b' && c <= '\u2ef3')
+             || (c >= '\u2f00' && c <= '\u2fd5') ->
+        pair '\uE0F0' (char (0xE100 + int c - 0x2e80))
+    // General Unicode keeps kana script, width, voicing, and size distinctions.
+    | c when (c >= '\u3041' && c <= '\u3096') || (c >= '\u3099' && c <= '\u30ff') ->
+        pair '\uE600' (char (0xE700 + int c - 0x3040))
+    | c when c >= '\uff61' && c <= '\uff9f' ->
+        pair '\uE600' (char (0xE900 + int c - 0xff61))
+    // These compatibility blocks retain their written forms; circled letters
+    // are the exception whose lowercase forms share uppercase weights.
+    | c when c >= '\uf900' && c <= '\ufaff' ->
+        pair '\uE0B1' (char (0xEA00 + int c - 0xF900))
+    | c when c >= '\u3200' && c <= '\u33ff' ->
+        pair '\uE0B2' (char (0xEC00 + int c - 0x3200))
+    | c when c >= '\u2460' && c <= '\u24ff' ->
+        let upper = if c >= '\u24d0' && c <= '\u24e9' then char (int c - 26) else c
+        pair '\uE0B3' (char (0xEE00 + int upper - 0x2460))
+    | c when c >= '\u3001' && c <= '\u303f' ->
+        pair '\uE0B4' (char (0xEF00 + int c - 0x3000))
+    // MySQL gives every vertical and small-form punctuation code point its
+    // written primary weight, including the unassigned positions in the block.
+    | c when c >= '\uFE10' && c <= '\uFE6F' ->
+        pair '\uE0B8' (char (0xF300 + int c - 0xFE10))
+    // Kanbun and Bopomofo extension letters have distinct legacy weights;
+    // ICU merges a few pairs that MySQL keeps separate.
+    | c when c >= '\u3190' && c <= '\u31BF' ->
+        pair '\uE0B9' (char (0xF400 + int c - 0x3190))
+    // The older Bopomofo block also has one weight per written code point.
+    | c when c >= '\u3100' && c <= '\u318F' ->
+        pair '\uE0BA' (char (0xF500 + int c - 0x3100))
+    // MySQL retains the written weights of later combining marks; ICU
+    // merges some of them before full-text postings are built.
+    | c when c >= '\u1AB0' && c <= '\u1AFF' ->
+        pair '\uE0BB' (char (0xF600 + int c - 0x1AB0))
+    | c when c >= '\u1DC0' && c <= '\u1DFF' ->
+        pair '\uE0BB' (char (0xF680 + int c - 0x1DC0))
+    | c when c >= '\u20D0' && c <= '\u20FF' ->
+        pair '\uE0BB' (char (0xF700 + int c - 0x20D0))
+    // Variation selectors are significant under general_ci, including FE0F.
+    | c when c >= '\uFE00' && c <= '\uFE0F' ->
+        pair '\uE0BB' (char (0xF800 + int c - 0xFE00))
+    // ICU folds several dash, quote, and script-number forms together;
+    // MySQL's legacy collation gives each of these its written weight.
+    | c when (c >= '\u2010' && c <= '\u201F')
+             || (c >= '\u2070' && c <= '\u208F')
+             || c = '\u2099' ->
+        pair '\uE0BC' (char (0xF810 + int c - 0x2000))
+    // MySQL's general collation keeps this Glagolitic/Coptic block in
+    // written-code-point order; ICU case-folds many of its letter pairs.
+    | c when c >= '\u2C00' && c <= '\u2CFF' ->
+        pair '\uE0BD' (char (0xE500 + int c - 0x2C00))
+    // Letterlike symbols, number forms, and arrows retain their code-point
+    // weights, except lowercase Roman numerals share uppercase weights.
+    | c when c >= '\u2100' && c <= '\u21ff' ->
+        let upper = if c >= '\u2170' && c <= '\u217f' then char (int c - 16) else c
+        pair '\uE0B5' (char (0xF000 + int upper - 0x2100))
+    // Mathematical operators in this block keep one primary weight per code point.
+    | c when c >= '\u2200' && c <= '\u22ff' ->
+        pair '\uE0B6' (char (0xF100 + int c - 0x2200))
+    // MySQL keeps dingbats and supplemental mathematical operators distinct.
+    | c when (c >= '\u2700' && c <= '\u27ff') || (c >= '\u2a00' && c <= '\u2aff') ->
+        pair '\uE0B7' (char (0xF200 + int c - 0x2700))
+    | _ -> ValueNone
+
+let private foldGeneralSyntheticWeights (value: string) =
+    let mutable first = 0
+    while first < value.Length
+          && (match generalSyntheticPair value.[first] with ValueNone -> true | ValueSome _ -> false) do
+        first <- first + 1
+    if first = value.Length then value
+    else
+        let result = StringBuilder(value.Length)
+        result.Append(value, 0, first) |> ignore
+        for index in first .. value.Length - 1 do
+            let c = value.[index]
+            match generalSyntheticPair c with
+            | ValueSome(struct (marker, weight)) -> result.Append(marker).Append(weight) |> ignore
+            | ValueNone -> result.Append(c) |> ignore
+        result.ToString()
+
 // MySQL's legacy UCA keeps some enclosed Korean/ideograph forms distinct,
 // while expanding enclosed kana and square unit forms that ICU keeps apart.
 let private foldLegacyEnclosedCjk (value: string) =
@@ -250,8 +499,8 @@ let private foldLegacyKanaForms (value: string) =
             | c -> result.Append(c) |> ignore
         result.ToString()
 
-// ICU merges these Bopomofo forms with older letters; MySQL's legacy
-// collation keeps them at distinct primary weights.
+// ICU merges these Bopomofo forms with older letters; MySQL's Unicode 4.0
+// and 5.2 collations keep them at distinct primary weights.
 let private foldLegacyBopomofoForms (value: string) =
     if not (value |> Seq.exists (fun c -> c = '\uE060' || c = 'ㄮ' || c = 'ㆻ')) then value
     else
@@ -298,54 +547,8 @@ let private foldLegacySupplementary (value: string) =
             index <- index + 1
         result.ToString()
 
-// UCA 5.2 assigns U+180E a primary weight; ICU now treats it as ignorable.
-let private foldUnicode520MongolianSeparator (value: string) =
-    if not (value.Contains('\u180e') || value.Contains('\uE0A0')) then value
-    else
-        let result = StringBuilder(value.Length)
-        for c in value do
-            match c with
-            | '\u180e' -> result.Append("\uE0A0\uE0A1") |> ignore
-            | '\uE0A0' -> result.Append("\uE0A0\uE0A0") |> ignore
-            | c -> result.Append(c) |> ignore
-        result.ToString()
-
-// ICU composes conjoining Hangul Jamo into syllables. MySQL's older Unicode
-// collations retain their individual weights; each collation decides whether
-// compatibility Jamo share them.
-let private foldUnicodeJamo compatibility (value: string) =
-    let isJamo c = c >= '\u1100' && c <= '\u11ff'
-    let marker = '\uE0B0'
-    if not (value |> Seq.exists (fun c -> c = marker || isJamo c || (compatibility c |> Option.isSome))) then value
-    else
-        let result = StringBuilder(value.Length)
-        let appendJamo c =
-            result.Append(marker).Append(char (0xE500 + int c - 0x1100)) |> ignore
-        for c in value do
-            if c = marker then result.Append(marker).Append(marker) |> ignore
-            elif isJamo c then appendJamo c
-            else
-                match compatibility c with
-                | Some decomposed -> for jamo in decomposed do appendJamo jamo
-                | None -> result.Append(c) |> ignore
-        result.ToString()
-
-let private foldLegacyUnicodeJamo (value: string) =
-    let compatibility c =
-        if (c >= '\u3130' && c <= '\u318f') || (c >= '\uffa0' && c <= '\uffdc') then
-            let decomposed = (string c).Normalize(NormalizationForm.FormKD)
-            if not (String.IsNullOrEmpty decomposed)
-               && (decomposed |> Seq.forall (fun jamo -> jamo >= '\u1100' && jamo <= '\u11ff')) then
-                Some decomposed
-            else None
-        else None
-    foldUnicodeJamo compatibility value
-
-// general_ci leaves compatibility Jamo distinct from conjoining Jamo.
-let private foldGeneralUnicodeJamo (value: string) = foldUnicodeJamo (fun _ -> None) value
-
-// UCA 4.0 gives the vertical punctuation block implicit, distinct weights;
-// newer MySQL weights fold its presentation forms.
+// UCA 4.0 gives FE10–FE1F and FE24–FE2F implicit, distinct weights;
+// newer MySQL weights fold many of these presentation forms.
 let private foldCjkPunctuationForms modern (value: string) =
     let value =
         let isWidthForm c =
@@ -367,18 +570,27 @@ let private foldCjkPunctuationForms modern (value: string) =
     else
         // Escape the marker in source text before encoding vertical forms.
         // Keep FE11's existing marker so stored ngram keys remain compatible.
-        if comma |> Seq.exists (fun c -> c = '\uE011' || (c >= '\uFE10' && c <= '\uFE19')) then
+        let hasImplicitWeight c =
+            (c >= '\uFE10' && c <= '\uFE1F') || (c >= '\uFE24' && c <= '\uFE2F')
+        if comma |> Seq.exists (fun c -> c = '\uE011' || hasImplicitWeight c) then
             let result = StringBuilder(comma.Length)
             for c in comma do
                 match c with
                 | '\uE011' -> result.Append("\uE011\uE011") |> ignore
                 | '\uFE11' -> result.Append("\uE011\uE012") |> ignore
-                | c when c >= '\uFE10' && c <= '\uFE19' ->
+                | c when hasImplicitWeight c ->
                     let marker = if c = '\uFE10' then '\uE010' else char (int '\uE013' + int c - int '\uFE12')
                     result.Append('\uE011').Append(marker) |> ignore
                 | c -> result.Append(c) |> ignore
             result.ToString()
         else comma
+
+// These characters share ASCII space's primary weight in MySQL's legacy
+// Unicode collations. U+1680 and the Unicode line separators do not.
+let private legacyUnicodePadSpaces =
+    [| ' '; '\u00a0'; '\u2000'; '\u2001'; '\u2002'; '\u2003'
+       '\u2004'; '\u2005'; '\u2006'; '\u2007'; '\u2008'; '\u2009'
+       '\u200a'; '\u202f'; '\u205f'; '\u3000' |]
 
 // Legacy Unicode collations treat these separator forms as an ordinary space
 // and these format controls as ignorable at the primary weight level.
@@ -397,7 +609,13 @@ let private foldLegacySpace (value: string) =
 
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
-    let trim (s: string) = if spec.PadSpace then s.TrimEnd(' ') else s
+    let trim (s: string) =
+        if not spec.PadSpace then s
+        elif name = "utf8mb4_unicode_ci" || name = "utf8mb4_unicode_520_ci" then
+            // MySQL gives these Unicode spaces the same primary weight as
+            // ASCII space, so PAD SPACE removes them at the end of a key.
+            s.TrimEnd(legacyUnicodePadSpaces)
+        else s.TrimEnd(' ')
     let charset =
         match name.IndexOf '_' with
         | -1 -> name
@@ -425,17 +643,27 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
     let foldText (value: string) =
         match name with
         | "utf8mb4_general_ci" ->
-            value.Replace("ß", "s").Replace("ẞ", "s") |> foldLegacySupplementary |> foldGeneralUnicodeJamo
+            value.Replace("ß", "s").Replace("ẞ", "s")
+            |> foldLegacySupplementary |> foldGeneralUnicodeJamo
+            |> foldGeneralSyntheticWeights
         | "utf8mb4_0900_ai_ci"
-        | "utf8mb4_0900_as_ci"
-        | "utf8mb4_unicode_520_ci" ->
-            value |> foldLegacySpace |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
+        | "utf8mb4_0900_as_ci" ->
+            value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
             |> foldCjkQuoteForms |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
+            |> foldSupplementaryKanaImplicit false
+        | "utf8mb4_unicode_520_ci" ->
+            value |> foldLegacySpace |> foldCjkPunctuationForms true |> foldLegacyBopomofoForms
+            |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
+            |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
+            |> foldLegacyExtendedCombiningMarks true
+            |> foldLegacyUnicodeJamo |> foldSupplementaryKanaImplicit true
+            |> foldUnicode520EnclosedImplicit
         | "utf8mb4_unicode_ci" ->
             value |> foldLegacySpace |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms
                   |> foldLegacyCompatibilityIdeographs
                   |> foldLegacySupplementary
+                  |> foldLegacyExtendedCombiningMarks false
                   |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
                   |> foldLegacyUnicodeJamo
         | _ -> value

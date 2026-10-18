@@ -220,9 +220,11 @@ let private tokenWith (collation: Collation) (text: string) =
     let foldedText =
         if isBinaryCollation collation then text
         else text.ToLowerInvariant()
-    // The legacy collation's historical case pairs are not identical to
-    // Unicode's current invariant lowercase mapping (for example Ↄ/ↄ).
-    let keyText = if collation.Name = "utf8mb4_unicode_ci" then text else foldedText
+    // Older collation weights can distinguish characters that current Unicode
+    // lowercasing merges, such as turned Latin and reversed C forms.
+    let keyText =
+        if collation.Name = "utf8mb4_unicode_ci" || collation.Name = "utf8mb4_general_ci" then text
+        else foldedText
     { Text = foldedText
       Key = collation.KeyOf keyText }
 
@@ -501,6 +503,21 @@ let private termScoresWithin (candidateIds: Set<'id> option) (view: ReadView<'id
 
 let private termScores view term = termScoresWithin None view term
 
+/// Short Boolean terms can reach historical postings, but not larger ngrams
+/// whose collation keys happen to contract to the same spelling.
+let private booleanPostingRows (view: ReadView<'id>) (token: Token) =
+    view.Postings
+    |> Map.tryFind token.Key
+    |> Option.map (fun rows ->
+        if view.Collation.Name <> "utf8mb4_general_ci" then rows
+        else
+            let length = runeLength token.Text
+            rows
+            |> Map.filter (fun id _ ->
+                match view.Documents.[id].Rules.Tokenizer with
+                | Words _ -> true
+                | Ngrams size -> length >= size))
+
 let private exactPhraseMatches collation (doc: Token[]) (words: Token[]) =
     if words.Length = 0 then
         false
@@ -525,8 +542,7 @@ let private phraseCandidates (view: ReadView<'id>) (words: Token[]) =
     |> Array.filter (isBooleanSearchable view.Rules)
     |> Array.distinctBy _.Key
     |> Array.map (fun word ->
-        view.Postings
-        |> Map.tryFind word.Key
+        booleanPostingRows view word
         |> Option.map (Map.keys >> Set.ofSeq)
         |> Option.defaultValue Set.empty)
     |> Array.sortBy _.Count
@@ -782,27 +798,35 @@ let private addBooleanContribution operator contribution state =
 let private tryBooleanScore state =
     if state.Matched && not state.Excluded then Some state.Score else None
 
-let private parseBooleanQuery rules (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
-    let policy, tokenizer = rules.Stopwords, rules.Tokenizer
-    let mutable i = 0
-    let len = query.Length
+let private booleanGroupSyntaxError (query: string) =
+    let mutable depth = 0
+    let mutable inPhrase = false
+    let mutable error = None
 
-    let balancedGroups () =
-        let mutable depth = 0
-        let mutable inPhrase = false
-        let mutable valid = true
-
-        for c in query do
+    for c in query do
+        if error.IsNone then
             if c = '"' then
                 inPhrase <- not inPhrase
             elif not inPhrase then
                 match c with
                 | '(' -> depth <- depth + 1
-                | ')' when depth = 0 -> valid <- false
+                | ')' when depth = 0 -> error <- Some "syntax error, unexpected ')', expecting $end"
                 | ')' -> depth <- depth - 1
                 | _ -> ()
 
-        valid && depth = 0
+    if error.IsSome then error
+    elif depth <> 0 then Some "syntax error, unexpected $end"
+    else None
+
+let internal booleanSyntaxErrorInView (view: ReadView<'id>) query =
+    match view.Rules.Tokenizer with
+    | Words _ -> booleanGroupSyntaxError query
+    | Ngrams _ -> None
+
+let private parseBooleanQuery rules (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
+    let policy, tokenizer = rules.Stopwords, rules.Tokenizer
+    let mutable i = 0
+    let len = query.Length
 
     let rec skipSpace () =
         if i < len && Char.IsWhiteSpace query.[i] then
@@ -917,7 +941,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
         List.ofSeq acc
 
     match tokenizer with
-    | Ngrams _ when not (balancedGroups ()) -> []
+    | Ngrams _ when booleanGroupSyntaxError query |> Option.isSome -> []
     | _ -> nodes 0
 
 let private proximityMatches (doc: Token[]) (words: Token[]) distance =
@@ -1016,7 +1040,13 @@ let rec private evalTerm
         // Rejected words can still occupy positions inside a longer phrase.
         Map.empty
     | BWord(term, false) ->
-        termScoresWithin candidateIds view term.Key
+        match booleanPostingRows view term with
+        | None -> Map.empty
+        | Some rows ->
+            let weight = idf view rows.Count
+            rows
+            |> restrictScores candidateIds
+            |> Map.map (fun _ frequency -> float frequency * weight * weight)
     | BWord(term, true) ->
         // Prefix wildcards bypass stopword and minimum-length rules.
         let rows =
@@ -1037,8 +1067,7 @@ let rec private evalTerm
             |> Array.filter (isBooleanSearchable view.Rules)
             |> Array.distinctBy _.Key
             |> Array.choose (fun word ->
-                view.Postings
-                |> Map.tryFind word.Key
+                booleanPostingRows view word
                 |> Option.map (fun rows ->
                     let weight = idf view rows.Count
                     rows, weight * weight))
@@ -1197,7 +1226,7 @@ let internal tryFlatBooleanScoresDictionaryInView
     let scoreTerms terms =
         let postingFor (term: Token, prefix) =
             if prefix then Map.tryFind term.Key view.PrefixPostings
-            elif isExactLookup view.Rules term then Map.tryFind term.Key view.Postings
+            elif isExactLookup view.Rules term then booleanPostingRows view term
             else None
 
         let postings =

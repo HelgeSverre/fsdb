@@ -195,6 +195,116 @@ let tests =
                                   [ 1, rules, [ "하늘하늘"; "한글" ] ]
                   Expect.isEmpty (booleanScores index "하늘") (name + " short composed query does not address a Jamo ngram")
 
+          testCase "general Unicode ngrams retain halfwidth voicing marks in relevance"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 6; Stopwords = StopwordPolicy.BuiltIn }
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index =
+                  buildIndexWithDocumentSettings rules collation
+                      [ 1, rules, [ "ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ" ]
+                        2, rules, [ "日本語日本語" ]
+                        3, rules, [ "中文中文" ]
+                        4, rules, [ "生日快乐生日快乐" ] ]
+              for scores in
+                  [ naturalScores index "ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ"
+                    booleanScores index "ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ"
+                    expansionScores index "ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ" ] do
+                  Expect.equal (scores |> Map.keys |> Seq.toList) [ 1 ] "only the matching document scores"
+                  closeTo 1.8123811483383179 scores.[1] "MySQL weights five distinct size-6 grams"
+
+          testCase "general Unicode size-5 ngrams separate format and space controls"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 5; Stopwords = StopwordPolicy.BuiltIn }
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index =
+                  buildIndexWithDocumentSettings rules collation
+                      [ 1, rules, [ "生日\u200d快乐" ]
+                        2, rules, [ "生日\ufe0f快乐" ]
+                        3, rules, [ "生日\u00a0快乐" ]
+                        4, rules, [ "生日\u3000快乐" ]
+                        5, rules, [ "日本語日本語" ]
+                        6, rules, [ "中文中文中文" ]
+                        7, rules, [ "北海道東京" ]
+                        8, rules, [ "韓国語学校" ] ]
+              for term, expectedId in [ "生日\u200d快乐", 1; "生日\ufe0f快乐", 2; "生日\u00a0快乐", 3 ] do
+                  let ids scores = scores |> Map.keys |> Seq.toList
+                  Expect.equal (ids (naturalScores index term)) [ expectedId ] "natural mode keeps the format weight"
+                  Expect.equal (ids (expansionScores index term)) [ expectedId ] "query expansion keeps the format weight"
+                  let booleanIds = if expectedId = 2 then [ 2 ] else []
+                  Expect.equal (ids (booleanScores index term)) booleanIds "Boolean parsing follows MySQL's control boundaries"
+
+          testCase "general Unicode ngrams do not compose kana marks"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              for size in [ 3; 4 ] do
+                  let rules = { Tokenizer = Ngrams size; Stopwords = StopwordPolicy.BuiltIn }
+                  let index =
+                      buildIndexWithDocumentSettings rules collation
+                          [ 1, rules, [ "ガラス" ]
+                            2, rules, [ "カ\u3099ラス" ]
+                            3, rules, [ "パピ" ]
+                            4, rules, [ "ハ\u309aピ" ]
+                            5, rules, [ "日本語日本語" ]
+                            6, rules, [ "中文中文中文" ]
+                            7, rules, [ "北海道東京" ]
+                            8, rules, [ "韓国語学校" ] ]
+                  let cases =
+                      if size = 3 then
+                          [ "ガラス", [ 1 ]; "カ\u3099ラス", [ 2 ]; "パピ", []; "ハ\u309aピ", [ 4 ] ]
+                      else
+                          [ "ガラス", []; "カ\u3099ラス", [ 2 ]; "パピ", []; "ハ\u309aピ", [] ]
+                  for term, expected in cases do
+                      for scores in [ naturalScores index term; booleanScores index term; expansionScores index term ] do
+                          Expect.equal (scores |> Map.keys |> Seq.toList) expected (sprintf "MySQL size %d search for %A" size term)
+
+          testCase "general Unicode radical postings do not inflate ideograph relevance"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 3; Stopwords = StopwordPolicy.BuiltIn }
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index =
+                  buildIndexWithDocumentSettings rules collation
+                      [ 1, rules, [ "⽇本語"; "日本語" ]
+                        2, rules, [ "日本語"; "東京" ]
+                        3, rules, [ "中国語"; "学校" ]
+                        4, rules, [ "韓国語"; "中文" ] ]
+              for scores in [ naturalScores index "日本語"; booleanScores index "日本語" ] do
+                  Expect.equal (scores |> Map.keys |> Seq.toList) [ 1; 2 ] "both documents have one ideograph posting"
+                  for id in [ 1; 2 ] do
+                      closeTo 0.0906190574169159 scores.[id] "MySQL does not count the radical as another ideograph"
+              let radicalScores = naturalScores index "⽇本語"
+              Expect.equal (radicalScores |> Map.keys |> Seq.toList) [ 1 ] "radical query has its own posting"
+              closeTo 0.3624762296676636 radicalScores.[1] "radical relevance matches MySQL"
+
+          testCase "general Unicode size-2 ngrams retain a decomposed accent"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index =
+                  buildIndexWithDocumentSettings rules collation
+                      [ 1, rules, [ "生e\u0301日"; "组合" ]
+                        2, rules, [ "生日快乐"; "祝福" ]
+                        3, rules, [ "日本語日本語"; "東京" ]
+                        4, rules, [ "中文中文"; "学校" ] ]
+              for query, expected in [ "日", []; "生 日", []; "\u0301日", [ 1 ]; "生e\u0301日", [ 1 ] ] do
+                  for scores in [ naturalScores index query; booleanScores index query; expansionScores index query ] do
+                      Expect.equal (scores |> Map.keys |> Seq.toList) expected (sprintf "MySQL search for %A" query)
+
+          testCase "general Unicode size-2 ngrams keep kana forms separate"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index =
+                  buildIndexWithDocumentSettings rules collation
+                      [ 1, rules, [ "ゝゞヽヾ"; "かな" ]
+                        2, rules, [ "ひらがなゟ"; "カタカナヿ" ]
+                        3, rules, [ "日本語日本語"; "東京" ]
+                        4, rules, [ "中文中文"; "学校" ] ]
+              for query, expected in
+                  [ "ひらがなゟ", [ 2 ]; "ゝゞ", [ 1 ]; "ヽヾ", [ 1 ]
+                    "カタカナ", [ 2 ]; "カタカナヿ", [ 2 ] ] do
+                  for scores in [ naturalScores index query; booleanScores index query; expansionScores index query ] do
+                      Expect.equal (scores |> Map.keys |> Seq.toList) expected (sprintf "MySQL search for %A" query)
+
           testCase "boolean ngram terms retain Unicode number characters"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }
@@ -412,6 +522,15 @@ let tests =
               Expect.equal (booleanScores replaced "生*" |> ids) [ 3 ] "replacement clears the old generation"
               Expect.equal (naturalScores replaced "中文检" |> ids) [ 1 ] "replacement uses the current generation"
 
+          testCase "Boolean short ngrams do not reach collapsed current-size postings"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index = buildIndexWithTokenizer (Ngrams 2) collation [ 1, "中⵿文" ]
+              let ids scores = scores |> Map.keys |> Seq.toList
+              Expect.equal (booleanScores index "中ⴧ" |> ids) [] "MySQL rejects a truncated Boolean term"
+              Expect.equal (booleanScores index "\"中ⴧ\"" |> ids) [] "quoted terms have the same boundary"
+              let historical = buildIndexWithTokenizer (Ngrams 1) collation [ 2, "中文" ] |> withTokenizer (Ngrams 2)
+              Expect.equal (booleanScores historical "中" |> ids) [ 2 ] "earlier one-character postings remain reachable"
           testCase "ngram exclusions without positive terms never score postings"
           <| fun _ ->
               let index =

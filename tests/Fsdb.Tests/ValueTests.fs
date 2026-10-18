@@ -1581,6 +1581,236 @@ let tests =
                     Expect.notEqual (col.KeyOf "하") (col.KeyOf "ㅎㅏ") "index keys preserve the distinction"
                     Expect.notEqual (col.HashOf "하") (col.HashOf "ㅎㅏ") "hash keys preserve the distinction"
 
+                testCase "utf8mb4_general_ci keeps halfwidth voicing marks in sequence keys"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in [ "ﾟﾋ", "ﾋﾟ"; "ﾞﾋ", "ﾋﾞ"; "ﾊﾟ", "ﾊ"; "ﾊﾞ", "ﾊﾟ"; "ﾟ", "゚" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the voicing mark"
+                    Expect.isFalse (col.Equals "ﾟ" "\uE0C0\uE0C2") "literal marker cannot alias the mark key"
+
+                testCase "utf8mb4_general_ci preserves distinct format and space weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let weighted =
+                        [ '\u034f'; '\u00a0'; '\u180e'; '\u200b'; '\u200c'
+                          '\u200d'; '\u2060'; '\u3000'; '\ufe0f' ]
+                    let keys = weighted |> List.map (fun c -> col.KeyOf ("生" + string c + "日"))
+                    Expect.equal (keys |> List.distinct |> List.length) weighted.Length "each audited control has its own positional key"
+                    for c in weighted do
+                        Expect.isFalse (col.Equals ("生" + string c + "日") "生日") "MySQL weights each audited control"
+                    for left, right in
+                        [ "生日\u200d快乐", "生日\ufe0f快乐"
+                          "生日\u00a0快乐", "生日\u3000快乐"
+                          "生日\u200d快乐", "生日快乐"
+                          "生日\ufe0f快乐", "生日快乐" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the distinction"
+                    Expect.isFalse (col.Equals "\u200d" "\uE0D0\uE0D6") "literal marker cannot alias a control"
+
+                testCase "utf8mb4_general_ci keeps decomposed kana distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in
+                        [ "ガ", "カ\u3099"
+                          "パ", "ハ\u309a"
+                          "ガラス", "カ\u3099ラス"
+                          "パピ", "ハ\u309aピ" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the decomposed spelling"
+                    Expect.isFalse (col.Equals "\u3099" "\uE0E0\uE0E1") "literal marker cannot alias the combining mark"
+
+                testCase "utf8mb4_general_ci keeps CJK radicals distinct from their ideographs"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for radical, ideograph in [ "⼀", "一"; "⽇", "日"; "⾔", "言"; "⿑", "齊" ] do
+                        Expect.isFalse (col.Equals radical ideograph) (radical + " differs from " + ideograph)
+                        Expect.notEqual (col.KeyOf radical) (col.KeyOf ideograph) "index keys preserve the radical"
+                    Expect.isFalse (col.Equals "⽇" "\uE0F0\uE1C7") "literal marker cannot alias a radical"
+
+                testCase "utf8mb4_general_ci keeps compatibility ideographs distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for compatibility, baseForm in [ "神", "神"; "郞", "郞"; "並", "並" ] do
+                        Expect.isFalse (col.Equals compatibility baseForm) (compatibility + " differs from " + baseForm)
+                        Expect.notEqual (col.KeyOf compatibility) (col.KeyOf baseForm) "index keys preserve the written ideograph"
+                    Expect.isFalse (col.Equals "神" "\uE0B1\uEB19") "literal marker cannot alias an ideograph"
+
+                testCase "utf8mb4_general_ci keeps enclosed CJK and square units distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in [ "㎞", "㏎"; "㉆", "㉇"; "㍿", "株" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the written symbol"
+                    Expect.isFalse (col.Equals "㎞" "\uE0B2\uED9E") "literal marker cannot alias a square unit"
+
+                testCase "utf8mb4_general_ci keeps enclosed numbers distinct but folds circled letter case"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in [ "①", "⓵"; "②", "⓶"; "①", "1"; "ⓐ", "⒜" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the written symbol"
+                    Expect.isTrue (col.Equals "Ⓐ" "ⓐ") "circled letters share MySQL's case-insensitive weight"
+                    Expect.isFalse (col.Equals "①" "\uE0B3\uEE00") "literal marker cannot alias an enclosed number"
+
+                testCase "utf8mb4_general_ci keeps CJK symbols and marks distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in [ "〒", "〶"; "〝", "〞"; "〪", "〫"; "〱", "〲" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the written symbol"
+                    Expect.isFalse (col.Equals "〒" "\uE0B4\uEF12") "literal marker cannot alias a CJK symbol"
+
+                testCase "utf8mb4_general_ci keeps vertical and small punctuation weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let forms = [ 0xFE10 .. 0xFE6F ] |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> Set.ofList |> Set.count) 96
+                        "every vertical and small-form code point has its own MySQL weight"
+                    for left, right in forms |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "vertical and small-form weights follow codepoint order"
+                    for left, right in [ "︐", "﹐"; "︕", "﹗"; "︠", "︡"; "﹛", "﹜" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isFalse (col.Equals "︐" "\uE0B8\uF300")
+                        "a literal marker cannot alias vertical punctuation"
+
+                testCase "utf8mb4_general_ci keeps punctuation and script number weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let forms = [ 0x2010 .. 0x201F ] @ [ 0x2070 .. 0x208F ] @ [ 0x2099 ]
+                                |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> Set.ofList |> Set.count) 49
+                        "MySQL gives each written form its own primary weight"
+                    for left, right in [ "‐", "‑"; "‘", "’"; "“", "”"; "⁰", "₀"; "ⁿ", "ₙ" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isFalse (col.Equals "‐" "\uE0BC\uF820")
+                        "a literal marker cannot alias punctuation"
+
+                testCase "utf8mb4_general_ci keeps Glagolitic and Coptic weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let forms = [ 0x2C00 .. 0x2CFF ] |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> Set.ofList |> Set.count) 256
+                        "MySQL assigns one literal primary weight per code point"
+                    for left, right in forms |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "the block follows MySQL's code-point order"
+                    for left, right in [ "Ⰰ", "ⰰ"; "⳯", "⳰" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isFalse (col.Equals "Ⰰ" "\uE0BD\uE500")
+                        "a literal marker cannot alias a Glagolitic character"
+
+                testCase "utf8mb4_general_ci keeps Bopomofo extension weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let forms = [ 0x3190 .. 0x31BF ] |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> Set.ofList |> Set.count) 48
+                        "MySQL assigns each Kanbun and Bopomofo extension point a distinct primary weight"
+                    for left, right in forms |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "the blocks follow MySQL's codepoint-ordered weights"
+                    Expect.isFalse (col.Equals "ㆣ" "ㆻ") "the two letters have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "ㆤ" "ㆥ") "adjacent letters have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "ㆣ" "\uE0B9\uF413")
+                        "a literal marker cannot alias an extension letter"
+
+                testCase "utf8mb4_general_ci keeps Bopomofo base weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let forms = [ 0x3100 .. 0x318F ] |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> Set.ofList |> Set.count) 144
+                        "MySQL assigns each base Bopomofo code point a distinct primary weight"
+                    for left, right in forms |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "the block follows MySQL's codepoint-ordered weights"
+                    Expect.isFalse (col.Equals "ㄜ" "ㄮ") "the two letters have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "ㄜ" "\uE0BA\uF51C")
+                        "a literal marker cannot alias a Bopomofo letter"
+
+                testCase "utf8mb4_general_ci keeps extended combining-mark weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let marks =
+                        [ 0x1AB0 .. 0x1AFF ] @ [ 0x1DC0 .. 0x1DFF ] @ [ 0x20D0 .. 0x20FF ]
+                        |> List.map (char >> string)
+                    Expect.equal (marks |> List.map col.KeyOf |> Set.ofList |> Set.count) 192
+                        "MySQL assigns each extended combining-mark point its written primary weight"
+                    for left, right in marks |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "the blocks follow MySQL's codepoint-ordered weights"
+                    Expect.isFalse (col.Equals "᪰" "᪱") "neighboring marks have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "᷀" "᷁") "supplemental marks have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "⃐" "⃑") "symbol marks have distinct MySQL weights"
+                    Expect.isFalse (col.Equals "᪰" "\uE0BB\uF600")
+                        "a literal marker cannot alias an extended combining mark"
+                    Expect.isFalse (col.Equals "᷀" "\uE0BB\uF680")
+                        "a literal marker cannot alias a supplemental mark"
+                    Expect.isFalse (col.Equals "⃐" "\uE0BB\uF700")
+                        "a literal marker cannot alias a symbol mark"
+
+                testCase "utf8mb4_general_ci keeps variation-selector weights distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let selectors = [ 0xFE00 .. 0xFE0F ] |> List.map (char >> string)
+                    Expect.equal (selectors |> List.map col.KeyOf |> Set.ofList |> Set.count) 16
+                        "MySQL assigns each variation selector its written primary weight"
+                    for left, right in selectors |> List.pairwise do
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "variation-selector weights follow codepoint order"
+                    Expect.isFalse (col.Equals "\uFE00" "\uE0BB\uF800")
+                        "a literal marker cannot alias a variation selector"
+
+                testCase "utf8mb4_general_ci keeps letterlike symbols at their written weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let keys = [ 0x2100 .. 0x21FF ] |> List.map (char >> string >> col.KeyOf)
+                    Expect.equal (keys |> Set.ofList |> Set.count) 240 "only the sixteen lowercase Roman numerals share weights"
+                    for left, right in [ "℁", "⅍"; "ℂ", "C"; "ℋ", "ℌ"; "Ⅎ", "ⅎ"; "Ↄ", "ↄ"; "←", "⇐" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isTrue (col.Equals "Ⅰ" "ⅰ") "Roman numeral case shares a primary weight"
+                    Expect.isFalse (col.Equals "℁" "\uE0B5\uF001") "literal marker cannot alias a letterlike symbol"
+
+                testCase "utf8mb4_general_ci keeps mathematical operators at their written weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let keys = [ 0x2200 .. 0x22FF ] |> List.map (char >> string >> col.KeyOf)
+                    Expect.equal (keys |> Set.ofList |> Set.count) 256 "each mathematical operator has its own MySQL weight"
+                    for left, right in [ "∃", "∄"; "∈", "∉"; "∣", "∤"; "∥", "∦"; "∼", "≁"; "≈", "≉" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isFalse (col.Equals "∃" "\uE0B6\uF103") "literal marker cannot alias an operator"
+
+                testCase "utf8mb4_general_ci distinguishes dingbats and supplemental operators"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let keys = [ 0x2700 .. 0x27FF ] @ [ 0x2A00 .. 0x2AFF ] |> List.map (char >> string >> col.KeyOf)
+                    Expect.equal (keys |> Set.ofList |> Set.count) 512 "each audited symbol has its own MySQL weight"
+                    for left, right in [ "❶", "➀"; "❶", "➊"; "➀", "➊"; "⫝̸", "⫝" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                    Expect.isFalse (col.Equals "❶" "\uE0B7\uF276") "literal marker cannot alias a dingbat"
+
+                testCase "utf8mb4_general_ci retains decomposed combining accents"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in [ "e\u0301", "e"; "e\u0301", "é"; "\u0301日", "日" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the combining accent"
+                    Expect.isTrue (col.Equals "é" "e") "precomposed acute remains MySQL accent-insensitive"
+                    Expect.isFalse (col.Equals "\u0301" "\uE300\uE401") "literal marker cannot alias an accent"
+
+                testCase "utf8mb4_general_ci keeps kana scripts and widths distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for left, right in
+                        [ "か", "カ"; "ｶ", "カ"; "ﾊﾟ", "パ"
+                          "が", "か"; "ガ", "カ"; "パ", "ハ"
+                          "がな", "かな"; "ぁ", "あ"
+                          "ゝ", "ヽ"; "ゞ", "ヾ"; "ゟ", "ヿ"
+                          "ゟ", "ゝゞ"; "ヿ", "ヽヾ" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys preserve the kana spelling"
+                    Expect.isFalse (col.Equals "が" "\uE600\uE70C") "literal marker cannot alias kana"
+
                 testTheory
                     "MySQL 8.4 kana width equality follows the selected collation"
                     [ "utf8mb4_0900_ai_ci", true
@@ -1659,11 +1889,14 @@ let tests =
                 testCase "legacy vertical punctuation keeps MySQL implicit-weight order"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
-                    let forms = [ 0xFE10 .. 0xFE19 ] |> List.map (char >> string)
-                    Expect.equal (forms |> List.map col.KeyOf |> List.distinct |> List.length) 10 "each vertical form has its own key"
+                    let forms = [ 0xFE10 .. 0xFE1F ] @ [ 0xFE24 .. 0xFE2F ] |> List.map (char >> string)
+                    Expect.equal (forms |> List.map col.KeyOf |> List.distinct |> List.length) 28
+                        "each implicit vertical or half-mark form has its own key"
                     for left, right in forms |> List.pairwise do
-                        Expect.isLessThan (col.ComparePrimary left right) 0 "vertical forms follow their implicit-weight order"
+                        Expect.isLessThan (col.ComparePrimary left right) 0
+                            "vertical and half-mark forms follow their implicit-weight order"
                     Expect.isFalse (col.Equals "︒" "\uE011\uE013") "a literal private-use marker cannot alias a vertical form"
+                    Expect.isFalse (col.Equals "︤" "\uE011\uE025") "a literal marker cannot alias a half mark"
 
                 testCase "legacy enclosed CJK implicit weights stay distinct"
                 <| fun _ ->
@@ -1708,12 +1941,13 @@ let tests =
 
                 testCase "legacy Bopomofo forms keep MySQL primary weights"
                 <| fun _ ->
-                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
-                    Expect.isTrue (col.Equals "ㄍ" "ㆣ") "the older velar forms remain equal"
-                    for left, right in [ "ㄮ", "ㄜ"; "ㆻ", "ㄍ"; "ㆻ", "ㆣ" ] do
-                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
-                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) (left + " has a distinct index key")
-                    Expect.isFalse (col.Equals "ㄮ" "\uE060\uE061") "the marker cannot alias a Bopomofo form"
+                    for name in [ "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci" ] do
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.isTrue (col.Equals "ㄍ" "ㆣ") (name + " keeps the older velar forms equal")
+                        for left, right in [ "ㄮ", "ㄜ"; "ㆻ", "ㄍ"; "ㆻ", "ㆣ" ] do
+                            Expect.isFalse (col.Equals left right) (name + ": " + left + " differs from " + right)
+                            Expect.notEqual (col.KeyOf left) (col.KeyOf right) (name + ": distinct index keys")
+                        Expect.isFalse (col.Equals "ㄮ" "\uE060\uE061") (name + " marker isolation")
 
                 testCase "legacy compatibility ideographs preserve measured UCA classes"
                 <| fun _ ->
@@ -1744,6 +1978,39 @@ let tests =
                         if expected then
                             Expect.equal (col.KeyOf left) (col.KeyOf right) (name + " index key")
                             Expect.equal (col.HashOf left) (col.HashOf right) (name + " hash")
+
+                testTheory "supplementary archaic WU keys follow MySQL Unicode generations"
+                    [ "utf8mb4_unicode_ci", true
+                      "utf8mb4_general_ci", true
+                      "utf8mb4_unicode_520_ci", false
+                      "utf8mb4_0900_ai_ci", false
+                      "utf8mb4_0900_as_ci", false ]
+                    <| fun (name, equal) ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.equal (col.Equals "𛄟" "𛄢") equal name
+                        Expect.equal (col.KeyOf "𛄟" = col.KeyOf "𛄢") equal (name + " canonical keys")
+                        if not equal then
+                            Expect.isTrue (col.ComparePrimary "𛄟" "𛄢" < 0) (name + " implicit weight order")
+                            Expect.isFalse (col.Equals "𛄟" "\uE0B2\uE71F") (name + " marker cannot alias source text")
+
+                testTheory "Kana Extended-B small letters retain implicit primary weights"
+                    [ "utf8mb4_unicode_520_ci"; "utf8mb4_0900_ai_ci"; "utf8mb4_0900_as_ci" ]
+                    <| fun name ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        for left, right in [ "𛄲", "𛅕"; "𛅐", "𛅤"; "𛅑", "𛅥"; "𛅒", "𛅦" ] do
+                            Expect.isFalse (col.Equals left right) (name + " distinguishes " + left + " and " + right)
+                            Expect.isTrue (col.ComparePrimary left right < 0) (name + " follows implicit weight order")
+
+                testCase "Unicode 5.2 enclosed alphanumerics retain implicit primary weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_520_ci" |> Option.get
+                    for left, right in [ "🄋", "🄌"; "🄰", "🅰"; "🄫", "🄲" ] do
+                        Expect.isFalse (col.Equals left right) (left + " and " + right + " stay distinct")
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys stay distinct"
+                    Expect.isTrue (col.ComparePrimary "🄋" "🄌" < 0) "implicit weights follow scalar order"
+                    Expect.isFalse (col.Equals "🄋" "\uE0BE\uEA0B") "literal marker text cannot alias a key"
+                    let newer = Fsdb.Collation.tryFind "utf8mb4_0900_ai_ci" |> Option.get
+                    Expect.isTrue (newer.Equals "🄰" "🅰") "the Unicode 9.0 collation keeps its expansion"
 
                 testTheory
                     "collations identify when equality fixes one full-order position"

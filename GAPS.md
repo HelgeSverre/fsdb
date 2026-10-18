@@ -971,7 +971,9 @@ oracle-verified TF × IDF² scoring with its epsilon floor and built-in stopword
 list. Word stopwords are filtered when indexing; ordinary queries can still
 match surviving collation-equivalent or historical postings
 ([oracle evidence](torture/findings/2026-10-07-fulltext-word-stopword-postings.md)). Boolean syntax covers
-`+ - > < ~ word* "phrases" @N proximity ()` with depth cap; blind
+`+ - > < ~ word* "phrases" @N proximity ()` with depth cap; [unbalanced
+word-parser groups](torture/findings/2026-10-17-word-boolean-group-syntax.md)
+raise MySQL error 1064 while ngram groups return no matches; blind
 relevance-feedback expansion and bare WHERE-MATCH relevance ordering are also
 supported.
 
@@ -1021,6 +1023,50 @@ of their posting and matched rows.
 | Transaction relevance | MySQL uses an approximate global table-row estimate for ranking | visibility cases agree; fsdb uses the committed corpus count rather than estimates that remain changed after rollback until ANALYZE ([controlled oracle](torture/findings/2026-10-07-fulltext-transaction-visibility.md#relevance-and-implementation-boundary)); follows the deliberate statistics policy in section 16 | high (relevance correctness) | deliberate divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | ngram DDL, search modes, stopword and phrase boundaries, mutation, startup token sizes, and preserved postings across WAL/snapshot recovery are implemented; common metadata-only MODIFY/CHANGE column definitions also preserve historical postings ([recovery oracle](torture/findings/2026-10-07-ngram-startup-sizing.md)); [multi-column searches and relevance at startup sizes 1–10](torture/findings/2026-10-07-ngram-fulltext.md) match the audited default-collation MySQL corpus, including Unicode formatting and zero-width controls, combining-mark boundaries, decomposed and voiced kana, width and script variants, compatibility ideographs, ideographic variation selectors, CJK punctuation presentation forms, and numeric symbols, within score tolerance; [legacy `utf8mb4_unicode_ci` punctuation](torture/findings/2026-10-15-legacy-ngram-punctuation.md), [enclosed CJK forms](torture/findings/2026-10-17-enclosed-cjk-legacy-ngram.md), and [U+2100–U+21FF letterlike symbols](torture/findings/2026-10-17-letterlike-legacy-ngram.md), and [U+3000–U+31FF kana and Bopomofo forms](torture/findings/2026-10-17-kana-extension-legacy-ngram.md) match their audited MySQL ngram and equality cases; [later compatibility ideographs and sampled supplementary scalars](torture/findings/2026-10-17-compatibility-ideograph-audit.md) now match their audited native-MySQL cases; exact legacy weight bytes, broader legacy-collation behavior, and MeCab remain open | medium (for CJK) | partial |
 
+The [remaining supplementary compatibility-ideograph block](torture/findings/2026-10-17-compatibility-ideograph-audit.md)
+also matches 1,716 native-MySQL ngram searches at each of startup sizes 1–10.
+A [legacy-collation selector and CJK punctuation audit](torture/findings/2026-10-18-legacy-cjk-selector-audit.md)
+found no membership or relevance differences across 4,800 additional
+two-column ngram queries at token sizes 1–10. This narrows the sampled
+legacy-collation gap; MeCab and unsampled weight families remain open.
+The [U+FE10–U+FE6F legacy vertical-form audit](torture/findings/2026-10-18-legacy-vertical-half-mark-ngram.md)
+also now matches 504 MySQL searches per token size at sizes 1–10, after
+preserving UCA 4.0's distinct U+FE1A–U+FE1F and U+FE24–U+FE2F weights.
+
+The [Nüshu U+1B170–U+1B2FF audit](torture/findings/2026-10-18-nushu-ngram-audit.md)
+finds no two-column membership or relevance differences in 7,128 general-ci
+searches at token sizes 1–3 or 2,376 searches each for Unicode 5.2 and 9.0
+at size 1. MeCab and other untested Unicode ranges remain open.
+The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
+likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
+plus 1,464 legacy Unicode searches over its later part at size 1.
+
+[Assigned supplementary kana in U+1B000–U+1B16F](torture/findings/2026-10-18-supplementary-kana-ngram.md)
+now retain distinct Unicode 5.2 and 9.0 implicit weights for equality and
+ngram postings. The audited size 1–3 corpus agrees with MySQL across natural,
+Boolean, and query-expansion searches under both collations and the older
+`utf8mb4_unicode_ci` fallback. The assigned U+1B130–U+1B16F extension also
+matches audited size-1 through size-3 searches under Unicode 5.2 and 9.0.
+The [U+1F100–U+1F1FF enclosed alphanumeric audit](torture/findings/2026-10-18-enclosed-alphanumeric-520-ngram.md)
+also preserves 193 distinct Unicode 5.2 implicit-weight scalars in
+collation keys and two-column ngram postings; the maintained range oracle
+checks natural, Boolean, and expansion searches across startup token sizes
+1–10. Unicode 9.0 keeps its separate expansion behavior.
+
+The [general Unicode letterlike-symbol audit](torture/findings/2026-10-17-general-ci-letterlike-weights.md)
+matches MySQL's U+2100–U+21FF primary-weight classes in two-column
+ngram searches at token sizes 1–10. Broader collation and parser behavior
+remains open.
+A current-head rerun of the maintained two-column `utf8mb4_general_ci`
+corpus matches MySQL 8.4.11 in all 387 searches at each of sizes 1–5;
+the range-specific audits below retain their separate coverage boundaries.
+The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
+also matches MySQL's distinct U+2200–U+22FF primary weights in the same
+two-column ngram lane at token sizes 1–10.
+The [dingbat and supplemental-operator audit](torture/findings/2026-10-17-general-ci-later-symbol-weights.md)
+likewise preserves literal U+2700–U+27FF and U+2A00–U+2AFF weights, including
+decorated number forms that ICU had merged.
+
 The [Boolean query Unicode character-table gap](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md)
 is closed for audited cases: Boolean word and phrase boundaries now use
 MySQL 8.4's historical Unicode 5.0-draft character set, while natural and
@@ -1051,12 +1097,106 @@ now matches the audited spacing, format-control, and Korean Jamo ngram cases
 under both `utf8mb4_unicode_ci` and `utf8mb4_unicode_520_ci`. The full
 two-column corpus matches at token sizes 1–10 for each collation. Broader
 collation behavior and MeCab remain open.
+The [Unicode 5.2 Bopomofo audit](torture/findings/2026-10-17-unicode520-bopomofo-ngram.md)
+keeps the measured extension letters distinct; the U+3100–U+31FF ngram corpus
+now matches MySQL at all ten token sizes under `utf8mb4_unicode_520_ci`.
 The [`utf8mb4_general_ci` supplementary-key probe](torture/findings/2026-10-17-general-ci-supplementary-ngram.md)
 now shares MySQL's sampled fallback weight across supplementary scalars;
 broader `general_ci` ngram and relevance differences remain.
 The [general-collation Jamo probe](torture/findings/2026-10-17-general-ci-jamo-ngram.md)
 also preserves conjoining Jamo's distinct weights without equating
 compatibility Jamo, resolving the audited size-5 Boolean short-term mismatch.
+The [Hangul-syllable probe](torture/findings/2026-10-17-general-ci-hangul-syllable-ngram.md)
+also matches 1,551 two-column searches per token size from 1–10 over
+U+AC00–U+ACFF with decomposed and compatibility Jamo controls.
+The complete U+AC00–U+D7A3 syllabary has distinct literal MySQL weights.
+Additional U+AD00–U+ADFF, U+C100–U+C1FF, and U+D600–U+D6FF corpora each
+match 1,536 searches per size across the same ten token sizes.
+The [halfwidth voicing-mark probe](torture/findings/2026-10-17-general-ci-halfwidth-marks.md)
+keeps mark positions in `utf8mb4_general_ci` keys; the audited two-column
+ngram corpus now matches MySQL at token sizes 6–10, while smaller sizes retain
+other collation and relevance differences.
+The [format-control probe](torture/findings/2026-10-17-general-ci-format-controls.md)
+also keeps nine audited format/space characters distinct. The corpus now
+matches at token sizes 5–10; smaller sizes and broader collation behavior
+remain open.
+The [decomposed-kana probe](torture/findings/2026-10-17-general-ci-kana-marks.md)
+keeps combining voicing marks distinct from precomposed kana under
+`utf8mb4_general_ci`; the audited corpus now matches at sizes 4–10.
+The [radical-weight probe](torture/findings/2026-10-17-general-ci-radical-weights.md)
+also preserves the distinct primary weights of assigned CJK radicals; the
+audited general-collation corpus now matches at ngram sizes 3–10.
+The [combining-accent probe](torture/findings/2026-10-17-general-ci-combining-accents.md)
+keeps decomposed accents in positional keys and removes the audited size-2
+short Boolean false positives; kana forms and query expansion remain open.
+The [kana-weight probe](torture/findings/2026-10-17-general-ci-kana-weights.md)
+also preserves assigned fullwidth and halfwidth kana weights; the two-column
+general-collation ngram corpus now has only four size-1 relevance differences,
+with sizes 2–10 matching all audited searches.
+The [compatibility-ideograph probe](torture/findings/2026-10-17-general-ci-compatibility-ideographs.md)
+separates U+F900–U+FAFF from unified Han in `utf8mb4_general_ci`. The maintained
+two-column corpus now matches MySQL 8.4.11 in membership and relevance for
+387 searches at each ngram size 1–10; the expanded size-1 range also matches
+across 2,832 searches. Other characters, collations, and search shapes remain
+outside these audits.
+The [enclosed-CJK and square-unit probe](torture/findings/2026-10-17-general-ci-enclosed-cjk-weights.md)
+preserves MySQL's literal U+3200–U+33FF weights. Its expanded two-column lane
+now matches 3,066 searches at each of ngram sizes 1 and 2; broader CJK and
+full-text behavior remains to audit.
+The [enclosed-alphanumeric probe](torture/findings/2026-10-17-general-ci-enclosed-alphanumerics.md)
+preserves U+2460–U+24FF written weights while retaining MySQL's circled-letter
+case pairs; its expanded ngram lane matches at sizes 1 and 2.
+The [CJK-symbol probe](torture/findings/2026-10-17-general-ci-cjk-symbol-weights.md)
+preserves MySQL's distinct U+3000–U+303F weights; its expanded ngram lane
+matches at sizes 1 and 2.
+The [vertical and small-form punctuation probe](torture/findings/2026-10-17-general-ci-vertical-small-forms.md)
+preserves distinct U+FE10–U+FE6F weights; its expanded two-column ngram lane
+matches MySQL at sizes 1 and 2.
+The [punctuation and script-number probe](torture/findings/2026-10-17-general-ci-punctuation-script-numbers.md)
+preserves distinct dash, quote, superscript, and subscript weights that ICU
+otherwise merges; the U+2000–U+20FF ngram lane matches at sizes 1 and 2.
+The [adjacent symbol-block audit](torture/findings/2026-10-17-general-ci-adjacent-symbol-blocks.md)
+found no additional membership or relevance differences across eight
+U+2300–U+2AFF blocks at sizes 1 and 2. The U+2800–U+28FF block also matches
+at sizes 3–10, with literal, distinct MySQL weights throughout.
+The [Glagolitic and Coptic block probe](torture/findings/2026-10-17-general-ci-glagolitic-coptic.md)
+preserves MySQL's distinct U+2C00–U+2CFF weights; its expanded ngram lane
+matches at sizes 1 and 2.
+The [adjacent U+2D00–U+2DFF probe](torture/findings/2026-10-17-general-ci-2d00-boolean-boundary.md)
+now matches at sizes 1–10. It corrected 152 Boolean-mode membership or
+relevance differences at size 2 while preserving historical short postings;
+adjacent U+2B00 and U+2E00 controls match at sizes 1 and 2.
+The [Bopomofo and Kanbun probe](torture/findings/2026-10-17-general-ci-bopomofo-weights.md)
+preserves distinct U+3100–U+31BF primary weights; the extension-block ngram
+lane matches MySQL at sizes 1–10 (288 searches per size), as does the
+base-block lane (822 searches per size). The adjacent U+31C0–U+31FF control
+also matches (330 searches per size) without an override.
+The [Han extension and Hangul Jamo audit](torture/findings/2026-10-18-general-ci-han-jamo-audit.md)
+matches MySQL across 7,356 additional two-column ngram searches at sizes 1
+and 2, covering sampled Extension A/B ideographs and both Jamo extension
+blocks without a code override.
+The [extended combining-mark probe](torture/findings/2026-10-17-general-ci-extended-combining-marks.md)
+preserves distinct U+1AB0–U+1AFF, U+1DC0–U+1DFF, and U+20D0–U+20FF
+weights in CJK text. The adjacent U+FE20–U+FE2F block needs no override.
+Their expanded ngram lanes match MySQL at sizes 1–10 (186, 384, 198, and 96
+searches per size, respectively).
+For `utf8mb4_unicode_520_ci`, [combining half marks](torture/findings/2026-10-18-unicode-520-combining-half-marks.md)
+retain the UCA 5.2 split between primary-ignorable U+FE20–U+FE26 and
+distinct U+FE27–U+FE2F weights. The [extended mark block](torture/findings/2026-10-18-unicode-520-extended-combining-marks.md)
+also keeps the 80 distinct U+1AB0–U+1AFF implicit weights. The half-mark
+two-column ngram probe matches MySQL at sizes 1 and 2; the extended-mark
+probe matches at sizes 1–10. The [supplemental mark block](torture/findings/2026-10-18-unicode-520-supplemental-combining-marks.md)
+retains its ignorable, explicit, and implicit weight classes, including
+U+1DCA's equivalence to U+036C; its expanded ngram probe also matches at
+sizes 1–10. Other Unicode 5.2 blocks remain to audit.
+For the older `utf8mb4_unicode_ci`, the [UCA 4.0 mark probe](torture/findings/2026-10-18-unicode-400-combining-marks.md)
+keeps U+1AB0–U+1AFF and U+1DC0–U+1DFF implicit weights distinct, and
+separates U+20EB–U+20F0 from the preceding ignorable marks. Its expanded
+ngram corpora match MySQL at sizes 1–10.
+[General Unicode variation selectors](torture/findings/2026-10-17-general-ci-variation-selectors.md)
+now retain their distinct written weights across U+FE00–U+FE0F, including
+U+FE0F, in equality keys and ngram postings. The two-column corpus matches
+MySQL at token sizes 1–10 (96 searches per size).
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row
