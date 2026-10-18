@@ -22990,9 +22990,12 @@ let private rewriteViewExpression (view: UpdatableView) (expression: Expr) =
         | _ -> None) expression
 
 let private writableViewFirst (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
+    // The mutation wrapper removes declarations after materializing them.
+    // Later view rewrites must still recognize names in that active scope.
     let isCte (table: TableRef) =
         table.Database.IsNone
-        && (update.Ctes |> List.exists (fun cte -> equalsIgnoreCase cte.CteName table.Table))
+        && ((update.Ctes |> List.exists (fun cte -> equalsIgnoreCase cte.CteName table.Table))
+            || Map.containsKey (table.Table.ToLowerInvariant()) (currentCteScope ()))
     let isPhysical (table: TableRef) =
         not (isCte table)
         && (physicalFastPathTable store defaultDatabase table |> Option.isSome)
@@ -23057,7 +23060,7 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                     { update with From = source; Joins = joins }
             // An independent read-only view can remain ahead of a later
             // writable view while that target is moved into first position.
-            | None when isPhysical source || isStoredView source ->
+            | None when isPhysical source || isStoredView source || isCte source ->
                 move (join :: prior) rest
             | None -> update
         | ({ Kind = InnerJoin; Table = (FromSubquery _ | FromLateral _ | FromJsonTable _); Using = [] } as join) :: rest ->

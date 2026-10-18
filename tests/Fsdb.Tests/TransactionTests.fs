@@ -2489,6 +2489,15 @@ let tests =
                   "CTE-first update reaches the later writable view"
               Expect.equal (handle session (cteFirst "-1") |> snd) (Affected 1UL)
                   "CTE-first update restores the view row"
+              let cteFirstTwoViews delta =
+                  "WITH c AS (SELECT id FROM tx_dual_link) "
+                  + "UPDATE c JOIN tx_dual_va va ON c.id=va.link_id "
+                  + "JOIN tx_dual_vb vb ON va.link_id=vb.link_id "
+                  + "SET va.n=va.n" + delta + ",vb.n=vb.n" + delta + " WHERE c.id=1"
+              Expect.equal (handle session (cteFirstTwoViews "+1") |> snd) (Affected 2UL)
+                  "CTE-first update reaches both later writable views"
+              Expect.equal (handle session (cteFirstTwoViews "-1") |> snd) (Affected 2UL)
+                  "CTE-first update restores both view rows"
               let aggregateFirstTwoViews delta =
                   "UPDATE tx_dual_read_counts rc JOIN tx_dual_va va ON rc.id=va.link_id "
                   + "LEFT JOIN tx_dual_vb vb ON va.link_id=vb.link_id "

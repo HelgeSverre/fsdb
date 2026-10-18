@@ -120,6 +120,9 @@ def main():
                 cases = [
                     "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
                     "SET va.n=va.n+1 WHERE c.id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
+                    "JOIN vb ON va.link_id=vb.link_id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE c.id=1",
                     "UPDATE va LEFT JOIN vb ON va.link_id=vb.link_id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
                     "UPDATE va LEFT JOIN vb ON va.link_id=vb.link_id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=2",
                     "UPDATE va RIGHT JOIN vb ON va.link_id=vb.link_id SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.id=3",
@@ -173,6 +176,12 @@ def main():
                 contended = [
                     ("a", 1, "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
                      "SET va.n=va.n+1 WHERE c.id=1"),
+                    ("a", 1, "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
+                     "JOIN vb ON va.link_id=vb.link_id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE c.id=1"),
+                    ("b", 1, "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
+                     "JOIN vb ON va.link_id=vb.link_id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE c.id=1"),
                     ("a", 1, "UPDATE va_complex va LEFT JOIN vb_complex vb ON va.link_id=vb.link_id "
                      "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1"),
                     ("a", 2, "UPDATE va_complex va LEFT JOIN vb_complex vb ON va.link_id=vb.link_id "
