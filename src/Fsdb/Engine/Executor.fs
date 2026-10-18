@@ -30045,6 +30045,10 @@ let transactionWriteTargets
                             columnName column
                             |> Option.bind (fun name -> keyFor name ordered primary)
                             |> Option.exists (function OrderedNull -> true | _ -> false)
+                        let excludesNull column =
+                            columnName column
+                            |> Option.bind (fun name -> keyFor name ordered primary)
+                            |> Option.exists (function OrderedNull -> false | _ -> true)
                         where
                         |> optionalConjuncts
                         |> List.exists (function
@@ -30061,6 +30065,7 @@ let transactionWriteTargets
                             | In(column, candidates) -> excludesIn column candidates false
                             | Not(In(column, candidates)) -> excludesIn column candidates true
                             | IsNotNull column -> excludesNonNull column
+                            | IsNull column -> excludesNull column
                             | _ -> false)
 
                     let pending =

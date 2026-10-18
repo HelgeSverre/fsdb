@@ -210,6 +210,15 @@ the maintained oracle, and the focused transaction regression agree for both
 verbs. The scheduler now skips a pending claim for this indexed `IS NOT NULL`
 case only when the known key is NULL.
 
+The inverse indexed `IS NULL` filter can rule out a pending row with a known
+non-NULL secondary key. With visible NULL-ranked rows 1 and 2, a pending
+rank-zero row sorts ahead of them under `ORDER BY rank_value DESC LIMIT 2`,
+but cannot enter `WHERE rank_value IS NULL`. MySQL 8.4.11 does not wait for
+that insert for either UPDATE or DELETE. Fsdb previously waited; the
+scheduler now excludes the claim when its known key is non-NULL. The native
+oracle and focused transaction regression cover ascending and descending
+orders, affected counts, and final rows.
+
 ## Equal secondary-key frontiers
 
 A pending row can enter a limited write even when its secondary ordering key

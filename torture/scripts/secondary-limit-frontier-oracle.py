@@ -121,6 +121,10 @@ def main():
                 tie_cases = (
                     ("IS NULL", "ASC", None, 0, True, (0, 1)),
                     ("IS NULL", "ASC", None, 4, False, (1, 2)),
+                    ("IS NULL", "ASC", 0, 0, False, (1, 2)),
+                    ("IS NULL", "ASC", 0, 4, False, (1, 2)),
+                    ("IS NULL", "DESC", 0, 0, False, (2, 1)),
+                    ("IS NULL", "DESC", 0, 4, False, (2, 1)),
                     ("IS NOT NULL", "ASC", 2, 0, True, (1, 0)),
                     ("IS NOT NULL", "ASC", 2, 4, False, (1, 2)),
                     ("IS NOT NULL", "DESC", 2, 0, False, (3, 2)),
@@ -133,7 +137,7 @@ def main():
                             with owner.cursor() as cursor:
                                 cursor.execute("DROP TABLE IF EXISTS target_tie")
                                 cursor.execute("CREATE TABLE target_tie(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))")
-                                if pending_rank is None:
+                                if predicate == "IS NULL":
                                     cursor.execute("INSERT INTO target_tie VALUES(1,NULL,0),(2,NULL,0),(3,3,0)")
                                 else:
                                     cursor.execute("INSERT INTO target_tie VALUES(1,1,0),(2,2,0),(3,3,0)")
