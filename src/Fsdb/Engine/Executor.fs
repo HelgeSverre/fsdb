@@ -13471,8 +13471,8 @@ and private chooseNumericJoinBase (store: Store) (dbName: string) (select: Selec
              && (select.OrderBy |> List.forall simpleOrdering) ->
         match join.Table, physical leftRef with
         | FromTable rightRef, Some leftTable when rightRef.IndexHints.IsEmpty ->
-            match physical rightRef, join.On with
-            | Some rightTable, BinOp(Eq, _, _) ->
+            match physical rightRef with
+            | Some rightTable ->
                 let leftQualifier = leftRef.Alias |> Option.defaultValue leftRef.Table
                 let rightQualifier = rightRef.Alias |> Option.defaultValue rightRef.Table
                 let equalityColumns =

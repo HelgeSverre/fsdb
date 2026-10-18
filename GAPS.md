@@ -322,6 +322,10 @@ correlated IN lookup](torture/findings/2026-10-18-correlated-materialized-text-e
 for audited string and NULL lists, including complete OR branches. The
 original predicate still decides row membership after candidate narrowing.
 
+[A compound `ON` equality](torture/findings/2026-10-07-fulltext-join-bounds.md#costed-source-choice-with-compound-on)
+now also participates in the audited costed mixed-type join source choice;
+the remaining `ON` conjunct still filters the joined rows.
+
 Numeric `CAST` constants now participate in indexed equality and range
 bounds, including an exact positive unsigned probe against a signed integer
 key. [Warning-producing numeric CAST bounds](torture/findings/2026-10-10-numeric-constant-bounds.md#numeric-cast-bounds)

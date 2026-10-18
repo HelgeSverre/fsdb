@@ -3437,6 +3437,14 @@ let tests =
                     check "labels o STRAIGHT_JOIN names d" "d" "(1,NULL)" "" [ "1"; "2" ]
                     check "names d JOIN labels o" "o" "(1,NULL)" "" [ "1"; "2" ]
                     check "names d JOIN labels o" "d" "(1,NULL)" "" [ "1"; "2" ]
+                    match runDefault store
+                        "SELECT d.id FROM names d JOIN labels o ON o.k=d.k AND d.id>0 WHERE d.k IN (1,NULL) ORDER BY d.id" with
+                    | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected costed compound-ON numeric IN to follow labels, got %A" other
+                    match runDefault store
+                        "SELECT d.id FROM names d JOIN labels o ON o.k=d.k AND d.id>1 WHERE d.k IN (1,NULL) ORDER BY d.id" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected costed compound-ON residual to filter IDs, got %A" other
                     check "names d JOIN labels o" "o" "(1,NULL)" " AND MATCH(d.body) AGAINST('needle')" [ "2" ]
                     check "names d JOIN labels o" "d" "(1,NULL)" " AND MATCH(d.body) AGAINST('needle')" [ "2" ]
                     check "names d STRAIGHT_JOIN labels o" "o" "(1)" "" [ "1"; "2" ]
