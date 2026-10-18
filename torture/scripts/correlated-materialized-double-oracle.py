@@ -182,23 +182,26 @@ def main():
                     cursor.execute("CREATE TABLE repeated_rows(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))")
                     cursor.executemany(
                         "INSERT INTO repeated_rows VALUES(%s,%s)",
-                        [(i, 12.5) for i in range(1000)] + [(1000, 13.5)],
+                        [(i, 12.5) for i in range(1000)] + [(1000, 14.5)],
                     )
-                    cursor.execute("UPDATE outer_bounds SET s='12.5' WHERE id=7")
+                    cursor.execute("ALTER TABLE outer_bounds ADD COLUMN hi VARCHAR(32)")
+                    cursor.execute("UPDATE outer_bounds SET s='12.5',hi='13.5' WHERE id=7")
                     for source in ("repeated_rows d", "(SELECT id,k FROM repeated_rows) d"):
-                        cursor.execute(
-                            f"SELECT (SELECT COUNT(*) FROM {source} WHERE d.k<>o.s) "
-                            "FROM outer_bounds o WHERE o.id=7"
-                        )
-                        assert cursor.fetchone() == (1,), source
-                        assert cursor._result.warning_count == 0, source
-                        cursor.execute("UPDATE outer_bounds SET s=NULL WHERE id=7")
-                        cursor.execute(
-                            f"SELECT (SELECT COUNT(*) FROM {source} WHERE d.k<>o.s) "
-                            "FROM outer_bounds o WHERE o.id=7"
-                        )
-                        assert cursor.fetchone() == (0,), source
-                        cursor.execute("UPDATE outer_bounds SET s='12.5' WHERE id=7")
+                        for predicate in ("d.k<>o.s", "d.k NOT BETWEEN o.s AND o.s",
+                                          "d.k NOT BETWEEN o.s AND o.hi"):
+                            cursor.execute(
+                                f"SELECT (SELECT COUNT(*) FROM {source} WHERE {predicate}) "
+                                "FROM outer_bounds o WHERE o.id=7"
+                            )
+                            assert cursor.fetchone() == (1,), (source, predicate)
+                            assert cursor._result.warning_count == 0, (source, predicate)
+                            cursor.execute("UPDATE outer_bounds SET s=NULL,hi=NULL WHERE id=7")
+                            cursor.execute(
+                                f"SELECT (SELECT COUNT(*) FROM {source} WHERE {predicate}) "
+                                "FROM outer_bounds o WHERE o.id=7"
+                            )
+                            assert cursor.fetchone() == (0,), (source, predicate)
+                            cursor.execute("UPDATE outer_bounds SET s='12.5',hi='13.5' WHERE id=7")
                     cursor.execute(
                         "SELECT x=i,x+0e0=i,9007199254740992e0=i,"
                         "9007199254740992e0+0e0=i "

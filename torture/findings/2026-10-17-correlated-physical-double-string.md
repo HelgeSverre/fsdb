@@ -43,3 +43,10 @@ metadata probe. On 1,001 inner rows with 1,000 copies of `12.5`, a correlated
 and pass-through sources, versus 1,004 residual calls before the change.
 The original predicate still decides row membership. The MySQL 8.4.11 oracle
 also checks the NULL-bound zero result.
+
+The same repeated-key corpus confirms `d.k NOT BETWEEN o.s AND o.s` and
+`d.k NOT BETWEEN o.s AND o.hi` use the two strict ranges. With 1,000 copies
+of `12.5`, one `14.5`, and bounds `12.5`/`13.5`, both physical source forms
+check fewer than 80 rows. MySQL 8.4.11 agrees on the one unmatched row, the
+NULL-bound zero result, and zero warnings for the clean bounds. The original
+predicate still decides membership after the indexed candidate union.

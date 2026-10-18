@@ -13644,18 +13644,21 @@ let tests =
                     |> String.concat ","
                     |> fun values -> runDefault store ("INSERT INTO physical_double_repeated VALUES" + values)
                     |> ignore
-                    runDefault store "INSERT INTO physical_double_repeated VALUES(1000,13.5)" |> ignore
+                    runDefault store "INSERT INTO physical_double_repeated VALUES(1000,14.5)" |> ignore
+                    runDefault store "ALTER TABLE physical_double_bounds ADD COLUMN hi VARCHAR(32)" |> ignore
+                    runDefault store "UPDATE physical_double_bounds SET hi='13.5' WHERE id=1" |> ignore
                     for source in [ "physical_double_repeated d"; "(SELECT id,k FROM physical_double_repeated) d" ] do
-                        for boundId, expected in [ 1, "1"; 8, "0" ] do
-                            calls <- 0
-                            let sql =
-                                "SELECT (SELECT COUNT(*) FROM " + source
-                                + " WHERE TOUCH(d.id)=d.id AND d.k<>o.s) "
-                                + "FROM physical_double_bounds o WHERE o.id=" + string boundId
-                            match run store registry sql with
-                            | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected "DOUBLE <> result"
-                            | other -> failtestf "expected DOUBLE <> result, got %A" other
-                            Expect.isLessThan calls 80 (source + " must use strict ranges for <>")
+                        for predicate in [ "d.k<>o.s"; "d.k NOT BETWEEN o.s AND o.s"; "d.k NOT BETWEEN o.s AND o.hi" ] do
+                            for boundId, expected in [ 1, "1"; 8, "0" ] do
+                                calls <- 0
+                                let sql =
+                                    "SELECT (SELECT COUNT(*) FROM " + source
+                                    + " WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                                    + "FROM physical_double_bounds o WHERE o.id=" + string boundId
+                                match run store registry sql with
+                                | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected (predicate + " result")
+                                | other -> failtestf "expected DOUBLE inequality result, got %A" other
+                                Expect.isLessThan calls 80 (source + " must use strict ranges for " + predicate)
 
                 testCase "physical correlated ABS equality probes indexed signed keys"
                 <| fun _ ->
