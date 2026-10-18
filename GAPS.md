@@ -275,6 +275,10 @@ the other is a literal, including NULL-bound cases and statement-local
 materialized lookups. The same mixed-bound form over a compatible `LOWER`
 functional index now uses strict range candidates on physical and pass-through
 sources.
+[Correlated `NOT IN` over clean numeric bounds](torture/findings/2026-10-17-correlated-physical-double-string.md)
+uses the narrowest member's strict-range union for direct and pass-through
+physical sources, retaining the full predicate for multi-member and NULL-list
+semantics. Bounds that cannot be compared safely keep the scan path.
 [Correlated integer inequality predicates](torture/findings/2026-10-15-correlated-integer-inequality.md)
 likewise union strict ranges for a stable integer bound, including complete OR
 branches. [Exact DECIMAL inequalities](torture/findings/2026-10-15-correlated-decimal-inequality.md)
