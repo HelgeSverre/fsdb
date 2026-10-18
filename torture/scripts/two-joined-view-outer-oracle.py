@@ -118,6 +118,8 @@ def main():
                     expected, actual = (execute(connection, sql) for connection in connections)
                     assert actual == expected and not isinstance(expected, tuple), (sql, expected, actual)
                 cases = [
+                    "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
+                    "SET va.n=va.n+1 WHERE c.id=1",
                     "UPDATE va LEFT JOIN vb ON va.link_id=vb.link_id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
                     "UPDATE va LEFT JOIN vb ON va.link_id=vb.link_id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=2",
                     "UPDATE va RIGHT JOIN vb ON va.link_id=vb.link_id SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.id=3",
@@ -169,6 +171,8 @@ def main():
                     expected, actual = (execute(connection, query) for connection in connections)
                     assert actual == expected, (rejected, query, expected, actual)
                 contended = [
+                    ("a", 1, "WITH c AS (SELECT id FROM link) UPDATE c JOIN va ON c.id=va.link_id "
+                     "SET va.n=va.n+1 WHERE c.id=1"),
                     ("a", 1, "UPDATE va_complex va LEFT JOIN vb_complex vb ON va.link_id=vb.link_id "
                      "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1"),
                     ("a", 2, "UPDATE va_complex va LEFT JOIN vb_complex vb ON va.link_id=vb.link_id "

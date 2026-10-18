@@ -2481,6 +2481,14 @@ let tests =
                   "later writable view updates after aggregate source"
               Expect.equal (handle session (aggregateFirst "-1") |> snd) (Affected 1UL)
                   "aggregate-first update restores later view row"
+              let cteFirst delta =
+                  "WITH c AS (SELECT id FROM tx_dual_link) "
+                  + "UPDATE c JOIN tx_dual_va va ON c.id=va.link_id "
+                  + "SET va.n=va.n" + delta + " WHERE c.id=1"
+              Expect.equal (handle session (cteFirst "+1") |> snd) (Affected 1UL)
+                  "CTE-first update reaches the later writable view"
+              Expect.equal (handle session (cteFirst "-1") |> snd) (Affected 1UL)
+                  "CTE-first update restores the view row"
               let aggregateFirstTwoViews delta =
                   "UPDATE tx_dual_read_counts rc JOIN tx_dual_va va ON rc.id=va.link_id "
                   + "LEFT JOIN tx_dual_vb vb ON va.link_id=vb.link_id "

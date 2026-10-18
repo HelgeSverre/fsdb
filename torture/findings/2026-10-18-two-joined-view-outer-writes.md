@@ -1,13 +1,13 @@
 # Two writable joined views under outer UPDATE joins
 
 The [native MySQL 8.4.11 differential oracle](../scripts/two-joined-view-outer-oracle.py)
-compares twelve UPDATE statements against fsdb. Two independently
+compares thirteen UPDATE statements against fsdb. Two independently
 writable inner-join views share their internal physical/read aliases. The
 matrix uses both LEFT and RIGHT outer joins, with a fully matched row and
 rows missing from either view. A second pair of views joins grouped read
 sources and dependent `LATERAL` projections before the outer UPDATE join.
 
-All twelve statements match MySQL's affected-row count and the resulting rows
+All thirteen statements match MySQL's affected-row count and the resulting rows
 in both physical target tables. A `CASCADED CHECK OPTION` on the grouped
 lateral view also rejects an invalid two-target update with error 1369 and
 leaves both tables unchanged. This extends the existing inner two-view and
@@ -39,7 +39,7 @@ pins the original 1146 case.
 A read-only aggregate view can also precede that writable second view. MySQL
 updates `bonus` through the second view, whereas fsdb previously returned
 1146 for the view name. The source reorder now recognizes a stored first
-view even when it is non-updatable, while leaving local CTE names untouched.
+view even when it is non-updatable.
 Both the ordinary and contended aggregate-first cases match MySQL.
 
 A three-source form exposed another 1146. An aggregate read-only view can
@@ -51,6 +51,15 @@ second assigned view first. It likewise crosses an unassigned writable
 inner-joined view when only the later view is assigned. The ordinary cases
 and three additional contended rebases now match MySQL. A focused F#
 regression checks both assignment patterns and restores the physical rows.
+
+A CTE-first UPDATE exposed the same 1146 error on the opposite side of the
+rewrite: `WITH c AS (SELECT id FROM link) UPDATE c JOIN va ... SET va.n=...`
+updates the later joined view in MySQL, but fsdb tried to open `c` as a base
+table. The mutation wrapper had removed the CTE declarations before choosing
+the writable first source. It now moves the assigned view while the CTE names
+are still available, then retains the CTE because the moved source joins it.
+The ordinary statement and a ninth contended rebase match MySQL. The focused
+F# regression checks the UPDATE and restores the target row.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:

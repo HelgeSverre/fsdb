@@ -23064,8 +23064,9 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             move (join :: prior) rest
         | _ -> update
 
-    if isPhysical update.From then move [] update.Joins
-    elif isCte update.From then update
+    // Move a later assigned view while CTE names are still available. The
+    // mutation wrapper clears Update.Ctes before executing the inner write.
+    if isPhysical update.From || isCte update.From then move [] update.Joins
     else
         let database = update.From.Database |> Option.defaultValue defaultDatabase
         let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
@@ -27661,6 +27662,7 @@ let rec executeAs
 
     match stmt with
     | Update update when not update.Ctes.IsEmpty ->
+        let update = writableViewFirst store dbName update
         let expressions =
             (update.Assignments |> List.map _.Value)
             @ Option.toList update.Where
