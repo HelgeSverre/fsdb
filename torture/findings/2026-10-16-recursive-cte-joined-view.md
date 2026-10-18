@@ -94,7 +94,12 @@ expressions contain no subqueries; the oracle includes a volatile
 `LIMIT 1 OFFSET 0` case.
 
 MySQL labels a recursive-only view `IS_UPDATABLE=YES` but rejects its UPDATE
-with 1288. Fsdb now matches both outcomes as part of the broader
-[derived-source metadata rule](2026-10-17-derived-source-view-metadata.md).
-More complex recursive/dependent source compositions, layered security, and
-other concurrent write shapes still need separate audits.
+with 1288. An additional MySQL 8.4.11 check showed the same metadata rule for
+a direct column projection from a nonrecursive CTE whose body is an aggregate
+or UNION; a projected expression instead reports `NO`. FSDB now bases this
+single-CTE metadata case on the outer projection and reports `YES` for the
+recursive-only view while still rejecting its UPDATE with 1288, as part of the
+broader [derived-source metadata rule](2026-10-17-derived-source-view-metadata.md).
+More complex
+recursive/dependent source compositions, layered security, and other concurrent
+write shapes still need separate audits.

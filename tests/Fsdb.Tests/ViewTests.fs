@@ -42,6 +42,40 @@ let tests =
                   [ [ Some "Acme"; Some "2"; Some "50.00" ] ]
                   "the view reevaluates its stored SELECT"
 
+          testCase "a grouped derived source keeps its source column inside HAVING aggregates"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE grouped_source (k INT,z INT)") "create source"
+              expectOk (run store "CREATE TABLE grouped_target (id INT PRIMARY KEY,k INT,val INT)") "create target"
+              expectOk (run store "INSERT INTO grouped_source VALUES (1,10),(1,5),(2,20),(3,-10),(3,-20)") "seed source"
+              expectOk (run store "INSERT INTO grouped_target VALUES (1,1,5),(2,2,7)") "seed target"
+              expectOk
+                  (run store "CREATE VIEW grouped_having_view AS SELECT t.id,t.val,d.z FROM (SELECT k,MAX(z) AS z FROM grouped_source GROUP BY k HAVING MAX(z)>0) d JOIN grouped_target t ON t.k=d.k")
+                  "create joined view"
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='grouped_having_view'")
+                  [ [ Some "YES" ] ]
+                  "the physical target remains writable"
+              Expect.equal
+                  (rows store "SELECT id,val,z FROM grouped_having_view ORDER BY id")
+                  [ [ Some "1"; Some "5"; Some "10" ]; [ Some "2"; Some "7"; Some "20" ] ]
+                  "the derived HAVING uses the source column"
+              expectOk (run store "UPDATE grouped_having_view SET val=val+1 WHERE id=1") "update through the view"
+              Expect.equal
+                  (rows store "SELECT id,val FROM grouped_target ORDER BY id")
+                  [ [ Some "1"; Some "6" ]; [ Some "2"; Some "7" ] ]
+                  "the joined write reaches the base table"
+
+              Expect.equal
+                  (rows store "SELECT k,MIN(z) AS z FROM grouped_source GROUP BY k HAVING ABS(z)>15 ORDER BY k")
+                  [ [ Some "2"; Some "20" ]; [ Some "3"; Some "-20" ] ]
+                  "outside an aggregate, HAVING still resolves the output alias first"
+
+              match run store "SELECT k,MAX(z) AS mz FROM grouped_source GROUP BY k HAVING MAX(mz)>0" with
+              | Err(1111, _) -> ()
+              | other -> failtestf "expected nested aggregate alias rejection, got %A" other
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()
@@ -2260,6 +2294,23 @@ let tests =
                   (run store
                       "CREATE VIEW recursive_only AS WITH RECURSIVE seq(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM seq WHERE k<3) SELECT k FROM seq")
                   "create recursive-only view"
+              expectOk
+                  (run store "CREATE VIEW aggregate_cte_only AS WITH x AS (SELECT COUNT(*) AS n FROM recursive_target) SELECT n FROM x")
+                  "create aggregate CTE-only view"
+              expectOk
+                  (run store "CREATE VIEW expression_cte_only AS WITH x AS (SELECT 1 AS k) SELECT k+1 AS n FROM x")
+                  "create expression CTE-only view"
+              expectOk
+                  (run store "CREATE VIEW union_cte_only AS WITH x AS (SELECT 1 AS k UNION ALL SELECT 2) SELECT k FROM x")
+                  "create UNION CTE-only view"
+              Expect.equal
+                  (rows store
+                      "SELECT TABLE_NAME, IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_NAME IN ('recursive_only','aggregate_cte_only','expression_cte_only','union_cte_only') ORDER BY TABLE_NAME")
+                  [ [ Some "aggregate_cte_only"; Some "YES" ]
+                    [ Some "expression_cte_only"; Some "NO" ]
+                    [ Some "recursive_only"; Some "YES" ]
+                    [ Some "union_cte_only"; Some "YES" ] ]
+                  "MySQL reports direct CTE columns writable in metadata despite rejecting recursive-only UPDATE"
               match run store "UPDATE recursive_only SET k=4" with
               | Err(1288, _) -> ()
               | other -> failtestf "expected recursive-only UPDATE rejection, got %A" other

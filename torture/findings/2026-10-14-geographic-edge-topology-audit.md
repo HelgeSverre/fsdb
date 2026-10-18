@@ -169,6 +169,76 @@ corpus. A local coordinate exception would fit the sample but would not
 explain MySQL's overlay and relation behavior, so the point remains an
 explicit open spatial edge case.
 
+A component probe further narrows the near-polar point discrepancy. For
+`POINT(86 1.00001)` under SRID 4326, MySQL and fsdb both say the point is
+within the exterior ring considered as its own polygon and outside the hole
+considered as its own polygon; neither says it touches either component.
+For the combined polygon, MySQL says it is outside while fsdb says it is
+inside. MySQL reports zero distance to the hole ring at this point, while
+fsdb reports about 0.09536 m. The maintained oracle now prints all three
+component results. This is evidence of a geographic ring-composition or
+numeric-boundary strategy difference: replacing the combined classifier
+with independent `outer within` and `not hole within` tests would preserve
+fsdb's wrong answer, and treating zero line distance as boundary would
+contradict MySQL's `ST_Touches=0` for the hole polygon.
+
+## Geographic winding strategy boundary
+
+MySQL 8.4.11's [point/polygon `Within` implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/within.cc#L661-L669)
+passes the complete polygon to Boost.Geometry with its ellipsoidal
+`geographic_winding` strategy. MySQL constructs that strategy from the SRS
+spheroid in [`within.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/within.cc#L53-L59),
+and the pinned source names [Boost 1.84.0](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/cmake/boost.cmake#L24).
+Boost's [winding strategy](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/spherical/point_in_poly_winding.hpp)
+counts longitude and antipodal crossings, with special handling around the
+poles, and its [geographic side test](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/side.hpp)
+uses Andoyer azimuths. Fsdb instead sums spherical angles along sampled
+ellipsoidal segments in `geographicRingContains`, then composes exterior and
+hole classifications.
+
+This source difference is a plausible cause of the near-polar point result,
+not a proof of which Boost branch decides that point. The next behavior
+change should compare a faithful winding/side implementation against the
+entire point corpus before replacing fsdb's classifier. The line/polygon
+relation differences also involve MySQL's geographic segment-intersection
+strategy, so a point-only winding change cannot be claimed to close them.
+
+The maintained oracle now reverses the exterior and hole rings independently
+for the disputed `POINT(86 1.00001)`. All four combined polygons are valid in
+MySQL 8.4.11, and ring direction changes neither engine's result: MySQL
+reports `(Within, Touches, Intersects) = (0, 0, 0)`, while fsdb reports
+`(1, 0, 1)`. Both engines return zero `ST_Distance` to the combined polygon.
+The mismatch therefore does not come from the input ring orientation, and
+zero distance is not a safe replacement for MySQL's relation result. The
+full replay remains at 12 of 412 line mismatches, one of 189 near-hole point
+mismatches, and no near-exterior point mismatches.
+
+A finer 7-by-7 corner grid around latitude `86` and longitude `1` found three
+point mismatches: `(86, 1.0000001)`, `(86, 1.000001)`, and `(86, 1.00001)`.
+MySQL reports all three outside and disjoint from the complete polygon;
+fsdb reports them inside and intersecting. The other 46 points agreed,
+including the same longitude offsets at nearby latitudes, longitude `1`,
+and longitude `1.0001` at latitude `86`. The result narrows the discrepancy
+to a short interval on the hole's lower-latitude level. It does not establish
+that a numeric cutoff is the rule: Boost 1.84's
+[geographic winding implementation](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/point_in_poly_winding.hpp)
+uses longitude crossing counts, endpoint-level handling, and an
+[Andoyer-azimuth side test](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/side.hpp),
+whereas fsdb's sampled angle sum has no equivalent endpoint-level branch.
+The full replay still has 12 of 412 line mismatches and one of the original
+189 near-hole point mismatches.
+
+A local, uncommitted crossing-count prototype reused fsdb's Andoyer azimuth
+calculation and accumulated signed longitude crossings across the exterior
+and hole rings. It included endpoint-level side checks but omitted Boost's
+antipodal and pole-specific counter states. The same oracle worsened from
+12 to 20 line mismatches and from one to two near-hole point mismatches;
+the three-point polar-corner mismatch stayed unchanged. The candidate was
+reverted. This rules out replacing the sampled angle sum with a simple
+crossing count. A faithful implementation must carry the complete winding
+state and match Boost's side and equality decisions before it can replace
+the existing classifier.
+
 ## Near-machine-precision hole-edge offsets
 
 A separate MySQL 8.4.11 probe placed `LINESTRING(1.5 y,3.0 y)` beside the

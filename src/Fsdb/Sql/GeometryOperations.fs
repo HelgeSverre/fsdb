@@ -36,6 +36,7 @@ let private strategyCodeLength = sizeof<int32>
 let private encodedStrategyLength = strategyCodeLength + sizeof<double>
 
 let private radians degrees = degrees * Math.PI / 180.0
+let private mysqlRadians degrees = degrees * 0.017453292519943278
 
 let internal planarPointDistance (firstX: float, firstY: float) (secondX: float, secondY: float) =
     let deltaX, deltaY = secondX - firstX, secondY - firstY
@@ -126,9 +127,7 @@ let internal geographicPointDistance referenceSystem first second =
 /// Boost's default geographic line interpolation uses Andoyer for the initial
 /// azimuth and first-order Thomas for the direct point. Keep this paired with
 /// geographicPointDistance, which supplies the distance along each segment.
-let private geographicSegmentAzimuth flattening (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
-    let latitude1, latitude2 = radians firstLatitude, radians secondLatitude
-    let longitudeDelta = radians (secondLongitude - firstLongitude)
+let private geographicSegmentAzimuthsFromRadians flattening latitude1 latitude2 longitudeDelta =
     let sin1, cos1 = sin latitude1, cos latitude1
     let sin2, cos2 = sin latitude2, cos latitude2
     let sinLongitude, cosLongitude = sin longitudeDelta, cos longitudeDelta
@@ -137,27 +136,48 @@ let private geographicSegmentAzimuth flattening (firstLatitude, firstLongitude) 
     let sineDistance = sin angularDistance
 
     if abs sineDistance < 1e-15 then
-        if cosineDistance >= 0.0 || abs (sin1 - 1.0) > 1e-15 then 0.0 else Math.PI
+        if cosineDistance >= 0.0 then 0.0, 0.0
+        elif abs (sin1 - 1.0) > 1e-15 then 0.0, Math.PI
+        else Math.PI, 0.0
     else
-        let firstAngle, firstCorrection =
+        let firstAngle, firstAdjustment =
             if abs cos2 < 1e-15 then
                 (if sin2 < 0.0 then Math.PI else 0.0), 0.0
             else
                 let angle = atan2 sinLongitude (cos1 * sin2 / cos2 - sin1 * cosLongitude)
                 angle, flattening / 2.0 * cos1 * cos1 * sin (2.0 * angle)
 
-        let secondCorrection =
-            if abs cos1 < 1e-15 then 0.0
+        let secondAngle, secondAdjustment =
+            if abs cos1 < 1e-15 then
+                (if sin1 < 0.0 then Math.PI else 0.0), 0.0
             else
                 let angle = atan2 sinLongitude (cos2 * sin1 / cos1 - sin2 * cosLongitude)
-                flattening / 2.0 * cos2 * cos2 * sin (2.0 * angle)
+                angle, flattening / 2.0 * cos2 * cos2 * sin (2.0 * angle)
 
-        let correction = secondCorrection * angularDistance / sineDistance - firstCorrection
-        let azimuth = firstAngle - correction
-        if firstAngle >= 0.0 then
-            if correction >= 0.0 then max 0.0 azimuth else min Math.PI azimuth
-        elif correction <= 0.0 then min 0.0 azimuth
-        else max -Math.PI azimuth
+        let clamp angle correction azimuth =
+            if angle >= 0.0 then
+                if correction >= 0.0 then max 0.0 azimuth else min Math.PI azimuth
+            elif correction <= 0.0 then min 0.0 azimuth
+            else max -Math.PI azimuth
+        let firstCorrection = secondAdjustment * angularDistance / sineDistance - firstAdjustment
+        let reverseCorrection =
+            -firstAdjustment * angularDistance / sineDistance + secondAdjustment
+        let forward = clamp firstAngle firstCorrection (firstAngle - firstCorrection)
+        let reverse =
+            (if secondAngle >= 0.0 then Math.PI - secondAngle else -Math.PI - secondAngle)
+            - reverseCorrection
+            |> clamp secondAngle reverseCorrection
+        forward, reverse
+
+let private geographicSegmentAzimuthsRadians flattening (latitude1, firstLongitude) (latitude2, secondLongitude) =
+    geographicSegmentAzimuthsFromRadians flattening latitude1 latitude2 (secondLongitude - firstLongitude)
+
+let private geographicSegmentAzimuths flattening (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
+    geographicSegmentAzimuthsFromRadians flattening
+        (radians firstLatitude) (radians secondLatitude) (radians (secondLongitude - firstLongitude))
+
+let private geographicSegmentAzimuth flattening first second =
+    geographicSegmentAzimuths flattening first second |> fst
 
 let internal geographicPointAlong referenceSystem first second distance =
     match referenceSystem.SemiMajorAxis, referenceSystem.InverseFlattening with
@@ -343,20 +363,187 @@ let private sampleGeographicSegment referenceSystem start endpoint =
         elif index = steps then endpoint
         else geographicPointAlong referenceSystem start endpoint (length * float index / float steps))
 
-let private geographicRingContains referenceSystem point ring =
-    let query = geographicUnitVector point
-    let winding =
+let private boostGeoEqual first second =
+    abs (first - second) <= (Math.BitIncrement(1.0) - 1.0) * max 1.0 (max (abs first) (abs second))
+
+let private normalizedLongitude delta =
+    let value = delta % 360.0
+    if value > 180.0 then value - 360.0
+    elif value <= -180.0 then value + 360.0
+    else value
+
+let private longitudeDistance first second = normalizedLongitude (second - first)
+let private longitudeEqual first second = boostGeoEqual (longitudeDistance first second) 0.0
+
+let private normalizedLongitudeRadians delta =
+    let period = 2.0 * Math.PI
+    let value = delta % period
+    if value > Math.PI then value - period
+    elif value <= -Math.PI then value + period
+    else value
+
+let private longitudeDistanceRadians first second = normalizedLongitudeRadians (second - first)
+let private longitudeEqualRadians first second = boostGeoEqual (longitudeDistanceRadians first second) 0.0
+
+// MySQL corrects WKB geographic rings with Boost's ellipsoidal area strategy.
+// This retains its Andoyer spherical term and prime-meridian correction for
+// ring direction; the ellipsoidal series correction is not needed for the
+// audited direction corpus but remains a near-degenerate edge to validate.
+let private geographicRingAreaSign referenceSystem ring =
+    let flattening = referenceSystem.InverseFlattening |> Option.map (fun value -> 1.0 / value) |> Option.defaultValue 0.0
+    let shortSegmentThreshold =
+        referenceSystem.SemiMajorAxis
+        |> Option.map (fun major -> (2.0 * major + major * (1.0 - flattening)) / 3.0 / 638.0)
+        |> Option.defaultValue 0.0
+    let crossesPrimeMeridian firstLongitude secondLongitude =
+        let delta = normalizedLongitude (secondLongitude - firstLongitude)
+        if boostGeoEqual (abs delta) 180.0 then true
+        else
+            let positive longitude =
+                let value = longitude % 360.0
+                if value < 0.0 then value + 360.0 else value
+            let first, second = positive firstLongitude, positive secondLongitude
+            max first second > 180.0 && min first second < 180.0 && abs (first - second) > 180.0
+    let sum, crossings =
         ring
         |> List.pairwise
-        |> List.sumBy (fun (start, endpoint) ->
-            sampleGeographicSegment referenceSystem start endpoint
-            |> Array.pairwise
-            |> Array.sumBy (fun (first, second) ->
-                let first, second = geographicUnitVector first, geographicUnitVector second
-                let numerator = dot3 query (cross3 first second)
-                let denominator = dot3 first second - dot3 query first * dot3 query second
-                atan2 numerator denominator))
-    abs winding > Math.PI
+        |> List.fold (fun (sum, crossings) ((firstLatitude, firstLongitude), (secondLatitude, secondLongitude)) ->
+            let first = firstLatitude, firstLongitude
+            let second = secondLatitude, secondLongitude
+            let longitudeDelta = normalizedLongitude (secondLongitude - firstLongitude)
+            if boostGeoEqual firstLongitude secondLongitude then sum, crossings
+            else
+                let crossings = crossings + (if crossesPrimeMeridian firstLongitude secondLongitude then 1 else 0)
+                let term =
+                    if boostGeoEqual (abs longitudeDelta) 180.0 then Math.PI
+                    elif boostGeoEqual firstLatitude 0.0 && boostGeoEqual secondLatitude 0.0 then 0.0
+                    elif not (boostGeoEqual (abs firstLatitude) 90.0 || boostGeoEqual (abs secondLatitude) 90.0)
+                         && geographicPointDistance referenceSystem first second < shortSegmentThreshold then
+                        let firstTangent = tan (radians firstLatitude / 2.0)
+                        let secondTangent = tan (radians secondLatitude / 2.0)
+                        2.0 * atan ((firstTangent + secondTangent) / (1.0 + firstTangent * secondTangent)
+                                    * tan (radians longitudeDelta / 2.0))
+                    else
+                        let forward, reverse = geographicSegmentAzimuths flattening first second
+                        reverse - forward
+                sum + term, crossings) (0.0, 0)
+    let area =
+        if crossings % 2 = 0 then sum
+        else
+            let polar = 2.0 * Math.PI * float (1 + crossings / 2) - abs sum
+            if sum > 0.0 then -polar else polar
+    // Boost's counterclockwise polygon trait negates the ring strategy result.
+    -area
+
+let private geographicRingContains referenceSystem includeBoundary point ring =
+    let flattening = referenceSystem.InverseFlattening |> Option.map (fun value -> 1.0 / value) |> Option.defaultValue 0.0
+    let ring = if geographicRingAreaSign referenceSystem ring < 0.0 then List.rev ring else ring
+    // Boost traverses a counterclockwise polygon's stored exterior ring in
+    // reverse when applying its point-in-ring winding strategy.
+    let windingRing = ring |> List.rev |> List.map (fun (latitude, longitude) -> mysqlRadians latitude, mysqlRadians longitude)
+    let pointLatitude, pointLongitude =
+        let latitude, longitude = point
+        mysqlRadians latitude, mysqlRadians longitude
+    let windingPoint = pointLatitude, pointLongitude
+    let mutable count = 0
+    let mutable southCount = 0
+    let mutable rawCount = 0
+    let mutable antipodalCount = 0
+    let mutable touches = false
+    let side first second query =
+        if query = first || query = second || first = second then 0
+        else
+            let queryAzimuth = geographicSegmentAzimuthsRadians flattening first query |> fst
+            let segmentAzimuth = geographicSegmentAzimuthsRadians flattening first second |> fst
+            let difference =
+                let value = (queryAzimuth - segmentAzimuth + Math.PI) % (2.0 * Math.PI)
+                let value = if value < 0.0 then value + 2.0 * Math.PI else value
+                value - Math.PI
+            if boostGeoEqual difference 0.0 || boostGeoEqual (abs difference) Math.PI then 0
+            elif difference > 0.0 then -1
+            else 1
+    for ((firstLatitude, firstLongitude), (secondLatitude, secondLongitude)) in List.pairwise windingRing do
+        let first = firstLatitude, firstLongitude
+        let second = secondLatitude, secondLongitude
+        if not touches then
+            let firstStrict = longitudeEqualRadians firstLongitude pointLongitude
+            let secondStrict = longitudeEqualRadians secondLongitude pointLongitude
+            let antipodalLongitude = pointLongitude + (if pointLongitude <= 0.0 then Math.PI else -Math.PI)
+            let firstAnti = longitudeEqualRadians firstLongitude antipodalLongitude
+            let secondAnti = longitudeEqualRadians secondLongitude antipodalLongitude
+            let mutable firstEqual = firstStrict || firstAnti
+            let mutable secondEqual = secondStrict || secondAnti
+            let antipodalSegment = boostGeoEqual (longitudeDistanceRadians firstLongitude secondLongitude) Math.PI
+            if antipodalSegment then
+                let equal = firstEqual || secondEqual || boostGeoEqual (abs pointLatitude) (Math.PI / 2.0)
+                firstEqual <- equal
+                secondEqual <- equal
+
+            let mutable handled = false
+            if longitudeDistanceRadians secondLongitude pointLongitude = 0.0 && boostGeoEqual (abs firstLatitude) (Math.PI / 2.0) then
+                touches <- if firstLatitude < 0.0 then secondLatitude > pointLatitude else secondLatitude < pointLatitude
+                handled <- touches
+            if not handled && longitudeDistanceRadians firstLongitude pointLongitude = 0.0 && boostGeoEqual (abs secondLatitude) (Math.PI / 2.0) then
+                touches <- if secondLatitude < 0.0 then firstLatitude > pointLatitude else firstLatitude < pointLatitude
+                handled <- touches
+
+            if not handled && firstEqual && secondEqual then
+                if not antipodalSegment then
+                    if min firstLatitude secondLatitude <= pointLatitude && pointLatitude <= max firstLatitude secondLatitude then
+                        touches <- not firstAnti || not secondAnti
+                elif firstLatitude + secondLatitude >= 0.0 then
+                    touches <- (firstStrict && firstLatitude <= pointLatitude)
+                               || (secondStrict && secondLatitude <= pointLatitude)
+                               || boostGeoEqual pointLatitude (Math.PI / 2.0)
+                else
+                    touches <- (firstStrict && firstLatitude >= pointLatitude)
+                               || (secondStrict && secondLatitude >= pointLatitude)
+                               || boostGeoEqual pointLatitude (-Math.PI / 2.0)
+                handled <- true
+
+            if not handled then
+                let firstPole = boostGeoEqual (abs firstLatitude) (Math.PI / 2.0)
+                let secondPole = boostGeoEqual (abs secondLatitude) (Math.PI / 2.0)
+                let delta = longitudeDistanceRadians firstLongitude secondLongitude
+                let firstToPoint = longitudeDistanceRadians firstLongitude pointLongitude
+                let direction = if delta < 0.0 then -1 else 1
+                let crossings, isAnti =
+                    if firstPole && secondPole then 0, false
+                    elif antipodalSegment then (if firstToPoint < 0.0 then -2 else 2), false
+                    elif firstEqual || secondEqual then
+                        direction, longitudeEqualRadians (pointLongitude + Math.PI) (if firstEqual then firstLongitude else secondLongitude)
+                    elif Math.Sign(firstToPoint) = Math.Sign(delta) && abs firstToPoint < abs delta then
+                        2 * direction, false
+                    else
+                        let firstToAntipode = longitudeDistanceRadians firstLongitude (pointLongitude + Math.PI)
+                        if Math.Sign(firstToAntipode) = Math.Sign(delta) && abs firstToAntipode < abs delta then
+                            2 * direction, true
+                        else 0, false
+
+                if crossings <> 0 then
+                    if isAnti then
+                        southCount <- southCount - crossings
+                        antipodalCount <- antipodalCount - crossings
+                    else
+                        let segmentSide =
+                            if abs crossings = 1 then
+                                let endpoint = if firstEqual then first else second
+                                let latitude, longitude = endpoint
+                                if boostGeoEqual pointLatitude latitude then 0
+                                else
+                                    let otherLongitude = normalizedLongitudeRadians (longitude + float direction * Math.PI / 180.0)
+                                    side endpoint (latitude, otherLongitude) windingPoint
+                            elif antipodalSegment then
+                                Math.Sign(crossings) * (if firstLatitude + secondLatitude >= 0.0 then -1 else 1)
+                            else side first second windingPoint
+                        if segmentSide = 0 then touches <- true
+                        else
+                            if segmentSide * crossings > 0 then count <- count + crossings
+                            rawCount <- rawCount + crossings
+
+    if touches then includeBoundary
+    elif rawCount <> 0 && antipodalCount <> 0 && rawCount > 0 then count + southCount <> 0
+    else count <> 0
 
 [<RequireQualifiedAccess>]
 type internal GeographicPointPolygonPosition =
@@ -404,8 +591,8 @@ let internal geographicPointPolygonPosition referenceSystem point polygons =
             | _ when holeDistances
                      |> List.exists (fun (hole, distance) -> nearGeodesicBoundary hole distance) ->
                 GeographicPointPolygonPosition.HoleBoundary
-            | _ when geographicRingContains referenceSystem point exterior
-                     && not (holes |> List.exists (geographicRingContains referenceSystem point)) ->
+            | _ when geographicRingContains referenceSystem false point exterior
+                     && not (holes |> List.exists (geographicRingContains referenceSystem true point)) ->
                 GeographicPointPolygonPosition.Interior
             | _ -> GeographicPointPolygonPosition.Outside boundaryDistance
     let positions = polygons |> List.map polygonPosition
@@ -473,6 +660,63 @@ let private geographicSegmentsProperlyCross referenceSystem (firstStart, firstEn
             |> Option.exists (fun intersection ->
                 not (nearEndpoint intersection firstStart || nearEndpoint intersection firstEnd
                      || nearEndpoint intersection secondStart || nearEndpoint intersection secondEnd))))
+
+let private geographicSimpleRingIsValid referenceSystem ring =
+    // A zero-length edge between equal neighbors is allowed; remove it before
+    // deciding which remaining edges are adjacent.
+    let ring =
+        ring
+        |> List.fold (fun points point ->
+            match points with
+            | previous :: _ when previous = point -> points
+            | _ -> point :: points) []
+        |> List.rev
+    let vertices = ring |> List.take (max 0 (List.length ring - 1))
+    if List.length ring < 4
+       || List.head ring <> List.last ring
+       || (vertices |> Seq.distinct |> Seq.truncate 3 |> Seq.length) < 3 then
+        false
+    else
+        let segments = ring |> List.pairwise |> List.toArray
+        let last = segments.Length - 1
+        let pointPosition point (start, endpoint) =
+            geographicPointLinePosition referenceSystem point [ [ start; endpoint ] ]
+        let invalidPair firstIndex secondIndex =
+            let (a, b) as first = segments.[firstIndex]
+            let (c, d) as second = segments.[secondIndex]
+            let adjacent = secondIndex = firstIndex + 1 || (firstIndex = 0 && secondIndex = last)
+            if adjacent then
+                geographicSegmentsProperlyCross referenceSystem first second
+                || pointPosition a second = GeographicPointLinePosition.Interior
+                || pointPosition b second = GeographicPointLinePosition.Interior
+                || pointPosition c first = GeographicPointLinePosition.Interior
+                || pointPosition d first = GeographicPointLinePosition.Interior
+            else
+                geographicSegmentsProperlyCross referenceSystem first second
+                || pointPosition a second <> GeographicPointLinePosition.Outside
+                || pointPosition b second <> GeographicPointLinePosition.Outside
+                || pointPosition c first <> GeographicPointLinePosition.Outside
+                || pointPosition d first <> GeographicPointLinePosition.Outside
+        seq {
+            for first in 0 .. last do
+                for second in first + 1 .. last do
+                    yield first, second
+        }
+        |> Seq.exists (fun (first, second) -> invalidPair first second)
+        |> not
+
+/// None preserves the explicit unsupported boundary for geographic polygons
+/// with holes and multipolygons until their geodesic containment is validated.
+let rec internal geographicValidity referenceSystem (geometry: Geometry) : bool option =
+    match geometry.Shape with
+    | GPolygon [ ring ] -> Some(geographicSimpleRingIsValid referenceSystem ring)
+    | GPolygon _
+    | GMultiPolygon _ -> None
+    | GGeometryCollection geometries ->
+        let results = geometries |> List.map (geographicValidity referenceSystem)
+        if results |> List.exists Option.isNone then None
+        else Some(results |> List.forall ((=) (Some true)))
+    | _ -> Some(geometryIsValidPlanar geometry)
 
 let private geographicLineCovers referenceSystem covering covered =
     let coveredPoints = covered |> List.collect id |> List.distinct
