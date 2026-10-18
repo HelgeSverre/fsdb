@@ -1039,6 +1039,9 @@ unbalanced ngram Boolean parentheses: 936 queries per startup token size from 1 
 adds U+3200–U+33FF cross-form equality and 1,533 ngram queries per token
 size, matching MySQL across sizes 1–10. Exact legacy weight bytes, broader
 collation behavior, and MeCab remain open.
+The [legacy CJK radical corpus](torture/findings/2026-10-17-cjk-radical-ngram.md)
+also matches MySQL for 1,635 searches at each token size from 1 through 10,
+including cross-equivalence between Kangxi radicals and NFKC Han forms.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

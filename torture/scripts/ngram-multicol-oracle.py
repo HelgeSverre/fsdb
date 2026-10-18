@@ -2,6 +2,8 @@
 
 Build Fsdb.Cli in Release first. Requires native mysqld/mysqladmin and PyMySQL.
 Each token size uses disposable servers and data directories.
+Use --legacy-punctuation, --legacy-radicals, or --legacy-range for the expanded
+utf8mb4_unicode_ci corpora.
 """
 
 import argparse
@@ -87,6 +89,16 @@ LEGACY_PUNCTUATION = [
     if chr(code).isprintable()
 ] + list(string.punctuation)
 
+RADICALS = [
+    chr(code)
+    for start, end in ((0x2E80, 0x2F00), (0x2F00, 0x2FE0))
+    for code in range(start, end)
+    if chr(code).isprintable()
+]
+LEGACY_RADICALS = list(dict.fromkeys(
+    RADICALS + [unicodedata.normalize("NFKC", char) for char in RADICALS]
+))
+
 
 def connect(**options):
     for _ in range(100):
@@ -160,9 +172,11 @@ def scores_agree(expected, actual):
     )
 
 
-def verify(size, legacy_punctuation=False, legacy_range=None):
+def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None):
     prefix = '中' * (size - 1)
-    if legacy_punctuation:
+    if legacy_radicals:
+        legacy_chars = LEGACY_RADICALS
+    elif legacy_punctuation:
         legacy_chars = LEGACY_PUNCTUATION
     elif legacy_range is not None:
         legacy_chars = [chr(code) for code in range(*legacy_range) if chr(code).isprintable()]
@@ -219,6 +233,13 @@ def verify(size, legacy_punctuation=False, legacy_range=None):
                         if char in ("︵", "﹙", "（")
                     }
                     matched = result(mysql_connection, prefix + "︵", "IN NATURAL LANGUAGE MODE")
+                    assert representative.issubset(set(matched)), (size, matched)
+                if legacy_radicals:
+                    representative = {
+                        index for index, char in enumerate(legacy_chars, 1)
+                        if char in ("⼀", "一")
+                    }
+                    matched = result(mysql_connection, prefix + "⼀", "IN NATURAL LANGUAGE MODE")
                     assert representative.issubset(set(matched)), (size, matched)
 
                 mismatches = []
@@ -294,11 +315,11 @@ if __name__ == "__main__":
         raise RuntimeError(f"Build the Release CLI first: {FSDB}")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("sizes", nargs="*", type=int)
-    parser.add_argument("--legacy-punctuation", action="store_true")
-    parser.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
+    corpus = parser.add_mutually_exclusive_group()
+    corpus.add_argument("--legacy-punctuation", action="store_true")
+    corpus.add_argument("--legacy-radicals", action="store_true")
+    corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
     args = parser.parse_args()
-    if args.legacy_punctuation and args.legacy_range:
-        parser.error("choose one legacy corpus")
     legacy_range = None
     if args.legacy_range:
         try:
@@ -308,4 +329,4 @@ if __name__ == "__main__":
         except ValueError:
             parser.error("--legacy-range requires hexadecimal START:END")
     sizes = args.sizes or list(range(1, 11))
-    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, legacy_range) for size in sizes) else 0)
+    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals, legacy_range) for size in sizes) else 0)
