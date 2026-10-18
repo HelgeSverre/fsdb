@@ -2051,15 +2051,36 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
 
         match Fsdb.Parser.parse definition with
         | Ok(Select parsed) ->
-            let select = parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
+            // MySQL derives IS_UPDATABLE from the outer SELECT for a view
+            // that reads directly from one CTE. It reports YES for a direct
+            // column projection even when the CTE body is a UNION, aggregate,
+            // or recursive query and an actual UPDATE is rejected.
+            let directCteSource =
+                parsed.Joins.IsEmpty
+                && (match parsed.From with
+                    | Some(FromTable table) when table.Database.IsNone ->
+                        parsed.Ctes
+                        |> List.exists (fun cte -> cte.CteName.Equals(table.Table, StringComparison.OrdinalIgnoreCase))
+                    | _ -> false)
+            let select =
+                if directCteSource then { parsed with Ctes = [] }
+                else parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
             match select.From with
             | Some source ->
                 let sourceAllowsUpdates = function
+                    | FromTable table when
+                        table.Database.IsNone
+                        && (select.Ctes |> List.exists (fun cte -> eqI cte.CteName table.Table)) -> true
                     | FromTable table -> sourceAllowsUpdates table
+                    // MySQL's view metadata treats a derived or CTE source as
+                    // updatable when the outer SELECT exposes its columns, even
+                    // when the source itself cannot accept a write.
+                    | FromSubquery _ -> true
                     | _ -> false
                 let sourceOrderAllowsUpdates =
                     match source, select.Joins with
                     | FromTable _, _ -> true
+                    | FromSubquery _, [] -> true
                     | (FromSubquery _ | FromLateral _ | FromJsonTable _), _ :: _ ->
                         tryLeadingReadOnlyWritableTarget source select.Joins |> Option.isSome
                     | _ -> false
@@ -2072,14 +2093,13 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                          || join.Kind = NaturalJoin)
                         && (match join.Table with FromTable _ | FromSubquery _ | FromLateral _ | FromJsonTable _ -> true | _ -> false))
                 let shapeAllowsUpdates =
-                    ((select.Joins.IsEmpty && match source with FromTable _ -> true | _ -> false)
-                     || (sourceOrderAllowsUpdates && joinsSupported && not select.Joins.IsEmpty))
+                    sourceOrderAllowsUpdates
+                    && joinsSupported
                     && not select.Distinct
                     && not select.CalculateFoundRows
                     && select.GroupBy.IsEmpty
                     && not select.Rollup
                     && select.Windows.IsEmpty
-                    && select.Ctes.IsEmpty
                     && select.Having.IsNone
                     && select.Limit.IsNone
                     && select.Offset.IsNone
@@ -2088,7 +2108,8 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                         |> List.exists (fun { Expression = expression } ->
                             match expression with
                             | Col _
-                            | QualifiedCol _ -> true
+                            | QualifiedCol _
+                            | Star _ -> true
                             | _ -> false))
 
                 if not shapeAllowsUpdates then
@@ -2097,7 +2118,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                     sourceAllowsUpdates source
                     || (select.Joins |> List.exists (fun join -> sourceAllowsUpdates join.Table))
                 else
-                    sourceAllowsUpdates source
+                    directCteSource || sourceAllowsUpdates source
             | _ -> false
         | _ -> false
 

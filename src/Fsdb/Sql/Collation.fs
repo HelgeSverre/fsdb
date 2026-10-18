@@ -592,6 +592,21 @@ let private legacyUnicodePadSpaces =
        '\u2004'; '\u2005'; '\u2006'; '\u2007'; '\u2008'; '\u2009'
        '\u200a'; '\u202f'; '\u205f'; '\u3000' |]
 
+// Legacy Unicode collations treat these separator forms as an ordinary space
+// and these format controls as ignorable at the primary weight level.
+let private foldLegacySpace (value: string) =
+    let isSpace = function
+        | '\u00a0' | '\u202f' | '\u205f' | '\u3000' -> true
+        | c when c >= '\u2000' && c <= '\u200a' -> true
+        | _ -> false
+    if not (value |> Seq.exists (fun c -> isSpace c || c = '\u200c' || c = '\u200d' || c = '\u2060')) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            if isSpace c then result.Append(' ') |> ignore
+            elif c <> '\u200c' && c <> '\u200d' && c <> '\u2060' then result.Append(c) |> ignore
+        result.ToString()
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) =
@@ -637,14 +652,14 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             |> foldCjkQuoteForms |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
             |> foldSupplementaryKanaImplicit false
         | "utf8mb4_unicode_520_ci" ->
-            value |> foldCjkPunctuationForms true |> foldLegacyBopomofoForms
+            value |> foldLegacySpace |> foldCjkPunctuationForms true |> foldLegacyBopomofoForms
             |> foldKanaVariants |> foldSmallKana |> foldCjkQuoteForms
             |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
             |> foldLegacyExtendedCombiningMarks true
             |> foldLegacyUnicodeJamo |> foldSupplementaryKanaImplicit true
             |> foldUnicode520EnclosedImplicit
         | "utf8mb4_unicode_ci" ->
-            value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
+            value |> foldLegacySpace |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms
                   |> foldLegacyCompatibilityIdeographs
                   |> foldLegacySupplementary
@@ -653,7 +668,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                   |> foldLegacyUnicodeJamo
         | _ -> value
 
-    let primaryText (s: string) = trim s |> foldText
+    let primaryText (s: string) = s |> foldText |> trim
     let substringFold =
         if spec.Fold.HasFlag CompareOptions.IgnoreCase then
             CompareOptions.IgnoreCase
