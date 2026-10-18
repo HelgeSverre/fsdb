@@ -8108,6 +8108,46 @@ let tests =
                             "ORDER BY and LIMIT use complete values after the mutation"
                     | other -> failtestf "expected ordered rows, got %A" other
 
+                testCase "text range bounds include complete collation equivalence classes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE range_indexed (id INT PRIMARY KEY, label VARCHAR(20), hit INT, KEY ix_label(label), KEY ix_lower((LOWER(label))))" |> ignore
+                    runDefault store "CREATE TABLE range_scanned (id INT PRIMARY KEY, label VARCHAR(20), hit INT)" |> ignore
+                    let values =
+                        [ "(1,'e',0)"; "(2,'é',0)"; "(3,'E',0)"; "(4,'f',0)" ]
+                        @ [ for id in 5 .. 504 -> sprintf "(%d,'z%03d',0)" id id ]
+                        |> String.concat ","
+                    runDefault store ("INSERT INTO range_indexed VALUES " + values) |> ignore
+                    runDefault store ("INSERT INTO range_scanned VALUES " + values) |> ignore
+
+                    let select table predicate =
+                        runDefault store (sprintf "SELECT id FROM %s WHERE %s ORDER BY id" table predicate)
+
+                    for predicate in [ "label BETWEEN 'é' AND 'é'"; "label >= 'é' AND label < 'f'";
+                                       "LOWER(label) >= 'é' AND LOWER(label) < 'f'" ] do
+                        Expect.equal (select "range_indexed" predicate) (select "range_scanned" predicate) predicate
+                        Expect.equal (select "range_indexed" predicate)
+                            (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]))
+                            "all case- and accent-equivalent rows belong to the range"
+
+                    let directPlan = runDefault store "EXPLAIN SELECT id FROM range_indexed WHERE label BETWEEN 'é' AND 'é'" |> explainRow
+                    Expect.equal directPlan.AccessType (Some "range") "the direct predicate uses a range"
+                    Expect.equal directPlan.Key (Some "ix_label") "the direct predicate uses the text index"
+                    let functionalPlan =
+                        runDefault store "EXPLAIN SELECT id FROM range_indexed WHERE LOWER(label) >= 'é' AND LOWER(label) < 'f'"
+                        |> explainRow
+                    Expect.equal functionalPlan.AccessType (Some "range") "the expression predicate uses a range"
+                    Expect.equal functionalPlan.Key (Some "ix_lower") "the expression predicate uses the functional index"
+
+                    let update table = runDefault store (sprintf "UPDATE %s SET hit = 1 WHERE label BETWEEN 'é' AND 'é'" table)
+                    Expect.equal (update "range_indexed") (update "range_scanned") "UPDATE uses complete range candidates"
+                    let contents table = runDefault store (sprintf "SELECT id, hit FROM %s ORDER BY id" table)
+                    Expect.equal (contents "range_indexed") (contents "range_scanned") "UPDATE retains all equivalent rows"
+
+                    let delete table = runDefault store (sprintf "DELETE FROM %s WHERE label >= 'é' AND label < 'f'" table)
+                    Expect.equal (delete "range_indexed") (delete "range_scanned") "DELETE uses complete range candidates"
+                    Expect.equal (contents "range_indexed") (contents "range_scanned") "DELETE retains only the upper-bound row"
+
                 testCase "prefix range scans retain primary-equivalent boundary keys"
                 <| fun _ ->
                     let store = newStore ()
