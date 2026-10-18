@@ -1153,6 +1153,21 @@ let private catalogHasQualifiedForeignKeys (catalog: Catalog) =
         |> Seq.exists (fun (KeyValue(_, table)) ->
             table.ForeignKeys |> List.exists (fun foreignKey -> foreignKey.RefDatabase.IsSome)))
 
+/// A qualified foreign key only affects its child and parent databases. Other
+/// databases may still publish through their own slots while that pair changes.
+let private catalogHasQualifiedForeignKeysAffecting (catalog: Catalog) (databases: Set<string>) =
+    catalog
+    |> Seq.exists (fun (KeyValue(childDatabase, tables)) ->
+        tables
+        |> Seq.exists (fun (KeyValue(_, table)) ->
+            table.ForeignKeys
+            |> List.exists (fun foreignKey ->
+                match foreignKey.RefDatabase with
+                | Some parentDatabase ->
+                    Set.contains (childDatabase.ToLowerInvariant()) databases
+                    || Set.contains (parentDatabase.ToLowerInvariant()) databases
+                | _ -> false)))
+
 type private ReferentialAccess =
     | SharedAccess
     | ExclusiveAccess
@@ -1351,7 +1366,7 @@ let private withReferentialCatalogPublishing
     let publish () =
         let catalog = store.Catalog
 
-        match access, catalogHasQualifiedForeignKeys catalog with
+        match access, catalogHasQualifiedForeignKeysAffecting catalog (Set.singleton (dbName.ToLowerInvariant())) with
         | SharedAccess, false ->
             withDatabasePublishing store dbName eventsOf (fun database ->
                 operation (setCatalogDatabase dbName database catalog) database
@@ -1429,7 +1444,7 @@ let private keysOf (m: Map<string, 'a>) : Set<string> = m |> Map.toList |> List.
 
 /// Publishes monotonic AUTO_INCREMENT advances from a private snapshot.
 /// MySQL retains allocated ids across rollback and crash recovery.
-let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
+let private bumpAutoIncrementsIntoCore (store: Store) (baseCatalog: Catalog option) (snapshotCatalog: Catalog) : unit =
     let advances = ResizeArray<CommitEvent>()
 
     let bumpSlot dbName (slot: Database ref) (snapshotDb: Database) =
@@ -1453,14 +1468,27 @@ let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
                 publishCatalogRoots store (fun () -> slot.Value <- mergedDb))
 
     for KeyValue(dbName, snapshotDb) in snapshotCatalog do
-        match store.Databases.TryGetValue dbName with
-        | false, _ -> ()
-        | true, slot -> bumpSlot dbName slot snapshotDb
+        let unchanged =
+            baseCatalog
+            |> Option.bind (Map.tryFind dbName)
+            |> Option.exists (fun baseDb -> obj.ReferenceEquals(baseDb, snapshotDb))
+
+        if not unchanged then
+            match store.Databases.TryGetValue dbName with
+            | false, _ -> ()
+            | true, slot -> bumpSlot dbName slot snapshotDb
 
     advances
     |> List.ofSeq
     |> prepareEvents store
     |> fun acknowledge -> acknowledge ()
+
+let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
+    bumpAutoIncrementsIntoCore store None snapshotCatalog
+
+/// A transaction only needs to publish allocations from databases it changed.
+let bumpAutoIncrementsIntoChanged (store: Store) (baseCatalog: Catalog) (snapshotCatalog: Catalog) : unit =
+    bumpAutoIncrementsIntoCore store (Some baseCatalog) snapshotCatalog
 
 /// Pure catalog-level version of `bumpAutoIncrementsInto`'s "never roll back
 /// a burned AUTO_INCREMENT id" rule — returns `target` with every table's
@@ -5952,9 +5980,59 @@ let internal tryEqualityLookupForMatch
             table.SecondaryOrder
             |> Map.tryFind matched.Name
             |> Option.map (fun entries ->
-                let first, afterLast = orderedPrefixBounds entries prefix
-                let count = afterLast - first
-                let candidates = Seq.init count (fun offset -> entries.[first + offset])
+                let foldedPart =
+                    matched.ColumnIndices
+                    |> List.tryFindIndex (fun columnIndex ->
+                        match table.Columns.[columnIndex].Type with
+                        | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
+                            table.Columns.[columnIndex].Collation
+                            |> Collation.findOrDefault
+                            |> _.EqualityIsOrderEquivalence
+                            |> not
+                        | _ -> false)
+
+                let candidates, count =
+                    match foldedPart with
+                    | None ->
+                        let first, afterLast = orderedPrefixBounds entries prefix
+                        let count = afterLast - first
+                        Seq.init count (fun offset -> entries.[first + offset]), count
+                    | Some position ->
+                        // Full-order tie breaks can separate later key parts, but
+                        // a primary-equal value of the first folded part is
+                        // contiguous within an exact leading-key slice.
+                        let first, afterLast = orderedPrefixBounds entries (prefix |> List.take position)
+                        let columnIndex = matched.ColumnIndices.[position]
+                        let collation = table.Columns.[columnIndex].Collation |> Collation.findOrDefault
+                        let probe = prefix.[position]
+                        let direction =
+                            if entries.Count = 0 then Asc else entries.[0].Directions.[position]
+                        let compareAt offset =
+                            let value = entries.[first + offset].Values.[position]
+                            let comparison =
+                                match value, probe with
+                                | VString left, VString right -> collation.ComparePrimary left right
+                                | _ -> compareIndexedValues table.Columns.[columnIndex].Collation value probe
+                            if direction = Desc then -comparison else comparison
+                        let length = afterLast - first
+                        let lower = sortedInsertionPoint FirstEqual length compareAt
+                        let upper = sortedInsertionPoint AfterEqual length compareAt
+                        let boundColumns =
+                            matched.ColumnIndices
+                            |> List.map (fun columnIndex ->
+                                let column = table.Columns.[columnIndex]
+                                column, Collation.findOrDefault column.Collation)
+                        let matchesBoundParts (entry: SecondaryOrderEntry) =
+                            List.zip3 boundColumns (entry.Values |> List.take matched.KeyColumnCount) prefix
+                            |> List.forall (fun ((column, spec), stored, bound) ->
+                                match stored, bound with
+                                | VString left, VString right -> spec.ComparePrimary left right = 0
+                                | _ -> compareIndexedValues column.Collation stored bound = 0)
+                        let filtered =
+                            Seq.init (upper - lower) (fun offset -> entries.[first + lower + offset])
+                            |> Seq.filter matchesBoundParts
+                            |> Seq.toArray
+                        filtered :> seq<_>, filtered.Length
 
                 { CandidateCount = count
                   CandidateRowIds = lazy (candidates |> Seq.map _.RowId |> Set.ofSeq)
@@ -6075,14 +6153,19 @@ let private trySecondaryOrderSliceInTable
                     let fullAfterEqual value = insertionIndex (entry value (RowId.create Int32.MaxValue))
                     let hasBounds = lower.IsSome || upper.IsSome
                     let prefixed = group.PrefixLength.IsSome
+                    let collation = table.Columns.[index].Collation |> Collation.findOrDefault
+                    let primaryBounds =
+                        prefixed
+                        || (match table.Columns.[index].Type with
+                            | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
+                                not collation.EqualityIsOrderEquivalence
+                            | _ -> false)
 
                     let comparePrimary left right =
                         let comparison =
                             match left, right with
                             | VString left, VString right ->
-                                table.Columns.[index].Collation
-                                |> Collation.findOrDefault
-                                |> fun collation -> collation.ComparePrimary left right
+                                collation.ComparePrimary left right
                             | _ -> Value.compare left right
 
                         if group.Direction = Desc then -comparison else comparison
@@ -6092,10 +6175,10 @@ let private trySecondaryOrderSliceInTable
                             comparePrimary entries.[current].Values.Head value)
 
                     let firstEqual value =
-                        if prefixed then primaryInsertionIndex FirstEqual value else fullFirstEqual value
+                        if primaryBounds then primaryInsertionIndex FirstEqual value else fullFirstEqual value
 
                     let afterEqual value =
-                        if prefixed then primaryInsertionIndex AfterEqual value else fullAfterEqual value
+                        if primaryBounds then primaryInsertionIndex AfterEqual value else fullAfterEqual value
 
                     let first, afterLast =
                         orderedSliceBounds
@@ -6925,6 +7008,18 @@ let private checkGeometryKeyColumns (columns: ColumnDef list) (indexes: IndexDef
         |> Option.map Error
         |> Option.defaultValue (Ok())
 
+let private duplicatePlainIndexPart (parts: IndexColumn list) =
+    let rec find (seen: Set<string>) (remaining: IndexColumn list) =
+        match remaining with
+        | [] -> None
+        | part :: rest when part.Name <> "" && part.Transform.IsNone ->
+            let name = part.Name.ToLowerInvariant()
+            if Set.contains name seen then Some part.Name
+            else find (Set.add name seen) rest
+        | _ :: rest -> find seen rest
+
+    find Set.empty parts
+
 let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list) : Result<unit, StorageError> =
     let fullLength column =
         match column.Type with
@@ -6996,13 +7091,16 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
 
     indexes
     |> traverse (fun index ->
-        index.KeyColumns
-        |> traverse (partLength index)
-        |> Result.bind (fun lengths ->
-            if index.Kind = BTree && List.sum lengths > 3072 then
-                Error(ExpressionError(1071, "Specified key was too long; max key length is 3072 bytes"))
-            else
-                Ok()))
+        match duplicatePlainIndexPart index.KeyColumns with
+        | Some name -> Error(ExpressionError(1060, sprintf "Duplicate column name '%s'" name))
+        | None ->
+            index.KeyColumns
+            |> traverse (partLength index)
+            |> Result.bind (fun lengths ->
+                if index.Kind = BTree && List.sum lengths > 3072 then
+                    Error(ExpressionError(1071, "Specified key was too long; max key length is 3072 bytes"))
+                else
+                    Ok()))
     |> Result.map ignore
 
 /// Validate the FULLTEXT parser and its text-column compatibility.
@@ -7920,11 +8018,17 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
             checkVectorKeyColumns table.Columns [ ix ]
             |> Result.bind (fun () -> checkGeometryKeyColumns table.Columns [ ix ])
         | AddPrimaryKey cols ->
-            let names = cols |> List.map _.Name |> Set.ofList
-            let columns = table.Columns |> List.map (fun column -> if Set.contains column.Name names then { column with PrimaryKey = true } else column)
+            if table.Columns |> List.exists _.PrimaryKey then
+                Ok() // The action reports MySQL's multiple-primary-key error first.
+            else
+                match duplicatePlainIndexPart cols with
+                | Some name -> Error(ExpressionError(1060, sprintf "Duplicate column name '%s'" name))
+                | None ->
+                    let names = cols |> List.map _.Name |> Set.ofList
+                    let columns = table.Columns |> List.map (fun column -> if Set.contains column.Name names then { column with PrimaryKey = true } else column)
 
-            checkVectorKeyColumns columns []
-            |> Result.bind (fun () -> checkGeometryKeyColumns columns [])
+                    checkVectorKeyColumns columns []
+                    |> Result.bind (fun () -> checkGeometryKeyColumns columns [])
         | DropPrimaryKey -> Ok()
         | _ -> Ok()
 
@@ -11053,8 +11157,6 @@ let private commitCatalogIntoWith
     (snapshot: Store)
     : unit =
     let batchCatalog = snapshot.Catalog
-    let validateWholeSnapshot = validateWholeSnapshot || catalogHasQualifiedForeignKeys batchCatalog
-
     let changedKeys =
         Set.union (keysOf baseCatalog) (keysOf batchCatalog)
         |> Set.filter (fun dbName ->
@@ -11062,6 +11164,11 @@ let private commitCatalogIntoWith
             | Some baseDb, Some batchDb -> not (obj.ReferenceEquals(baseDb, batchDb))
             | None, None -> false
             | _ -> true)
+
+    let validateWholeSnapshot =
+        validateWholeSnapshot
+        || catalogHasQualifiedForeignKeysAffecting baseCatalog changedKeys
+        || catalogHasQualifiedForeignKeysAffecting batchCatalog changedKeys
 
     if not changedKeys.IsEmpty then
         let needsCatalogLock =

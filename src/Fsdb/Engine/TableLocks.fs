@@ -427,7 +427,13 @@ let withStatementAccess timeout store owner accesses body =
     withStatementAccessUnder RespectGlobalRead timeout store owner accesses body
 
 let withTemporaryStatementAccess timeout store owner accesses body =
-    withStatementAccessUnder IgnoreGlobalRead timeout store owner accesses body
+    // Temporary sources have already been removed from `accesses`; a remaining
+    // writer still changes shared state and must obey the global read lock.
+    let policy =
+        if accesses |> List.exists (fun access -> access.Mode = WriteAccess) then RespectGlobalRead
+        else IgnoreGlobalRead
+
+    withStatementAccessUnder policy timeout store owner accesses body
 
 let withGlobalWriteAccess timeout store owner body =
     let access =

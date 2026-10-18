@@ -941,8 +941,11 @@ let rec tryNormalizeProbe columnType transform normalizeStored value =
         | TBit width ->
             let maximum = if width = 64 then UInt64.MaxValue else (1UL <<< width) - 1UL
 
-            value
-            |> tryExactUInt64
+            // Above 2^53, adjacent BIT integers can compare equal to the same
+            // DOUBLE. One exact functional key would omit those other rows.
+            (match value with
+             | VDouble number when number >= 9007199254740992.0 -> None
+             | _ -> tryExactUInt64 value)
             |> Option.filter (fun value -> value <= maximum)
             |> Option.map VUInt
         | _ -> normalizeStored value
