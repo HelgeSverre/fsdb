@@ -181,6 +181,74 @@ def main():
         print(f"{point_count} near-hole points; {len(point_mismatches)} point mismatches")
         for mismatch in point_mismatches:
             print("point", mismatch)
+        # Resolve the near-polar corner more finely before changing the
+        # geographic winding rule. The broad point corpus samples only one
+        # offset on each side of this boundary.
+        polar_polygon = (
+            "POLYGON((85 0,85 4,89 4,89 0,85 0),"
+            "(86 1,88 1,88 3,86 3,86 1))"
+        )
+        polar_latitudes = (85.99999, 86, 86.0000001, 86.000001, 86.00001, 86.0001, 86.001)
+        polar_longitudes = (0.99999, 1, 1.0000001, 1.000001, 1.00001, 1.0001, 1.001)
+        polar_mismatches = []
+        for latitude in polar_latitudes:
+            for longitude in polar_longitudes:
+                coordinates = f"{latitude} {longitude}"
+                expected = point_result(mysql_connection, coordinates, polar_polygon)
+                actual = point_result(fsdb_connection, coordinates, polar_polygon)
+                if actual != expected:
+                    polar_mismatches.append((coordinates, expected, actual))
+        print(f"{len(polar_latitudes) * len(polar_longitudes)} polar-corner points; "
+              f"{len(polar_mismatches)} point mismatches")
+        for mismatch in polar_mismatches:
+            print("polar corner", mismatch)
+        # The near-polar mismatch is not explained by classifying each ring as
+        # an independent polygon: both engines agree on those two predicates.
+        polar_point = "ST_GeomFromText('POINT(86 1.00001)',4326)"
+        polar_components = {
+            "outer": "POLYGON((85 0,85 4,89 4,89 0,85 0))",
+            "hole": "POLYGON((86 1,88 1,88 3,86 3,86 1))",
+            "combined": "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))",
+        }
+        for name, polygon in polar_components.items():
+            area = f"ST_GeomFromText('{polygon}',4326)"
+            sql = (
+                f"SELECT ST_Within({polar_point},{area}),ST_Touches({polar_point},{area}),"
+                f"ST_Distance({polar_point},ST_ExteriorRing({area}))"
+            )
+            values = []
+            for connection in (mysql_connection, fsdb_connection):
+                with connection.cursor() as cursor:
+                    cursor.execute(sql)
+                    values.append(cursor.fetchone())
+            print("polar component", name, "MySQL", values[0], "fsdb", values[1])
+        outer = [(85, 0), (85, 4), (89, 4), (89, 0), (85, 0)]
+        inner = [(86, 1), (88, 1), (88, 3), (86, 3), (86, 1)]
+
+        def polar_ring(points):
+            return "(" + ",".join(f"{latitude} {longitude}" for latitude, longitude in points) + ")"
+
+        for reverse_outer in (False, True):
+            for reverse_inner in (False, True):
+                shell = list(reversed(outer)) if reverse_outer else outer
+                hole = list(reversed(inner)) if reverse_inner else inner
+                polygon = "POLYGON(" + polar_ring(shell) + "," + polar_ring(hole) + ")"
+                area = f"ST_GeomFromText('{polygon}',4326)"
+                sql = (
+                    f"SELECT ST_Within({polar_point},{area}),"
+                    f"ST_Touches({polar_point},{area}),ST_Intersects({polar_point},{area}),"
+                    f"ST_Distance({polar_point},{area})"
+                )
+                values = []
+                for connection in (mysql_connection, fsdb_connection):
+                    with connection.cursor() as cursor:
+                        cursor.execute(sql)
+                        values.append(cursor.fetchone())
+                with mysql_connection.cursor() as cursor:
+                    cursor.execute(f"SELECT ST_IsValid({area})")
+                    valid = cursor.fetchone()[0]
+                print("polar orientation", reverse_outer, reverse_inner, "MySQL valid", valid,
+                      "MySQL", values[0], "fsdb", values[1])
         exterior = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
         edge_probes = [
             ("0 -0.00000000001", "near west edge"),
