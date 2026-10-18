@@ -2274,6 +2274,22 @@ let tests =
 
                   Expect.isLessThan touches 10 "the numeric bound is narrower than the equality key"
 
+          testCase "correlated indexed ranges respect the comparison collation"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_bound (bound VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+              runDefault store "CREATE TABLE inner_values (value VARCHAR(10) COLLATE utf8mb4_0900_ai_ci, KEY ix_value(value))" |> ignore
+              runDefault store "INSERT INTO outer_bound VALUES ('a')" |> ignore
+              runDefault store "INSERT INTO inner_values VALUES ('Z'), ('b')" |> ignore
+
+              for source in [ "inner_values i"; "(SELECT value FROM inner_values) i" ] do
+                  let sql =
+                      "SELECT (SELECT COUNT(*) FROM " + source
+                      + " WHERE i.value < o.bound) FROM outer_bound o"
+                  match runDefault store sql with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected binary comparison ordering for %s, got %A" source other
+
           testCase "correlated text ranges use the materialized source collation"
           <| fun _ ->
               let mutable touches = 0

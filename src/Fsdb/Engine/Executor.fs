@@ -14838,13 +14838,53 @@ and private correlatedAffineEqualityProbes source (columns: ColumnDef list) cont
             inverse left right |> Option.orElseWith (fun () -> inverse right left)
         | _ -> None)
 
-and private correlatedRangeBounds source (whereExpr: Expr option) (outer: EvalContext option) =
+and private correlatedRangeBounds
+    (store: Store)
+    (projection: PhysicalProjection)
+    source
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    =
     outer
     |> Option.map (fun context ->
-        collectRangeBounds
+        functionalRangeLookupBounds
             (tryCorrelatedInnerColumn source)
             (tryCorrelatedProbeValue source context)
-            whereExpr)
+            whereExpr
+        |> List.choose (fun bounds ->
+            Option.map2
+                (fun (outputColumn: ColumnDef) (physicalColumn: ColumnDef) ->
+                    let isText =
+                        match physicalColumn.Type with
+                        | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText -> true
+                        | _ -> false
+                    let compatible =
+                        match equalityMembershipDomain store physicalColumn with
+                        | Some(TextMembership stored) ->
+                            [ bounds.Lower; bounds.Upper ]
+                            |> List.choose id
+                            |> List.forall (fun ((expression, value), _) ->
+                                match value with
+                                | VNull -> true
+                                | VString _ ->
+                                    comparisonCollation
+                                        context
+                                        "<"
+                                        (Col outputColumn.Name)
+                                        (Some outputColumn)
+                                        expression
+                                        (tryColumnDefForExpr context expression)
+                                    |> Result.toOption
+                                    |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)
+                                | _ -> false)
+                        | _ when isText -> false
+                        | _ -> true
+                    if compatible then Some(functionalRangeValues bounds) else None)
+                (resolveColumn projection.OutputColumns bounds.Column
+                 |> Result.toOption
+                 |> Option.map (fun index -> projection.OutputColumns.[index]))
+                (tryPhysicalProjectionColumn projection bounds.Column)
+            |> Option.flatten))
     |> Option.defaultValue []
 
 and private correlatedFunctionalRangeBounds
@@ -15629,7 +15669,7 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
 
                 let rangePolicy = if membership.IsSome then CandidateNarrowing else CostedRead
                 let ranges =
-                    correlatedRangeBounds probeSource (Some branch) outer
+                    correlatedRangeBounds store projection probeSource (Some branch) outer
                     |> List.choose (tryProjectedPhysicalRangeCandidates rangePolicy store projection)
 
                 let likePrefixes =
@@ -15681,7 +15721,7 @@ and private tryProjectedPhysicalCorrelatedRangeLookup
     |> Option.bind (fun qualifier ->
         tryPhysicalProjection store registry dbName source
         |> Option.bind (fun projection ->
-            correlatedRangeBounds (correlatedProbeSource qualifier projection.OutputColumns) whereExpr outer
+            correlatedRangeBounds store projection (correlatedProbeSource qualifier projection.OutputColumns) whereExpr outer
             |> List.tryPick (tryProjectedPhysicalRangeRows store registry dbName projection)))
 
 and private tryProjectedPhysicalCorrelatedIntersectionLookup
@@ -15718,7 +15758,7 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
 
                 let rangePolicy = if membership.IsEmpty then CostedRead else CandidateNarrowing
                 let ranges =
-                    correlatedRangeBounds probeSource whereExpr outer
+                    correlatedRangeBounds store projection probeSource whereExpr outer
                     |> List.choose (tryProjectedPhysicalRangeCandidates rangePolicy store projection)
 
                 let likePrefixes =
