@@ -3410,6 +3410,26 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected hash joins to resolve both key collations, got %A" other
 
+                testCase "CAST text comparisons honor explicit legacy collation"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cast value = $"CAST('{value}' AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci"
+                    let parenthesizedKorean, korean = cast "㈎", cast "(가)"
+                    let verticalPeriod, ideographicPeriod = cast "︒", cast "。"
+                    let school, writing = cast "㉆", cast "文"
+                    let enclosedKana, kana = cast "㋐", cast "ア"
+                    let sql =
+                        $"SELECT {parenthesizedKorean} = {korean}, {verticalPeriod} = {ideographicPeriod}, {school} = {writing}, {enclosedKana} = {kana}"
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "0"; Some "0"; Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "CAST text must use its explicit comparison collation, got %A" other
+
+                    runDefault store "CREATE TABLE cast_cjk (body TEXT COLLATE utf8mb4_unicode_ci)" |> ignore
+                    runDefault store "INSERT INTO cast_cjk VALUES ('㈎')" |> ignore
+                    match runDefault store $"SELECT {korean} = CAST(body AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci FROM cast_cjk" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "row-derived CAST text must use its explicit comparison collation, got %A" other
+
                 testCase "multi-value numeric IN follows the first equality key in MySQL joins"
                 <| fun _ ->
                     let store = newStore ()
