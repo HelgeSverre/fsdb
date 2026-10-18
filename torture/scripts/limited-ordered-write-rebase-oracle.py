@@ -168,57 +168,60 @@ def main():
                                 waiter.close()
 
                 filesort_cases = 0
-                for inserted_id in (0, 100):
-                    for verb in ("UPDATE", "DELETE"):
-                        waiter = connect(socket)
-                        try:
-                            with owner.cursor() as cursor:
-                                cursor.execute("DROP TABLE IF EXISTS target")
-                                cursor.execute("CREATE TABLE target(id INT PRIMARY KEY,n INT)")
-                                cursor.execute("INSERT INTO target VALUES(1,0),(2,0)")
-                                cursor.execute("BEGIN")
-                                cursor.execute(f"INSERT INTO target VALUES({inserted_id},0)")
-                            with waiter.cursor() as cursor:
-                                cursor.execute("USE probe")
-                                cursor.execute("BEGIN")
-                            action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
-                            statement = action + " WHERE n>=0 ORDER BY id+0 LIMIT 1"
-                            started = threading.Event()
-                            outcome = {}
+                for limit, inserted_id, verb in itertools.product(
+                    (1, 2, 3), (0, 100), ("UPDATE", "DELETE")
+                ):
+                    waiter = connect(socket)
+                    try:
+                        with owner.cursor() as cursor:
+                            cursor.execute("DROP TABLE IF EXISTS target")
+                            cursor.execute("CREATE TABLE target(id INT PRIMARY KEY,n INT)")
+                            initial_ids = tuple(range(1, limit + 2))
+                            values = ",".join(f"({id},0)" for id in initial_ids)
+                            cursor.execute(f"INSERT INTO target VALUES{values}")
+                            cursor.execute("BEGIN")
+                            cursor.execute(f"INSERT INTO target VALUES({inserted_id},0)")
+                        with waiter.cursor() as cursor:
+                            cursor.execute("USE probe")
+                            cursor.execute("BEGIN")
+                        action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
+                        statement = action + f" WHERE n>=0 ORDER BY id+0 LIMIT {limit}"
+                        started = threading.Event()
+                        outcome = {}
 
-                            def filesort_write():
-                                try:
-                                    with waiter.cursor() as cursor:
-                                        started.set()
-                                        cursor.execute(statement)
-                                        outcome["affected"] = cursor.rowcount
-                                        cursor.execute("COMMIT")
-                                except Exception as error:
-                                    outcome["error"] = error
+                        def filesort_write():
+                            try:
+                                with waiter.cursor() as cursor:
+                                    started.set()
+                                    cursor.execute(statement)
+                                    outcome["affected"] = cursor.rowcount
+                                    cursor.execute("COMMIT")
+                            except Exception as error:
+                                outcome["error"] = error
 
-                            thread = threading.Thread(target=filesort_write, daemon=True)
-                            thread.start()
-                            assert started.wait(2), statement
-                            thread.join(0.2)
-                            assert thread.is_alive(), (statement, inserted_id, "writer did not wait")
-                            with owner.cursor() as cursor:
-                                cursor.execute("COMMIT")
-                            thread.join(5)
-                            assert not thread.is_alive(), (statement, "writer did not resume")
-                            assert outcome == {"affected": 1}, (statement, outcome)
-                            with owner.cursor() as cursor:
-                                cursor.execute("SELECT id,n FROM target ORDER BY id")
-                                actual = cursor.fetchall()
-                            changed_id = 0 if inserted_id == 0 else 1
-                            expected = tuple(
-                                (id, 1 if verb == "UPDATE" and id == changed_id else 0)
-                                for id in sorted((1, 2, inserted_id))
-                                if verb == "UPDATE" or id != changed_id
-                            )
-                            assert actual == expected, (statement, inserted_id, actual)
-                            filesort_cases += 1
-                        finally:
-                            waiter.close()
+                        thread = threading.Thread(target=filesort_write, daemon=True)
+                        thread.start()
+                        assert started.wait(2), statement
+                        thread.join(0.2)
+                        assert thread.is_alive(), (statement, inserted_id, "writer did not wait")
+                        with owner.cursor() as cursor:
+                            cursor.execute("COMMIT")
+                        thread.join(5)
+                        assert not thread.is_alive(), (statement, "writer did not resume")
+                        assert outcome == {"affected": limit}, (statement, outcome)
+                        with owner.cursor() as cursor:
+                            cursor.execute("SELECT id,n FROM target ORDER BY id")
+                            actual = cursor.fetchall()
+                        changed_ids = set(sorted((*initial_ids, inserted_id))[:limit])
+                        expected = tuple(
+                            (id, 1 if verb == "UPDATE" and id in changed_ids else 0)
+                            for id in sorted((*initial_ids, inserted_id))
+                            if verb == "UPDATE" or id not in changed_ids
+                        )
+                        assert actual == expected, (statement, inserted_id, actual)
+                        filesort_cases += 1
+                    finally:
+                        waiter.close()
 
                 insert_cases = (
                     ("ASC", 0, True, (0,), 0, (1, 2), 1),
