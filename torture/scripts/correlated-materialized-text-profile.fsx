@@ -36,3 +36,28 @@ for expression in [ "d.k"; "LOWER(d.k)" ] do
     match connection.QueryValues(sql, []) with
     | Ok(_, rows) -> printfn "%s: rows=%A residual_calls=%d" expression rows calls
     | Error error -> failwithf "%s: %A" expression error
+
+connection.Query "CREATE TABLE range_bounds(id INT PRIMARY KEY,x VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+connection.Query "INSERT INTO range_bounds VALUES(1,'word99'),(2,'zzzz'),(3,NULL)" |> ignore
+for predicate in [ "LOWER(d.k)>=o.x"; "LOWER(d.k) BETWEEN o.x AND CONCAT(o.x,'9')"; "LOWER(d.k) NOT BETWEEN 'a' AND o.x" ] do
+    calls <- 0
+    let sql =
+        "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM inner_rows) d "
+        + "WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+        + "FROM range_bounds o ORDER BY o.id"
+    match connection.QueryValues(sql, []) with
+    | Ok(_, rows) -> printfn "%s: rows=%A residual_calls=%d" predicate rows calls
+    | Error error -> failwithf "%s: %A" predicate error
+
+connection.Query "CREATE TABLE like_bounds(id INT PRIMARY KEY,p VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+connection.Query "INSERT INTO like_bounds VALUES(1,'word99%'),(2,'word1%'),(3,NULL)" |> ignore
+for predicate in [ "LOWER(d.k) LIKE o.p"; "LOWER(d.k) LIKE o.p OR d.id=2" ] do
+    for outerId in [ 1; 2; 3 ] do
+        calls <- 0
+        let sql =
+            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM inner_rows) d "
+            + "WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+            + sprintf "FROM like_bounds o WHERE o.id=%d" outerId
+        match connection.QueryValues(sql, []) with
+        | Ok(_, rows) -> printfn "%s outer=%d: rows=%A residual_calls=%d" predicate outerId rows calls
+        | Error error -> failwithf "%s: %A" predicate error

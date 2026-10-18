@@ -197,6 +197,12 @@ def verify(client, second_client):
     native["expect"]("numeric text bound cannot propagate", client.query(prefix + "o.k=1 AND d.k=1" + suffix), "2")
     native["expect"]("numeric text range", client.query(prefix + "o.k BETWEEN 1 AND 1" + suffix), "1\n2")
     native["expect"]("numeric text IN without MATCH", client.query(prefix + "o.k IN (1,NULL) ORDER BY d.id"), "1\n2")
+    native["expect"]("costed numeric IN with compound ON", client.query(
+        "SELECT d.id FROM names d JOIN labels o ON o.k=d.k AND d.id>0 "
+        "WHERE d.k IN (1,NULL) ORDER BY d.id"), "1\n2")
+    native["expect"]("costed numeric IN keeps compound ON filter", client.query(
+        "SELECT d.id FROM names d JOIN labels o ON o.k=d.k AND d.id>1 "
+        "WHERE d.k IN (1,NULL) ORDER BY d.id"), "2")
     native["expect"]("numeric text IN with MATCH", client.query(prefix + "o.k IN (1,NULL)" + suffix), "2")
     native["expect"]("string text bound", client.query(prefix + "o.k='1'" + suffix), "1\n2")
 

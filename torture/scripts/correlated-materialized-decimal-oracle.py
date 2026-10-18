@@ -45,11 +45,13 @@ def main():
                     assert version.startswith("8.4.11"), version
                     for query in [
                         "CREATE DATABASE probe", "USE probe",
-                        "CREATE TABLE outer_bounds(id INT PRIMARY KEY,x DECIMAL(12,2),i BIGINT,f DOUBLE)",
+                        "CREATE TABLE outer_bounds(id INT PRIMARY KEY,x DECIMAL(12,2),i BIGINT,f DOUBLE,s VARCHAR(40),sr VARCHAR(40))",
                         "CREATE TABLE inner_rows(id INT PRIMARY KEY,k DECIMAL(12,2))",
                         "INSERT INTO outer_bounds VALUES"
-                        "(1,10.25,10,10.25),(2,999.00,999,999.00),"
-                        "(3,NULL,NULL,NULL),(4,-10.25,-10,-10.25)",
+                        "(1,10.25,10,10.25,'10.25','490.25'),"
+                        "(2,999.00,999,999.00,'999','1479'),"
+                        "(3,NULL,NULL,NULL,NULL,NULL),"
+                        "(4,-10.25,-10,-10.25,'-10.25','469.75')",
                     ]:
                         cursor.execute(query)
                     cursor.executemany(
@@ -64,6 +66,24 @@ def main():
                         ("d.k+0.00=o.i", (0, 0, 0, 0)),
                         ("d.k+0.00=o.f", (1, 0, 0, 1)),
                         ("d.k+0.00=o.x OR d.id=12", (2, 1, 1, 2)),
+                        ("d.k+0.00 IN (o.x,o.x+1.00)", (2, 0, 0, 2)),
+                        ("d.k+0.00 IN (o.x,NULL)", (1, 0, 0, 1)),
+                        ("d.k+0.00 IN (o.x,o.x)", (1, 0, 0, 1)),
+                        ("d.k+0.00 IN (o.x,NULL) OR d.id=12", (2, 1, 1, 2)),
+                        ("d.k+0.00 IN (o.f,NULL)", (1, 0, 0, 1)),
+                        ("d.k+0.00>o.x", (489, 0, 0, 509)),
+                        ("d.k+0.00>=o.x", (490, 0, 0, 510)),
+                        ("d.k+0.00<o.x", (510, 1000, 0, 490)),
+                        ("d.k+0.00 BETWEEN o.x AND o.x+1.00", (2, 0, 0, 2)),
+                        ("d.k+0.00>o.x+480.00", (9, 0, 0, 30)),
+                        ("d.k+0.00<o.x-500.00 AND o.id<>2", (11, 0, 0, 0)),
+                        ("d.k+0.00<o.x-500.00", (11, 999, 0, 0)),
+                        ("d.k+0.00 BETWEEN o.x+480.00 AND o.x+481.00", (2, 0, 0, 1)),
+                        ("d.k+0.00>o.x+480.00 OR d.id=12", (10, 1, 1, 31)),
+                        ("d.k+0.00>o.f+480e0", (9, 0, 0, 30)),
+                        ("d.k+0.00=o.s", (1, 0, 0, 1)),
+                        ("d.k+0.00 IN (o.s,NULL)", (1, 0, 0, 1)),
+                        ("d.k+0.00>o.sr", (9, 0, 0, 30)),
                     ]
                     for predicate, expected in cases:
                         query = (
@@ -74,7 +94,87 @@ def main():
                         cursor.execute(query)
                         actual = tuple(count for _, count in cursor.fetchall())
                         assert actual == expected, (predicate, actual, expected)
-                    print(f"MySQL {version}: {len(cases)} decimal comparison cases match")
+                    for query in [
+                        "CREATE TABLE wide_bounds(id INT PRIMARY KEY,lo DOUBLE,hi DOUBLE)",
+                        "CREATE TABLE wide_rows(id INT PRIMARY KEY,k DECIMAL(20,2))",
+                        "INSERT INTO wide_bounds VALUES"
+                        "(1,9007199254740992e0,9007199254740992e0),"
+                        "(2,9007199254740994e0,9007199254740994e0)",
+                        "INSERT INTO wide_rows VALUES"
+                        "(1,9007199254740991.00),(2,9007199254740992.00),"
+                        "(3,9007199254740993.00),(4,9007199254740994.00)",
+                    ]:
+                        cursor.execute(query)
+                    cursor.execute(
+                        "SELECT o.id,(SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                        "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                        "WHERE d.k+0.00 BETWEEN o.lo AND o.hi) "
+                        "FROM wide_bounds o ORDER BY o.id"
+                    )
+                    assert cursor.fetchall() == ((1, "2,3"), (2, "4"))
+                    for predicate, expected in [
+                        ("d.k+0.00='9007199254740993'", "3"),
+                        ("d.k+0.00>='9007199254740993'", "3,4"),
+                        ("d.k+0.00 BETWEEN '9007199254740993' AND '9007199254740994'", "2,3,4"),
+                        ("d.k+0.00 IN ('9007199254740993',9007199254740993.00)", "2,3"),
+                        ("d.k+0.00='9007199254740993x'", "3"),
+                    ]:
+                        cursor.execute(
+                            "SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                            "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                            f"WHERE {predicate}"
+                        )
+                        assert cursor.fetchone() == (expected,), predicate
+                    cursor.execute("CREATE TABLE wide_string_bounds(id INT PRIMARY KEY,lo VARCHAR(40),hi VARCHAR(40))")
+                    cursor.execute("INSERT INTO wide_string_bounds VALUES"
+                                   "(1,'9007199254740993','9007199254740994'),"
+                                   "(2,'9007199254740993x','9007199254740994x'),"
+                                   "(3,'abc','xyz')")
+                    for predicate, expected in [
+                        ("d.k+0.00=o.lo", (("2,3",), ("2,3",), (None,))),
+                        ("d.k+0.00>=o.lo", (("2,3,4",), ("2,3,4",), ("1,2,3,4",))),
+                        ("d.k+0.00 BETWEEN o.lo AND o.hi", (("2,3,4",), ("2,3,4",), (None,))),
+                        ("d.k+0.00 IN (o.lo)", (("2,3",), ("2,3",), (None,))),
+                        ("d.k+0.00 IN (o.lo,9007199254740993.00)", (("2,3",), ("2,3",), ("3",))),
+                    ]:
+                        cursor.execute(
+                            "SELECT (SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                            "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                            f"WHERE {predicate}) FROM wide_string_bounds o ORDER BY o.id"
+                        )
+                        assert cursor.fetchall() == expected, predicate
+                    for predicate, expected in [
+                        ("d.k+0.00 IN (o.lo)", ((1, "2,3"), (2, "4"))),
+                        ("d.k+0.00 IN (o.lo,9007199254740993.00)", ((1, "2,3"), (2, "3,4"))),
+                        ("d.k+0.00 IN (9007199254740993.00,o.lo)", ((1, "2,3"), (2, "3,4"))),
+                        ("d.k+0.00 IN (o.lo,NULL)", ((1, "2,3"), (2, "4"))),
+                    ]:
+                        cursor.execute(
+                            "SELECT o.id,(SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                            "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                            f"WHERE {predicate}) FROM wide_bounds o ORDER BY o.id"
+                        )
+                        assert cursor.fetchall() == expected, predicate
+                    cursor.execute(
+                        "SELECT o.id,(SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                        "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                        "WHERE d.k+0.00=o.lo) "
+                        "FROM wide_bounds o ORDER BY o.id"
+                    )
+                    assert cursor.fetchall() == ((1, "2,3"), (2, "4"))
+                    cursor.execute("CREATE TABLE mixed_bounds(id INT PRIMARY KEY,lo DECIMAL(20,2),hi DOUBLE)")
+                    cursor.execute("INSERT INTO mixed_bounds VALUES(1,9007199254740993.00,9007199254740994e0)")
+                    for predicate, expected in [
+                        ("d.k+0.00 BETWEEN o.lo AND o.hi", "2,3,4"),
+                        ("d.k+0.00>=o.lo AND d.k+0.00<=o.hi", "3,4"),
+                    ]:
+                        cursor.execute(
+                            "SELECT (SELECT GROUP_CONCAT(d.id ORDER BY d.id) "
+                            "FROM (SELECT DISTINCT id,k FROM wide_rows) d "
+                            f"WHERE {predicate}) FROM mixed_bounds o"
+                        )
+                        assert cursor.fetchone() == (expected,), (predicate, expected)
+                    print(f"MySQL {version}: {len(cases)} decimal comparison cases and wide DOUBLE cuts match")
             finally:
                 if connection:
                     connection.close()

@@ -12,8 +12,13 @@ subquery with a synthetic outer row before the actual correlated probes. That
 probe could not bind either prefix and scanned roughly 1,000 rows. An actual
 outer row with a NULL pattern caused another 1,000-row scan. MySQL returns zero
 matches for the NULL pattern. FSDB now recognizes a top-level conjunct whose
-direct inner column is `LIKE` a stable NULL outer pattern and supplies an empty
-candidate set. The ordinary predicate validation still runs: an unknown inner
+direct inner column is `LIKE` or `NOT LIKE` a stable NULL outer pattern and
+supplies an empty candidate set. Before the `NOT LIKE` extension, its focused
+physical regression evaluated a leading residual 2,002 times despite finding
+no rows. The ordinary predicate validation still runs: an unknown inner
 column returns 1054, and a `LIKE` inside `OR` cannot suppress matches from its
-other branch. The regression now counts metadata and runtime calls together,
-and remains below 60 for three outer rows.
+other branch. The `NOT LIKE` oracle checks physical, pass-through derived, and
+materialized forms, including an OR branch that still matches beside the NULL
+pattern. The regression now counts metadata and runtime calls together, and
+remains below 60 for the three positive-LIKE outer rows and each NULL
+`NOT LIKE` source.

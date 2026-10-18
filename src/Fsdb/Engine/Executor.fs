@@ -142,6 +142,10 @@ type private RangeLookupBounds<'column, 'bound> =
       Lower: ('bound * bool) option
       Upper: ('bound * bool) option }
 
+type private DecimalRangeCut =
+    | ExactDecimalCut of decimal
+    | ApproximateDoubleCut of double
+
 type private SpatialLookupPredicate =
     { Column: string
       Relation: SpatialIndex.Relation
@@ -734,6 +738,7 @@ type private StatementMemo =
       MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string list, MaterializedEqualityLookup option>>
       MaterializedCorrelatedIntegerExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedDecimalExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
+      MaterializedCorrelatedDecimalRanges: Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>
       MaterializedCorrelatedDoubleExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedDoubleRanges: Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>
       MaterializedCorrelatedTextExpressions: Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>
@@ -765,6 +770,8 @@ let private freshStatementMemo () =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedDecimalExpressions =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+      MaterializedCorrelatedDecimalRanges =
+        Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedDoubleExpressions =
         Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedDoubleRanges =
@@ -5173,26 +5180,38 @@ let private disjuncts (expr: Expr) : Expr list =
 
 let private optionalConjuncts = Option.map conjuncts >> Option.defaultValue []
 
-/// Inequality and `NOT BETWEEN` are unions of strict ranges under SQL's
-/// three-valued comparison rules. The original expression remains the filter.
-let private candidateDisjuncts canSplitInequality expression =
-    disjuncts expression
-    |> List.collect (function
+/// An OR narrows candidates only when every branch has a safe lookup.
+/// Strict-range unions are safe supersets under SQL's three-valued rules;
+/// the original predicate still decides row membership after the lookup.
+let private tryCompleteOrCandidates whereExpr canSplitInequality branchCandidates merge candidateCount =
+    let candidates branches = branches |> List.map branchCandidates |> tryAllSome
+    let candidateForBranch single = function
         | Not(Between(value, lower, upper)) ->
-            [ BinOp(Lt, value, lower); BinOp(Gt, value, upper) ]
+            candidates [ BinOp(Lt, value, lower); BinOp(Gt, value, upper) ], true
         | BinOp(Neq, left, right)
         | Not(BinOp(Eq, left, right)) when canSplitInequality left right ->
-            [ BinOp(Lt, left, right); BinOp(Gt, left, right) ]
-        | branch -> [ branch ])
+            candidates [ BinOp(Lt, left, right); BinOp(Gt, left, right) ], true
+        | Not(In(value, bounds)) when not bounds.IsEmpty && List.forall (canSplitInequality value) bounds ->
+            // Each exclusion is a safe superset of NOT IN. Use the most
+            // selective one, including when this is one arm of an OR.
+            let alternatives =
+                bounds
+                |> List.choose (fun bound ->
+                    candidates [ BinOp(Lt, value, bound); BinOp(Gt, value, bound) ]
+                    |> Option.bind (fun group ->
+                        merge group |> Option.map (fun merged -> candidateCount merged, group)))
+            (if alternatives.IsEmpty then None else Some(alternatives |> List.minBy fst |> snd)), true
+        | branch ->
+            (if single then None else branchCandidates branch |> Option.map List.singleton), false
 
-/// An OR narrows candidates only when every branch has a safe lookup.
-let private tryCompleteOrCandidates whereExpr canSplitInequality branchCandidates merge candidateCount =
     whereExpr
     |> optionalConjuncts
     |> List.choose (fun expression ->
-        match candidateDisjuncts canSplitInequality expression with
-        | [ _ ] -> None
-        | branches -> branches |> List.map branchCandidates |> tryAllSome |> Option.bind merge)
+        let disjunction = disjuncts expression
+        let single = disjunction.Length = 1
+        let branches = disjunction |> List.map (candidateForBranch single)
+        if single && not (snd branches.Head) then None
+        else branches |> List.map fst |> tryAllSome |> Option.bind (List.collect id >> merge))
     |> function
         | [] -> None
         | candidates -> Some(List.minBy candidateCount candidates)
@@ -5809,6 +5828,13 @@ let private isIntegerColumnType = function
 
 let private isIntegerColumn column = column |> Option.exists (_.Type >> isIntegerColumnType)
 
+let private isTextColumn column =
+    column
+    |> Option.exists (fun column ->
+        match column.Type with
+        | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText -> true
+        | _ -> false)
+
 let private compareWithColumnDomain
     (leftExpr: Expr) (leftColumn: ColumnDef option) left
     (rightExpr: Expr) (rightColumn: ColumnDef option) right =
@@ -5835,6 +5861,13 @@ let private compareWithColumnDomain
     | VDouble bound, VUInt integer
         when isIntegerColumn rightColumn && leftColumn.IsNone && not (rowDependent leftExpr) ->
         -(Value.compareIntegerToDouble (bigint integer) bound)
+    // A row-derived text column compares with a DECIMAL expression in the
+    // approximate numeric domain. A quoted constant instead keeps MySQL's
+    // exact DECIMAL/string comparison, including values beyond 2^53.
+    | VDecimal number, VString text when isTextColumn rightColumn ->
+        Operators.compare (Value.toDouble (VDecimal number)) (Value.toDouble (VString text))
+    | VString text, VDecimal number when isTextColumn leftColumn ->
+        Operators.compare (Value.toDouble (VString text)) (Value.toDouble (VDecimal number))
     | _ -> Value.compare left right
 
 // CAST/CONVERT retain encoded bytes for charset-aware functions, but their
@@ -6769,14 +6802,35 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             |> Result.bind (fun vlo ->
                 eval hi
                 |> Result.bind (fun vhi ->
+                    let numeric = function
+                        | VInt _ | VUInt _ | VDecimal _ | VBit _ -> true
+                        | VDouble number -> System.Double.IsFinite number
+                        | _ -> false
+                    // BETWEEN resolves one comparison domain for all three
+                    // operands. A DOUBLE bound makes numeric DECIMAL values
+                    // approximate even beside an exact DECIMAL bound.
+                    let approximate =
+                        let values = [ ve; vlo; vhi ]
+                        (values |> List.forall (fun value -> value = VNull || numeric value)
+                         && values |> List.exists (function VDouble _ -> true | _ -> false))
+                        || (match ve with
+                            | VDecimal _ ->
+                                [ vlo; vhi ]
+                                |> List.forall (function VNull | VString _ -> true | value -> numeric value)
+                                && [ vlo; vhi ] |> List.exists (function VString _ -> true | _ -> false)
+                            | _ -> false)
+                    let compareBound operation boundExpr boundValue =
+                        if approximate then
+                            Ok(Operators.compare (Value.toDouble ve) (Value.toDouble boundValue))
+                        else resolvedCompare ctx operation e ve boundExpr boundValue
                     let lower =
                         if ve = VNull || vlo = VNull then Ok None
-                        else resolvedCompare ctx ">=" e ve lo vlo |> Result.map (fun comparison -> Some(comparison >= 0))
+                        else compareBound ">=" lo vlo |> Result.map (fun comparison -> Some(comparison >= 0))
                     lower
                     |> Result.bind (fun lower ->
                         let upper =
                             if ve = VNull || vhi = VNull then Ok None
-                            else resolvedCompare ctx "<=" e ve hi vhi |> Result.map (fun comparison -> Some(comparison <= 0))
+                            else compareBound "<=" hi vhi |> Result.map (fun comparison -> Some(comparison <= 0))
                         upper
                         |> Result.map (fun upper ->
                             match lower, upper with
@@ -13788,8 +13842,8 @@ and private chooseNumericJoinBase (store: Store) (dbName: string) (select: Selec
              && (select.OrderBy |> List.forall simpleOrdering) ->
         match join.Table, physical leftRef with
         | FromTable rightRef, Some leftTable when rightRef.IndexHints.IsEmpty ->
-            match physical rightRef, join.On with
-            | Some rightTable, BinOp(Eq, _, _) ->
+            match physical rightRef with
+            | Some rightTable ->
                 let leftQualifier = leftRef.Alias |> Option.defaultValue leftRef.Table
                 let rightQualifier = rightRef.Alias |> Option.defaultValue rightRef.Table
                 let equalityColumns =
@@ -14977,6 +15031,7 @@ and private tryCorrelatedOuterValue source context expression =
 
 and private tryCorrelatedProbeValue source context = function
     | LiteralValue value -> Some value
+    | Expression.CollationOverride(LiteralValue value, _) -> Some value
     | expression -> tryCorrelatedOuterValue source context expression
 
 and private correlatedBinaryLikePrefixes store source context columns predicate =
@@ -15029,11 +15084,11 @@ and private correlatedBinaryLikePrefixes store source context columns predicate 
                     | _ -> None))
         | _ -> None)
 
-and private canSplitCorrelatedExactNumericInequality source (columns: ColumnDef list) outer left right =
+and private canSplitCorrelatedInequality store source (columns: ColumnDef list) outer left right =
     let innerColumn expression =
         tryCorrelatedInnerColumn source expression
         |> Option.bind (resolveColumn columns >> Result.toOption)
-        |> Option.map (fun index -> columns.[index].Type)
+        |> Option.map (fun index -> columns.[index])
 
     let boundValue expression =
         match expression with
@@ -15042,11 +15097,30 @@ and private canSplitCorrelatedExactNumericInequality source (columns: ColumnDef 
 
     let compatible indexed bound =
         match innerColumn indexed, boundValue bound with
-        | Some indexedType, Some(VNull | VInt _ | VUInt _ | VBit _)
-            when isExactIntegerIndexType indexedType -> true
-        | Some indexedType, Some(VDecimal _)
-            when isExactIntegerIndexType indexedType -> true
-        | Some(TDecimal _), Some(VNull | VInt _ | VUInt _ | VDecimal _) -> true
+        | Some column, Some(VNull | VInt _ | VUInt _ | VBit _)
+            when isExactIntegerIndexType column.Type -> true
+        | Some column, Some(VDecimal _)
+            when isExactIntegerIndexType column.Type -> true
+        | Some { Type = TDecimal _ }, Some(VNull | VInt _ | VUInt _ | VDecimal _) -> true
+        | Some { Type = TDouble _ }, Some VNull -> true
+        | Some { Type = TDouble _ }, Some(VString text) when not (System.String.IsNullOrWhiteSpace text) ->
+            match System.Double.TryParse(
+                text,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture
+            ) with
+            | true, number -> System.Double.IsFinite number
+            | _ -> false
+        | Some column, Some value ->
+            match equalityMembershipDomain store column, value, outer with
+            | Some(TextMembership _), VNull, _ -> true
+            | Some(TextMembership stored), VString _, Some context ->
+                comparisonCollation
+                    context "<" (Col column.Name) (Some column)
+                    bound (tryColumnDefForExpr context bound)
+                |> Result.toOption
+                |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)
+            | _ -> false
         | _ -> false
 
     compatible left right || compatible right left
@@ -15890,6 +15964,12 @@ and private tryProjectedPhysicalRangeRows store registry dbName projection bound
     tryProjectedPhysicalRangeCandidates CostedRead store projection bounds
     |> Option.bind (projectPhysicalLookupRows store registry dbName projection)
 
+and private tryCorrelatedNullLikeColumn probeSource context = function
+    | Like(indexed, pattern, _, _)
+    | Not(Like(indexed, pattern, _, _)) when tryCorrelatedProbeValue probeSource context pattern = Some VNull ->
+        tryCorrelatedInnerColumn probeSource indexed
+    | _ -> None
+
 and private tryProjectedPhysicalCorrelatedLikeCandidates
     policy store (projection: PhysicalProjection) probeSource context whereExpr =
     if not (storedRowsMatchReadRows store projection.PhysicalTable.Columns) then
@@ -15898,13 +15978,9 @@ and private tryProjectedPhysicalCorrelatedLikeCandidates
         let rejectsEveryRow =
             whereExpr
             |> optionalConjuncts
-            |> List.exists (function
-                | Like(indexed, pattern, _, _) ->
-                    tryCorrelatedInnerColumn probeSource indexed
-                    |> Option.bind (tryPhysicalProjectionColumn projection)
-                    |> Option.isSome
-                    && tryCorrelatedProbeValue probeSource context pattern = Some VNull
-                | _ -> false)
+            |> List.exists (tryCorrelatedNullLikeColumn probeSource context
+                            >> Option.bind (tryPhysicalProjectionColumn projection)
+                            >> Option.isSome)
 
         if rejectsEveryRow then Some []
         else
@@ -16087,7 +16163,7 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
 
             tryCompleteOrCandidates
                 whereExpr
-                (canSplitCorrelatedExactNumericInequality probeSource projection.OutputColumns outer)
+                (canSplitCorrelatedInequality store probeSource projection.OutputColumns outer)
                 branchCandidates
                 merge
                 (snd >> List.length)))
@@ -16266,7 +16342,7 @@ and private tryMaterializedCorrelatedLookup
                     | _ -> false) expression)
                 && isStatementStableExpr store registry dbName innerScope expression
 
-            let buildExpressionLookup expression rowKey probeKey =
+            let buildExpressionLookupWithKeys expression rowKeys probeKey =
                 let rowsByKey = Dictionary<Value, ResizeArray<Value[]>>()
                 let mutable compatible = true
                 for row in rows do
@@ -16274,11 +16350,12 @@ and private tryMaterializedCorrelatedLookup
                         match evalExpr (rowContext row) expression with
                         | Ok VNull -> ()
                         | Ok value ->
-                            match rowKey value with
-                            | Some key ->
-                                match rowsByKey.TryGetValue key with
-                                | true, matches -> matches.Add row
-                                | _ -> rowsByKey.[key] <- ResizeArray [ row ]
+                            match rowKeys value with
+                            | Some keys ->
+                                for key in keys do
+                                    match rowsByKey.TryGetValue key with
+                                    | true, matches -> matches.Add row
+                                    | _ -> rowsByKey.[key] <- ResizeArray [ row ]
                             | None -> compatible <- false
                         | Error _ -> compatible <- false
                 if not compatible then None
@@ -16294,7 +16371,54 @@ and private tryMaterializedCorrelatedLookup
                                 | _ -> Some [])
                         | _ -> None)
 
-            // Integer expressions need an exact result domain before their
+            let buildExpressionLookup expression rowKey probeKey =
+                buildExpressionLookupWithKeys expression
+                    (rowKey >> Option.map List.singleton) probeKey
+
+            let unionExpressionLookupCandidates lookup values =
+                values
+                |> List.map (fun value -> lookup [ value ])
+                |> tryAllSome
+                |> Option.map (fun groups ->
+                    let seen = HashSet<Value[]>(HashIdentity.Reference)
+                    groups |> List.collect id |> List.filter seen.Add)
+
+            let correlatedBoundValue = function
+                | Cast(LiteralValue VNull, _) -> Some VNull
+                | expression -> tryCorrelatedProbeValue probeSource context expression
+
+            let expressionEqualityCandidates indexable lookup acceptsEqualityBound acceptsInBound predicate =
+                let candidate indexed bound =
+                    if not (indexable indexed) then None
+                    else
+                        tryCorrelatedProbeValue probeSource context bound
+                        |> Option.bind (fun value ->
+                            if acceptsEqualityBound value then
+                                lookup indexed |> Option.bind (fun keyLookup -> keyLookup [ value ])
+                            else None)
+
+                let inCandidate indexed bounds =
+                    if not (indexable indexed) then None
+                    else
+                        bounds
+                        |> List.map correlatedBoundValue
+                        |> tryAllSome
+                        |> Option.bind (fun values ->
+                            if values |> List.forall acceptsInBound then
+                                lookup indexed
+                                |> Option.bind (fun keyLookup -> unionExpressionLookupCandidates keyLookup values)
+                            else None)
+
+                predicate
+                |> optionalConjuncts
+                |> List.choose (function
+                    | BinOp(Eq, left, right) ->
+                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | In(indexed, bounds) -> inCandidate indexed bounds
+                    | _ -> None)
+                |> intersectSharedRows
+
+            // Integer arithmetic needs an exact result domain before its
             // signed and unsigned values can share one equality key.
             let rec integerKeyExpression = function
                 | LiteralValue(VInt _ | VUInt _ | VNull) -> true
@@ -16304,15 +16428,31 @@ and private tryMaterializedCorrelatedLookup
                      |> Option.bind (fun index -> equalityMembershipDomain store columns.[index]))
                     |> Option.exists (function IntegerMembership -> true | _ -> false)
                 | Neg expression -> integerKeyExpression expression
-                | FuncCall(name, [ expression ]) when equalsIgnoreCase name "ABS" ->
+                | FuncCall(name, [ expression ])
+                    when equalsIgnoreCase name "ABS" || equalsIgnoreCase name "BIT_COUNT" ->
                     integerKeyExpression expression
-                | FuncCall(name, arguments) when equalsIgnoreCase name "COALESCE" ->
-                    not arguments.IsEmpty && List.forall integerKeyExpression arguments
-                | FuncCall(name, [ left; right ]) when equalsIgnoreCase name "IFNULL" ->
-                    integerKeyExpression left && integerKeyExpression right
+                | FuncCall(name, expressions)
+                    when (equalsIgnoreCase name "COALESCE" && not (List.isEmpty expressions))
+                         || (equalsIgnoreCase name "IFNULL" && List.length expressions = 2) ->
+                    expressions |> List.forall integerKeyExpression
                 | BinOp((Add | Sub | Mul), left, right) ->
                     integerKeyExpression left && integerKeyExpression right
                 | _ -> false
+
+            let decimalIntegerBoundKey number =
+                if number = System.Decimal.Truncate number then
+                    if number >= decimal System.Int64.MinValue
+                       && number <= decimal System.Int64.MaxValue then
+                        Some(VInt(int64 number))
+                    elif number >= 0m && number <= decimal System.UInt64.MaxValue then
+                        Some(VUInt(uint64 number))
+                    else Some(VDecimal number)
+                else Some(VDecimal number)
+
+            let cleanNumericStringBound text =
+                let _, truncated = Value.coerceLeadingDouble text
+                if truncated then None
+                else Value.tryLeadingDecimal text |> Option.bind decimalIntegerBoundKey
 
             let integerExpressionLookup expression =
                 let lookups =
@@ -16326,10 +16466,23 @@ and private tryMaterializedCorrelatedLookup
                         let integerKey = function
                             | VInt _ | VUInt _ as value -> Some(canonicalIntegerKey value)
                             | _ -> None
-                        buildExpressionLookup expression integerKey integerKey)
+                        let boundKey = function
+                            // Only integer row results enter this lookup. A fractional
+                            // or out-of-range DECIMAL has no matching integer key.
+                            | VDecimal number -> decimalIntegerBoundKey number
+                            | VString text -> cleanNumericStringBound text
+                            | VEncodedString _ as value -> Value.toText value |> Option.bind cleanNumericStringBound
+                            | VDouble number when System.Double.IsFinite number -> Some(VDouble number)
+                            | value -> integerKey value
+                        // Numeric comparison with a DOUBLE bound rounds even
+                        // distinct wide integer rows to the same key.
+                        let rowKeys value =
+                            integerKey value
+                            |> Option.map (fun exact -> [ exact; VDouble(Value.toDouble value) ])
+                        buildExpressionLookupWithKeys expression rowKeys boundKey)
 
             let integerExpressionCandidates predicate =
-                let candidate indexed bound =
+                let indexable indexed =
                     let hasInnerColumn =
                         indexed
                         |> Expression.exists (function
@@ -16342,21 +16495,16 @@ and private tryMaterializedCorrelatedLookup
                                 tryCorrelatedSignedIntegerColumn probeSource columns column |> Option.isSome
                             | _ -> false)
 
-                    if hasInnerColumn && not alreadyIndexed && integerKeyExpression indexed then
-                        tryCorrelatedProbeValue probeSource context bound
-                        |> Option.bind (fun value ->
-                            integerExpressionLookup indexed
-                            |> Option.bind (fun lookup -> lookup [ value ]))
-                    else
-                        None
+                    hasInnerColumn && not alreadyIndexed
+                    && integerKeyExpression indexed && rowLocalExpression indexed
 
-                predicate
-                |> optionalConjuncts
-                |> List.choose (function
-                    | BinOp(Eq, left, right) ->
-                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
-                    | _ -> None)
-                |> intersectSharedRows
+                let acceptsBound = function
+                    | VNull | VInt _ | VUInt _ | VDecimal _ -> true
+                    | VDouble number -> System.Double.IsFinite number
+                    | VString text -> cleanNumericStringBound text |> Option.isSome
+                    | VEncodedString _ as value -> Value.toText value |> Option.bind cleanNumericStringBound |> Option.isSome
+                    | _ -> false
+                expressionEqualityCandidates indexable integerExpressionLookup (fun _ -> true) acceptsBound predicate
 
             // Decimal results compare exactly with decimal and integer bounds.
             // Strings and DOUBLE bounds can compare through other coercion
@@ -16378,26 +16526,16 @@ and private tryMaterializedCorrelatedLookup
                             | _ -> None
                         buildExpressionLookup expression rowKey decimalKey)
 
-                let candidate indexed bound =
-                    if not (rowLocalExpression indexed) || Option.isSome (tryCorrelatedInnerColumn probeSource indexed) then
-                        None
-                    else
-                        tryCorrelatedProbeValue probeSource context bound
-                        |> Option.bind (fun value ->
-                            match value with
-                            | VNull | VDecimal _ | VInt _ | VUInt _ ->
-                                decimalLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
-                            | _ -> None)
+                let indexable indexed =
+                    rowLocalExpression indexed
+                    && Option.isNone (tryCorrelatedInnerColumn probeSource indexed)
 
-                predicate
-                |> optionalConjuncts
-                |> List.choose (function
-                    | BinOp(Eq, left, right) ->
-                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
-                    | _ -> None)
-                |> intersectSharedRows
+                let acceptsBound = function
+                    | VNull | VDecimal _ | VInt _ | VUInt _ -> true
+                    | _ -> false
+                expressionEqualityCandidates indexable decimalLookup acceptsBound acceptsBound predicate
 
-            let finiteNumericDouble = function
+            let rec finiteNumericDouble = function
                 | VDouble number when System.Double.IsFinite number -> Some number
                 | VInt _ | VUInt _ | VDecimal _ | VBit _ as value ->
                     let number = Value.toDouble value
@@ -16410,6 +16548,8 @@ and private tryMaterializedCorrelatedLookup
                     ) with
                     | true, number when System.Double.IsFinite number -> Some number
                     | _ -> None
+                | VEncodedString _ as value ->
+                    Value.toText value |> Option.bind (VString >> finiteNumericDouble)
                 | _ -> None
 
             // Numeric bounds compare with a DOUBLE result in the approximate
@@ -16422,7 +16562,7 @@ and private tryMaterializedCorrelatedLookup
                     | _ -> None
                 let probeKey value =
                     match value with
-                    | VInt _ | VUInt _ | VDecimal _ | VBit _ | VString _ as value ->
+                    | VInt _ | VUInt _ | VDecimal _ | VBit _ | VString _ | VEncodedString _ as value ->
                         finiteNumericDouble value |> Option.map VDouble
                     | value -> doubleKey value
 
@@ -16433,48 +16573,169 @@ and private tryMaterializedCorrelatedLookup
                     getMemoized lookups expression (fun () ->
                         buildExpressionLookup expression doubleKey probeKey)
 
-                let candidate indexed bound =
-                    if not (rowLocalExpression indexed) then
-                        None
-                    else
-                        tryCorrelatedProbeValue probeSource context bound
-                        |> Option.bind (fun value ->
-                            match value with
-                            | VNull -> doubleLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
-                            | _ when probeKey value |> Option.isSome ->
-                                doubleLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
-                            | _ -> None)
+                let acceptsBound value = value = VNull || (probeKey value |> Option.isSome)
+                expressionEqualityCandidates rowLocalExpression doubleLookup acceptsBound acceptsBound predicate
 
-                let inCandidate indexed bounds =
-                    if not (rowLocalExpression indexed) then
-                        None
-                    else
-                        let boundValue = function
-                            | Cast(LiteralValue VNull, _) -> Some VNull
-                            | expression -> tryCorrelatedProbeValue probeSource context expression
-                        bounds
-                        |> List.map boundValue
-                        |> tryAllSome
-                        |> Option.bind (fun values ->
-                            if values |> List.forall (fun value -> value = VNull || (probeKey value |> Option.isSome)) then
-                                doubleLookup indexed
-                                |> Option.bind (fun lookup ->
-                                    values
-                                    |> List.map (fun value -> lookup [ value ])
-                                    |> tryAllSome
-                                    |> Option.map (fun groups ->
-                                        let seen = HashSet<Value[]>(HashIdentity.Reference)
-                                        groups |> List.collect id |> List.filter seen.Add))
+            let decimalRangeCandidates predicate =
+                let decimalKey = function
+                    | VDecimal number -> Some number
+                    | VInt number -> Some(decimal number)
+                    | VUInt number -> Some(decimal number)
+                    | _ -> None
+
+                let rangeLookup expression =
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedDecimalRanges source (fun () ->
+                            Dictionary<Expr, MaterializedRangeLookup option>(HashIdentity.Reference))
+
+                    getMemoized lookups expression (fun () ->
+                        let sourceRows = List.toArray rows
+                        let entries = ResizeArray<decimal * int>()
+                        let mutable compatible = true
+                        for index = 0 to sourceRows.Length - 1 do
+                            if compatible then
+                                match evalExpr (rowContext sourceRows.[index]) expression with
+                                | Ok VNull -> ()
+                                | Ok(VDecimal number) -> entries.Add(number, index)
+                                | _ -> compatible <- false
+
+                        if not compatible then None
+                        else
+                            let entries = entries.ToArray()
+                            Array.sortInPlaceBy fst entries
+
+                            let firstMatching bound inclusive =
+                                let mutable lower, upper = 0, entries.Length
+                                while lower < upper do
+                                    let middle = lower + (upper - lower) / 2
+                                    let key = fst entries.[middle]
+                                    // Decimal-to-DOUBLE conversion is monotone: equal rounded
+                                    // keys stay adjacent in this exact-decimal ordering.
+                                    let comparison =
+                                        match bound with
+                                        | ExactDecimalCut exact -> Operators.compare key exact
+                                        | ApproximateDoubleCut approximate -> Operators.compare (Value.toDouble (VDecimal key)) approximate
+                                    if comparison < 0 || (comparison = 0 && not inclusive) then
+                                        lower <- middle + 1
+                                    else
+                                        upper <- middle
+                                lower
+
+                            Some(fun lower upper ->
+                                let convert = function
+                                    | None -> Some None
+                                    | Some(VDouble number, inclusive) when System.Double.IsFinite number ->
+                                        Some(Some(ApproximateDoubleCut number, inclusive))
+                                    | Some(value, inclusive) ->
+                                        decimalKey value |> Option.map (fun number -> Some(ExactDecimalCut number, inclusive))
+
+                                let isNullBound = function Some(VNull, _) -> true | _ -> false
+                                match convert lower, convert upper with
+                                | _ when isNullBound lower || isNullBound upper -> Some []
+                                | Some lower, Some upper ->
+                                    let first =
+                                        lower
+                                        |> Option.map (fun (value, inclusive) -> firstMatching value inclusive)
+                                        |> Option.defaultValue 0
+                                    let afterLast =
+                                        upper
+                                        |> Option.map (fun (value, inclusive) -> firstMatching value (not inclusive))
+                                        |> Option.defaultValue entries.Length
+                                    entries.[first .. afterLast - 1]
+                                    |> Array.map snd
+                                    |> Array.sort
+                                    |> Array.map (fun index -> sourceRows.[index])
+                                    |> Array.toList
+                                    |> Some
+                                | _ -> None))
+
+                let indexed expression =
+                    if rowLocalExpression expression
+                       && Option.isNone (tryCorrelatedInnerColumn probeSource expression) then Some expression
+                    else None
+                let bound expression =
+                    tryCorrelatedProbeValue probeSource context expression
+                    |> Option.map (fun value -> expression, value)
+
+                let approximateBound expression value =
+                    match value with
+                    | VDouble number when System.Double.IsFinite number -> Some(VDouble number)
+                    | VString text when isTextColumn (tryColumnDefForExpr context expression)
+                                        && not (System.String.IsNullOrWhiteSpace text) ->
+                        let number, truncated = Value.coerceLeadingDouble text
+                        if not truncated && System.Double.IsFinite number then Some(VDouble number) else None
+                    | _ -> None
+
+                let cutValue expression value =
+                    approximateBound expression value |> Option.defaultValue value
+
+                let lookupRange (range: RangeLookupBounds<Expr, Expr * Value>) =
+                    rangeLookup range.Column
+                    |> Option.bind (fun lookup ->
+                        let value = Option.map (fun ((expression, value), inclusive) -> cutValue expression value, inclusive)
+                        lookup (value range.Lower) (value range.Upper))
+
+                let candidates expression =
+                    let regular () = rangePredicatesFor indexed bound expression |> List.choose lookupRange
+                    match expression with
+                    | BinOp(Eq, left, right) ->
+                        let approximateEquality indexedExpression boundExpression =
+                            match indexed indexedExpression, bound boundExpression with
+                            | Some indexedExpression, Some(expression, value) ->
+                                approximateBound expression value
+                                |> Option.bind (fun cut ->
+                                    rangeLookup indexedExpression
+                                    |> Option.bind (fun lookup ->
+                                        lookup (Some(cut, true)) (Some(cut, true))))
+                            | _ -> None
+                        approximateEquality left right
+                        |> Option.orElseWith (fun () -> approximateEquality right left)
+                        |> Option.toList
+                    | In(indexedExpression, boundExpressions) ->
+                        let bounds =
+                            boundExpressions
+                            |> List.map (fun expression ->
+                                correlatedBoundValue expression |> Option.map (fun value -> expression, value))
+                            |> tryAllSome
+                        match indexed indexedExpression, bounds with
+                        | Some indexedExpression, Some values
+                            when values |> List.exists (fun (expression, value) ->
+                                approximateBound expression value |> Option.isSome) ->
+                            rangeLookup indexedExpression
+                            |> Option.bind (fun lookup ->
+                                values
+                                |> List.map (fun (expression, value) ->
+                                    let cut = cutValue expression value
+                                    lookup (Some(cut, true)) (Some(cut, true)))
+                                |> tryAllSome
+                                |> Option.map (fun groups ->
+                                    let seen = HashSet<Value[]>(HashIdentity.Reference)
+                                    groups |> List.collect id |> List.filter seen.Add))
+                            |> Option.toList
+                        | _ -> regular ()
+                    | Between(indexedExpression, lowerExpression, upperExpression) ->
+                        match indexed indexedExpression, bound lowerExpression, bound upperExpression with
+                        | Some indexedExpression, Some(_, lower), Some(_, upper)
+                            when (match lower, upper with
+                                  | VDouble _, _ | _, VDouble _ | VString _, _ | _, VString _ -> true
+                                  | _ -> false) ->
+                            let approximate = function
+                                | VInt _ | VUInt _ | VDecimal _ | VDouble _ | VBit _ | VString _ as value -> finiteNumericDouble value
+                                | _ -> None
+                            if lower = VNull || upper = VNull then [ [] ]
                             else
-                                None)
+                                match approximate lower, approximate upper with
+                                | Some lower, Some upper ->
+                                    rangeLookup indexedExpression
+                                    |> Option.bind (fun lookup -> lookup (Some(VDouble lower, true)) (Some(VDouble upper, true)))
+                                    |> Option.toList
+                                | _ -> []
+                        | _ -> regular ()
+                    | _ -> regular ()
 
                 predicate
                 |> optionalConjuncts
-                |> List.choose (function
-                    | BinOp(Eq, left, right) ->
-                        candidate left right |> Option.orElseWith (fun () -> candidate right left)
-                    | In(indexed, bounds) -> inCandidate indexed bounds
-                    | _ -> None)
+                |> List.collect candidates
                 |> intersectSharedRows
 
             let doubleRangeCandidates predicate =
@@ -16654,36 +16915,186 @@ and private tryMaterializedCorrelatedLookup
             // materialized source. Its collation belongs to the comparison,
             // not necessarily to the source column or the connection.
             let textExpressionCandidates predicate =
+                let indexable indexed =
+                    rowLocalExpression indexed
+                    && Option.isNone (tryCorrelatedInnerColumn probeSource indexed)
+
+                let comparisonCollation indexed bound =
+                    resolveOperandCollation "="
+                        (collationOperand (rowContext [||]) indexed None)
+                        (collationOperand context bound (tryColumnDefForExpr context bound))
+                    |> Result.toOption
+
+                let lookup indexed (collation: Collation.Collation) =
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedTextExpressions source (fun () ->
+                            Dictionary<Expr * string, MaterializedEqualityLookup option>())
+                    getMemoized lookups (indexed, collation.Name) (fun () ->
+                        let textKey = function
+                            | VString text -> Some(VString(collation.KeyOf text))
+                            | _ -> None
+                        buildExpressionLookup indexed textKey textKey)
+
                 let candidate indexed bound =
-                    if not (rowLocalExpression indexed) || Option.isSome (tryCorrelatedInnerColumn probeSource indexed) then
-                        None
+                    if not (indexable indexed) then None
                     else
                         tryCorrelatedProbeValue probeSource context bound
                         |> Option.bind (fun value ->
                             match value with
                             | VString _ | VNull ->
-                                textComparisonCollation "=" indexed bound
-                                |> Result.toOption
+                                comparisonCollation indexed bound
                                 |> Option.bind (fun collation ->
-                                    let lookups =
-                                        getMemoized memo.MaterializedCorrelatedTextExpressions source (fun () ->
-                                            Dictionary<Expr * string, MaterializedEqualityLookup option>())
-                                    let lookup =
-                                        getMemoized lookups (indexed, collation.Name) (fun () ->
-                                            let textKey = function
-                                                | VString text -> Some(VString(collation.KeyOf text))
-                                                | _ -> None
-                                            buildExpressionLookup indexed textKey textKey)
-                                    lookup |> Option.bind (fun probe -> probe [ value ]))
+                                    lookup indexed collation |> Option.bind (fun probe -> probe [ value ]))
                             | _ -> None)
+
+                let inCandidate indexed bounds =
+                    if not (indexable indexed) then None
+                    else
+                        bounds
+                        |> List.map (fun bound ->
+                            tryCorrelatedProbeValue probeSource context bound
+                            |> Option.bind (fun value ->
+                                match value with
+                                | VString _ | VNull ->
+                                    comparisonCollation indexed bound
+                                    |> Option.bind (fun collation ->
+                                        lookup indexed collation
+                                        |> Option.bind (fun probe -> probe [ value ]))
+                                | _ -> None))
+                        |> tryAllSome
+                        |> Option.map (fun groups ->
+                            let seen = HashSet<Value[]>(HashIdentity.Reference)
+                            groups |> List.collect id |> List.filter seen.Add)
 
                 predicate
                 |> optionalConjuncts
                 |> List.choose (function
                     | BinOp(Eq, left, right) ->
                         candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | In(indexed, bounds) -> inCandidate indexed bounds
                     | _ -> None)
                 |> intersectSharedRows
+
+            let textExpressionRangeCandidates predicate =
+                let indexed expression =
+                    if rowLocalExpression expression
+                       && Option.isNone (tryCorrelatedInnerColumn probeSource expression) then Some expression
+                    else None
+                let bound expression =
+                    tryCorrelatedProbeValue probeSource context expression
+                    |> Option.bind (function
+                        | VString _ | VNull as value -> Some(expression, value)
+                        | _ -> None)
+
+                let rangeLookup expression (collation: Collation.Collation) =
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedTextRanges source (fun () ->
+                            Dictionary<Expr * string, MaterializedRangeLookup option>())
+                    getMemoized lookups (expression, collation.Name) (fun () ->
+                        let sourceRows = List.toArray rows
+                        let entries = ResizeArray<string * int>()
+                        let mutable compatible = true
+                        for index = 0 to sourceRows.Length - 1 do
+                            if compatible then
+                                match evalExpr (rowContext sourceRows.[index]) expression with
+                                | Ok VNull -> ()
+                                | Ok(VString value) -> entries.Add(value, index)
+                                | _ -> compatible <- false
+
+                        if not compatible then None
+                        else
+                            let entries = entries.ToArray()
+                            Array.sortInPlaceWith
+                                (fun (left, _) (right, _) -> collation.ComparePrimary left right)
+                                entries
+                            let firstMatching bound inclusive =
+                                let mutable lower, upper = 0, entries.Length
+                                while lower < upper do
+                                    let middle = lower + (upper - lower) / 2
+                                    let comparison = collation.ComparePrimary (fst entries.[middle]) bound
+                                    if comparison < 0 || (comparison = 0 && not inclusive) then
+                                        lower <- middle + 1
+                                    else
+                                        upper <- middle
+                                lower
+                            Some(fun lower upper ->
+                                let convert = function
+                                    | None -> Some None
+                                    | Some(VString value, inclusive) -> Some(Some(value, inclusive))
+                                    | Some(VNull, _) -> Some None
+                                    | _ -> None
+                                let isNull = function Some(VNull, _) -> true | _ -> false
+                                match convert lower, convert upper with
+                                | _ when isNull lower || isNull upper -> Some []
+                                | Some lower, Some upper ->
+                                    let first =
+                                        lower
+                                        |> Option.map (fun (value, inclusive) -> firstMatching value inclusive)
+                                        |> Option.defaultValue 0
+                                    let afterLast =
+                                        upper
+                                        |> Option.map (fun (value, inclusive) -> firstMatching value (not inclusive))
+                                        |> Option.defaultValue entries.Length
+                                    entries.[first .. afterLast - 1]
+                                    |> Array.map snd
+                                    |> Array.sort
+                                    |> Array.map (fun index -> sourceRows.[index])
+                                    |> Array.toList
+                                    |> Some
+                                | _ -> None))
+
+                let rangeCandidates =
+                    predicate
+                    |> optionalConjuncts
+                    |> List.collect (rangePredicatesFor indexed bound)
+                    |> List.choose (fun range ->
+                        let bounds = [ range.Lower; range.Upper ] |> List.choose id
+                        bounds
+                        |> List.tryHead
+                        |> Option.bind (fun ((boundExpression, _), _) ->
+                            resolveOperandCollation "="
+                                (collationOperand (rowContext [||]) range.Column None)
+                                (collationOperand context boundExpression (tryColumnDefForExpr context boundExpression))
+                            |> Result.toOption)
+                        |> Option.bind (fun collation ->
+                            rangeLookup range.Column collation
+                            |> Option.bind (fun lookup ->
+                                let value = Option.map (fun ((_, value), inclusive) -> value, inclusive)
+                                lookup (value range.Lower) (value range.Upper))))
+
+                let likeCandidates =
+                    predicate
+                    |> optionalConjuncts
+                    |> List.choose (function
+                        | Like(expression, patternExpression, _, escape) ->
+                            match indexed expression, bound patternExpression with
+                            | Some _, Some(_, VNull) -> Some []
+                            | Some expression, Some(_, VString pattern) ->
+                                resolveOperandCollation "like"
+                                    (collationOperand (rowContext [||]) expression None)
+                                    (collationOperand context patternExpression (tryColumnDefForExpr context patternExpression))
+                                |> Result.toOption
+                                |> Option.filter (fun collation ->
+                                    equalsIgnoreCase collation.Name "utf8mb4_0900_bin"
+                                    || equalsIgnoreCase collation.Name "utf8mb4_bin")
+                                |> Option.bind (fun collation ->
+                                    let prefix = likeLiteralPrefix (escape |> Option.defaultValue '\\') pattern
+                                    if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
+                                    else
+                                        let lower =
+                                            if equalsIgnoreCase collation.Name "utf8mb4_bin" then
+                                                likePadSpaceLowerBound prefix
+                                            else Some prefix
+                                        rangeLookup expression collation
+                                        |> Option.bind (fun lookup ->
+                                            lookup
+                                                (lower |> Option.map (fun value -> VString value, true))
+                                                (likePrefixUpperBound prefix
+                                                 |> Option.map (fun value -> VString value, false))))
+                            | _ -> None
+                        | _ -> None)
+
+                rangeCandidates @ likeCandidates |> intersectSharedRows
 
             let equalityCandidates predicate =
                 let equalities =
@@ -16822,13 +17233,9 @@ and private tryMaterializedCorrelatedLookup
                 let nullLikeRejects =
                     predicate
                     |> optionalConjuncts
-                    |> List.exists (function
-                        | Like(indexed, patternExpr, _, _) ->
-                            tryCorrelatedInnerColumn probeSource indexed
-                            |> Option.bind (resolveColumn columns >> Result.toOption)
-                            |> Option.isSome
-                            && tryCorrelatedProbeValue probeSource context patternExpr = Some VNull
-                        | _ -> false)
+                    |> List.exists (tryCorrelatedNullLikeColumn probeSource context
+                                    >> Option.bind (resolveColumn columns >> Result.toOption)
+                                    >> Option.isSome)
 
                 let usesStoredCollation (bound: RangeLookupBounds<string, Expr * Value>) =
                     match resolveColumn columns bound.Column with
@@ -16891,9 +17298,11 @@ and private tryMaterializedCorrelatedLookup
                     [ equalityCandidates (Some branch)
                       integerExpressionCandidates (Some branch)
                       decimalExpressionCandidates (Some branch)
+                      decimalRangeCandidates (Some branch)
                       doubleExpressionCandidates (Some branch)
                       doubleRangeCandidates (Some branch)
                       textExpressionCandidates (Some branch)
+                      textExpressionRangeCandidates (Some branch)
                       textRangeCandidates (Some branch)
                       absoluteCandidates (Some branch)
                       affineCandidates (Some branch)
@@ -16909,7 +17318,7 @@ and private tryMaterializedCorrelatedLookup
 
                 tryCompleteOrCandidates
                     whereExpr
-                    (canSplitCorrelatedExactNumericInequality probeSource columns (Some context))
+                    (canSplitCorrelatedInequality store probeSource columns (Some context))
                     branchCandidates
                     merge
                     List.length
@@ -16917,9 +17326,11 @@ and private tryMaterializedCorrelatedLookup
             [ equalityCandidates whereExpr
               integerExpressionCandidates whereExpr
               decimalExpressionCandidates whereExpr
+              decimalRangeCandidates whereExpr
               doubleExpressionCandidates whereExpr
               doubleRangeCandidates whereExpr
               textExpressionCandidates whereExpr
+              textExpressionRangeCandidates whereExpr
               textRangeCandidates whereExpr
               absoluteCandidates whereExpr
               affineCandidates whereExpr
@@ -16991,6 +17402,12 @@ and private tryCorrelatedSourceLookup
         | _ -> false
 
     let hasLikePredicate = whereExpr |> Option.exists hasLikeBranch
+
+    let hasExpressionLikePredicate =
+        whereExpr
+        |> Option.exists (Expression.exists (function
+            | Like(FuncCall _, _, _, _) -> true
+            | _ -> false))
 
     let physicalIntersection () =
         if hasRangePredicate || hasFunctionalEqualityPredicate || hasNullTestPredicate || hasLikePredicate then
@@ -17123,7 +17540,9 @@ and private tryCorrelatedSourceLookup
         |> chooseWithMembership
     | None, FromSubquery _ ->
         (if hasLikePredicate then
-             tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
+             (if hasExpressionLikePredicate then materializedLookup () else None)
+             |> Option.orElseWith (fun () ->
+                 tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer)
              |> Option.orElseWith (fun () ->
                  tryProjectedPhysicalCorrelatedLikeLookup store registry dbName source whereExpr outer)
              |> Option.orElseWith materializedLookup

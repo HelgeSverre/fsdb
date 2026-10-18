@@ -235,6 +235,18 @@ MySQL 8.4.11 run at `20261012T045938983-12044/contracts` passed every
 the remaining nine signatures are exactly the previous identifier-case
 differences, with no new mismatch.
 
+### Costed source choice with compound ON
+
+MySQL 8.4.11 returns IDs 1 and 2 for the one-label costed query with
+`ON o.k=d.k AND d.id>0` and `WHERE d.k IN (1,NULL)`. Fsdb previously returned
+only ID 2 because the costed source-choice entry point required the entire
+`ON` expression to be one equality, even though its existing equality
+extractor already identifies the compatible key inside a conjunction.
+The entry point now accepts that extractor's result. A second case with
+`AND d.id>1` confirms that the additional `ON` condition remains effective;
+both engines return only ID 2. The native oracle and focused F# regression
+pin the two outcomes. The source-choice limits above still apply.
+
 ### A wider costed-join matrix
 
 Fresh MySQL 8.4.11 tables show why the small costed fix is not a general

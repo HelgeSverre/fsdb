@@ -69,6 +69,7 @@ def main():
                         ("d.k+0e0=o.d", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0=o.i", (0, 0, 0, 0, 1, 1)),
                         ("d.k+0e0=o.s", (1, 0, 0, 1, 1, 1)),
+                        ("d.k+0e0=CAST(o.x AS CHAR)", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0=o.x OR d.id=12", (2, 1, 1, 2, 2, 2)),
                     ]
                     for predicate, expected in cases:
@@ -84,6 +85,7 @@ def main():
                             assert cursor._result.warning_count == 0, predicate
                     in_cases = [
                         ("d.k+0e0 IN (o.s,o.x)", (1, 0, 0, 1, 1, 1)),
+                        ("d.k+0e0 IN (CAST(o.x AS CHAR),NULL)", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0 IN (o.s,o.d)", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0 IN (o.s,CAST(NULL AS DOUBLE))", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0 IN (o.s,o.s)", (1, 0, 0, 1, 1, 1)),
@@ -107,6 +109,7 @@ def main():
                         ("d.k+0e0 BETWEEN o.x-1e0 AND o.x+1e0", (3, 0, 0, 3, 2, 1)),
                         ("d.k+0e0<o.s", (513, 1001, 0, 488, 500, 1001)),
                         ("d.k+0e0 BETWEEN o.s AND o.s", (1, 0, 0, 1, 1, 1)),
+                        ("d.k+0e0 BETWEEN CAST(o.x AS CHAR) AND CAST(o.x AS CHAR)", (1, 0, 0, 1, 1, 1)),
                         ("d.k+0e0<o.x OR d.id=999", (514, 1001, 1, 489, 501, 1001)),
                     ]
                     for predicate, expected in range_cases:
@@ -119,6 +122,20 @@ def main():
                         assert actual == expected, (predicate, actual, expected)
                         if "o.s" in predicate:
                             assert cursor._result.warning_count == 0, predicate
+                    outside_range_cases = [
+                        ("d.k+0e0 NOT BETWEEN o.x-490e0 AND o.x+490e0", (25, 1003, 0, 24, 23, 1001)),
+                        ("d.k+0e0 NOT BETWEEN o.s-490e0 AND o.s+490e0", (25, 1003, 0, 24, 23, 1001)),
+                        ("d.k+0e0 NOT BETWEEN o.s AND 490e0", (525, 1003, 12, 500, 512, 1003)),
+                    ]
+                    for predicate, expected in outside_range_cases:
+                        cursor.execute(
+                            "SELECT o.id,(SELECT COUNT(*) FROM "
+                            "(SELECT DISTINCT id,k FROM inner_rows) d "
+                            f"WHERE {predicate}) FROM outer_bounds o ORDER BY o.id"
+                        )
+                        actual = tuple(count for _, count in cursor.fetchall())
+                        assert actual == expected, (predicate, actual, expected)
+                        assert cursor._result.warning_count == 0, predicate
                     cursor.execute("INSERT INTO outer_bounds VALUES(7,NULL,NULL,NULL,'12.5x')")
                     for predicate in ("d.k+0e0=o.s", "d.k+0e0 BETWEEN o.s AND o.s", "d.k+0e0 IN (o.s,o.x)"):
                         cursor.execute(
@@ -162,6 +179,37 @@ def main():
                                     "FROM outer_bounds o WHERE o.id=7"
                                 )
                                 assert cursor.fetchone()[0] == expected, (source, text, predicate)
+                    cursor.execute("CREATE TABLE repeated_rows(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))")
+                    cursor.executemany(
+                        "INSERT INTO repeated_rows VALUES(%s,%s)",
+                        [(i, 12.5) for i in range(1000)] + [(1000, 14.5)],
+                    )
+                    cursor.execute("ALTER TABLE outer_bounds ADD COLUMN hi VARCHAR(32)")
+                    cursor.execute("UPDATE outer_bounds SET s='12.5',hi='13.5' WHERE id=7")
+                    for source in ("repeated_rows d", "(SELECT id,k FROM repeated_rows) d"):
+                        for predicate in ("d.k<>o.s", "d.k NOT IN(o.s)",
+                                          "d.k NOT IN(o.s,o.hi)", "d.k NOT IN(o.hi,o.s)",
+                                          "d.k NOT BETWEEN o.s AND o.s", "d.k NOT BETWEEN o.s AND o.hi"):
+                            cursor.execute(
+                                f"SELECT (SELECT COUNT(*) FROM {source} WHERE {predicate}) "
+                                "FROM outer_bounds o WHERE o.id=7"
+                            )
+                            assert cursor.fetchone() == (1,), (source, predicate)
+                            assert cursor._result.warning_count == 0, (source, predicate)
+                            cursor.execute("UPDATE outer_bounds SET s=NULL,hi=NULL WHERE id=7")
+                            cursor.execute(
+                                f"SELECT (SELECT COUNT(*) FROM {source} WHERE {predicate}) "
+                                "FROM outer_bounds o WHERE o.id=7"
+                            )
+                            assert cursor.fetchone() == (0,), (source, predicate)
+                            cursor.execute("UPDATE outer_bounds SET s='12.5',hi='13.5' WHERE id=7")
+                        predicate = "d.k NOT IN(o.hi,o.s) OR d.id=1"
+                        for bound in (7, 3):
+                            cursor.execute(
+                                f"SELECT (SELECT COUNT(*) FROM {source} WHERE {predicate}) "
+                                f"FROM outer_bounds o WHERE o.id={bound}"
+                            )
+                            assert cursor.fetchone() == ((2,) if bound == 7 else (1,)), (source, bound)
                     cursor.execute("CREATE TABLE warning_rows(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))")
                     cursor.execute("INSERT INTO warning_rows VALUES(1,12.5),(2,0.0),(3,1.7976931348623157e308)")
                     for hint, warning_cases in (
@@ -195,7 +243,9 @@ def main():
                         "FROM outer_bounds WHERE id=6"
                     )
                     assert cursor.fetchone() == (1, 1, 0, 0)
-                    print(f"MySQL {version}: {len(cases)} DOUBLE equalities, {len(in_cases)} IN forms, {len(range_cases)} ranges, and physical string bounds match")
+                    print(f"MySQL {version}: {len(cases)} DOUBLE equalities, {len(in_cases)} IN forms, "
+                          f"{len(range_cases)} ranges, {len(outside_range_cases)} outside ranges, "
+                          "and physical string bounds and warning cases match")
             finally:
                 if connection:
                     connection.close()
