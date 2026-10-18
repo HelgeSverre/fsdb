@@ -682,6 +682,12 @@ A [post-preview.11 durability-matched checkpoint](benchmarks/results/2026-10-15-
 again measures about 0.43× MySQL throughput at one writer and 0.27× at eight;
 the recent correctness and planning merges did not change the wire-write
 scaling gap.
+A [current-head repeat](benchmarks/results/2026-10-17-keyless-write-scaling-checkpoint.md)
+measures 0.39× and 0.25× at one and eight writers. Its in-memory control has
+the same weak worker-scaling slope, so WAL work alone is not the full cause.
+A [same-run stage profile](benchmarks/results/2026-10-17-keyless-write-handler-stage-profile.md)
+locates eight-writer growth in both durable acknowledgement and execution work
+outside that acknowledgement; it does not yet isolate the latter's cause.
 
 ## 8. Persistence and durability
 
@@ -1726,6 +1732,13 @@ implementation effort:
    A [completion-option check](benchmarks/results/2026-10-14-write-completion-check.md)
    likewise found no eight-writer gain from changing group-commit task
    continuations; the candidate was reverted.
+   A [fixed group-commit batch-window check](benchmarks/results/2026-10-17-group-commit-batch-window-check.md)
+   on the retained-WAL-stream branch found a clear one-writer regression from
+   a 50 microsecond leader delay. Eight-writer controls drifted, so the
+   candidate was reverted without a scheduling-policy change.
+   Its conditional 25 microsecond follow-up measured larger eight-writer
+   batches but no throughput gain against same-run MySQL controls; it too was
+   reverted.
    A [WAL queue and batch-stage profile](benchmarks/results/2026-10-15-wal-queue-stage-profile.md)
    found queue admission small relative to completion and measured per-batch
    file-open and flush costs. A retained-handle prototype removed the open
