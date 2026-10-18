@@ -380,6 +380,7 @@ type private EqualityMembershipDomain =
     | IntegerMembership
     | DecimalMembership
     | TextMembership of Collation.Collation
+    | BinaryMembership
 
 type private EqualityMembership =
     { Values: HashSet<Value>
@@ -487,6 +488,8 @@ let private equalityMembershipKey domain value =
     | IntegerMembership, (VInt _ | VUInt _) -> Some(canonicalIntegerKey value)
     | DecimalMembership, VDecimal _ -> Some value
     | TextMembership collation, VString text -> Some(VString(collation.KeyOf text))
+    | BinaryMembership, VBytes _ -> Some value
+    | BinaryMembership, VBinaryLiteral bytes -> Some(VBytes bytes)
     | _ -> None
 
 let private equalityMembershipDomain (store: Store) (column: ColumnDef) =
@@ -508,6 +511,7 @@ let private equalityMembershipDomain (store: Store) (column: ColumnDef) =
         |> Option.bind Collation.tryFind
         |> Option.orElseWith (fun () -> Some store.ExecutionSettings.ConnectionCollation)
         |> Option.map TextMembership
+    | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob -> Some BinaryMembership
     | _ -> None
 
 let private equalityMembershipForValues (store: Store) (column: ColumnDef) (values: Value list) =
@@ -5493,6 +5497,13 @@ let private compareWithColumnDomain
         -(Value.compareIntegerToDouble (bigint integer) bound)
     | _ -> Value.compare left right
 
+// CAST/CONVERT retain encoded bytes for charset-aware functions, but their
+// text comparisons still resolve through the expression's SQL collation.
+let private textComparisonOperand = function
+    | VString value -> Some value
+    | VEncodedString(charset, bytes) -> Some(Charset.decodeBytes charset bytes)
+    | _ -> None
+
 let private resolvedCompareWithColumns
     (ctx: EvalContext)
     (leftExpr: Expr)
@@ -5505,8 +5516,8 @@ let private resolvedCompareWithColumns
     : Result<int, EvalError> =
     let pa, pb = comparisonOperands leftColumn left rightColumn right
 
-    match pa, pb with
-    | VString sa, VString sb ->
+    match textComparisonOperand pa, textComparisonOperand pb with
+    | Some sa, Some sb ->
         comparisonCollation ctx operation leftExpr leftColumn rightExpr rightColumn
         |> Result.map (fun collation -> collation.ComparePrimary sa sb)
     | _ -> Ok(compareWithColumnDomain leftExpr leftColumn pa rightExpr rightColumn pb)
@@ -5570,8 +5581,8 @@ let private comparisonResult
             | Gte -> boolToValue (compared >= 0)
             | _ -> VNull
 
-        match comparedLeft, comparedRight with
-        | VString leftText, VString rightText ->
+        match textComparisonOperand comparedLeft, textComparisonOperand comparedRight with
+        | Some leftText, Some rightText ->
             comparisonCollation ctx operation leftExpr leftColumn rightExpr rightColumn
             |> Result.map (fun collation ->
                 finish
@@ -15854,10 +15865,10 @@ and private tryMaterializedCorrelatedLookup
                                 | _ -> Some [])
                         | _ -> None)
 
-            // Integer arithmetic needs an exact result domain before its
+            // Integer expressions need an exact result domain before their
             // signed and unsigned values can share one equality key.
             let rec integerKeyExpression = function
-                | LiteralValue(VInt _ | VUInt _) -> true
+                | LiteralValue(VInt _ | VUInt _ | VNull) -> true
                 | (Col _ | QualifiedCol _) as expression ->
                     (tryCorrelatedInnerColumn probeSource expression
                      |> Option.bind (resolveColumn columns >> Result.toOption)
@@ -15866,6 +15877,10 @@ and private tryMaterializedCorrelatedLookup
                 | Neg expression -> integerKeyExpression expression
                 | FuncCall(name, [ expression ]) when equalsIgnoreCase name "ABS" ->
                     integerKeyExpression expression
+                | FuncCall(name, arguments) when equalsIgnoreCase name "COALESCE" ->
+                    not arguments.IsEmpty && List.forall integerKeyExpression arguments
+                | FuncCall(name, [ left; right ]) when equalsIgnoreCase name "IFNULL" ->
+                    integerKeyExpression left && integerKeyExpression right
                 | BinOp((Add | Sub | Mul), left, right) ->
                     integerKeyExpression left && integerKeyExpression right
                 | _ -> false
@@ -16607,7 +16622,16 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
                 equalities
                 |> List.map (fun (column, _, value) -> column.Name, value)
                 |> tryStoredEqualityMatchLookup outer.Store projection.PhysicalTable
-                |> Option.map (snd >> _.CandidateCount)
+                |> Option.bind (fun (matched, lookup) ->
+                    // A candidate bucket is a final COUNT only when every equality
+                    // is represented by a distinct, complete stored key part.
+                    // Prefix keys and uncovered predicates still need WHERE.
+                    if matched.UsesWholeStoredValues
+                       && matched.KeyColumnCount = equalities.Length
+                       && (matched.ColumnIndices |> Set.ofList |> Set.count) = equalities.Length then
+                        Some lookup.CandidateCount
+                    else
+                        None)
 
         tryPhysicalProjection outer.Store outer.Registry outer.DbName source
         |> Option.filter (fun projection -> storedRowsMatchReadRows outer.Store projection.PhysicalTable.Columns)
@@ -18247,22 +18271,37 @@ and private resolveGroupByRef (columnIndex: Map<string, int list>) (projections:
     | Col name -> resolveGroupOrHavingCol columnIndex projections name
     | _ -> Ok(resolvePositionalOrAlias projections expr)
 
-/// HAVING aliases may occur anywhere in the condition tree.
-and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: Projection list) (expr: Expr) : Result<Expr, EvalError> =
-    let sub = resolveHavingRef columnIndex projections
+/// HAVING aliases may occur anywhere in the condition tree, but an aggregate
+/// argument resolves a source column before an output alias of the same name.
+and private resolveHavingRef
+    (registry: Registry)
+    (columnIndex: Map<string, int list>)
+    (projections: Projection list)
+    (insideAggregate: bool)
+    (expr: Expr)
+    : Result<Expr, EvalError> =
+    let sub = resolveHavingRef registry columnIndex projections insideAggregate
 
     match expr with
     | Placeholder _ -> Ok expr
     | UserVariable _
     | SystemVariable _ -> Ok expr
     | MatchAgainst(cols, q, mode) -> sub q |> Result.map (fun q2 -> MatchAgainst(cols, q2, mode))
+    | Col name when insideAggregate ->
+        resolveGroupOrHavingCol columnIndex projections name
+        |> Result.bind (fun resolved ->
+            if containsAggregate registry resolved then Error(1111, "Invalid use of group function")
+            else Ok resolved)
     | Col name ->
         match projections |> List.tryPick (function
             | { Expression = projection; Alias = Some alias } when equalsIgnoreCase alias name -> Some projection
             | _ -> None) with
         | Some projection -> Ok projection
         | None -> resolveGroupOrHavingCol columnIndex projections name
-    | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
+    | FuncCall(name, args) ->
+        let resolveArgument =
+            resolveHavingRef registry columnIndex projections (insideAggregate || isAggregateFunctionName registry name)
+        args |> traverse resolveArgument |> Result.map (fun args' -> FuncCall(name, args'))
     | Row values -> values |> traverse sub |> Result.map Row
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
     | AssignUserVariable(name, value) -> sub value |> Result.map (fun value' -> AssignUserVariable(name, value'))
@@ -18871,7 +18910,7 @@ and private validateOnlyFullGroupBy
             |> traverse id
             |> Result.bind (fun _ ->
                 select.Having
-                |> Option.map (resolveHavingRef columnIndex select.Projections)
+                |> Option.map (resolveHavingRef registry columnIndex select.Projections false)
                 |> Option.defaultValue (Ok(Lit(VInt 1L)))
                 |> Result.bind (groupingError "HAVING clause" 1 groupExprs determined))
             |> Result.bind (fun _ ->
@@ -18962,7 +19001,7 @@ and private runGroupedSelect
     let ctxFor =
         if Map.isEmpty jsonViewSourceNames then baseCtxFor
         else fun row -> { baseCtxFor row with JsonViewSourceNames = jsonViewSourceNames }
-    let havingExpression = select.Having |> Option.map (resolveHavingRef columnIndex select.Projections)
+    let havingExpression = select.Having |> Option.map (resolveHavingRef registry columnIndex select.Projections false)
     let tryProjectedExpressionIndex expression =
         orderProjections |> List.tryFindIndex (fun projection -> projection.Expression = expression)
     let orderExpressions =
@@ -21853,7 +21892,7 @@ and private runSelect
     // `containsAggregate`/`GroupBy.IsEmpty` routing above) — so it's just
     // ANDed onto the same per-row `matches` check here.
     let matchesWhere = prepareWhereMatches ctxFor whereExpr
-    let havingExpression = select.Having |> Option.map (resolveHavingRef columnIndex projections)
+    let havingExpression = select.Having |> Option.map (resolveHavingRef registry columnIndex projections false)
     let constantHaving =
         havingExpression |> Option.bind (fun resolved -> resolved |> Result.toOption) |> Option.bind (fun expression ->
             let context = { ctxFor [||] with Clause = HavingClause }

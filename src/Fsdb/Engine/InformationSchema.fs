@@ -2051,7 +2051,20 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
 
         match Fsdb.Parser.parse definition with
         | Ok(Select parsed) ->
-            let select = parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
+            // MySQL derives IS_UPDATABLE from the outer SELECT for a view
+            // that reads directly from one CTE. It reports YES for a direct
+            // column projection even when the CTE body is a UNION, aggregate,
+            // or recursive query and an actual UPDATE is rejected.
+            let directCteSource =
+                parsed.Joins.IsEmpty
+                && (match parsed.From with
+                    | Some(FromTable table) when table.Database.IsNone ->
+                        parsed.Ctes
+                        |> List.exists (fun cte -> cte.CteName.Equals(table.Table, StringComparison.OrdinalIgnoreCase))
+                    | _ -> false)
+            let select =
+                if directCteSource then { parsed with Ctes = [] }
+                else parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
             match select.From with
             | Some source ->
                 let sourceAllowsUpdates = function
@@ -2097,7 +2110,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                     sourceAllowsUpdates source
                     || (select.Joins |> List.exists (fun join -> sourceAllowsUpdates join.Table))
                 else
-                    sourceAllowsUpdates source
+                    directCteSource || sourceAllowsUpdates source
             | _ -> false
         | _ -> false
 

@@ -1153,6 +1153,21 @@ let private catalogHasQualifiedForeignKeys (catalog: Catalog) =
         |> Seq.exists (fun (KeyValue(_, table)) ->
             table.ForeignKeys |> List.exists (fun foreignKey -> foreignKey.RefDatabase.IsSome)))
 
+/// A qualified foreign key only affects its child and parent databases. Other
+/// databases may still publish through their own slots while that pair changes.
+let private catalogHasQualifiedForeignKeysAffecting (catalog: Catalog) (databases: Set<string>) =
+    catalog
+    |> Seq.exists (fun (KeyValue(childDatabase, tables)) ->
+        tables
+        |> Seq.exists (fun (KeyValue(_, table)) ->
+            table.ForeignKeys
+            |> List.exists (fun foreignKey ->
+                match foreignKey.RefDatabase with
+                | Some parentDatabase ->
+                    Set.contains (childDatabase.ToLowerInvariant()) databases
+                    || Set.contains (parentDatabase.ToLowerInvariant()) databases
+                | _ -> false)))
+
 type private ReferentialAccess =
     | SharedAccess
     | ExclusiveAccess
@@ -1351,7 +1366,7 @@ let private withReferentialCatalogPublishing
     let publish () =
         let catalog = store.Catalog
 
-        match access, catalogHasQualifiedForeignKeys catalog with
+        match access, catalogHasQualifiedForeignKeysAffecting catalog (Set.singleton (dbName.ToLowerInvariant())) with
         | SharedAccess, false ->
             withDatabasePublishing store dbName eventsOf (fun database ->
                 operation (setCatalogDatabase dbName database catalog) database
@@ -1429,7 +1444,7 @@ let private keysOf (m: Map<string, 'a>) : Set<string> = m |> Map.toList |> List.
 
 /// Publishes monotonic AUTO_INCREMENT advances from a private snapshot.
 /// MySQL retains allocated ids across rollback and crash recovery.
-let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
+let private bumpAutoIncrementsIntoCore (store: Store) (baseCatalog: Catalog option) (snapshotCatalog: Catalog) : unit =
     let advances = ResizeArray<CommitEvent>()
 
     let bumpSlot dbName (slot: Database ref) (snapshotDb: Database) =
@@ -1453,14 +1468,27 @@ let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
                 publishCatalogRoots store (fun () -> slot.Value <- mergedDb))
 
     for KeyValue(dbName, snapshotDb) in snapshotCatalog do
-        match store.Databases.TryGetValue dbName with
-        | false, _ -> ()
-        | true, slot -> bumpSlot dbName slot snapshotDb
+        let unchanged =
+            baseCatalog
+            |> Option.bind (Map.tryFind dbName)
+            |> Option.exists (fun baseDb -> obj.ReferenceEquals(baseDb, snapshotDb))
+
+        if not unchanged then
+            match store.Databases.TryGetValue dbName with
+            | false, _ -> ()
+            | true, slot -> bumpSlot dbName slot snapshotDb
 
     advances
     |> List.ofSeq
     |> prepareEvents store
     |> fun acknowledge -> acknowledge ()
+
+let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
+    bumpAutoIncrementsIntoCore store None snapshotCatalog
+
+/// A transaction only needs to publish allocations from databases it changed.
+let bumpAutoIncrementsIntoChanged (store: Store) (baseCatalog: Catalog) (snapshotCatalog: Catalog) : unit =
+    bumpAutoIncrementsIntoCore store (Some baseCatalog) snapshotCatalog
 
 /// Pure catalog-level version of `bumpAutoIncrementsInto`'s "never roll back
 /// a burned AUTO_INCREMENT id" rule — returns `target` with every table's
@@ -6125,14 +6153,19 @@ let private trySecondaryOrderSliceInTable
                     let fullAfterEqual value = insertionIndex (entry value (RowId.create Int32.MaxValue))
                     let hasBounds = lower.IsSome || upper.IsSome
                     let prefixed = group.PrefixLength.IsSome
+                    let collation = table.Columns.[index].Collation |> Collation.findOrDefault
+                    let primaryBounds =
+                        prefixed
+                        || (match table.Columns.[index].Type with
+                            | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
+                                not collation.EqualityIsOrderEquivalence
+                            | _ -> false)
 
                     let comparePrimary left right =
                         let comparison =
                             match left, right with
                             | VString left, VString right ->
-                                table.Columns.[index].Collation
-                                |> Collation.findOrDefault
-                                |> fun collation -> collation.ComparePrimary left right
+                                collation.ComparePrimary left right
                             | _ -> Value.compare left right
 
                         if group.Direction = Desc then -comparison else comparison
@@ -6142,10 +6175,10 @@ let private trySecondaryOrderSliceInTable
                             comparePrimary entries.[current].Values.Head value)
 
                     let firstEqual value =
-                        if prefixed then primaryInsertionIndex FirstEqual value else fullFirstEqual value
+                        if primaryBounds then primaryInsertionIndex FirstEqual value else fullFirstEqual value
 
                     let afterEqual value =
-                        if prefixed then primaryInsertionIndex AfterEqual value else fullAfterEqual value
+                        if primaryBounds then primaryInsertionIndex AfterEqual value else fullAfterEqual value
 
                     let first, afterLast =
                         orderedSliceBounds
@@ -11103,8 +11136,6 @@ let private commitCatalogIntoWith
     (snapshot: Store)
     : unit =
     let batchCatalog = snapshot.Catalog
-    let validateWholeSnapshot = validateWholeSnapshot || catalogHasQualifiedForeignKeys batchCatalog
-
     let changedKeys =
         Set.union (keysOf baseCatalog) (keysOf batchCatalog)
         |> Set.filter (fun dbName ->
@@ -11112,6 +11143,11 @@ let private commitCatalogIntoWith
             | Some baseDb, Some batchDb -> not (obj.ReferenceEquals(baseDb, batchDb))
             | None, None -> false
             | _ -> true)
+
+    let validateWholeSnapshot =
+        validateWholeSnapshot
+        || catalogHasQualifiedForeignKeysAffecting baseCatalog changedKeys
+        || catalogHasQualifiedForeignKeysAffecting batchCatalog changedKeys
 
     if not changedKeys.IsEmpty then
         let needsCatalogLock =

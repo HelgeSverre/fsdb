@@ -3410,6 +3410,26 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected hash joins to resolve both key collations, got %A" other
 
+                testCase "CAST text comparisons honor explicit legacy collation"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cast value = $"CAST('{value}' AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci"
+                    let parenthesizedKorean, korean = cast "㈎", cast "(가)"
+                    let verticalPeriod, ideographicPeriod = cast "︒", cast "。"
+                    let school, writing = cast "㉆", cast "文"
+                    let enclosedKana, kana = cast "㋐", cast "ア"
+                    let sql =
+                        $"SELECT {parenthesizedKorean} = {korean}, {verticalPeriod} = {ideographicPeriod}, {school} = {writing}, {enclosedKana} = {kana}"
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "0"; Some "0"; Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "CAST text must use its explicit comparison collation, got %A" other
+
+                    runDefault store "CREATE TABLE cast_cjk (body TEXT COLLATE utf8mb4_unicode_ci)" |> ignore
+                    runDefault store "INSERT INTO cast_cjk VALUES ('㈎')" |> ignore
+                    match runDefault store $"SELECT {korean} = CAST(body AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci FROM cast_cjk" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "row-derived CAST text must use its explicit comparison collation, got %A" other
+
                 testCase "multi-value numeric IN follows the first equality key in MySQL joins"
                 <| fun _ ->
                     let store = newStore ()
@@ -8087,6 +8107,46 @@ let tests =
                               [ Some "498"; Some "Gamma" ] ]
                             "ORDER BY and LIMIT use complete values after the mutation"
                     | other -> failtestf "expected ordered rows, got %A" other
+
+                testCase "text range bounds include complete collation equivalence classes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE range_indexed (id INT PRIMARY KEY, label VARCHAR(20), hit INT, KEY ix_label(label), KEY ix_lower((LOWER(label))))" |> ignore
+                    runDefault store "CREATE TABLE range_scanned (id INT PRIMARY KEY, label VARCHAR(20), hit INT)" |> ignore
+                    let values =
+                        [ "(1,'e',0)"; "(2,'é',0)"; "(3,'E',0)"; "(4,'f',0)" ]
+                        @ [ for id in 5 .. 504 -> sprintf "(%d,'z%03d',0)" id id ]
+                        |> String.concat ","
+                    runDefault store ("INSERT INTO range_indexed VALUES " + values) |> ignore
+                    runDefault store ("INSERT INTO range_scanned VALUES " + values) |> ignore
+
+                    let select table predicate =
+                        runDefault store (sprintf "SELECT id FROM %s WHERE %s ORDER BY id" table predicate)
+
+                    for predicate in [ "label BETWEEN 'é' AND 'é'"; "label >= 'é' AND label < 'f'";
+                                       "LOWER(label) >= 'é' AND LOWER(label) < 'f'" ] do
+                        Expect.equal (select "range_indexed" predicate) (select "range_scanned" predicate) predicate
+                        Expect.equal (select "range_indexed" predicate)
+                            (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]))
+                            "all case- and accent-equivalent rows belong to the range"
+
+                    let directPlan = runDefault store "EXPLAIN SELECT id FROM range_indexed WHERE label BETWEEN 'é' AND 'é'" |> explainRow
+                    Expect.equal directPlan.AccessType (Some "range") "the direct predicate uses a range"
+                    Expect.equal directPlan.Key (Some "ix_label") "the direct predicate uses the text index"
+                    let functionalPlan =
+                        runDefault store "EXPLAIN SELECT id FROM range_indexed WHERE LOWER(label) >= 'é' AND LOWER(label) < 'f'"
+                        |> explainRow
+                    Expect.equal functionalPlan.AccessType (Some "range") "the expression predicate uses a range"
+                    Expect.equal functionalPlan.Key (Some "ix_lower") "the expression predicate uses the functional index"
+
+                    let update table = runDefault store (sprintf "UPDATE %s SET hit = 1 WHERE label BETWEEN 'é' AND 'é'" table)
+                    Expect.equal (update "range_indexed") (update "range_scanned") "UPDATE uses complete range candidates"
+                    let contents table = runDefault store (sprintf "SELECT id, hit FROM %s ORDER BY id" table)
+                    Expect.equal (contents "range_indexed") (contents "range_scanned") "UPDATE retains all equivalent rows"
+
+                    let delete table = runDefault store (sprintf "DELETE FROM %s WHERE label >= 'é' AND label < 'f'" table)
+                    Expect.equal (delete "range_indexed") (delete "range_scanned") "DELETE uses complete range candidates"
+                    Expect.equal (contents "range_indexed") (contents "range_scanned") "DELETE retains only the upper-bound row"
 
                 testCase "prefix range scans retain primary-equivalent boundary keys"
                 <| fun _ ->
@@ -12945,7 +13005,7 @@ let tests =
                     | other -> failtestf "expected 0900 binary materialized LIKE counts, got %A" other
                     Expect.isLessThan calls 60 "the 0900 binary prefix restricts residual evaluation"
 
-                testCase "materialized correlated ABS equality probes both signed keys"
+                testCase "materialized correlated integer expressions probe equality keys"
                 <| fun _ ->
                     let mutable calls = 0
                     let registry =
@@ -12964,6 +13024,38 @@ let tests =
                     |> ignore
                     runDefault store "INSERT INTO abs_rows VALUES(1000,-2147483648)" |> ignore
                     runDefault store "INSERT INTO abs_rows VALUES(1001,NULL)" |> ignore
+
+                    runDefault store "CREATE TABLE fallback_bounds(id INT PRIMARY KEY,x INT)" |> ignore
+                    runDefault store "INSERT INTO fallback_bounds VALUES(1,0),(2,10),(3,NULL)" |> ignore
+                    for prefix, source in
+                        [ "", "(SELECT DISTINCT id,k FROM abs_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM abs_rows) ", "materialized d" ] do
+                        for expression in
+                            [ "COALESCE(d.k,0)"
+                              "IFNULL(d.k,0)"
+                              "COALESCE(d.k,NULL,0)"
+                              "COALESCE(NULL,d.k,0)" ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND " + expression + "=o.x) "
+                                + "FROM fallback_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]) -> ()
+                            | other -> failtestf "expected %s materialized fallback matches, got %A" expression other
+                            Expect.isLessThan calls 60 (expression + " key bounds residual work")
+
+                    runDefault store "CREATE TABLE unsigned_fallback_rows(id INT PRIMARY KEY,k BIGINT UNSIGNED)" |> ignore
+                    runDefault store "CREATE TABLE unsigned_fallback_bounds(id INT PRIMARY KEY,x BIGINT UNSIGNED)" |> ignore
+                    runDefault store "INSERT INTO unsigned_fallback_rows VALUES(1,0),(2,9223372036854775808),(3,18446744073709551615),(4,NULL)" |> ignore
+                    runDefault store "INSERT INTO unsigned_fallback_bounds VALUES(1,0),(2,9223372036854775808),(3,18446744073709551615),(4,NULL)" |> ignore
+                    for expression in [ "COALESCE(d.k,0)"; "IFNULL(d.k,0)" ] do
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM unsigned_fallback_rows) d "
+                            + "WHERE " + expression + "=o.x) FROM unsigned_fallback_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ]; [ Some "4"; Some "0" ] ]) -> ()
+                        | other -> failtestf "expected %s unsigned-bound matches, got %A" expression other
 
                     for prefix, source in
                         [ "", "(SELECT DISTINCT id,k FROM abs_rows) d"
@@ -13717,6 +13809,21 @@ let tests =
                     | other -> failtestf "expected numeric coercion to match the text value, got %A" other
 
                     Expect.isGreaterThan calls 0 "numeric comparison against text falls back to row evaluation"
+
+                testCase "correlated COUNT checks prefix collisions and uncovered equalities"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE count_outer (value VARBINARY(8), tenant INT, bucket INT)" |> ignore
+                    runDefault store "CREATE TABLE count_inner (value VARBINARY(8), tenant INT, bucket INT, KEY ix_value (value(2)), KEY ix_tenant_value (tenant, value))" |> ignore
+                    runDefault store "INSERT INTO count_outer VALUES (X'010203', 1, 1)" |> ignore
+                    runDefault store "INSERT INTO count_inner VALUES (X'010203', 1, 1), (X'010204', 1, 2)" |> ignore
+
+                    match runDefault store
+                        ("SELECT (SELECT COUNT(*) FROM count_inner i WHERE i.value = o.value), "
+                         + "(SELECT COUNT(*) FROM count_inner i WHERE i.tenant = o.tenant AND i.bucket = o.bucket) "
+                         + "FROM count_outer o") with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | other -> failtestf "prefix and uncovered equality counts must recheck rows, got %A" other
 
                 testCase "correlated derived sources use composite equality indexes"
                 <| fun _ ->
