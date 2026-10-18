@@ -13656,7 +13656,13 @@ let tests =
                     runDefault store "ALTER TABLE physical_double_bounds ADD COLUMN hi VARCHAR(32)" |> ignore
                     runDefault store "UPDATE physical_double_bounds SET hi='13.5' WHERE id=1" |> ignore
                     for source in [ "physical_double_repeated d"; "(SELECT id,k FROM physical_double_repeated) d" ] do
-                        for predicate in [ "d.k<>o.s"; "d.k NOT IN(o.s)"; "d.k NOT BETWEEN o.s AND o.s"; "d.k NOT BETWEEN o.s AND o.hi" ] do
+                        for predicate in
+                            [ "d.k<>o.s"
+                              "d.k NOT IN(o.s)"
+                              "d.k NOT IN(o.s,o.hi)"
+                              "d.k NOT IN(o.hi,o.s)"
+                              "d.k NOT BETWEEN o.s AND o.s"
+                              "d.k NOT BETWEEN o.s AND o.hi" ] do
                             for boundId, expected in [ 1, "1"; 8, "0" ] do
                                 calls <- 0
                                 let sql =

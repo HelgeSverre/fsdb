@@ -4845,7 +4845,7 @@ let private disjuncts (expr: Expr) : Expr list =
 
 let private optionalConjuncts = Option.map conjuncts >> Option.defaultValue []
 
-/// Inequality, single-value `NOT IN`, and `NOT BETWEEN` are unions of strict ranges under SQL's
+/// Inequality and `NOT BETWEEN` are unions of strict ranges under SQL's
 /// three-valued comparison rules. The original expression remains the filter.
 let private candidateDisjuncts canSplitInequality expression =
     disjuncts expression
@@ -4855,18 +4855,28 @@ let private candidateDisjuncts canSplitInequality expression =
         | BinOp(Neq, left, right)
         | Not(BinOp(Eq, left, right)) when canSplitInequality left right ->
             [ BinOp(Lt, left, right); BinOp(Gt, left, right) ]
-        | Not(In(value, [ bound ])) when canSplitInequality value bound ->
-            [ BinOp(Lt, value, bound); BinOp(Gt, value, bound) ]
         | branch -> [ branch ])
 
 /// An OR narrows candidates only when every branch has a safe lookup.
+/// A NOT IN alternative narrows by one safe exclusion at a time.
 let private tryCompleteOrCandidates whereExpr canSplitInequality branchCandidates merge candidateCount =
+    let candidateAlternatives = function
+        | Not(In(value, bounds)) when not bounds.IsEmpty && List.forall (canSplitInequality value) bounds ->
+            // A row satisfying NOT IN must differ from every bound. Each
+            // strict-range union is a safe superset; use the smallest one.
+            bounds |> List.map (fun bound -> [ BinOp(Lt, value, bound); BinOp(Gt, value, bound) ])
+        | expression -> [ candidateDisjuncts canSplitInequality expression ]
+
     whereExpr
     |> optionalConjuncts
     |> List.choose (fun expression ->
-        match candidateDisjuncts canSplitInequality expression with
-        | [ _ ] -> None
-        | branches -> branches |> List.map branchCandidates |> tryAllSome |> Option.bind merge)
+        candidateAlternatives expression
+        |> List.choose (function
+            | [ _ ] -> None
+            | branches -> branches |> List.map branchCandidates |> tryAllSome |> Option.bind merge)
+        |> function
+            | [] -> None
+            | candidates -> Some(List.minBy candidateCount candidates))
     |> function
         | [] -> None
         | candidates -> Some(List.minBy candidateCount candidates)

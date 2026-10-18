@@ -51,8 +51,12 @@ check fewer than 80 rows. MySQL 8.4.11 agrees on the one unmatched row, the
 NULL-bound zero result, and zero warnings for the clean bounds. The original
 predicate still decides membership after the indexed candidate union.
 
-A one-element `NOT IN` list has the same three-valued result as `<>`, so it
-can use that strict-range candidate union as well. The repeated-key direct
-and pass-through probes check fewer than 80 rows for `d.k NOT IN(o.s)`;
-MySQL 8.4.11 returns one unmatched row for `o.s='12.5'` and zero for a NULL
-bound, with no warnings. Multi-element `NOT IN` is left to its existing path.
+`NOT IN` can also use strict-range candidates for clean numeric bounds: any
+matching row must differ from every list member. The planner compares each
+member's two-range candidate union and uses the smallest, leaving the
+original `NOT IN` predicate to decide membership. The repeated-key direct
+and pass-through probes check fewer than 80 rows for one- and two-member
+lists, including the order where the selective bound is second. MySQL 8.4.11
+returns one unmatched row for bounds `12.5`/`13.5` and zero for NULL bounds,
+with no warnings. Non-numeric or diagnostic-producing bounds retain the
+existing scan path.
