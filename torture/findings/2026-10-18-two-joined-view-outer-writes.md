@@ -1,13 +1,13 @@
 # Two writable joined views under outer UPDATE joins
 
 The [native MySQL 8.4.11 differential oracle](../scripts/two-joined-view-outer-oracle.py)
-compares ten UPDATE statements against fsdb. Two independently
+compares twelve UPDATE statements against fsdb. Two independently
 writable inner-join views share their internal physical/read aliases. The
 matrix uses both LEFT and RIGHT outer joins, with a fully matched row and
 rows missing from either view. A second pair of views joins grouped read
 sources and dependent `LATERAL` projections before the outer UPDATE join.
 
-All ten statements match MySQL's affected-row count and the resulting rows
+All twelve statements match MySQL's affected-row count and the resulting rows
 in both physical target tables. A `CASCADED CHECK OPTION` on the grouped
 lateral view also rejects an invalid two-target update with error 1369 and
 leaves both tables unchanged. This extends the existing inner two-view and
@@ -40,8 +40,17 @@ A read-only aggregate view can also precede that writable second view. MySQL
 updates `bonus` through the second view, whereas fsdb previously returned
 1146 for the view name. The source reorder now recognizes a stored first
 view even when it is non-updatable, while leaving local CTE names untouched.
-Both the ordinary and contended aggregate-first cases match MySQL. The F#
-regression and all 3,721 suite tests pass.
+Both the ordinary and contended aggregate-first cases match MySQL.
+
+A three-source form exposed another 1146. An aggregate read-only view can
+precede two writable joined views, with the second joined by `LEFT JOIN`.
+MySQL updates both targets, but fsdb expanded the first writable view and
+stopped its second source-order pass at the intervening aggregate view. The
+rewrite now crosses an independent read-only inner-joined view to bring the
+second assigned view first. It likewise crosses an unassigned writable
+inner-joined view when only the later view is assigned. The ordinary cases
+and three additional contended rebases now match MySQL. A focused F#
+regression checks both assignment patterns and restores the physical rows.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:

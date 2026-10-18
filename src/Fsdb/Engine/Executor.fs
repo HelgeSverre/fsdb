@@ -22996,6 +22996,10 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
     let isPhysical (table: TableRef) =
         not (isCte table)
         && (physicalFastPathTable store defaultDatabase table |> Option.isSome)
+    let isStoredView (table: TableRef) =
+        not (isCte table)
+        && (tryStoredViewDefinition store (table.Database |> Option.defaultValue defaultDatabase) table.Table
+            |> Option.isSome)
 
     let rec move prior remaining =
         match remaining with
@@ -23037,7 +23041,7 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                         | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
 
                 if not writesView then
-                    update
+                    move (join :: prior) rest
                 else
                     // Keep the old first source before its prior joins, so
                     // LATERAL and JSON_TABLE dependencies remain in scope.
@@ -23051,7 +23055,10 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                             { join with Table = FromTable update.From; On = Lit(VInt 1L) }
                             :: (List.rev (carried :: earlierReversed) @ rest)
                     { update with From = source; Joins = joins }
-            | None when isPhysical source -> move (join :: prior) rest
+            // An independent read-only view can remain ahead of a later
+            // writable view while that target is moved into first position.
+            | None when isPhysical source || isStoredView source ->
+                move (join :: prior) rest
             | None -> update
         | ({ Kind = InnerJoin; Table = (FromSubquery _ | FromLateral _ | FromJsonTable _); Using = [] } as join) :: rest ->
             move (join :: prior) rest

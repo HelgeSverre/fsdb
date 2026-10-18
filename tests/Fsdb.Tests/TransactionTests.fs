@@ -2481,6 +2481,22 @@ let tests =
                   "later writable view updates after aggregate source"
               Expect.equal (handle session (aggregateFirst "-1") |> snd) (Affected 1UL)
                   "aggregate-first update restores later view row"
+              let aggregateFirstTwoViews delta =
+                  "UPDATE tx_dual_read_counts rc JOIN tx_dual_va va ON rc.id=va.link_id "
+                  + "LEFT JOIN tx_dual_vb vb ON va.link_id=vb.link_id "
+                  + "SET va.n=va.n" + delta + ",vb.n=vb.n" + delta + " WHERE rc.id=1"
+              Expect.equal (handle session (aggregateFirstTwoViews "+1") |> snd) (Affected 2UL)
+                  "aggregate-first source can update two later writable views"
+              Expect.equal (handle session (aggregateFirstTwoViews "-1") |> snd) (Affected 2UL)
+                  "aggregate-first two-view update restores both rows"
+              let aggregateFirstOnlySecond delta =
+                  "UPDATE tx_dual_read_counts rc JOIN tx_dual_va va ON rc.id=va.link_id "
+                  + "LEFT JOIN tx_dual_vb vb ON va.link_id=vb.link_id "
+                  + "SET vb.n=vb.n" + delta + " WHERE rc.id=1"
+              Expect.equal (handle session (aggregateFirstOnlySecond "+1") |> snd) (Affected 1UL)
+                  "aggregate and unassigned view precede a writable view"
+              Expect.equal (handle session (aggregateFirstOnlySecond "-1") |> snd) (Affected 1UL)
+                  "later writable view restores its row"
               Expect.equal
                   (handle session
                       "UPDATE tx_dual_vb vb JOIN tx_dual_va va ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1" |> snd)

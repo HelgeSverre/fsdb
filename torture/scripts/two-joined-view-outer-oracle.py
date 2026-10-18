@@ -134,6 +134,12 @@ def main():
                     "SET bonus=bonus+1 WHERE vb.id=1",
                     "UPDATE read_counts rc JOIN vb_unique vb ON rc.id=vb.link_id "
                     "SET bonus=bonus+1 WHERE vb.id=1",
+                    "UPDATE read_counts rc JOIN va ON rc.id=va.link_id "
+                    "LEFT JOIN vb ON va.link_id=vb.link_id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE rc.id=1",
+                    "UPDATE read_counts rc JOIN va ON rc.id=va.link_id "
+                    "LEFT JOIN vb ON va.link_id=vb.link_id "
+                    "SET vb.n=vb.n+1 WHERE rc.id=1",
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)
@@ -173,6 +179,15 @@ def main():
                      "SET bonus=bonus+1 WHERE vb.id=1"),
                     ("b", 1, "UPDATE read_counts rc JOIN vb_unique vb ON rc.id=vb.link_id "
                      "SET bonus=bonus+1 WHERE vb.id=1"),
+                    ("a", 1, "UPDATE read_counts rc JOIN va ON rc.id=va.link_id "
+                     "LEFT JOIN vb ON va.link_id=vb.link_id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE rc.id=1"),
+                    ("b", 1, "UPDATE read_counts rc JOIN va ON rc.id=va.link_id "
+                     "LEFT JOIN vb ON va.link_id=vb.link_id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE rc.id=1"),
+                    ("b", 1, "UPDATE read_counts rc JOIN va ON rc.id=va.link_id "
+                     "LEFT JOIN vb ON va.link_id=vb.link_id "
+                     "SET vb.n=vb.n+1 WHERE rc.id=1"),
                 ]
                 for table, row_id, sql in contended:
                     expected = contended_update(mysql_connection, {"unix_socket": mysql_socket}, table, row_id, sql)
