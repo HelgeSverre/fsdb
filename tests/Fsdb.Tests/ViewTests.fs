@@ -2616,6 +2616,22 @@ let tests =
                     + "UNION ALL SELECT k FROM seq WHERE k=s.k AND FALSE) "
                     + "SELECT k AS lookup_key FROM copied) l ON TRUE "
                     + "JOIN recursive_target t ON t.id=l.lookup_key"
+                    "union_derived_source",
+                    recursive + " SELECT t.id,t.n FROM "
+                    + "(SELECT k FROM seq UNION ALL SELECT k FROM seq WHERE k=0) d "
+                    + "JOIN recursive_target t ON t.id=d.k"
+                    "ordered_union_derived_source",
+                    recursive + " SELECT t.id,t.n FROM "
+                    + "(SELECT k FROM seq UNION ALL SELECT k FROM seq WHERE k=0 "
+                    + "ORDER BY (SELECT MAX(k) FROM seq) LIMIT 3) d "
+                    + "JOIN recursive_target t ON t.id=d.k"
+                    "plain_derived_source",
+                    recursive + " SELECT t.id,t.n FROM "
+                    + "(SELECT k FROM seq) d JOIN recursive_target t ON t.id=d.k"
+                    "local_cte_derived_source",
+                    recursive + " SELECT t.id,t.n FROM "
+                    + "(WITH copied AS (SELECT k FROM seq) SELECT k FROM copied) d "
+                    + "JOIN recursive_target t ON t.id=d.k"
                     "lateral_volatile_union_cte",
                     "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
                     + "SELECT k+1,r FROM seq WHERE k<3) "
@@ -2669,7 +2685,7 @@ let tests =
 
               Expect.equal
                   (rows store "SELECT n FROM recursive_target WHERE id=2")
-                  [ [ Some "64" ] ]
+                  [ [ Some "68" ] ]
                   "dependent, derived, lateral, JSON, and repeated recursive rows each update once"
 
               expectOk

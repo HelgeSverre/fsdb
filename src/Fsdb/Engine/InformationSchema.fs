@@ -1677,12 +1677,38 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
     let sources = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
     let cteNames = select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
 
-    let referenceCount name =
-        sources
-        |> List.filter (function
-            | FromTable table -> table.Database.IsNone && eqI table.Table name
-            | _ -> false)
-        |> List.length
+    let rec sourceReferences name = function
+        | FromTable table ->
+            if table.Database.IsNone && eqI table.Table name then 1 else 0
+        | FromJoinGroup(first, joins) ->
+            sourceReferences name first
+            + (joins |> List.sumBy (fun join -> sourceReferences name join.Table))
+        | FromSubquery(query, _) | FromLateral(query, _) -> queryReferences name query
+        | _ -> 0
+
+    and selectReferences name (body: SelectStmt) =
+        let cteReferences, shadowsOuter =
+            body.Ctes
+            |> List.fold (fun (count, shadowed) cte ->
+                // Earlier definitions can still read the outer binding before
+                // a later local CTE with the same name shadows it.
+                let shadowsBody = shadowed || (cte.Recursive && eqI cte.CteName name)
+                let references = if shadowsBody then 0 else queryReferences name cte.Body
+                count + references, shadowed || eqI cte.CteName name) (0, false)
+        let sourceCount =
+            if shadowsOuter then 0
+            else
+                (body.From |> Option.map (sourceReferences name) |> Option.defaultValue 0)
+                + (body.Joins |> List.sumBy (fun join -> sourceReferences name join.Table))
+        cteReferences + sourceCount
+
+    and queryReferences name = function
+        | PlainSelect body -> selectReferences name body
+        | UnionSelect(first, rest, _, _, _) ->
+            selectReferences name first
+            + (rest |> List.sumBy (snd >> selectReferences name))
+
+    let referenceCount name = sources |> List.sumBy (sourceReferences name)
 
     let rec expandedProjections knownCtes (body: SelectStmt) =
         let hasStar =
@@ -1842,8 +1868,17 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                       Offset = None
                       Locking = [] }
                 FromSubquery(PlainSelect wrapper, table.Alias |> Option.defaultValue table.Table)
-            | FromSubquery(PlainSelect body, alias) when body.Ctes.IsEmpty ->
+            | FromSubquery(PlainSelect body, alias) ->
                 FromSubquery(PlainSelect(expandSelect activeNames rewriteExpressions body), alias)
+            | FromSubquery(UnionSelect(first, rest, orderBy, limit, offset), alias) ->
+                FromSubquery(
+                    UnionSelect(
+                        expandSelect activeNames true first,
+                        rest |> List.map (fun (kind, body) -> kind, expandSelect activeNames true body),
+                        orderBy |> List.map (fun (expression, direction) -> expandExpression activeNames expression, direction),
+                        limit |> Option.map (expandExpression activeNames),
+                        offset |> Option.map (expandExpression activeNames)
+                    ), alias)
             | FromLateral(PlainSelect body, alias) ->
                 FromLateral(PlainSelect(expandSelect activeNames rewriteExpressions body), alias)
             | FromJoinGroup(first, joins) ->
@@ -1963,10 +1998,19 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         | FromJoinGroup(first, joins) ->
             canWrapNestedSource first
             && (joins |> List.forall (_.Table >> canWrapNestedSource))
-        | FromSubquery(PlainSelect body, _) | FromLateral(PlainSelect body, _) ->
-            canWrapNestedSelect body
+        | FromSubquery(query, _) | FromLateral(query, _) -> canWrapNestedQuery query
         | FromJsonTable(source, _, _, _) -> Expression.collectSubqueries source |> List.isEmpty
-        | _ -> false
+
+    and canWrapNestedQuery = function
+        | PlainSelect body -> canWrapNestedSelect body
+        | UnionSelect(first, rest, orderBy, limit, offset) ->
+            let canWrapExpression expression =
+                Expression.collectSubqueries expression |> List.forall canWrapNestedSelect
+            canWrapNestedSelect first
+            && (rest |> List.forall (snd >> canWrapNestedSelect))
+            && (orderBy |> List.forall (fst >> canWrapExpression))
+            && (limit |> Option.forall canWrapExpression)
+            && (offset |> Option.forall canWrapExpression)
 
     and canWrapNestedSelect (body: SelectStmt) =
         (body.Ctes
@@ -1976,17 +2020,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                  || (match cte.Body with
                      | PlainSelect nested -> nested.From.IsNone && nested.Joins.IsEmpty && nested.Ctes.IsEmpty
                      | _ -> false))
-             && (match cte.Body with
-                 | PlainSelect nested -> canWrapNestedSelect nested
-                 | UnionSelect(first, rest, orderBy, limit, offset) ->
-                     let canWrapExpression expression =
-                         Expression.collectSubqueries expression |> List.forall canWrapNestedSelect
-                     (orderBy |> List.forall (fst >> canWrapExpression))
-                     && (limit |> Option.forall canWrapExpression)
-                     && (offset |> Option.forall canWrapExpression)
-                     && canWrapNestedSelect first
-                     && (rest |> List.forall (snd >> canWrapNestedSelect))
-                 )))
+             && canWrapNestedQuery cte.Body))
         && (body.From |> Option.forall canWrapNestedSource)
         && (body.Joins |> List.forall (_.Table >> canWrapNestedSource))
         && not (Expression.statementExists
@@ -1997,6 +2031,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
 
     let recursiveCompanionSource = function
         | FromTable _ -> true
+        | FromSubquery(query, _) -> canWrapNestedQuery query
         | FromLateral(PlainSelect body, _) -> canWrapNestedSelect body
         | FromLateral(body, _) -> not (queryNeedsCteScope body)
         | FromJsonTable(source, _, _, _) -> Expression.collectSubqueries source |> List.isEmpty

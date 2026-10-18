@@ -220,6 +220,22 @@ def main():
                          "UNION ALL SELECT k FROM seq WHERE k=s.k AND FALSE) "
                          "SELECT k AS lookup_key FROM copied) l ON TRUE "
                          "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_union_derived_source",
+                         f"{recursive} SELECT t.id,t.n FROM "
+                         "(SELECT k FROM seq UNION ALL SELECT k FROM seq WHERE k=0) d "
+                         "JOIN target t ON t.id=d.k"),
+                        ("recursive_ordered_union_derived_source",
+                         f"{recursive} SELECT t.id,t.n FROM "
+                         "(SELECT k FROM seq UNION ALL SELECT k FROM seq WHERE k=0 "
+                         "ORDER BY (SELECT MAX(k) FROM seq) LIMIT 3) d "
+                         "JOIN target t ON t.id=d.k"),
+                        ("recursive_plain_derived_source",
+                         f"{recursive} SELECT t.id,t.n FROM "
+                         "(SELECT k FROM seq) d JOIN target t ON t.id=d.k"),
+                        ("recursive_local_cte_derived_source",
+                         f"{recursive} SELECT t.id,t.n FROM "
+                         "(WITH copied AS (SELECT k FROM seq) SELECT k FROM copied) d "
+                         "JOIN target t ON t.id=d.k"),
                         ("recursive_lateral_volatile_union_cte",
                          "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
                          "SELECT k+1,r FROM seq WHERE k<3) "

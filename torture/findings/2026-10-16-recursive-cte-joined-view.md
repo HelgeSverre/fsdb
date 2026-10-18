@@ -125,5 +125,15 @@ outer CTE and compares it during the re-read, detecting a separate outer
 materialization. MySQL 8.4.11 and fsdb both mark these views updatable and
 change the target once; the maintained oracle now covers 44 layouts.
 
+Four further layouts read the outer recursive CTE only inside a derived
+source, with no direct outer reference: a plain SELECT, a UNION ALL, an
+ordered/limited UNION whose order expression re-reads the recursive CTE, and
+a local dependent CTE within the derived SELECT. MySQL 8.4.11 marks all four
+joined views updatable and increments the physical target once. Fsdb's CTE
+reference discovery now visits nested source branches and local CTE bodies in
+declaration order. Its write rewrite carries the binding into plain and UNION
+derived sources, including their order expressions, while respecting local
+shadowing. The native oracle now covers 48 writable layouts.
+
 More complex recursive/dependent source compositions, layered security, and
 other concurrent write shapes still need separate audits.
