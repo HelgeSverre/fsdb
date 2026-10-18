@@ -2526,6 +2526,71 @@ let tests =
               | ResultSet(_, [ [ Some "16"; Some "26" ] ]) -> ()
               | result -> failtestf "expected reversed derived-source view targets to change, got %A" result
               for sql in
+                  [ "CREATE VIEW tx_dual_va_grouped AS SELECT a.id,a.n,r.id AS link_id FROM tx_dual_a a JOIN (SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id) r ON a.id=r.id"
+                    "CREATE VIEW tx_dual_vb_grouped AS SELECT b.id,b.n,r.id AS link_id FROM tx_dual_b b JOIN (SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id) r ON b.id=r.id" ] do
+                  match handle session sql |> snd with
+                  | Affected 0UL -> ()
+                  | result -> failtestf "expected grouped read-source view creation, got %A" result
+              for source, expected in
+                  [ "tx_dual_va_grouped va JOIN tx_dual_vb_grouped vb ON va.link_id=vb.link_id", [ Some "17"; Some "27" ]
+                    "tx_dual_vb_grouped vb JOIN tx_dual_va_grouped va ON va.id=vb.id", [ Some "18"; Some "28" ] ] do
+                  let update = "UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1"
+                  Expect.equal (handle session update |> snd) (Affected 2UL) "grouped read sources keep both views writable"
+                  match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+                  | ResultSet(_, [ row ]) -> Expect.equal row expected "both grouped view targets update"
+                  | result -> failtestf "expected grouped view target rows, got %A" result
+              for sql in
+                  [ "CREATE VIEW tx_dual_va_grouped_lateral AS SELECT a.id,a.n,q.link_id FROM tx_dual_a a JOIN (SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id) r ON a.id=r.id JOIN LATERAL (SELECT r.id AS link_id) q ON TRUE"
+                    "CREATE VIEW tx_dual_vb_grouped_lateral AS SELECT b.id,b.n,q.link_id FROM tx_dual_b b JOIN (SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id) r ON b.id=r.id JOIN LATERAL (SELECT r.id AS link_id) q ON TRUE" ] do
+                  match handle session sql |> snd with
+                  | Affected 0UL -> ()
+                  | result -> failtestf "expected grouped lateral view creation, got %A" result
+              for source, expected in
+                  [ "tx_dual_va_grouped_lateral va JOIN tx_dual_vb_grouped_lateral vb ON va.link_id=vb.link_id", [ Some "19"; Some "29" ]
+                    "tx_dual_vb_grouped_lateral vb JOIN tx_dual_va_grouped_lateral va ON va.id=vb.id", [ Some "20"; Some "30" ] ] do
+                  let update = "UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1"
+                  Expect.equal (handle session update |> snd) (Affected 2UL) "dependent grouped sources keep both views writable"
+                  match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+                  | ResultSet(_, [ row ]) -> Expect.equal row expected "both grouped lateral view targets update"
+                  | result -> failtestf "expected grouped lateral target rows, got %A" result
+              let checkedGrouped =
+                  "CREATE VIEW tx_dual_va_grouped_checked AS SELECT a.id,a.n,q.link_id FROM tx_dual_a a "
+                  + "JOIN (SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id) r ON a.id=r.id "
+                  + "JOIN LATERAL (SELECT r.id AS link_id) q ON TRUE "
+                  + "WHERE a.id=1 WITH CASCADED CHECK OPTION"
+              Expect.equal (handle session checkedGrouped |> snd) (Affected 0UL) "grouped lateral checked view creates"
+              match handle session
+                  ("UPDATE tx_dual_va_grouped_checked va JOIN tx_dual_vb_grouped_lateral vb "
+                   + "ON va.link_id=vb.link_id SET va.id=2,vb.n=vb.n+1") |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected grouped lateral CHECK OPTION error, got %A" result
+              match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "20"; Some "30" ] ]) -> ()
+              | result -> failtestf "grouped lateral CHECK OPTION must preserve both targets, got %A" result
+              let owner, _ = handle (create 10 store) "BEGIN"
+              let owner, held = handle owner "UPDATE tx_dual_a SET n=n+10 WHERE id=1"
+              Expect.equal held (Affected 1UL) "the owner holds the first grouped view target"
+              let waiter, _ = handle (create 11 store) "BEGIN"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter
+                          ("UPDATE tx_dual_va_grouped_lateral va JOIN tx_dual_vb_grouped_lateral vb "
+                           + "ON va.link_id=vb.link_id SET va.n=va.n+1,vb.n=vb.n+1"))
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "grouped view writer starts"
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "grouped view writer waits for the held row"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "grouped view writer resumes"
+              let waiter, result = waiting.Result
+              Expect.equal result (Affected 2UL) "both grouped view targets rebase"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "grouped view writer commits"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "31"; Some "31" ] ]) -> ()
+              | result -> failtestf "expected both rebased grouped view values, got %A" result
+              handle session "UPDATE tx_dual_a SET n=16" |> ignore
+              handle session "UPDATE tx_dual_b SET n=26" |> ignore
+              for sql in
                   [ "CREATE VIEW tx_dual_va_lateral AS SELECT a.id,a.n,r.link_id FROM tx_dual_a a JOIN LATERAL (SELECT a.id AS link_id) r ON TRUE"
                     "CREATE VIEW tx_dual_vb_lateral AS SELECT b.id,b.n,r.link_id FROM tx_dual_b b JOIN LATERAL (SELECT b.id AS link_id) r ON TRUE" ] do
                   match handle session sql |> snd with

@@ -78,6 +78,17 @@ the shadowed-alias set into expression and FROM subqueries. The joined UPDATE
 matches MySQL's two affected rows with `WHERE vb.link_id=2`. Grouped non-table
 sources and broader dependency compositions remain to audit.
 
+Two writable views can also each join a grouped derived read source under
+the same view-local alias `r`. MySQL 8.4.11 and fsdb update both physical
+targets in either view order. The same result holds when each grouped source
+feeds a dependent `LATERAL` source under a second shared alias `q`. A
+`CASCADED CHECK OPTION` on one such view rejects an invalid two-target
+assignment with error 1369 and leaves both rows unchanged. When another
+transaction holds one physical target, the two-view UPDATE waits, then
+rebases and changes both rows after the owner commits. The maintained native
+oracle and focused transaction regression pin all of these outcomes;
+other grouped dependency trees and layered grants remain unaudited.
+
 ## A physical target beside the writable view
 
 MySQL also accepts `UPDATE x JOIN v ON x.id=v.id SET x.n=x.n+1,v.n=v.n+1`

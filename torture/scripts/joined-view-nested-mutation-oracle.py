@@ -821,6 +821,90 @@ def main():
                     cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
                     assert cursor.fetchone() == (16, 26)
                     cursor.execute(
+                        "CREATE VIEW dual_va_grouped AS SELECT a.id,a.n,r.id AS link_id FROM dual_a a "
+                        "JOIN (SELECT id,COUNT(*) AS hits FROM dual_link GROUP BY id) r ON a.id=r.id"
+                    )
+                    cursor.execute(
+                        "CREATE VIEW dual_vb_grouped AS SELECT b.id,b.n,r.id AS link_id FROM dual_b b "
+                        "JOIN (SELECT id,COUNT(*) AS hits FROM dual_link GROUP BY id) r ON b.id=r.id"
+                    )
+                    for source, expected in (
+                        ("dual_va_grouped va JOIN dual_vb_grouped vb ON va.link_id=vb.link_id", (17, 27)),
+                        ("dual_vb_grouped vb JOIN dual_va_grouped va ON va.id=vb.id", (18, 28)),
+                    ):
+                        cursor.execute("UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1")
+                        assert cursor.rowcount == 2, "two grouped read sources share alias r"
+                        cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                        assert cursor.fetchone() == expected
+                    cursor.execute(
+                        "CREATE VIEW dual_va_grouped_lateral AS SELECT a.id,a.n,q.link_id FROM dual_a a "
+                        "JOIN (SELECT id,COUNT(*) AS hits FROM dual_link GROUP BY id) r ON a.id=r.id "
+                        "JOIN LATERAL (SELECT r.id AS link_id) q ON TRUE"
+                    )
+                    cursor.execute(
+                        "CREATE VIEW dual_vb_grouped_lateral AS SELECT b.id,b.n,q.link_id FROM dual_b b "
+                        "JOIN (SELECT id,COUNT(*) AS hits FROM dual_link GROUP BY id) r ON b.id=r.id "
+                        "JOIN LATERAL (SELECT r.id AS link_id) q ON TRUE"
+                    )
+                    for source, expected in (
+                        ("dual_va_grouped_lateral va JOIN dual_vb_grouped_lateral vb ON va.link_id=vb.link_id", (19, 29)),
+                        ("dual_vb_grouped_lateral vb JOIN dual_va_grouped_lateral va ON va.id=vb.id", (20, 30)),
+                    ):
+                        cursor.execute("UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1")
+                        assert cursor.rowcount == 2, "two dependent grouped sources reuse r and q"
+                        cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                        assert cursor.fetchone() == expected
+                    cursor.execute(
+                        "CREATE VIEW dual_va_grouped_checked AS SELECT a.id,a.n,q.link_id FROM dual_a a "
+                        "JOIN (SELECT id,COUNT(*) AS hits FROM dual_link GROUP BY id) r ON a.id=r.id "
+                        "JOIN LATERAL (SELECT r.id AS link_id) q ON TRUE "
+                        "WHERE a.id=1 WITH CASCADED CHECK OPTION"
+                    )
+                    try:
+                        cursor.execute(
+                            "UPDATE dual_va_grouped_checked va JOIN dual_vb_grouped_lateral vb "
+                            "ON va.link_id=vb.link_id SET va.id=2,vb.n=vb.n+1"
+                        )
+                        raise AssertionError("grouped lateral CHECK OPTION accepted invalid two-target write")
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                    cursor.execute("SELECT a.id,a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (1, 20, 30)
+                    with owner.cursor() as holding:
+                        holding.execute("BEGIN")
+                        holding.execute("UPDATE dual_a SET n=n+10 WHERE id=1")
+                    with waiter.cursor() as waiting:
+                        waiting.execute("BEGIN")
+                    started = threading.Event()
+                    result = {}
+
+                    def update_grouped_views():
+                        try:
+                            with waiter.cursor() as waiting:
+                                started.set()
+                                waiting.execute(
+                                    "UPDATE dual_va_grouped_lateral va JOIN dual_vb_grouped_lateral vb "
+                                    "ON va.link_id=vb.link_id SET va.n=va.n+1,vb.n=vb.n+1"
+                                )
+                                result["affected"] = waiting.rowcount
+                                waiting.execute("COMMIT")
+                        except Exception as error:
+                            result["error"] = str(error)
+
+                    thread = threading.Thread(target=update_grouped_views, daemon=True)
+                    thread.start()
+                    assert started.wait(2), "grouped view writer starts"
+                    thread.join(0.2)
+                    assert thread.is_alive(), "grouped view writer waits for dual_a"
+                    owner.commit()
+                    thread.join(5)
+                    assert not thread.is_alive(), "grouped view writer resumes"
+                    assert result == {"affected": 2}, result
+                    cursor.execute("SELECT a.n,b.n FROM dual_a a JOIN dual_b b ON a.id=b.id")
+                    assert cursor.fetchone() == (31, 31)
+                    cursor.execute("UPDATE dual_a SET n=16")
+                    cursor.execute("UPDATE dual_b SET n=26")
+                    cursor.execute(
                         "CREATE VIEW dual_va_lateral AS SELECT a.id,a.n,r.link_id FROM dual_a a "
                         "JOIN LATERAL (SELECT a.id AS link_id) r ON TRUE"
                     )
@@ -926,7 +1010,8 @@ def main():
                     "four- and five-source CHECK OPTION rejected atomically; "
                     "two writable views with matching internal aliases updated both physical targets in both orders; "
                     "their CHECK OPTION rejected atomically; shared physical target aliases updated both targets in both orders; "
-                    "shared derived, lateral, and JSON_TABLE read aliases updated both targets in both orders; "
+                    "shared derived, grouped, dependent lateral, and JSON_TABLE read aliases updated both targets in both orders; "
+                    "grouped lateral CHECK OPTION rejected atomically and contended two-view writes rebased; "
                     "colliding writable and dependent lateral aliases stayed scoped; "
                     "dependent joined CHECK OPTION rejected atomically; local and nested lateral shadows stayed scoped"
                 )
