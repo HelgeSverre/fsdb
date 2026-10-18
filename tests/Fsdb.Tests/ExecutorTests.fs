@@ -3410,6 +3410,26 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected hash joins to resolve both key collations, got %A" other
 
+                testCase "CAST text comparisons honor explicit legacy collation"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cast value = $"CAST('{value}' AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci"
+                    let parenthesizedKorean, korean = cast "㈎", cast "(가)"
+                    let verticalPeriod, ideographicPeriod = cast "︒", cast "。"
+                    let school, writing = cast "㉆", cast "文"
+                    let enclosedKana, kana = cast "㋐", cast "ア"
+                    let sql =
+                        $"SELECT {parenthesizedKorean} = {korean}, {verticalPeriod} = {ideographicPeriod}, {school} = {writing}, {enclosedKana} = {kana}"
+                    match runDefault store sql with
+                    | ResultSet(_, [ [ Some "0"; Some "0"; Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "CAST text must use its explicit comparison collation, got %A" other
+
+                    runDefault store "CREATE TABLE cast_cjk (body TEXT COLLATE utf8mb4_unicode_ci)" |> ignore
+                    runDefault store "INSERT INTO cast_cjk VALUES ('㈎')" |> ignore
+                    match runDefault store $"SELECT {korean} = CAST(body AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci FROM cast_cjk" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "row-derived CAST text must use its explicit comparison collation, got %A" other
+
                 testCase "multi-value numeric IN follows the first equality key in MySQL joins"
                 <| fun _ ->
                     let store = newStore ()
@@ -4935,6 +4955,22 @@ let tests =
                     Expect.equal betweenOrderPlan.AccessType (Some "range") "BETWEEN retains contiguous ordering"
                     Expect.equal betweenOrderPlan.Key (Some "ix_tenant_bucket") "BETWEEN uses the composite index"
                     Expect.equal betweenOrderPlan.EstimatedRows (Some "3") "BETWEEN estimates the bounded prefix slice"
+
+                testCase "mixed-case suffix range bounds stay together in index-owned grouping"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed(id INT PRIMARY KEY,tenant_id INT,bucket INT,KEY ix_tenant_bucket(tenant_id,bucket))" |> ignore
+                    runDefault store "CREATE TABLE scanned(id INT PRIMARY KEY,tenant_id INT,bucket INT)" |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES(1,1,1),(2,1,2),(3,1,2),(4,1,3),(5,1,4)" table) |> ignore
+
+                    let result table =
+                        runDefault store (sprintf "SELECT bucket,COUNT(*) FROM %s WHERE tenant_id=1 AND bucket>=2 AND BUCKET<4 GROUP BY bucket" table)
+
+                    let expected = ResultSet([ "bucket"; "COUNT(*)" ], [ [ Some "2"; Some "2" ]; [ Some "3"; Some "1" ] ])
+                    Expect.equal (result "scanned") expected "the scan obeys both bounds"
+                    Expect.equal (result "indexed") expected "the indexed grouped count obeys both bounds"
 
                 testCase "string fixed prefixes require order and equality to share an equivalence class"
                 <| fun _ ->
@@ -8088,6 +8124,46 @@ let tests =
                             "ORDER BY and LIMIT use complete values after the mutation"
                     | other -> failtestf "expected ordered rows, got %A" other
 
+                testCase "text range bounds include complete collation equivalence classes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE range_indexed (id INT PRIMARY KEY, label VARCHAR(20), hit INT, KEY ix_label(label), KEY ix_lower((LOWER(label))))" |> ignore
+                    runDefault store "CREATE TABLE range_scanned (id INT PRIMARY KEY, label VARCHAR(20), hit INT)" |> ignore
+                    let values =
+                        [ "(1,'e',0)"; "(2,'é',0)"; "(3,'E',0)"; "(4,'f',0)" ]
+                        @ [ for id in 5 .. 504 -> sprintf "(%d,'z%03d',0)" id id ]
+                        |> String.concat ","
+                    runDefault store ("INSERT INTO range_indexed VALUES " + values) |> ignore
+                    runDefault store ("INSERT INTO range_scanned VALUES " + values) |> ignore
+
+                    let select table predicate =
+                        runDefault store (sprintf "SELECT id FROM %s WHERE %s ORDER BY id" table predicate)
+
+                    for predicate in [ "label BETWEEN 'é' AND 'é'"; "label >= 'é' AND label < 'f'";
+                                       "LOWER(label) >= 'é' AND LOWER(label) < 'f'" ] do
+                        Expect.equal (select "range_indexed" predicate) (select "range_scanned" predicate) predicate
+                        Expect.equal (select "range_indexed" predicate)
+                            (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]))
+                            "all case- and accent-equivalent rows belong to the range"
+
+                    let directPlan = runDefault store "EXPLAIN SELECT id FROM range_indexed WHERE label BETWEEN 'é' AND 'é'" |> explainRow
+                    Expect.equal directPlan.AccessType (Some "range") "the direct predicate uses a range"
+                    Expect.equal directPlan.Key (Some "ix_label") "the direct predicate uses the text index"
+                    let functionalPlan =
+                        runDefault store "EXPLAIN SELECT id FROM range_indexed WHERE LOWER(label) >= 'é' AND LOWER(label) < 'f'"
+                        |> explainRow
+                    Expect.equal functionalPlan.AccessType (Some "range") "the expression predicate uses a range"
+                    Expect.equal functionalPlan.Key (Some "ix_lower") "the expression predicate uses the functional index"
+
+                    let update table = runDefault store (sprintf "UPDATE %s SET hit = 1 WHERE label BETWEEN 'é' AND 'é'" table)
+                    Expect.equal (update "range_indexed") (update "range_scanned") "UPDATE uses complete range candidates"
+                    let contents table = runDefault store (sprintf "SELECT id, hit FROM %s ORDER BY id" table)
+                    Expect.equal (contents "range_indexed") (contents "range_scanned") "UPDATE retains all equivalent rows"
+
+                    let delete table = runDefault store (sprintf "DELETE FROM %s WHERE label >= 'é' AND label < 'f'" table)
+                    Expect.equal (delete "range_indexed") (delete "range_scanned") "DELETE uses complete range candidates"
+                    Expect.equal (contents "range_indexed") (contents "range_scanned") "DELETE retains only the upper-bound row"
+
                 testCase "prefix range scans retain primary-equivalent boundary keys"
                 <| fun _ ->
                     let store = newStore ()
@@ -10278,6 +10354,13 @@ let tests =
                     Expect.equal bitPlan.AccessType (Some "const") "unique BIT ABS access"
                     Expect.equal bitPlan.Key (Some "uq_abs_bit") "BIT ABS key"
 
+                    runDefault store "CREATE TABLE wide_bits (id INT PRIMARY KEY, value BIT(64), UNIQUE INDEX uq_abs_wide ((ABS(value))))" |> ignore
+                    runDefault store "INSERT INTO wide_bits VALUES (1, 9007199254740993)" |> ignore
+                    Expect.equal
+                        (runDefault store "SELECT id FROM wide_bits WHERE ABS(value) = 9.007199254740992e15")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "a rounded DOUBLE bound must not narrow to one exact BIT key"
+
                     Expect.equal
                         (runDefault store "UPDATE magnitudes SET signed_value = -9 WHERE ABS(signed_value) = 7")
                         (Affected 1UL)
@@ -12187,6 +12270,62 @@ let tests =
                         ()
                     | other -> failtestf "expected a composite indexed join plan, got %A" other
 
+                testCase "a composite left-prefix join keeps collation-equal rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE folded_left (name VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE folded_right (id INT PRIMARY KEY, name VARCHAR(20), sequence_no INT, KEY ix_name_sequence(name, sequence_no))" |> ignore
+                    runDefault store "INSERT INTO folded_left VALUES ('foo')" |> ignore
+                    let values =
+                        "(1,'FOO',1)"
+                        :: [ for id in 2 .. 501 -> sprintf "(%d,'z%03d',%d)" id id id ]
+                        |> String.concat ","
+                    runDefault store ("INSERT INTO folded_right VALUES " + values) |> ignore
+
+                    match runDefault store
+                        "SELECT r.id FROM folded_left l STRAIGHT_JOIN folded_right r ON r.name = l.name" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "the indexed join must find the folded-equal row, got %A" other
+
+                    match runDefault store
+                        "SELECT r.id FROM folded_left l LEFT JOIN folded_right r ON r.name = l.name" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "LEFT JOIN must not emit a NULL-padded row, got %A" other
+
+                    let plan =
+                        runDefault store
+                            "EXPLAIN SELECT r.id FROM folded_left l STRAIGHT_JOIN folded_right r ON r.name = l.name"
+                        |> explainRows
+                        |> List.item 1
+                    Expect.equal plan.AccessType (Some "ref") "the right side uses its composite-prefix index"
+                    Expect.equal plan.Key (Some "ix_name_sequence") "the named key drives the join"
+
+                testCase "a folded first key still checks later composite join keys"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE folded_pair_left (name VARCHAR(20), sequence_no INT)" |> ignore
+                    runDefault store "CREATE TABLE folded_pair_right (id INT PRIMARY KEY, name VARCHAR(20), sequence_no INT, marker INT, KEY ix_name_sequence_marker(name DESC, sequence_no DESC, marker))" |> ignore
+                    runDefault store "INSERT INTO folded_pair_left VALUES ('foo', 1)" |> ignore
+                    let values =
+                        [ "(1,'FOO',1,0)"; "(2,'FOO',2,0)"; "(3,'foo',1,0)"; "(4,'bar',1,0)" ]
+                        @ [ for id in 5 .. 504 -> sprintf "(%d,'z%03d',1,0)" id id ]
+                        |> String.concat ","
+                    runDefault store ("INSERT INTO folded_pair_right VALUES " + values) |> ignore
+
+                    match runDefault store
+                        ("SELECT r.id FROM folded_pair_left l STRAIGHT_JOIN folded_pair_right r "
+                         + "ON r.name = l.name AND r.sequence_no = l.sequence_no ORDER BY r.id") with
+                    | ResultSet(_, [ [ Some "1" ]; [ Some "3" ] ]) -> ()
+                    | other -> failtestf "folded and later integer keys must both match, got %A" other
+
+                    let plan =
+                        runDefault store
+                            ("EXPLAIN SELECT r.id FROM folded_pair_left l STRAIGHT_JOIN folded_pair_right r "
+                             + "ON r.name = l.name AND r.sequence_no = l.sequence_no")
+                        |> explainRows
+                        |> List.item 1
+                    Expect.equal plan.Key (Some "ix_name_sequence_marker") "the descending composite key is probed"
+
                 testCase "an indexed INNER JOIN probes a composite left prefix"
                 <| fun _ ->
                     let store = newStore ()
@@ -12567,18 +12706,48 @@ let tests =
                         |> registerScalar "OUTER_KEY" outerKey
                         |> registerExtension (ScalarFunction.create "OUTER_KEY" (fun _ values -> outerKey values) |> ScalarFunction.effectful)
 
+                    let correlatedCountsSql =
+                        "SELECT users.id, (SELECT COUNT(*) FROM orders candidate "
+                        + "WHERE candidate.user_id = OUTER_KEY(users.id)) FROM users WHERE users.id <= 3"
+
                     match
                         run
                             store
                             effectful
-                            ("SELECT users.id, (SELECT COUNT(*) FROM orders candidate "
-                             + "WHERE candidate.user_id = OUTER_KEY(users.id)) FROM users WHERE users.id <= 3")
+                            correlatedCountsSql
                     with
                     | ResultSet(_, rows) ->
                         Expect.equal (rows |> List.map (fun row -> row.[1])) [ Some "20"; Some "20"; Some "20" ] "effectful keys retain results"
                     | other -> failtestf "expected effectful correlated counts, got %A" other
 
                     Expect.isGreaterThan effects 1000 "an effectful outer expression is not hoisted into an index probe"
+
+                    effects <- 0
+
+                    match
+                        run
+                            store
+                            (builtins |> registerScalar "OUTER_KEY" outerKey)
+                            correlatedCountsSql
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal (rows |> List.map (fun row -> row.[1])) [ Some "20"; Some "20"; Some "20" ] "unannotated scalar keys retain results"
+                    | other -> failtestf "expected unannotated scalar correlated counts, got %A" other
+
+                    Expect.isGreaterThan effects 1000 "an unannotated scalar cannot be assumed free of effects"
+
+                    effects <- 0
+                    let stable =
+                        builtins
+                        |> registerScalar "OUTER_KEY" outerKey
+                        |> registerExtension (ScalarFunction.create "OUTER_KEY" (fun _ values -> outerKey values))
+
+                    match run store stable correlatedCountsSql with
+                    | ResultSet(_, rows) ->
+                        Expect.equal (rows |> List.map (fun row -> row.[1])) [ Some "20"; Some "20"; Some "20" ] "deterministic extension keys retain results"
+                    | other -> failtestf "expected deterministic extension correlated counts, got %A" other
+
+                    Expect.isLessThan effects 10 "an explicitly deterministic extension retains the indexed probe"
 
                 testCase "correlated indexed OR probes only matching inner rows"
                 <| fun _ ->
@@ -12889,7 +13058,7 @@ let tests =
                     | other -> failtestf "expected 0900 binary materialized LIKE counts, got %A" other
                     Expect.isLessThan calls 60 "the 0900 binary prefix restricts residual evaluation"
 
-                testCase "materialized correlated ABS equality probes both signed keys"
+                testCase "materialized correlated integer expressions probe equality keys"
                 <| fun _ ->
                     let mutable calls = 0
                     let registry =
@@ -12908,6 +13077,38 @@ let tests =
                     |> ignore
                     runDefault store "INSERT INTO abs_rows VALUES(1000,-2147483648)" |> ignore
                     runDefault store "INSERT INTO abs_rows VALUES(1001,NULL)" |> ignore
+
+                    runDefault store "CREATE TABLE fallback_bounds(id INT PRIMARY KEY,x INT)" |> ignore
+                    runDefault store "INSERT INTO fallback_bounds VALUES(1,0),(2,10),(3,NULL)" |> ignore
+                    for prefix, source in
+                        [ "", "(SELECT DISTINCT id,k FROM abs_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM abs_rows) ", "materialized d" ] do
+                        for expression in
+                            [ "COALESCE(d.k,0)"
+                              "IFNULL(d.k,0)"
+                              "COALESCE(d.k,NULL,0)"
+                              "COALESCE(NULL,d.k,0)" ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND " + expression + "=o.x) "
+                                + "FROM fallback_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]) -> ()
+                            | other -> failtestf "expected %s materialized fallback matches, got %A" expression other
+                            Expect.isLessThan calls 60 (expression + " key bounds residual work")
+
+                    runDefault store "CREATE TABLE unsigned_fallback_rows(id INT PRIMARY KEY,k BIGINT UNSIGNED)" |> ignore
+                    runDefault store "CREATE TABLE unsigned_fallback_bounds(id INT PRIMARY KEY,x BIGINT UNSIGNED)" |> ignore
+                    runDefault store "INSERT INTO unsigned_fallback_rows VALUES(1,0),(2,9223372036854775808),(3,18446744073709551615),(4,NULL)" |> ignore
+                    runDefault store "INSERT INTO unsigned_fallback_bounds VALUES(1,0),(2,9223372036854775808),(3,18446744073709551615),(4,NULL)" |> ignore
+                    for expression in [ "COALESCE(d.k,0)"; "IFNULL(d.k,0)" ] do
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM unsigned_fallback_rows) d "
+                            + "WHERE " + expression + "=o.x) FROM unsigned_fallback_bounds o ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "1" ]; [ Some "4"; Some "0" ] ]) -> ()
+                        | other -> failtestf "expected %s unsigned-bound matches, got %A" expression other
 
                     for prefix, source in
                         [ "", "(SELECT DISTINCT id,k FROM abs_rows) d"
@@ -13661,6 +13862,21 @@ let tests =
                     | other -> failtestf "expected numeric coercion to match the text value, got %A" other
 
                     Expect.isGreaterThan calls 0 "numeric comparison against text falls back to row evaluation"
+
+                testCase "correlated COUNT checks prefix collisions and uncovered equalities"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE count_outer (value VARBINARY(8), tenant INT, bucket INT)" |> ignore
+                    runDefault store "CREATE TABLE count_inner (value VARBINARY(8), tenant INT, bucket INT, KEY ix_value (value(2)), KEY ix_tenant_value (tenant, value))" |> ignore
+                    runDefault store "INSERT INTO count_outer VALUES (X'010203', 1, 1)" |> ignore
+                    runDefault store "INSERT INTO count_inner VALUES (X'010203', 1, 1), (X'010204', 1, 2)" |> ignore
+
+                    match runDefault store
+                        ("SELECT (SELECT COUNT(*) FROM count_inner i WHERE i.value = o.value), "
+                         + "(SELECT COUNT(*) FROM count_inner i WHERE i.tenant = o.tenant AND i.bucket = o.bucket) "
+                         + "FROM count_outer o") with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | other -> failtestf "prefix and uncovered equality counts must recheck rows, got %A" other
 
                 testCase "correlated derived sources use composite equality indexes"
                 <| fun _ ->

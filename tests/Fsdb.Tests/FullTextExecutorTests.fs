@@ -402,6 +402,80 @@ let tests =
               Expect.equal (search "中，") [ "2"; "3" ] "fullwidth and small comma tokens share a key"
               Expect.equal (search "中﹐") [ "2"; "3" ] "small comma finds both token forms"
 
+          testCase "legacy Unicode ngrams keep implicit enclosed CJK forms distinct"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE enclosed_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO enclosed_docs VALUES(1,'中㉆文'),(2,'中㊥文'),(3,'中㉊文'),(4,'中㉚文'),(5,'中㉋文'),(6,'中㊵文'),(7,'中㉌文'),(8,'中㊿文')" |> ignore
+              let search term mode =
+                  let sql = $"SELECT id FROM enclosed_docs WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                  ids (run store sql)
+              for mode in [ "IN NATURAL LANGUAGE MODE"; "WITH QUERY EXPANSION" ] do
+                  for id, term in [ "1", "中㉆"; "2", "中㊥"; "3", "中㉊"; "4", "中㉚"
+                                    "5", "中㉋"; "6", "中㊵"; "7", "中㉌"; "8", "中㊿" ] do
+                      Expect.equal (search term mode) [ id ] (mode + " " + term)
+              for id, term in [ "4", "中㉚"; "6", "中㊵"; "8", "中㊿" ] do
+                  Expect.equal (search term "IN BOOLEAN MODE") [ id ] ("Boolean " + term)
+              for term in [ "中㉆"; "中㊥"; "中㉊"; "中㉋"; "中㉌" ] do
+                  Expect.equal (search term "IN BOOLEAN MODE") [] ("Boolean Unicode boundary " + term)
+
+          testCase "legacy Unicode ngrams retain historical letterlike case distinctions"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE symbol_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO symbol_docs VALUES(1,'中Ⅎ文'),(2,'中ⅎ文'),(3,'中Ↄ文'),(4,'中ↄ文')" |> ignore
+              let search term mode =
+                  let sql = $"SELECT id FROM symbol_docs WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                  ids (run store sql)
+              for id, term in [ "1", "中Ⅎ"; "2", "中ⅎ"; "3", "中Ↄ"; "4", "中ↄ" ] do
+                  for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
+                      Expect.equal (search term mode) [ id ] (term + " keeps its own " + mode + " posting")
+
+          testCase "legacy Unicode ngrams fold kana extensions and keep Bopomofo distinctions"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE kana_ligatures(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO kana_ligatures VALUES(1,'中ゟ文'),(2,'中ヿ文'),(3,'中より文'),(4,'中コト文'),(5,'中ㇰ文'),(6,'中ク文'),(7,'中ㄮ文'),(8,'中ㄜ文'),(9,'中ㆻ文'),(10,'中ㄍ文'),(11,'中ㆣ文')" |> ignore
+              let search term mode =
+                  let sql = $"SELECT id FROM kana_ligatures WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                  ids (run store sql)
+              for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
+                  Expect.equal (search "中ゟ" mode) [ "1" ] (mode + " ligature posting")
+                  Expect.equal (search "中ヿ" mode) [ "2" ] (mode + " katakana ligature posting")
+                  Expect.equal (search "中ㇰ" mode) [ "5"; "6" ] (mode + " small katakana folds")
+                  Expect.equal (search "中ㄍ" mode) [ "10"; "11" ] (mode + " older velar forms remain equal")
+              Expect.equal (search "中ㄮ" "IN NATURAL LANGUAGE MODE") [ "7" ] "Bopomofo extension stays distinct"
+              Expect.equal (search "中ㆻ" "IN NATURAL LANGUAGE MODE") [ "9" ] "newer Bopomofo stays distinct"
+              Expect.equal (search "中ㄮ" "IN BOOLEAN MODE") [] "historical Boolean word table excludes ㄮ"
+              Expect.equal (search "中ㆻ" "IN BOOLEAN MODE") [] "historical Boolean word table excludes ㆻ"
+
+          testCase "legacy Unicode ngrams keep later BMP ideographs distinct and share supplementary keys"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE compatibility_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO compatibility_docs VALUES(1,'中郞文'),(2,'中郞文'),(3,'中並文'),(4,'中並文'),(5,'中丽文'),(6,'中丸文'),(7,'中𠀀文')" |> ignore
+              let search term =
+                  let sql = $"SELECT id FROM compatibility_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (search "中郞") [ "1" ] "later BMP form keeps its implicit key"
+              Expect.equal (search "中並") [ "3" ] "second BMP form stays distinct from its base"
+              Expect.equal (search "中丽") [ "5"; "6"; "7" ] "supplementary forms share MySQL's fallback key"
+
+          testCase "ngram Boolean lexer uses MySQL's historical Unicode word characters"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE unicode_words(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO unicode_words VALUES(1,'中㉎文'),(2,'中①文'),(3,'中\u4DBC文'),(4,'中\u9FA6文')" |> ignore
+              let search term mode =
+                  let sql = $"SELECT id FROM unicode_words WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (search "中㉎" "IN NATURAL LANGUAGE MODE") [ "1" ] "ngram postings retain newer numeric symbols"
+              Expect.equal (search "中㉎" "IN BOOLEAN MODE") [] "Unicode 5 draft excludes U+324E from Boolean terms"
+              Expect.equal (search "\"中㉎\"" "IN BOOLEAN MODE") [] "quoted Boolean terms use the same boundary"
+              Expect.equal (search "中①" "IN BOOLEAN MODE") [ "2" ] "older circled digits remain Boolean terms"
+              Expect.equal (search "中\u4DBC" "IN BOOLEAN MODE") [] "later-assigned ideographs are not Boolean terms"
+              Expect.equal (search "中\u9FA6" "IN BOOLEAN MODE") [] "draft/final Unicode 5 exception is excluded"
+
           testCase "legacy Unicode ngrams share width-folded punctuation keys"
           <| fun _ ->
               let store = create ()

@@ -2690,6 +2690,33 @@ let tests =
                   | ResultSet(_, [ [ _; _; _; _; defaultValue; _ ] ]) -> Expect.equal defaultValue (Some "rand()") "metadata excludes the DDL wrapper"
                   | result -> failtestf "expected the added column definition, got %A" result
 
+          testCase "duplicate plain index parts are rejected across DDL forms"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, created = handle session "CREATE TABLE duplicate_index_parts(a INT, b INT, KEY dup_a(a,a))"
+              Expect.equal created (Err(1060, "Duplicate column name 'a'")) "CREATE TABLE rejects a repeated key column"
+              let session, mixedCase = handle session "CREATE TABLE duplicate_case_parts(a INT, KEY ix(a,A))"
+              Expect.equal mixedCase (Err(1060, "Duplicate column name 'A'")) "key columns are case-insensitive"
+
+              let session, baseTable = handle session "CREATE TABLE duplicate_index_parts(a INT, b INT)"
+              Expect.equal baseTable (Affected 0UL) "the rejected definition left no table behind"
+
+              for sql in
+                  [ "CREATE INDEX dup_a ON duplicate_index_parts(a,a)"
+                    "ALTER TABLE duplicate_index_parts ADD KEY dup_a(a,a)"
+                    "ALTER TABLE duplicate_index_parts ADD UNIQUE KEY dup_a(a,a)"
+                    "ALTER TABLE duplicate_index_parts ADD PRIMARY KEY(a,a)" ] do
+                  let _, result = handle session sql
+                  Expect.equal result (Err(1060, "Duplicate column name 'a'")) sql
+
+              let _, mixed =
+                  handle session "CREATE TABLE mixed_index_parts(name VARCHAR(20), KEY ix_mixed(name,(LOWER(name))))"
+              Expect.equal mixed (Affected 0UL) "a column and its functional expression are distinct key parts"
+
+              let session, _ = handle session "CREATE TABLE existing_primary_part(a INT PRIMARY KEY, b INT)"
+              let _, existingPrimary = handle session "ALTER TABLE existing_primary_part ADD PRIMARY KEY(b,b)"
+              Expect.equal existingPrimary (Err(1068, "Multiple primary key defined")) "an existing primary key fails first"
+
           testCase "ALTER statement logging retains its warning before duplicate-column failure"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -8552,6 +8579,43 @@ let tests =
               | Err(1146, _) -> ()
               | other -> failtestf "expected temporary tables to stay outside FLUSH locking, got %A" other
 
+          testCase "global FLUSH read lock blocks permanent writes sourced from temporary tables"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE mixed_flush_target (n INT)"
+              let worker, _ = handle (create 2 store) "CREATE TEMPORARY TABLE mixed_flush_source (n INT)"
+              let worker, _ = handle worker "INSERT INTO mixed_flush_source VALUES (7)"
+              let holder, locked = handle (create 3 store) "FLUSH TABLES WITH READ LOCK"
+              Expect.equal locked (Affected 0UL) "global read lock acquired"
+              let holder, _ = handle holder "CREATE TEMPORARY TABLE mixed_flush_owner (n INT)"
+              let holder, _ = handle holder "INSERT INTO mixed_flush_owner VALUES (9)"
+
+              match handle holder "INSERT INTO mixed_flush_target SELECT n FROM mixed_flush_owner" |> snd with
+              | Err(1223, _) -> ()
+              | other -> failtestf "expected the lock owner's mixed permanent write to fail, got %A" other
+
+              let worker, temporaryWrite = handle worker "INSERT INTO mixed_flush_source VALUES (8)"
+              Expect.equal temporaryWrite (Affected 1UL) "temporary writes stay available"
+
+              let mixedWrite =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle worker "INSERT INTO mixed_flush_target SELECT n FROM mixed_flush_source")
+
+              try
+                  Expect.isFalse
+                      (mixedWrite.Wait(TimeSpan.FromMilliseconds 100.0))
+                      "a permanent write sourced from a temporary table waits for the global read lock"
+              finally
+                  handle holder "UNLOCK TABLES" |> ignore
+
+              Expect.isTrue (mixedWrite.Wait(TimeSpan.FromSeconds 2.0)) "the mixed write continues after unlock"
+              Expect.equal (mixedWrite.Result |> snd) (Affected 2UL) "both temporary rows reach the permanent table"
+
+              match handle setup "SELECT n FROM mixed_flush_target ORDER BY n" |> snd with
+              | ResultSet(_, [ [ Some "7" ]; [ Some "8" ] ]) -> ()
+              | other -> failtestf "unexpected permanent rows after unlock: %A" other
+
           testCase "global FLUSH read locks block permanent writes and survive transaction start"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -9738,6 +9802,35 @@ let tests =
               match handle session "SELECT value FROM routine_commit" |> snd with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected pre-function transaction write to stay committed, got %A" other
+
+          testCase "correlated predicates evaluate nondeterministic stored functions per candidate"
+          <| fun _ ->
+              let mutable session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
+
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+
+              for sql in
+                  [ "CREATE TABLE outer_t(id INT PRIMARY KEY)"
+                    "CREATE TABLE inner_t(id INT PRIMARY KEY,k INT,KEY ix_k(k))"
+                    "INSERT INTO outer_t VALUES(1),(2),(3)"
+                    "INSERT INTO inner_t VALUES(1,1),(2,1),(3,2),(4,2),(5,3),(6,3),(7,4),(8,4),(9,5),(10,5)"
+                    "CREATE FUNCTION bump(x INT) RETURNS INT NOT DETERMINISTIC NO SQL RETURN x + (@calls := @calls + 1)*0"
+                    "SET @calls=0" ] do
+                  match execute sql with
+                  | Affected _ -> ()
+                  | result -> failtestf "%s failed: %A" sql result
+
+              match execute "SELECT o.id,(SELECT COUNT(*) FROM inner_t i WHERE i.k=bump(o.id)) FROM outer_t o ORDER BY o.id" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "1"; Some "2" ]; [ Some "2"; Some "2" ]; [ Some "3"; Some "2" ] ] "correlated counts"
+              | result -> failtestf "expected correlated counts, got %A" result
+
+              match execute "SELECT @calls" with
+              | ResultSet(_, [ [ Some "30" ] ]) -> ()
+              | result -> failtestf "expected MySQL's 30 stored-function calls, got %A" result
 
           testCase "stored function writes share the invoking statement transaction"
           <| fun _ ->
@@ -14545,6 +14638,48 @@ let tests =
 
               let _, _ = handle holder "ROLLBACK"
               ()
+
+          testCase "locking reads include tables inside grouped join operands"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+
+              for table in [ "group_lock_a"; "group_lock_b"; "group_lock_c" ] do
+                  let setup, _ = handle setup ($"CREATE TABLE {table} (id INT PRIMARY KEY)")
+                  handle setup ($"INSERT INTO {table} VALUES (1)") |> ignore
+
+              let grouped =
+                  "SELECT b.id FROM group_lock_a a JOIN "
+                  + "(group_lock_b b JOIN group_lock_c c ON b.id=c.id) ON a.id=b.id"
+
+              let holder, _ = handle (create 2 store) "BEGIN"
+              let holder, allLocked = handle holder (grouped + " FOR UPDATE")
+              Expect.equal allLocked (ResultSet([ "id" ], [ [ Some "1" ] ])) "the grouped join returns its row"
+
+              let contender, _ = handle (create 3 store) "BEGIN"
+
+              for table in [ "group_lock_a"; "group_lock_b"; "group_lock_c" ] do
+                  match handle contender ($"SELECT id FROM {table} FOR UPDATE NOWAIT") |> snd with
+                  | Err(3572, _) -> ()
+                  | other -> failtestf "expected %s to be locked, got %A" table other
+
+              handle holder "ROLLBACK" |> ignore
+              handle contender "ROLLBACK" |> ignore
+
+              let holder, _ = handle holder "BEGIN"
+              let holder, onlyB = handle holder (grouped + " FOR UPDATE OF b")
+              Expect.equal onlyB (ResultSet([ "id" ], [ [ Some "1" ] ])) "OF b resolves inside the grouped join"
+
+              let contender, _ = handle contender "BEGIN"
+
+              for table in [ "group_lock_a"; "group_lock_b"; "group_lock_c" ] do
+                  match handle contender ($"SELECT id FROM {table} FOR UPDATE NOWAIT") |> snd with
+                  | Err(3572, _) when table = "group_lock_b" -> ()
+                  | ResultSet(_, [ [ Some "1" ] ]) when table <> "group_lock_b" -> ()
+                  | other -> failtestf "unexpected OF b lock result for %s: %A" table other
+
+              handle holder "ROLLBACK" |> ignore
+              handle contender "ROLLBACK" |> ignore
 
           testCase "multiple locking clauses preserve source-specific strengths"
           <| fun _ ->
