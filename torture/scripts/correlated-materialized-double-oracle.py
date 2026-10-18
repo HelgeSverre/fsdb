@@ -203,6 +203,13 @@ def main():
                             )
                             assert cursor.fetchone() == (0,), (source, predicate)
                             cursor.execute("UPDATE outer_bounds SET s='12.5',hi='13.5' WHERE id=7")
+                        predicate = "d.k NOT IN(o.hi,o.s) OR d.id=1"
+                        for bound in (7, 3):
+                            cursor.execute(
+                                f"SELECT (SELECT COUNT(*) FROM {source} WHERE {predicate}) "
+                                f"FROM outer_bounds o WHERE o.id={bound}"
+                            )
+                            assert cursor.fetchone() == ((2,) if bound == 7 else (1,)), (source, bound)
                     cursor.execute(
                         "SELECT x=i,x+0e0=i,9007199254740992e0=i,"
                         "9007199254740992e0+0e0=i "

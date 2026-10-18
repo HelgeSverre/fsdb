@@ -60,3 +60,10 @@ lists, including the order where the selective bound is second. MySQL 8.4.11
 returns one unmatched row for bounds `12.5`/`13.5` and zero for NULL bounds,
 with no warnings. Non-numeric or diagnostic-producing bounds retain the
 existing scan path.
+
+The same choice now works inside a complete OR. On the skewed corpus,
+`d.k NOT IN(o.hi,o.s) OR d.id=1` returns two rows for the clean bounds and
+one for NULL bounds. Direct and pass-through physical sources each perform
+fewer than 80 residual `TOUCH` calls rather than scanning the 1,001 rows.
+The native MySQL 8.4.11 oracle agrees on both row counts. Every OR arm must
+still have a safe lookup; the original predicate filters the union.

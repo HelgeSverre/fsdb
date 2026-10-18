@@ -13674,6 +13674,18 @@ let tests =
                                 | other -> failtestf "expected DOUBLE inequality result, got %A" other
                                 Expect.isLessThan calls 80 (source + " must use strict ranges for " + predicate)
 
+                        for boundId, expected in [ 1, "2"; 8, "1" ] do
+                            calls <- 0
+                            let predicate = "d.k NOT IN(o.hi,o.s) OR d.id=1"
+                            let sql =
+                                "SELECT (SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                                + "FROM physical_double_bounds o WHERE o.id=" + string boundId
+                            match run store registry sql with
+                            | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected predicate
+                            | other -> failtestf "expected DOUBLE NOT IN OR result, got %A" other
+                            Expect.isLessThan calls 80 (source + " unions the NOT IN and equality candidates")
+
                 testCase "physical correlated ABS equality probes indexed signed keys"
                 <| fun _ ->
                     let mutable calls = 0

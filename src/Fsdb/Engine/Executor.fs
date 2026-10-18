@@ -4845,38 +4845,38 @@ let private disjuncts (expr: Expr) : Expr list =
 
 let private optionalConjuncts = Option.map conjuncts >> Option.defaultValue []
 
-/// Inequality and `NOT BETWEEN` are unions of strict ranges under SQL's
-/// three-valued comparison rules. The original expression remains the filter.
-let private candidateDisjuncts canSplitInequality expression =
-    disjuncts expression
-    |> List.collect (function
+/// An OR narrows candidates only when every branch has a safe lookup.
+/// Strict-range unions are safe supersets under SQL's three-valued rules;
+/// the original predicate still decides row membership after the lookup.
+let private tryCompleteOrCandidates whereExpr canSplitInequality branchCandidates merge candidateCount =
+    let candidates branches = branches |> List.map branchCandidates |> tryAllSome
+    let candidateForBranch single = function
         | Not(Between(value, lower, upper)) ->
-            [ BinOp(Lt, value, lower); BinOp(Gt, value, upper) ]
+            candidates [ BinOp(Lt, value, lower); BinOp(Gt, value, upper) ], true
         | BinOp(Neq, left, right)
         | Not(BinOp(Eq, left, right)) when canSplitInequality left right ->
-            [ BinOp(Lt, left, right); BinOp(Gt, left, right) ]
-        | branch -> [ branch ])
-
-/// An OR narrows candidates only when every branch has a safe lookup.
-/// A NOT IN alternative narrows by one safe exclusion at a time.
-let private tryCompleteOrCandidates whereExpr canSplitInequality branchCandidates merge candidateCount =
-    let candidateAlternatives = function
+            candidates [ BinOp(Lt, left, right); BinOp(Gt, left, right) ], true
         | Not(In(value, bounds)) when not bounds.IsEmpty && List.forall (canSplitInequality value) bounds ->
-            // A row satisfying NOT IN must differ from every bound. Each
-            // strict-range union is a safe superset; use the smallest one.
-            bounds |> List.map (fun bound -> [ BinOp(Lt, value, bound); BinOp(Gt, value, bound) ])
-        | expression -> [ candidateDisjuncts canSplitInequality expression ]
+            // Each exclusion is a safe superset of NOT IN. Use the most
+            // selective one, including when this is one arm of an OR.
+            let alternatives =
+                bounds
+                |> List.choose (fun bound ->
+                    candidates [ BinOp(Lt, value, bound); BinOp(Gt, value, bound) ]
+                    |> Option.bind (fun group ->
+                        merge group |> Option.map (fun merged -> candidateCount merged, group)))
+            (if alternatives.IsEmpty then None else Some(alternatives |> List.minBy fst |> snd)), true
+        | branch ->
+            (if single then None else branchCandidates branch |> Option.map List.singleton), false
 
     whereExpr
     |> optionalConjuncts
     |> List.choose (fun expression ->
-        candidateAlternatives expression
-        |> List.choose (function
-            | [ _ ] -> None
-            | branches -> branches |> List.map branchCandidates |> tryAllSome |> Option.bind merge)
-        |> function
-            | [] -> None
-            | candidates -> Some(List.minBy candidateCount candidates))
+        let disjunction = disjuncts expression
+        let single = disjunction.Length = 1
+        let branches = disjunction |> List.map (candidateForBranch single)
+        if single && not (snd branches.Head) then None
+        else branches |> List.map fst |> tryAllSome |> Option.bind (List.collect id >> merge))
     |> function
         | [] -> None
         | candidates -> Some(List.minBy candidateCount candidates)
