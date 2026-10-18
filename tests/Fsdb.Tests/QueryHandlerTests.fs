@@ -8845,6 +8845,55 @@ let tests =
               | ProcedureResult([ "10" ], [ [ Some "10" ] ]) -> ()
               | other -> failtestf "expected parameterized procedure result, got %A" other
 
+          testCase "indexed grouping respects routine variables that shadow columns"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE routine_group_source (tenant_id INT, secret_value INT, KEY ix(tenant_id,secret_value))"
+              let session, _ = handle session "INSERT INTO routine_group_source VALUES (1,11),(1,12),(2,21)"
+              let session, _ =
+                  handle
+                      session
+                      "CREATE PROCEDURE routine_group_shadow(IN tenant_id INT) BEGIN SELECT secret_value,COUNT(*) FROM routine_group_source WHERE tenant_id=1 GROUP BY secret_value ORDER BY secret_value; END"
+              let session, _ =
+                  handle
+                      session
+                      "CREATE PROCEDURE routine_group_qualified(IN tenant_id INT) BEGIN SELECT secret_value,COUNT(*) FROM routine_group_source WHERE routine_group_source.tenant_id=1 GROUP BY secret_value ORDER BY secret_value; END"
+
+              match handle session "CALL routine_group_shadow(1)" |> snd with
+              | ProcedureResult(_, rows) ->
+                  Expect.equal rows [ [ Some "11"; Some "1" ]; [ Some "12"; Some "1" ]; [ Some "21"; Some "1" ] ] "true variable predicate keeps every row"
+              | other -> failtestf "unexpected routine grouping result: %A" other
+
+              match handle session "CALL routine_group_shadow(2)" |> snd with
+              | ProcedureResult(_, rows) -> Expect.equal rows [] "false variable predicate filters every row"
+              | other -> failtestf "unexpected routine grouping result: %A" other
+
+              match handle session "CALL routine_group_qualified(2)" |> snd with
+              | ProcedureResult(_, rows) ->
+                  Expect.equal rows [ [ Some "11"; Some "1" ]; [ Some "12"; Some "1" ] ] "qualified predicate reads the indexed column"
+              | other -> failtestf "unexpected qualified grouping result: %A" other
+
+          testCase "correlated derived probes respect routine variable projections"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE derived_shadow_source (k INT, payload INT, KEY ix(k))"
+              let session, _ = handle session "INSERT INTO derived_shadow_source VALUES (1,11),(2,22),(3,33)"
+              let session, _ = handle session "CREATE TABLE derived_shadow_ids (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO derived_shadow_ids VALUES (1),(2),(3)"
+              let session, _ =
+                  handle
+                      session
+                      "CREATE PROCEDURE derived_shadow_count(IN k INT) BEGIN SELECT p.id,(SELECT COUNT(*) FROM (SELECT k,payload FROM derived_shadow_source) d WHERE d.k=p.id) AS n FROM derived_shadow_ids p ORDER BY p.id; END"
+
+              for argument, expected in
+                  [ 1, [ [ Some "1"; Some "3" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ]
+                    2, [ [ Some "1"; Some "0" ]; [ Some "2"; Some "3" ]; [ Some "3"; Some "0" ] ] ] do
+                  match handle session ($"CALL derived_shadow_count({argument})") |> snd with
+                  | ProcedureResult(_, rows) -> Expect.equal rows expected "the parameter supplies every derived k value"
+                  | other -> failtestf "unexpected correlated derived result: %A" other
+
           testCase "PARAMETERS describes procedure arguments and function returns"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
