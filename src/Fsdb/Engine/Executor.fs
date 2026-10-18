@@ -13141,6 +13141,7 @@ and private prepareLockingRead
     : Result<Map<string, Set<RowId>>, QueryResult> =
     let sourceItems =
         (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+        |> List.collect FromItem.leaves
 
     let physicalSource =
         function
