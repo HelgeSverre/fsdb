@@ -31,7 +31,8 @@ behavior remains open.
 An expanded native 8.4.11 replay used the same two-column oracle with
 `--legacy-range` and `--collation utf8mb4_ja_0900_as_cs_ks`, at token sizes
 one and two. U+F900–U+F9FF produced 1,536 searches per size, U+FA00–U+FAFF
-1,296, U+2F800–U+2FA1F 3,252, and U+3040–U+30FF 1,134. All 14,436
+1,296, U+2F800–U+2FA1F 3,252, U+3040–U+30FF 1,134, and U+3100–U+31FF
+1,440. All 17,316
 comparisons matched in both membership and relevance. Each range includes
 the oracle's natural, Boolean, and query-expansion searches. This covers
 individual characters in those ranges embedded in the oracle's two-column
