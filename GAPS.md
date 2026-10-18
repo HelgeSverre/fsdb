@@ -1737,8 +1737,17 @@ implementation effort:
    [EPSG 4030](torture/findings/2026-10-11-unspecified-wgs84-datum.md) uses
    WGS 84 ellipsoidal operations but refuses cross-SRS transforms without a
    datum shift. [Inverse projected longitude wrapping](torture/findings/2026-10-11-projected-longitude-wrap.md)
-   follows MySQL across geographic and projected targets. Geographic
-   [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
+   follows MySQL across geographic and projected targets.
+   Geographic [`ST_IsValid` for points, linework, and simple single-ring polygons](torture/findings/2026-10-16-geographic-validity.md)
+   now accepts the audited geographic shapes, including collections of them;
+   polygons with holes and multipolygons still need geodesic validity rules.
+   [Global and antipodal containment counterexamples](torture/findings/2026-10-16-geographic-global-containment.md)
+   now use Boost-shaped geographic winding and ring orientation; 3,600 random
+   global point probes and 1,200 random, vertex, and antipodal probes matched
+   MySQL 8.4.11. Two global `ST_IsValid` disagreements in the larger corpus
+   remain open, so broader geographic polygon validity still needs separate
+   validation.
+   Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)
    are covered for audited cases. [Point-to-polygon distance](torture/findings/2026-10-11-geographic-point-polygon-distance.md)
    covers audited holes, antimeridian crossings, and polar caps. [Line-to-polygon distance](torture/findings/2026-10-11-geographic-line-polygon-distance.md)
