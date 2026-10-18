@@ -424,6 +424,10 @@ when its point relation reports disjointness, so distance is not a substitute
 for that strategy. A finer polar-corner grid confines the sampled point
 divergence to four same-latitude points within `0.00001` degrees of one hole
 corner; adjacent grid points agree.
+The expanded [near-hole distance oracle](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
+finds 34 point-to-polygon distance mismatches across 189 points. Reversing
+ring traversal globally or only for polygon distance does not reduce that
+count without changing other MySQL-compatible distances.
 
 [`ST_DISTANCE_SPHERE` with a large finite radius](torture/findings/2026-10-17-spherical-radius-overflow.md)
 now retains finite and zero point-set distances and reports MySQL error 3049

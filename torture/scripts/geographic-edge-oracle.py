@@ -165,6 +165,12 @@ def main():
         hole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,3 1,3 3,1 3,1 1))"
         point_count = 0
         point_mismatches = []
+        point_distance_mismatches = []
+        def check_point_distance(coordinates, polygon):
+            expected = point_distance(mysql_connection, coordinates, polygon)
+            actual = point_distance(fsdb_connection, coordinates, polygon)
+            if abs(expected - actual) >= 0.01:
+                point_distance_mismatches.append((coordinates, polygon, expected, actual))
         for longitude in [1.00001, 1.001, 2.999]:
             for latitude in [1, 1.00001, 1.001, 1.01, 1.1, 1.5, 2, 2.5, 2.9, 2.999, 2.99999, 3, 3.00001]:
                 point_count += 1
@@ -173,6 +179,7 @@ def main():
                 actual = point_result(fsdb_connection, coordinates, hole)
                 if actual != expected:
                     point_mismatches.append((latitude, longitude, expected, actual))
+                check_point_distance(coordinates, hole)
         for latitude_shift in (40, 60, 70, 80, 85):
             polygon = (
                 f"POLYGON(({latitude_shift} 0,{latitude_shift} 4,"
@@ -190,7 +197,11 @@ def main():
                     actual = point_result(fsdb_connection, coordinates, polygon)
                     if actual != expected:
                         point_mismatches.append((latitude, longitude, expected, actual))
+                    check_point_distance(coordinates, polygon)
         print(f"{point_count} near-hole points; {len(point_mismatches)} point mismatches")
+        print(f"{point_count} near-hole point distances; {len(point_distance_mismatches)} mismatches")
+        for mismatch in point_distance_mismatches:
+            print("point distance", mismatch)
         for mismatch in point_mismatches:
             print("point", mismatch)
         polar_exterior = "POLYGON((85 0,85 4,89 4,89 0,85 0))"

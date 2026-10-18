@@ -250,6 +250,17 @@ native distance is about 71,223.12146 m. The trial was reverted. Globally
 symmetrizing the segment distance would change other MySQL-compatible cases;
 the polar ring-order result needs a narrower explanation.
 
+A broader point-distance replay now compares all 189 near-hole points in the
+maintained oracle with a `0.01` metre tolerance. The unchanged implementation
+has 34 distance mismatches, alongside the previously known one relation
+mismatch; the line relation corpus remains at 12 of 412. A polygon-only trial
+that took the minimum of each ring's forward and reversed segment distances
+still had 34 point-distance mismatches. It removed the standalone polar-ring
+`0.09536` metre error, but at `(73, 2.99999)` and `(83, 2.99999)` it changed
+nonzero distances to zero while MySQL reports approximately `0.31618` and
+`0.13485` metres. That trial was also reverted. The expanded distance corpus
+now exposes these tradeoffs before another geographic strategy change.
+
 A 49-point grid around the combined polar polygon found only the known
 `POINT(86 1.00001)` disagreement. A finer 35-point corner grid found four
 disagreements, all at latitude 86 and longitudes `1.000001`, `1.000002`,
