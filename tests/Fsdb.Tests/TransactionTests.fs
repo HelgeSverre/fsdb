@@ -2551,17 +2551,31 @@ let tests =
                       Expect.equal rows expected "the indexed filter selects only its matching rows"
                   | other -> failtestf "expected filtered frontier rows, got %A" other
 
-          testCase "IS NOT NULL excludes pending NULL secondary keys from limited writes"
+          testCase "indexed NULL filters and tied secondary keys schedule limited writes"
           <| fun _ ->
-              for verb in [ "UPDATE"; "DELETE" ] do
-                for pendingRank, shouldWait in [ "NULL", false; "0", true ] do
+              let cases =
+                  [ "IS NOT NULL", "ASC", "NULL", 4, false, [ 1; 2 ]
+                    "IS NOT NULL", "ASC", "0", 4, true, [ 4; 1 ]
+                    "IS NULL", "ASC", "NULL", 0, true, [ 0; 1 ]
+                    "IS NULL", "ASC", "NULL", 4, false, [ 1; 2 ]
+                    "IS NOT NULL", "ASC", "2", 0, true, [ 1; 0 ]
+                    "IS NOT NULL", "ASC", "2", 4, false, [ 1; 2 ]
+                    "IS NOT NULL", "DESC", "2", 0, false, [ 3; 2 ]
+                    "IS NOT NULL", "DESC", "2", 4, true, [ 3; 4 ] ]
+              for predicate, direction, pendingRank, pendingId, shouldWait, selected in cases do
+                for verb in [ "UPDATE"; "DELETE" ] do
                   let store = Fsdb.Storage.create ()
                   let setup = create 1 store
                   handle setup "CREATE TABLE tx_null_frontier(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
-                  handle setup "INSERT INTO tx_null_frontier VALUES(1,1,0),(2,2,0),(3,3,0)" |> ignore
+                  let initialRows =
+                      if predicate = "IS NULL" then
+                          "(1,NULL,0),(2,NULL,0),(3,3,0)"
+                      else "(1,1,0),(2,2,0),(3,3,0)"
+                  handle setup ("INSERT INTO tx_null_frontier VALUES" + initialRows) |> ignore
                   let owner, _ = handle (create 2 store) "BEGIN"
-                  let owner, inserted = handle owner ("INSERT INTO tx_null_frontier VALUES(4," + pendingRank + ",0)")
-                  Expect.equal inserted (Affected 1UL) "owner inserts before the visible frontier"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_null_frontier VALUES(%d,%s,0)" pendingId pendingRank)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a tied or filtered key"
                   let waiter, _ = handle (create 3 store) "BEGIN"
                   use started = new Threading.ManualResetEventSlim(false)
                   let waiting =
@@ -2570,7 +2584,7 @@ let tests =
                           let statement =
                               (if verb = "UPDATE" then "UPDATE tx_null_frontier SET n=n+1"
                                else "DELETE FROM tx_null_frontier")
-                              + " WHERE rank_value IS NOT NULL ORDER BY rank_value ASC LIMIT 2"
+                              + sprintf " WHERE rank_value %s ORDER BY rank_value %s LIMIT 2" predicate direction
                           handle waiter statement)
                   Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "NULL-filter writer starts"
                   let completedBeforeCommit = waiting.Wait(TimeSpan.FromMilliseconds 100.0)
@@ -2578,13 +2592,13 @@ let tests =
                   Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "NULL-filter writer completes"
                   let waiter, result = waiting.Result
                   Expect.equal completedBeforeCommit (not shouldWait) "NULL-filter wait matches MySQL"
-                  Expect.equal result (Affected 2UL) "two non-NULL rows change"
+                  Expect.equal result (Affected 2UL) "two matching rows change"
                   Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
                   match handle setup "SELECT id,n FROM tx_null_frontier ORDER BY id" |> snd with
                   | ResultSet(_, rows) ->
-                      let selected = if shouldWait then [ 4; 1 ] else [ 1; 2 ]
                       let expected =
-                          [ 1 .. 4 ]
+                          pendingId :: [ 1; 2; 3 ]
+                          |> List.sort
                           |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id selected))
                           |> List.map (fun id ->
                               [ Some(string id); Some(if List.contains id selected then "1" else "0") ])

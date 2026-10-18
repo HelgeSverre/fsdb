@@ -210,6 +210,26 @@ the maintained oracle, and the focused transaction regression agree for both
 verbs. The scheduler now skips a pending claim for this indexed `IS NOT NULL`
 case only when the known key is NULL.
 
+## Equal secondary-key frontiers
+
+A pending row can enter a limited write even when its secondary ordering key
+equals the visible frontier. With visible `(id,rank_value)` rows `(1,1)`,
+`(2,2)`, and `(3,3)`, a pending `(0,2)` enters `ORDER BY rank_value ASC LIMIT 2`
+ahead of `(2,2)`; pending `(4,2)` does not. Descending order reverses that
+tie: `(4,2)` enters the selected pair and `(0,2)` does not. The same rule
+applies to a nullable secondary key: among visible `(1,NULL)` and `(2,NULL)`,
+a pending `(0,NULL)` enters an `IS NULL` filtered ascending pair, while
+`(4,NULL)` does not. MySQL 8.4.11 confirms waits, affected counts, and final
+rows for both UPDATE and DELETE across all 12 combinations.
+
+The scheduler now compares the complete primary key when a pending secondary
+key ties the frontier. After a required wait, the mutation selector also uses
+that primary-key order to choose rows; waiting alone had still selected the
+wrong visible pair after the inserted row appeared. The tie rule applies when
+the ORDER BY columns cover a complete secondary index or a prefix of the
+primary index. An incomplete secondary-index prefix conservatively waits on
+equal keys because another index column may decide their order.
+
 An in-memory A/B/A check with 1,000 sequential inserts into a table with one
 secondary index measured warm trials around 186–205 ms on the previous and
 current revisions. The spread does not establish a precise cost difference;

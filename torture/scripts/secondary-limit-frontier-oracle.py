@@ -118,6 +118,71 @@ def main():
                         print(f"MySQL {version}: {verb} limit={limit} visible_rows={size} predicate={predicate or 'none'} inserted_rank={inserted_rank} wait={waited}", flush=True)
                     finally:
                         waiter.close()
+                tie_cases = (
+                    ("IS NULL", "ASC", None, 0, True, (0, 1)),
+                    ("IS NULL", "ASC", None, 4, False, (1, 2)),
+                    ("IS NOT NULL", "ASC", 2, 0, True, (1, 0)),
+                    ("IS NOT NULL", "ASC", 2, 4, False, (1, 2)),
+                    ("IS NOT NULL", "DESC", 2, 0, False, (3, 2)),
+                    ("IS NOT NULL", "DESC", 2, 4, True, (3, 4)),
+                )
+                for predicate, direction, pending_rank, pending_id, should_wait, selected in tie_cases:
+                    for verb in ("UPDATE", "DELETE"):
+                        waiter = connect(socket)
+                        try:
+                            with owner.cursor() as cursor:
+                                cursor.execute("DROP TABLE IF EXISTS target_tie")
+                                cursor.execute("CREATE TABLE target_tie(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))")
+                                if pending_rank is None:
+                                    cursor.execute("INSERT INTO target_tie VALUES(1,NULL,0),(2,NULL,0),(3,3,0)")
+                                else:
+                                    cursor.execute("INSERT INTO target_tie VALUES(1,1,0),(2,2,0),(3,3,0)")
+                                cursor.execute("BEGIN")
+                                cursor.execute("INSERT INTO target_tie VALUES(%s,%s,0)", (pending_id, pending_rank))
+                            with waiter.cursor() as cursor:
+                                cursor.execute("USE probe")
+                                cursor.execute("BEGIN")
+                            started = threading.Event()
+                            result = {}
+
+                            def write_tie():
+                                try:
+                                    with waiter.cursor() as cursor:
+                                        started.set()
+                                        command = "UPDATE target_tie SET n=n+1" if verb == "UPDATE" else "DELETE FROM target_tie"
+                                        cursor.execute(
+                                            command + f" WHERE rank_value {predicate} ORDER BY rank_value {direction} LIMIT 2"
+                                        )
+                                        result["affected"] = cursor.rowcount
+                                        cursor.execute("COMMIT")
+                                except Exception as error:
+                                    result["error"] = str(error)
+
+                            thread = threading.Thread(target=write_tie, daemon=True)
+                            thread.start()
+                            assert started.wait(2)
+                            thread.join(0.25)
+                            waited = thread.is_alive()
+                            owner.commit()
+                            thread.join(5)
+                            assert not thread.is_alive(), (predicate, direction, pending_id, result)
+                            assert result == {"affected": 2}, (predicate, direction, pending_id, result)
+                            assert waited == should_wait, (predicate, direction, pending_id, verb, waited)
+                            with owner.cursor() as cursor:
+                                cursor.execute("SELECT id,n FROM target_tie ORDER BY id")
+                                actual = cursor.fetchall()
+                            expected = tuple(
+                                (key, int(key in selected))
+                                for key in sorted((1, 2, 3, pending_id))
+                                if verb == "UPDATE" or key not in selected
+                            )
+                            assert actual == expected, (predicate, direction, pending_id, verb, actual, expected)
+                            print(
+                                f"MySQL {version}: {verb} secondary tie={predicate}/{direction} pending={pending_id},{pending_rank} wait={waited}",
+                                flush=True,
+                            )
+                        finally:
+                            waiter.close()
                 text_cases = (
                     ("utf8mb4_bin", "z", "id<='f'", False, ("b", "d")),
                     ("utf8mb4_bin", "a", "id<='f'", True, ("a", "b")),

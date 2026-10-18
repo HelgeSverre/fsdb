@@ -22245,6 +22245,44 @@ let evaluateRowPredicate
     |> Result.map (truthy >> (=) (Some true))
     |> Result.mapError Err
 
+/// Uses the primary key as the final ordering key when a limited write scans
+/// a complete visible index order.
+let private mutationPrimaryTieOrder (table: Table option) qualifier (orderBy: OrderKey list) limit =
+    match table, orderBy, limit with
+    | Some table, (_ :: _), Some _ ->
+        let named =
+            orderBy
+            |> List.choose (function
+                | Col name, direction -> Some(name, direction)
+                | QualifiedCol(owner, name), direction when equalsIgnoreCase owner qualifier ->
+                    Some(name, direction)
+                | _ -> None)
+        if named.Length <> orderBy.Length then []
+        else
+            let direction = named.Head |> snd
+            if named |> List.exists (fun (_, other) -> other <> direction) then []
+            else
+                let orderedNames = named |> List.map fst
+                let indexes = Storage.orderedIndexKeyColumns table
+                let matches (indexNames: string list) =
+                    indexNames.Length >= orderedNames.Length
+                    && List.forall2 equalsIgnoreCase
+                        (indexNames |> List.take orderedNames.Length) orderedNames
+                let completeOrder =
+                    indexes
+                    |> List.exists (fun (indexName, indexNames) ->
+                        matches indexNames
+                        && (equalsIgnoreCase indexName "PRIMARY"
+                            || indexNames.Length = orderedNames.Length))
+                if not completeOrder then []
+                else
+                    indexes
+                    |> List.tryPick (fun (indexName, names) ->
+                        if equalsIgnoreCase indexName "PRIMARY" then Some names else None)
+                    |> Option.defaultValue []
+                    |> List.map (fun name -> Col name, direction)
+    | _ -> []
+
 /// The physical rows a single-table `UPDATE`/`DELETE` actually mutates,
 /// retaining their stable identifiers for the storage write:
 /// every row `matches` (the `WHERE`, or everything when there's none),
@@ -22261,6 +22299,7 @@ let private selectMutationTargets
     (rows: (RowId * Value[]) seq)
     (matches: Value[] -> Result<bool, EvalError>)
     (orderBy: OrderKey list)
+    (tieOrder: OrderKey list)
     (limit: int option)
     : Result<(RowId * Value[]) list, EvalError> =
     let rows = trackExaminedRows rows
@@ -22280,14 +22319,23 @@ let private selectMutationTargets
         matchedRows ()
         |> Result.bind (fun matched ->
             let dirs = orderBy |> List.map snd
+            let tieDirs = tieOrder |> List.map snd
 
             matched
             |> traverse (fun ((_, row) as positioned) ->
                 orderBy
                 |> traverse (fun (e, _) -> evalOrderKey (ctxFor row) e)
-                |> Result.map (fun keys -> keys, positioned))
+                |> Result.bind (fun keys ->
+                    tieOrder
+                    |> traverse (fun (e, _) -> evalOrderKey (ctxFor row) e)
+                    |> Result.map (fun tieKeys -> keys, tieKeys, positioned)))
             |> Result.map (fun keyed ->
-                let ordered = keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) |> List.map snd
+                let ordered =
+                    keyed
+                    |> List.sortWith (fun (ka, ta, _) (kb, tb, _) ->
+                        let order = compareByOrderKeys dirs ka kb
+                        if order <> 0 then order else compareByOrderKeys tieDirs ta tb)
+                    |> List.map (fun (_, _, positioned) -> positioned)
 
                 match limit with
                 | Some count -> ordered |> List.truncate (max 0 count)
@@ -28928,7 +28976,8 @@ let rec executeAs
                 with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
-                    match selectMutationTargets ctxFor positionedRows check updateStmt.OrderBy (Option.map rowCount updateStmt.Limit) with
+                    let tieOrder = mutationPrimaryTieOrder tableRoot tableAlias updateStmt.OrderBy updateStmt.Limit
+                    match selectMutationTargets ctxFor positionedRows check updateStmt.OrderBy tieOrder (Option.map rowCount updateStmt.Limit) with
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok targetRows ->
                         let targetImages = targetRows |> Map.ofList
@@ -29340,7 +29389,8 @@ let rec executeAs
             match withSourceMetadataProbe (fun () -> whereMatches ctxFor probePredicate (probeRow columns)) with
             | Error(code, message) -> ids, Err(code, message)
             | Ok _ ->
-                match selectMutationTargets ctxFor positionedRows check deleteStmt.OrderBy (Option.map rowCount deleteStmt.Limit) with
+                let tieOrder = mutationPrimaryTieOrder tableRoot tableAlias deleteStmt.OrderBy deleteStmt.Limit
+                match selectMutationTargets ctxFor positionedRows check deleteStmt.OrderBy tieOrder (Option.map rowCount deleteStmt.Limit) with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok targetRows ->
                     let targetImages = targetRows |> Map.ofList
@@ -29852,6 +29902,10 @@ let transactionWriteTargets
                         table.Columns
                         |> List.find (fun column -> equalsIgnoreCase column.Name name)
                         |> fun column -> column.Type)
+                let primaryColumnIndices =
+                    primaryColumns
+                    |> List.map (fun name ->
+                        table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name))
                 let directions = orderedColumns |> List.map snd
                 let comparePart left right =
                     match left, right with
@@ -29888,6 +29942,12 @@ let transactionWriteTargets
                         columnIndices
                         |> List.choose (fun index -> orderedValue table.Columns.[index] row.[index])
                     if values.Length = columnIndices.Length then Some values else None
+                let storedPrimaryKey (row: Value[]) =
+                    let values =
+                        primaryColumnIndices
+                        |> List.choose (fun index -> orderedValue table.Columns.[index] row.[index])
+                    if values.Length = primaryColumnIndices.Length && not values.IsEmpty then Some values
+                    else None
                 let pending =
                     Storage.activeOrderedKeyClaims store database tableRef.Table indexName keyTypes primaryKeyTypes
                     |> List.map (fun (key, primaryKey, claim) ->
@@ -29898,6 +29958,16 @@ let transactionWriteTargets
                         match directions with
                         | first :: rest -> rest |> List.exists (fun direction -> direction <> first)
                         | [] -> false
+                    let completeIndexOrder =
+                        equalsIgnoreCase indexName "PRIMARY" || orderedColumns.Length = indexColumns.Length
+                    let primaryDirections = List.replicate primaryColumns.Length directions.Head
+                    let compareEntry (leftKey, leftPrimary) (rightKey, rightPrimary) =
+                        let order = compareOrdered leftKey rightKey directions
+                        if order <> 0 || not completeIndexOrder then order
+                        else
+                            match leftPrimary, rightPrimary with
+                            | Some left, Some right -> compareOrdered left right primaryDirections
+                            | _ -> 0
                     let hasRuntimeEffects =
                         where
                         |> Option.exists (Expression.exists (function
@@ -30005,7 +30075,7 @@ let transactionWriteTargets
                         let columns = table.Columns
                         let ctxFor =
                             contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None
-                        let matched = ResizeArray<OrderedIndexKeyPart list>()
+                        let matched = ResizeArray<OrderedIndexKeyPart list * OrderedIndexKeyPart list option>()
                         let mutable valid = true
 
                         Diagnostics.suppress (fun () ->
@@ -30014,7 +30084,7 @@ let transactionWriteTargets
                                     match storedKey row with
                                     | Some key ->
                                         match whereMatches ctxFor where row with
-                                        | Ok true -> matched.Add key
+                                        | Ok true -> matched.Add(key, storedPrimaryKey row)
                                         | Ok false -> ()
                                         | Error _ -> valid <- false
                                     | _ -> valid <- false)
@@ -30027,11 +30097,16 @@ let transactionWriteTargets
                            || (not (equalsIgnoreCase indexName "PRIMARY")
                                && not hasIndexedFilter && matched.Count / 2 < count) then allKeys
                         else
-                            let ordered = matched |> Seq.sortWith (fun left right -> compareOrdered left right directions) |> Seq.toArray
+                            let ordered = matched |> Seq.sortWith compareEntry |> Seq.toArray
                             let frontier = ordered.[count - 1]
                             pending
-                            |> List.choose (fun (key, _, claim) ->
-                                if compareOrdered key frontier directions < 0 then Some claim
+                            |> List.choose (fun (key, primary, claim) ->
+                                let order = compareOrdered key (fst frontier) directions
+                                if order < 0 then Some claim
+                                elif order > 0 then None
+                                elif not completeIndexOrder then Some claim
+                                elif primary.IsNone || (snd frontier).IsNone then Some claim
+                                elif compareEntry (key, primary) frontier < 0 then Some claim
                                 else None)
         | _ -> []
 
