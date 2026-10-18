@@ -113,8 +113,14 @@ Fsdb previously classified the shadowed form as non-updatable. The view
 rewrite now admits the local recursive source and removes its own binding
 name from the outer rewrite scope while expanding its seed and recursive
 branch. The focused regression checks metadata, UPDATE, and the accumulated
-physical row value for both variants. The native oracle covers 40 writable
-recursive-source layouts.
+physical row value for both variants.
+
+Two declaration-order follow-ups put `copied` before the local recursive
+`seq`. The first CTE re-reads the outer binding, while the later CTE shadows
+it and recursively reads itself. The second case carries `RAND()` through the
+outer CTE and compares it during the re-read, detecting a separate outer
+materialization. MySQL 8.4.11 and fsdb both mark these views updatable and
+change the target once; the maintained oracle now covers 42 layouts.
 
 More complex recursive/dependent source compositions, layered security, and
 other concurrent write shapes still need separate audits.

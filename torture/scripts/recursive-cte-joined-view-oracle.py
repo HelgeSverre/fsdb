@@ -186,6 +186,20 @@ def main():
                          "(WITH RECURSIVE local(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM local WHERE k<s.k) "
                          "SELECT k AS lookup_key FROM local ORDER BY k LIMIT 1) l ON TRUE "
                          "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_recursive_late_shadowed_cte",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH RECURSIVE copied AS (SELECT k FROM seq WHERE k=s.k), "
+                         "seq(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM seq WHERE k<s.k) "
+                         "SELECT copied.k AS lookup_key FROM copied JOIN seq ON seq.k=copied.k) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_recursive_late_shadowed_volatile_cte",
+                         "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
+                         "SELECT k+1,r FROM seq WHERE k<3) "
+                         "SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH RECURSIVE copied AS (SELECT k FROM seq WHERE k=s.k AND r=s.r), "
+                         "seq(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM seq WHERE k<s.k) "
+                         "SELECT copied.k AS lookup_key FROM copied JOIN seq ON seq.k=copied.k) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
                         ("recursive_lateral_late_shadowed_local_cte",
                          f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
                          "(WITH copied AS (SELECT k FROM seq WHERE k=s.k), "
