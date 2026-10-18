@@ -381,15 +381,26 @@ the selective 1,004-row fixture reduces a residual from 6,030 calls to
 fewer than 80. [Exact decimal expression keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-decimal-expression-lookup)
 reduce `d.k+0.00=o.x` from 5,005 to seven calls. [Finite DOUBLE-domain keys](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-lookup)
 now reduce `d.k+0e0=o.x` from 5,005 to seven calls too. DECIMAL and integer
-bounds use the same approximate comparison key, while string and non-finite
-floating lookups remain open. The audited BIGINT/DOUBLE expression-provenance
-comparison at 2⁵³ now matches MySQL.
+bounds and fully numeric finite strings use the same approximate comparison
+key; [positive `IN` lists](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#correlated-double-expression-in-candidates)
+of compatible stable outer bounds now union those keys. Malformed strings
+and non-finite floating lookups remain open. The
+audited BIGINT/DOUBLE expression-provenance comparison at 2⁵³ now matches MySQL.
 [Finite DOUBLE-expression ranges](torture/findings/2026-10-15-correlated-materialized-functional-equality.md#statement-local-finite-double-expression-ranges)
 now use ordered statement-local cuts for numeric correlated inequalities and
 BETWEEN, including complete OR branches; the narrow 1,000-row profile uses
 11 residual calls across four outer rows. The audited decimal-to-DOUBLE
-halfway bound at 2⁵³+1 also follows MySQL's single rounding. String and
-non-finite range bounds still scan.
+halfway bound at 2⁵³+1 also follows MySQL's single rounding. Fully numeric
+finite string bounds use the same cuts; malformed strings and non-finite
+range bounds still scan.
+[Indexed physical and pass-through DOUBLE columns](torture/findings/2026-10-17-correlated-physical-double-string.md)
+also use fully numeric finite correlated string bounds for equality,
+narrow ranges, and [positive `IN` lists](torture/findings/2026-10-17-correlated-physical-double-string.md#correlated-positive-in-bounds),
+leaving the original predicate to decide row membership.
+The [indexed malformed and overflowing string comparison follow-up](torture/findings/2026-10-17-correlated-physical-double-string.md#numeric-conversion-warnings-and-indexed-malformed-bounds)
+also matches audited plan-dependent warning counts and maximum-DOUBLE row
+membership for equality and positive `IN`; ambiguous overflow text and non-finite ranges retain
+the conservative scan path.
 
 ## 3. Built-in functions
 

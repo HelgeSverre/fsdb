@@ -5812,6 +5812,12 @@ let private isIntegerColumn column = column |> Option.exists (_.Type >> isIntege
 let private compareWithColumnDomain
     (leftExpr: Expr) (leftColumn: ColumnDef option) left
     (rightExpr: Expr) (rightColumn: ColumnDef option) right =
+    match left, right with
+    | VDouble _, VString text
+    | VString text, VDouble _ ->
+        let _, truncated = Value.coerceLeadingDouble text
+        if truncated then Diagnostics.numericConversion "DOUBLE" text
+    | _ -> ()
     // MySQL keeps an integer column exact against a constant DOUBLE
     // expression, but compares it approximately with a row-derived DOUBLE.
     let rowDependent expression =
@@ -6614,21 +6620,23 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     xs
                     |> traverse eval
                     |> Result.bind (fun values ->
-                        List.zip xs values
-                        |> traverse (fun (candidateExpr, candidate) ->
-                            comparisonResult
-                                ctx
-                                e
-                                (tryColumnDefForExpr ctx e)
-                                ve
-                                candidateExpr
-                                (tryColumnDefForExpr ctx candidateExpr)
-                                Eq
-                                candidate)
-                        |> Result.map (fun comparisons ->
-                            if comparisons |> List.exists ((=) (VInt 1L)) then VInt 1L
-                            elif comparisons |> List.exists ((=) VNull) then VNull
-                            else VInt 0L)))
+                        let rec compareUntilMatch sawNull = function
+                            | [] -> Ok(if sawNull then VNull else VInt 0L)
+                            | (candidateExpr, candidate) :: rest ->
+                                match comparisonResult
+                                          ctx
+                                          e
+                                          (tryColumnDefForExpr ctx e)
+                                          ve
+                                          candidateExpr
+                                          (tryColumnDefForExpr ctx candidateExpr)
+                                          Eq
+                                          candidate with
+                                | Error error -> Error error
+                                | Ok(VInt 1L) -> Ok(VInt 1L)
+                                | Ok VNull -> compareUntilMatch true rest
+                                | Ok _ -> compareUntilMatch sawNull rest
+                        List.zip xs values |> compareUntilMatch false))
     | InSubquery((Row _ as e), select) ->
         evalRowOperand ctx e
         |> Result.bind (fun value ->
@@ -15779,6 +15787,13 @@ and private tryProjectedPhysicalCorrelatedInRowIds store (projection: PhysicalPr
     let indexedColumn expression =
         tryCorrelatedInnerColumn probeSource expression
         |> Option.map (fun name -> name, None)
+    let doubleBound = function
+        | VNull -> Some VNull
+        | VString _ as value -> Some value
+        | (VDouble _ | VInt _ | VUInt _ | VDecimal _ | VBit _) as value ->
+            let number = Value.toDouble value
+            if System.Double.IsFinite number then Some(VDouble number) else None
+        | _ -> None
     let boundValue (name, _) expression =
         let value =
             match expression with
@@ -15792,10 +15807,14 @@ and private tryProjectedPhysicalCorrelatedInRowIds store (projection: PhysicalPr
             |> Option.bind (fun index ->
                 let outputColumn = projection.OutputColumns.[index]
                 tryPhysicalProjectionColumn projection name
-                |> Option.bind (equalityMembershipDomain store)
-                |> Option.filter (fun domain ->
-                    compatibleCorrelatedMembershipBound context outputColumn domain expression value)
-                |> Option.map (fun _ -> value)))
+                |> Option.bind (fun physicalColumn ->
+                    match physicalColumn.Type with
+                    | TDouble _ -> doubleBound value
+                    | _ ->
+                        equalityMembershipDomain store physicalColumn
+                        |> Option.filter (fun domain ->
+                            compatibleCorrelatedMembershipBound context outputColumn domain expression value)
+                        |> Option.map (fun _ -> value))))
 
     let candidateIds (probe: IndexInProbe) =
         let names = probe.Columns |> List.map fst
@@ -16383,18 +16402,27 @@ and private tryMaterializedCorrelatedLookup
                 | VInt _ | VUInt _ | VDecimal _ | VBit _ as value ->
                     let number = Value.toDouble value
                     if System.Double.IsFinite number then Some number else None
+                | VString text when not (System.String.IsNullOrWhiteSpace text) ->
+                    match System.Double.TryParse(
+                        text,
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture
+                    ) with
+                    | true, number when System.Double.IsFinite number -> Some number
+                    | _ -> None
                 | _ -> None
 
             // Numeric bounds compare with a DOUBLE result in the approximate
             // domain, including exact values that round to the same double.
-            // Text bounds retain the scan because their coercion is broader.
+            // Fully numeric strings use that domain too; strings requiring a
+            // truncated conversion retain the scan and its warning count.
             let doubleExpressionCandidates predicate =
                 let doubleKey = function
                     | VDouble number when System.Double.IsFinite number -> Some(VDouble number)
                     | _ -> None
                 let probeKey value =
                     match value with
-                    | VInt _ | VUInt _ | VDecimal _ | VBit _ as value ->
+                    | VInt _ | VUInt _ | VDecimal _ | VBit _ | VString _ as value ->
                         finiteNumericDouble value |> Option.map VDouble
                     | value -> doubleKey value
 
@@ -16417,11 +16445,35 @@ and private tryMaterializedCorrelatedLookup
                                 doubleLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
                             | _ -> None)
 
+                let inCandidate indexed bounds =
+                    if not (rowLocalExpression indexed) then
+                        None
+                    else
+                        let boundValue = function
+                            | Cast(LiteralValue VNull, _) -> Some VNull
+                            | expression -> tryCorrelatedProbeValue probeSource context expression
+                        bounds
+                        |> List.map boundValue
+                        |> tryAllSome
+                        |> Option.bind (fun values ->
+                            if values |> List.forall (fun value -> value = VNull || (probeKey value |> Option.isSome)) then
+                                doubleLookup indexed
+                                |> Option.bind (fun lookup ->
+                                    values
+                                    |> List.map (fun value -> lookup [ value ])
+                                    |> tryAllSome
+                                    |> Option.map (fun groups ->
+                                        let seen = HashSet<Value[]>(HashIdentity.Reference)
+                                        groups |> List.collect id |> List.filter seen.Add))
+                            else
+                                None)
+
                 predicate
                 |> optionalConjuncts
                 |> List.choose (function
                     | BinOp(Eq, left, right) ->
                         candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | In(indexed, bounds) -> inCandidate indexed bounds
                     | _ -> None)
                 |> intersectSharedRows
 
