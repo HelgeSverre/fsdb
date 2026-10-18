@@ -63,7 +63,11 @@ def main():
                           (2, 3, "id IN (1,2,4)", True, 0, "UPDATE"),
                           (2, 3, "id IN (1,2,4)", True, 0, "DELETE"),
                           (2, 3, "id NOT IN (4,5)", False, 0, "UPDATE"),
-                          (2, 3, "id NOT IN (4,5)", False, 0, "DELETE")]
+                          (2, 3, "id NOT IN (4,5)", False, 0, "DELETE"),
+                          (2, 3, "rank_value IS NOT NULL", True, 0, "UPDATE"),
+                          (2, 3, "rank_value IS NOT NULL", True, 0, "DELETE"),
+                          (2, 3, "rank_value IS NOT NULL", False, None, "UPDATE"),
+                          (2, 3, "rank_value IS NOT NULL", False, None, "DELETE")]
                 for limit, size, predicate, should_wait, inserted_rank, verb in cases:
                     waiter = connect(socket)
                     try:
@@ -105,6 +109,7 @@ def main():
                             cursor.execute("SELECT id,n FROM target ORDER BY id")
                             final_rows = cursor.fetchall()
                         selected_ids = ((size + 1, 1) if predicate == "id IN (1,2,4)"
+                                        or (predicate == "rank_value IS NOT NULL" and inserted_rank == 0)
                                         else tuple(range(1, limit + 1)))
                         expected_rows = (tuple((i, int(i in selected_ids)) for i in range(1, size + 2))
                                          if verb == "UPDATE" else

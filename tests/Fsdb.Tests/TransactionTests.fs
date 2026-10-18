@@ -2551,6 +2551,46 @@ let tests =
                       Expect.equal rows expected "the indexed filter selects only its matching rows"
                   | other -> failtestf "expected filtered frontier rows, got %A" other
 
+          testCase "IS NOT NULL excludes pending NULL secondary keys from limited writes"
+          <| fun _ ->
+              for verb in [ "UPDATE"; "DELETE" ] do
+                for pendingRank, shouldWait in [ "NULL", false; "0", true ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_null_frontier(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  handle setup "INSERT INTO tx_null_frontier VALUES(1,1,0),(2,2,0),(3,3,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted = handle owner ("INSERT INTO tx_null_frontier VALUES(4," + pendingRank + ",0)")
+                  Expect.equal inserted (Affected 1UL) "owner inserts before the visible frontier"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let statement =
+                              (if verb = "UPDATE" then "UPDATE tx_null_frontier SET n=n+1"
+                               else "DELETE FROM tx_null_frontier")
+                              + " WHERE rank_value IS NOT NULL ORDER BY rank_value ASC LIMIT 2"
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "NULL-filter writer starts"
+                  let completedBeforeCommit = waiting.Wait(TimeSpan.FromMilliseconds 100.0)
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the pending insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "NULL-filter writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal completedBeforeCommit (not shouldWait) "NULL-filter wait matches MySQL"
+                  Expect.equal result (Affected 2UL) "two non-NULL rows change"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                  match handle setup "SELECT id,n FROM tx_null_frontier ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let selected = if shouldWait then [ 4; 1 ] else [ 1; 2 ]
+                      let expected =
+                          [ 1 .. 4 ]
+                          |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id selected))
+                          |> List.map (fun id ->
+                              [ Some(string id); Some(if List.contains id selected then "1" else "0") ])
+                      Expect.equal rows expected "NULL-filter write selects the MySQL rows"
+                  | other -> failtestf "expected NULL-filter rows, got %A" other
+
           testCase "indexed text filters classify pending secondary keys"
           <| fun _ ->
               let cases =

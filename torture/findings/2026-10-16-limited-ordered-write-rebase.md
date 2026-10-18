@@ -201,6 +201,15 @@ the selected pair under `utf8mb4_0900_ai_ci`; `IN ('b','d','z')` excludes it
 under the latter collation. The native oracle and transaction regression
 cover both write verbs, wait decisions, and resulting rows.
 
+An indexed `IS NOT NULL` filter can likewise rule out a pending row whose
+secondary ordering key is NULL. With visible ranks 1, 2, and 3, a pending
+`(id,rank_value)=(4,NULL)` does not delay an ascending `LIMIT 2` UPDATE or
+DELETE filtered by `rank_value IS NOT NULL`; both select rows 1 and 2. If the
+pending rank is 0, both writes wait and then select rows 4 and 1. MySQL 8.4.11,
+the maintained oracle, and the focused transaction regression agree for both
+verbs. The scheduler now skips a pending claim for this indexed `IS NOT NULL`
+case only when the known key is NULL.
+
 An in-memory A/B/A check with 1,000 sequential inserts into a table with one
 secondary index measured warm trials around 186–205 ms on the previous and
 current revisions. The spread does not establish a precise cost difference;

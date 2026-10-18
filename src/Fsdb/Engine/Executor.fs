@@ -29971,6 +29971,10 @@ let transactionWriteTargets
                                                 comparison candidate |> Option.exists ((<>) 0)))
                                 | None -> false
                             | None -> false
+                        let excludesNonNull column =
+                            columnName column
+                            |> Option.bind (fun name -> keyFor name ordered primary)
+                            |> Option.exists (function OrderedNull -> true | _ -> false)
                         where
                         |> optionalConjuncts
                         |> List.exists (function
@@ -29986,6 +29990,7 @@ let transactionWriteTargets
                                 excludes left right false || excludes right left true
                             | In(column, candidates) -> excludesIn column candidates false
                             | Not(In(column, candidates)) -> excludesIn column candidates true
+                            | IsNotNull column -> excludesNonNull column
                             | _ -> false)
 
                     let pending =
