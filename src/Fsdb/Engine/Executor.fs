@@ -16479,24 +16479,58 @@ and private tryMaterializedCorrelatedLookup
                                     |> Some
                                 | _ -> None))
 
-                predicate
-                |> optionalConjuncts
-                |> List.collect (rangePredicatesFor indexed bound)
-                |> List.choose (fun range ->
-                    let bounds = [ range.Lower; range.Upper ] |> List.choose id
-                    bounds
-                    |> List.tryHead
-                    |> Option.bind (fun ((boundExpression, _), _) ->
-                        resolveOperandCollation "="
-                            (collationOperand (rowContext [||]) range.Column None)
-                            (collationOperand context boundExpression (tryColumnDefForExpr context boundExpression))
-                        |> Result.toOption)
-                    |> Option.bind (fun collation ->
-                        rangeLookup range.Column collation
-                        |> Option.bind (fun lookup ->
-                            let value = Option.map (fun ((_, value), inclusive) -> value, inclusive)
-                            lookup (value range.Lower) (value range.Upper))))
-                |> intersectSharedRows
+                let rangeCandidates =
+                    predicate
+                    |> optionalConjuncts
+                    |> List.collect (rangePredicatesFor indexed bound)
+                    |> List.choose (fun range ->
+                        let bounds = [ range.Lower; range.Upper ] |> List.choose id
+                        bounds
+                        |> List.tryHead
+                        |> Option.bind (fun ((boundExpression, _), _) ->
+                            resolveOperandCollation "="
+                                (collationOperand (rowContext [||]) range.Column None)
+                                (collationOperand context boundExpression (tryColumnDefForExpr context boundExpression))
+                            |> Result.toOption)
+                        |> Option.bind (fun collation ->
+                            rangeLookup range.Column collation
+                            |> Option.bind (fun lookup ->
+                                let value = Option.map (fun ((_, value), inclusive) -> value, inclusive)
+                                lookup (value range.Lower) (value range.Upper))))
+
+                let likeCandidates =
+                    predicate
+                    |> optionalConjuncts
+                    |> List.choose (function
+                        | Like(expression, patternExpression, _, escape) ->
+                            match indexed expression, bound patternExpression with
+                            | Some _, Some(_, VNull) -> Some []
+                            | Some expression, Some(_, VString pattern) ->
+                                resolveOperandCollation "like"
+                                    (collationOperand (rowContext [||]) expression None)
+                                    (collationOperand context patternExpression (tryColumnDefForExpr context patternExpression))
+                                |> Result.toOption
+                                |> Option.filter (fun collation ->
+                                    equalsIgnoreCase collation.Name "utf8mb4_0900_bin"
+                                    || equalsIgnoreCase collation.Name "utf8mb4_bin")
+                                |> Option.bind (fun collation ->
+                                    let prefix = likeLiteralPrefix (escape |> Option.defaultValue '\\') pattern
+                                    if prefix.Length = 0 || (Charset.tryEncodeStrict "utf8mb4" prefix).IsNone then None
+                                    else
+                                        let lower =
+                                            if equalsIgnoreCase collation.Name "utf8mb4_bin" then
+                                                likePadSpaceLowerBound prefix
+                                            else Some prefix
+                                        rangeLookup expression collation
+                                        |> Option.bind (fun lookup ->
+                                            lookup
+                                                (lower |> Option.map (fun value -> VString value, true))
+                                                (likePrefixUpperBound prefix
+                                                 |> Option.map (fun value -> VString value, false))))
+                            | _ -> None
+                        | _ -> None)
+
+                rangeCandidates @ likeCandidates |> intersectSharedRows
 
             let equalityCandidates predicate =
                 let equalities = correlatedProbeEqualities probeSource predicate (Some context) |> Option.defaultValue []
@@ -16784,6 +16818,12 @@ and private tryCorrelatedSourceLookup
 
     let hasLikePredicate = whereExpr |> Option.exists hasLikeBranch
 
+    let hasExpressionLikePredicate =
+        whereExpr
+        |> Option.exists (Expression.exists (function
+            | Like(FuncCall _, _, _, _) -> true
+            | _ -> false))
+
     let physicalIntersection () =
         if hasRangePredicate || hasFunctionalEqualityPredicate || hasNullTestPredicate || hasLikePredicate then
             tryProjectedPhysicalCorrelatedIntersectionLookup store registry dbName source whereExpr outer
@@ -16908,7 +16948,9 @@ and private tryCorrelatedSourceLookup
         |> chooseWithMembership
     | None, FromSubquery _ ->
         (if hasLikePredicate then
-             tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
+             (if hasExpressionLikePredicate then materializedLookup () else None)
+             |> Option.orElseWith (fun () ->
+                 tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer)
              |> Option.orElseWith (fun () ->
                  tryProjectedPhysicalCorrelatedLikeLookup store registry dbName source whereExpr outer)
              |> Option.orElseWith materializedLookup

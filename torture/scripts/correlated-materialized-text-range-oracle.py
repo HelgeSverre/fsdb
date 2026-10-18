@@ -74,6 +74,20 @@ def main():
                         )
                         actual = tuple(count for _, count in cursor.fetchall())
                         assert actual == expected, (predicate, actual, expected)
+                    cursor.execute("CREATE TABLE like_bounds(id INT PRIMARY KEY,p VARCHAR(20) COLLATE utf8mb4_bin)")
+                    cursor.execute("INSERT INTO like_bounds VALUES(1,'word99%'),(2,'word1%'),(3,NULL),(4,'%')")
+                    like_cases = [
+                        ("LOWER(d.k) LIKE o.p", (11, 111, 0, 1000)),
+                        ("LOWER(d.k) LIKE o.p OR d.id=2", (12, 112, 1, 1000)),
+                    ]
+                    for predicate, expected in like_cases:
+                        cursor.execute(
+                            "SELECT o.id,(SELECT COUNT(*) FROM "
+                            "(SELECT DISTINCT id,k FROM inner_rows) d "
+                            f"WHERE {predicate}) FROM like_bounds o ORDER BY o.id"
+                        )
+                        actual = tuple(count for _, count in cursor.fetchall())
+                        assert actual == expected, (predicate, actual, expected)
                     cursor.execute("CREATE TABLE upper_bounds(id INT PRIMARY KEY,x VARCHAR(20) COLLATE utf8mb4_bin)")
                     cursor.execute("INSERT INTO upper_bounds VALUES(1,'word1')")
                     cursor.execute(
@@ -106,7 +120,7 @@ def main():
                         "FROM accent_bounds o"
                     )
                     assert cursor.fetchone() == (2,), "mixed per-member comparison collations"
-                    print(f"MySQL {version}: {len(cases)} materialized text range/IN cases, upper bound, and accent cases match")
+                    print(f"MySQL {version}: {len(cases)} materialized text range/IN cases, {len(like_cases)} LIKE cases, upper bound, and accent cases match")
             finally:
                 if connection:
                     connection.close()

@@ -13230,7 +13230,7 @@ let tests =
                             | other -> failtestf "expected materialized text IN matches, got %A" other
                             Expect.isLessThan calls 80 (source + " " + predicate + " bounds residual work")
 
-                testCase "materialized correlated text expression ranges bound residual work"
+                testCase "materialized correlated text expression ranges and LIKE prefixes bound residual work"
                 <| fun _ ->
                     let mutable calls = 0
                     let registry =
@@ -13287,6 +13287,29 @@ let tests =
                     match run store registry accentSql with
                     | ResultSet(_, [ [ Some "2" ] ]) -> ()
                     | other -> failtestf "expected accent-insensitive range candidates, got %A" other
+
+                    runDefault store "CREATE TABLE like_bounds(id INT PRIMARY KEY,p VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO like_bounds VALUES(1,'word99%'),(2,'word1%'),(3,NULL)" |> ignore
+                    for predicate, expected in
+                        [ "LOWER(d.k) LIKE o.p", [ 11; 111 ]
+                          "LOWER(d.k) LIKE o.p OR d.id=2", [ 12; 112 ] ] do
+                        calls <- 0
+                        let sql =
+                            "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM text_range_rows) d "
+                            + "WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                            + "FROM like_bounds o WHERE o.id<=2 ORDER BY o.id"
+                        match run store registry sql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual (expected |> List.map Some) predicate
+                        | other -> failtestf "expected materialized LIKE matches for %s, got %A" predicate other
+                        Expect.isLessThan calls 150 (predicate + " must use the binary prefix range")
+                    let nullLike =
+                        "SELECT (SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM text_range_rows) d "
+                        + "WHERE LOWER(d.k) LIKE o.p) FROM like_bounds o WHERE o.id=3"
+                    match run store registry nullLike with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected NULL correlated pattern to reject matches, got %A" other
 
                 testCase "materialized correlated decimal expressions key exact DOUBLE and VARCHAR bounds"
                 <| fun _ ->

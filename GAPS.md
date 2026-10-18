@@ -237,6 +237,10 @@ complete OR branches union their bounded candidates and retain other matches.
 The original residual
 probe evaluated 2,024 rows for two selective prefixes and a NULL pattern;
 the focused regression now bounds residual work while checking the same rows.
+[Binary-collated `LIKE` prefixes over stable materialized text expressions](torture/findings/2026-10-18-correlated-materialized-text-expression-like.md)
+also use statement-local expression ranges for audited function expressions,
+including complete OR branches. NULL outer patterns yield empty candidates;
+the original predicate still checks rows in each candidate range.
 [Direct materialized `IS NULL` and `IS NOT NULL` predicates](torture/findings/2026-10-15-correlated-materialized-null.md)
 reuse statement-local NULL or non-NULL buckets, including complete OR unions.
 [Physical and pass-through correlated `IS NULL` and `IS NOT NULL` predicates](torture/findings/2026-10-15-correlated-physical-null.md)
