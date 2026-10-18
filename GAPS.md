@@ -901,7 +901,10 @@ also remain scoped across both writable views in audited two-target UPDATEs.
 An [outer-join two-view oracle](torture/findings/2026-10-18-two-joined-view-outer-writes.md)
 now also matches MySQL for eight LEFT/RIGHT UPDATE cases with matched or
 missing view rows, shared internal aliases, grouped lateral read sources,
-and atomic `CHECK OPTION` rejection.
+atomic `CHECK OPTION` rejection, and three contended rebases. Joined updates
+now claim every assigned writable view's physical target before taking their
+transaction snapshot, including a right-only row that previously failed
+COMMIT with 1205 after the holder released its lock.
 Grouped derived aliases and dependent `LATERAL` aliases now also stay scoped
 across both writable views, including an atomic CHECK OPTION rejection and a
 contended two-target rebase; broader grouped dependency trees remain unaudited.

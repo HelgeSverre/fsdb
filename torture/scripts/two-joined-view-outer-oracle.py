@@ -4,6 +4,7 @@ import pathlib
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 
 import pymysql
@@ -31,6 +32,33 @@ def execute(connection, sql):
             return cursor.rowcount
     except pymysql.MySQLError as error:
         return "error", error.args
+
+
+def contended_update(owner, waiter_options, table, row_id, sql):
+    waiter = connect(**waiter_options)
+    outcome = {}
+    try:
+        assert execute(waiter, "USE probe") == 0
+        assert execute(owner, "BEGIN") == 0
+        assert execute(owner, f"UPDATE {table} SET n=n+10 WHERE id={row_id}") == 1
+        assert execute(waiter, "BEGIN") == 0
+
+        def run_waiter():
+            outcome["affected"] = execute(waiter, sql)
+            if not isinstance(outcome["affected"], tuple):
+                outcome["commit"] = execute(waiter, "COMMIT")
+
+        thread = threading.Thread(target=run_waiter, daemon=True)
+        thread.start()
+        thread.join(0.2)
+        waited = thread.is_alive()
+        assert execute(owner, "COMMIT") == 0
+        thread.join(5)
+        assert not thread.is_alive(), (sql, outcome)
+        assert outcome["affected"] in (1, 2) and outcome["commit"] == 0, (sql, outcome)
+        return waited, outcome["affected"]
+    finally:
+        waiter.close()
 
 
 def main():
@@ -127,7 +155,26 @@ def main():
                     query = f"SELECT id,n FROM {table} ORDER BY id"
                     expected, actual = (execute(connection, query) for connection in connections)
                     assert actual == expected, (rejected, query, expected, actual)
-                print(f"MySQL 8.4.11: {len(cases)} two-view outer UPDATE cases and atomic CHECK OPTION matched")
+                contended = [
+                    ("a", 1, "UPDATE va_complex va LEFT JOIN vb_complex vb ON va.link_id=vb.link_id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1"),
+                    ("a", 2, "UPDATE va_complex va LEFT JOIN vb_complex vb ON va.link_id=vb.link_id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=2"),
+                    ("b", 3, "UPDATE va_complex va RIGHT JOIN vb_complex vb ON va.link_id=vb.link_id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.id=3"),
+                ]
+                for table, row_id, sql in contended:
+                    expected = contended_update(mysql_connection, {"unix_socket": mysql_socket}, table, row_id, sql)
+                    actual = contended_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, table, row_id, sql)
+                    assert expected == actual and expected[0], (sql, expected, actual)
+                    for target in ("a", "b"):
+                        query = f"SELECT id,n FROM {target} ORDER BY id"
+                        expected_rows, actual_rows = (execute(connection, query) for connection in connections)
+                        assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
+                print(
+                    f"MySQL 8.4.11: {len(cases)} two-view outer UPDATE cases, atomic CHECK OPTION, "
+                    f"and {len(contended)} contended rebases matched"
+                )
             finally:
                 if fsdb_connection:
                     fsdb_connection.close()

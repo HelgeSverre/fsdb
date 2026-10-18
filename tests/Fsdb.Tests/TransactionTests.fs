@@ -2588,6 +2588,31 @@ let tests =
               match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
               | ResultSet(_, [ [ Some "31"; Some "31" ] ]) -> ()
               | result -> failtestf "expected both rebased grouped view values, got %A" result
+              Expect.equal (handle session "INSERT INTO tx_dual_b VALUES(3,40)" |> snd) (Affected 1UL) "unmatched right view row creates"
+              Expect.equal (handle session "INSERT INTO tx_dual_link VALUES(3)" |> snd) (Affected 1UL) "unmatched right view link creates"
+              let rightOwner, _ = handle (create 12 store) "BEGIN"
+              let rightOwner, heldRight = handle rightOwner "UPDATE tx_dual_b SET n=n+10 WHERE id=3"
+              Expect.equal heldRight (Affected 1UL) "owner holds the right-only physical target"
+              let rightWaiter, _ = handle (create 13 store) "BEGIN"
+              use rightStarted = new Threading.ManualResetEventSlim(false)
+              let rightWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      rightStarted.Set()
+                      handle rightWaiter
+                          ("UPDATE tx_dual_va_grouped_lateral va RIGHT JOIN tx_dual_vb_grouped_lateral vb "
+                           + "ON va.link_id=vb.link_id SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.id=3"))
+              Expect.isTrue (rightStarted.Wait(TimeSpan.FromSeconds 1.0)) "right-only view writer starts"
+              Expect.isFalse (rightWaiting.Wait(TimeSpan.FromMilliseconds 100.0)) "right-only view writer waits for held row"
+              Expect.equal (handle rightOwner "COMMIT" |> snd) (Affected 0UL) "right-row owner commits"
+              Expect.isTrue (rightWaiting.Wait(TimeSpan.FromSeconds 5.0)) "right-only view writer resumes"
+              let rightWaiter, rightResult = rightWaiting.Result
+              Expect.equal rightResult (Affected 1UL) "right-only physical row rebases"
+              Expect.equal (handle rightWaiter "COMMIT" |> snd) (Affected 0UL) "right-only view writer commits"
+              match handle session "SELECT n FROM tx_dual_b WHERE id=3" |> snd with
+              | ResultSet(_, [ [ Some "51" ] ]) -> ()
+              | result -> failtestf "expected rebased right-only row, got %A" result
+              Expect.equal (handle session "DELETE FROM tx_dual_b WHERE id=3" |> snd) (Affected 1UL) "right-only test row removes"
+              Expect.equal (handle session "DELETE FROM tx_dual_link WHERE id=3" |> snd) (Affected 1UL) "right-only test link removes"
               handle session "UPDATE tx_dual_a SET n=16" |> ignore
               handle session "UPDATE tx_dual_b SET n=26" |> ignore
               for sql in

@@ -30445,18 +30445,20 @@ let transactionWriteTargets
         | None -> targets update.From update.Where |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
         let update = writableViewFirst store dbName update
-        let viewDatabase = update.From.Database |> Option.defaultValue dbName
-
-        let viewTargets =
-            tryUpdatableView store viewDatabase update.From.Table
+        let viewTargetFor (source: TableRef) allowUnqualified =
+            let viewDatabase = source.Database |> Option.defaultValue dbName
+            let resolvedView =
+                if source.Database.IsNone && Set.contains (source.Table.ToLowerInvariant()) cteNames then None
+                else tryUpdatableView store viewDatabase source.Table
+            resolvedView
             |> Option.bind (fun view ->
-                let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
+                let viewQualifier = source.Alias |> Option.defaultValue source.Table
                 let viewAssignments =
                     update.Assignments
                     |> List.filter (fun assignment ->
                         match assignment.Table with
                         | Some owner -> equalsIgnoreCase owner viewQualifier
-                        | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+                        | None -> allowUnqualified && Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
                 viewAssignments
                 |> traverse (fun assignment ->
                     Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
@@ -30495,9 +30497,13 @@ let transactionWriteTargets
                         |> Option.map (fun target -> view, target)
                     | _ -> None))
 
-        match viewTargets with
+        match viewTargetFor update.From true with
         | Some(view, target) ->
             let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
+            let otherViewTargets =
+                update.Joins
+                |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
+                |> List.choose (function FromTable source -> viewTargetFor source false |> Option.map snd | _ -> None)
             let outerTables =
                 update.Joins
                 |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
@@ -30521,7 +30527,7 @@ let transactionWriteTargets
                             match owners with
                             | [ (table, _) ] -> Some(table.Alias |> Option.defaultValue table.Table)
                             | _ -> None)
-            target :: joinedTargets update.From update.Joins externalNames None
+            target :: (otherViewTargets @ joinedTargets update.From update.Joins externalNames None)
             |> combineTargets
         | None ->
             let projectedNames body =
