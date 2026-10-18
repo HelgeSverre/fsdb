@@ -1789,6 +1789,29 @@ let tests =
                         Expect.isFalse (col.Equals left right) (left + " differs from " + right)
                     Expect.isFalse (col.Equals "❶" "\uE0B7\uF276") "literal marker cannot alias a dingbat"
 
+                testCase "Japanese kana-sensitive collation distinguishes hiragana from katakana"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_ja_0900_as_cs_ks" |> Option.get
+                    for left, right in [ "こ", "コ"; "は", "ハ"; "ぱ", "パ" ] do
+                        Expect.isFalse (col.Equals left right) (left + " differs from " + right)
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "ngram keys retain kana script"
+                    Expect.isTrue (col.Equals "カ" "ｶ") "unvoiced katakana width still folds"
+                    Expect.equal (col.KeyOf "カ") (col.KeyOf "ｶ") "equivalent width forms share the same key"
+                    Expect.isTrue (col.Equals "が" "か\u3099") "decomposed hiragana voicing composes before script marking"
+                    Expect.equal (col.KeyOf "ぱ") (col.KeyOf "は\u309A") "decomposed semi-voicing shares the kana key"
+                    Expect.isFalse (col.Equals "こ" "こ\uE0B8") "a literal marker cannot alias hiragana"
+
+                testCase "Japanese collation retains compatibility ideograph weight classes"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_ja_0900_as_cs_ks" |> Option.get
+                    Expect.isFalse (col.Equals "神" "神") "compatibility ideograph has a distinct MySQL weight"
+                    Expect.notEqual (col.KeyOf "神") (col.KeyOf "神") "ngram keys retain the distinction"
+                    Expect.isTrue (col.Equals "神" "神") "the ideograph remains reflexive"
+                    Expect.isTrue (col.Equals "\uF927" "\u881F") "MySQL folds this compatibility ideograph"
+                    Expect.isTrue (col.Equals "\uF907" "\uF908") "MySQL aliases share a compatibility weight"
+                    Expect.isTrue (col.Equals (System.Char.ConvertFromUtf32(0x2F8B1)) "\uF90D") "supplementary alias shares a weight"
+                    Expect.isFalse (col.Equals "神" "\uE0B9\uE619") "a literal marker cannot alias an ideograph"
+
                 testCase "utf8mb4_general_ci retains decomposed combining accents"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get

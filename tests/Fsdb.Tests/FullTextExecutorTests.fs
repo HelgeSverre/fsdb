@@ -621,6 +621,29 @@ let tests =
               for term, expected in [ "❶", "1"; "➀", "2"; "➊", "3"; "⫝̸", "4"; "⫝", "5" ] do
                   Expect.equal (search term) [ expected ] (term + " keeps its own posting")
 
+          testCase "Japanese kana-sensitive ngrams separate hiragana and katakana"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE japanese_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_ja_0900_as_cs_ks,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO japanese_docs VALUES(1,'こ'),(2,'コ'),(3,'カ'),(4,'ｶ')" |> ignore
+              let search term =
+                  ids (run store ($"SELECT id FROM japanese_docs WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+              Expect.equal (search "こ") [ "1" ] "hiragana posting remains separate"
+              Expect.equal (search "コ") [ "2" ] "katakana posting remains separate"
+              Expect.equal (search "カ") [ "3"; "4" ] "unvoiced width forms share a posting"
+
+          testCase "Japanese kana-sensitive ngrams distinguish compatibility ideographs"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE japanese_ideographs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_ja_0900_as_cs_ks,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO japanese_ideographs VALUES(1,'神'),(2,'神')" |> ignore
+              let search term mode =
+                  ids (run store ($"SELECT id FROM japanese_ideographs WHERE MATCH(body) AGAINST('{term}' {mode}) ORDER BY id"))
+              for mode in [ "IN NATURAL LANGUAGE MODE"; "IN BOOLEAN MODE" ] do
+                  Expect.equal (search "神" mode) [ "1" ] (mode + " keeps the compatibility ideograph distinct")
+                  Expect.equal (search "神" mode) [ "2" ] (mode + " keeps the unified ideograph distinct")
           testCase "general Unicode Glagolitic and Coptic ngrams retain distinct postings"
           <| fun _ ->
               let store = create ()

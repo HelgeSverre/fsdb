@@ -336,7 +336,7 @@ if __name__ == "__main__":
     corpus.add_argument("--legacy-punctuation", action="store_true")
     corpus.add_argument("--legacy-radicals", action="store_true")
     corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
-    parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci"))
+    parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_ja_0900_as_cs_ks"))
     args = parser.parse_args()
     legacy_range = None
     if args.legacy_range:

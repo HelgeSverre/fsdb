@@ -1066,6 +1066,11 @@ two-column ngram lane at token sizes 1–10.
 The [dingbat and supplemental-operator audit](torture/findings/2026-10-17-general-ci-later-symbol-weights.md)
 likewise preserves literal U+2700–U+27FF and U+2A00–U+2AFF weights, including
 decorated number forms that ICU had merged.
+[Japanese kana-sensitive ngrams](torture/findings/2026-10-17-ja-kana-sensitive-ngram.md)
+now keep hiragana and katakana postings separate under
+`utf8mb4_ja_0900_as_cs_ks`; the audited size-one and size-two corpora match
+MySQL after accounting for compatibility ideograph weight classes. Broader
+Japanese collation and parser behavior remains open.
 
 The [Boolean query Unicode character-table gap](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md)
 is closed for audited cases: Boolean word and phrase boundaries now use
