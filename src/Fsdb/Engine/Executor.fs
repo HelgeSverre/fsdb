@@ -380,6 +380,7 @@ type private EqualityMembershipDomain =
     | IntegerMembership
     | DecimalMembership
     | TextMembership of Collation.Collation
+    | BinaryMembership
 
 type private EqualityMembership =
     { Values: HashSet<Value>
@@ -487,6 +488,8 @@ let private equalityMembershipKey domain value =
     | IntegerMembership, (VInt _ | VUInt _) -> Some(canonicalIntegerKey value)
     | DecimalMembership, VDecimal _ -> Some value
     | TextMembership collation, VString text -> Some(VString(collation.KeyOf text))
+    | BinaryMembership, VBytes _ -> Some value
+    | BinaryMembership, VBinaryLiteral bytes -> Some(VBytes bytes)
     | _ -> None
 
 let private equalityMembershipDomain (store: Store) (column: ColumnDef) =
@@ -508,6 +511,7 @@ let private equalityMembershipDomain (store: Store) (column: ColumnDef) =
         |> Option.bind Collation.tryFind
         |> Option.orElseWith (fun () -> Some store.ExecutionSettings.ConnectionCollation)
         |> Option.map TextMembership
+    | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob -> Some BinaryMembership
     | _ -> None
 
 let private equalityMembershipForValues (store: Store) (column: ColumnDef) (values: Value list) =
