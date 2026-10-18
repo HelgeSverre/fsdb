@@ -29,3 +29,17 @@ zero, negative, subnormal, maximum finite, and overflowing radii.
 String-to-DOUBLE conversion retains its distinct warning and clamping behavior.
 This audit does not assert exact bitwise parity for spherical distances across
 the antimeridian.
+
+## Follow-up: near-pole rounding
+
+An expanded deterministic sweep of 79 point/radius combinations found one
+coordinate-pair discrepancy, repeated at four radius values and mirrored at
+the south pole. For `POINT(89.999999 0)` and
+`POINT(89.999999 179.999999)` at radius `1e300`, MySQL returns
+`3.4906587964907284e292` and fsdb returns `3.4906584856282815e292`,
+about `8.9e-8` lower. The same relative difference occurs at radii
+`5e307`, `5.7e307`, and `1e308`. The other 71 cases match within the
+oracle's `1e-13` relative tolerance. The oracle checks this divergence
+explicitly so that future numerical changes cannot silently erase or widen
+it. Its cause and the appropriate compatibility fix remain open; the
+large-radius overflow fix above is unaffected.
