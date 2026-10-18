@@ -1,13 +1,13 @@
 # Two writable joined views under outer UPDATE joins
 
 The [native MySQL 8.4.11 differential oracle](../scripts/two-joined-view-outer-oracle.py)
-compares eight multi-target UPDATE statements against fsdb. Two independently
+compares nine UPDATE statements against fsdb. Two independently
 writable inner-join views share their internal physical/read aliases. The
 matrix uses both LEFT and RIGHT outer joins, with a fully matched row and
 rows missing from either view. A second pair of views joins grouped read
 sources and dependent `LATERAL` projections before the outer UPDATE join.
 
-All eight statements match MySQL's affected-row count and the resulting rows
+All nine statements match MySQL's affected-row count and the resulting rows
 in both physical target tables. A `CASCADED CHECK OPTION` on the grouped
 lateral view also rejects an invalid two-target update with error 1369 and
 leaves both tables unchanged. This extends the existing inner two-view and
@@ -25,7 +25,16 @@ available. The same oracle now matches MySQL in three contended cases:
 both views matched, only the left view matched, and only the right view
 matched. Each waits for the held row, rebases, commits, and produces the same
 physical target values. A focused F# transaction regression pins the
-right-only commit path; the full suite passed 3,721 tests.
+right-only commit path.
+
+The ninth case exposed a separate source-order gap. When the first source is
+an unassigned joined view and the second view owns a uniquely named bare
+assignment (`SET bonus=bonus+1`), MySQL updates the second view but fsdb
+previously returned error 1146 for that view name as though it were a base
+table. The writable-view source reorder now also moves a later assigned view
+ahead of an unassigned first view. The oracle matches both the ordinary
+update and a fourth contended rebase on that second view; an F# regression
+pins the original 1146 case. The complete suite passed 3,721 tests.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:

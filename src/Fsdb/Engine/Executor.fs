@@ -23057,7 +23057,20 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             move (join :: prior) rest
         | _ -> update
 
-    if isPhysical update.From then move [] update.Joins else update
+    let firstViewIsUnassigned =
+        if isCte update.From then false
+        else
+            let database = update.From.Database |> Option.defaultValue defaultDatabase
+            tryUpdatableView store database update.From.Table
+            |> Option.exists (fun view ->
+                let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
+                update.Assignments
+                |> List.forall (fun assignment ->
+                    match assignment.Table with
+                    | Some owner -> not (equalsIgnoreCase owner qualifier)
+                    | None -> not (Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)))
+
+    if isPhysical update.From || firstViewIsUnassigned then move [] update.Joins else update
 
 let private targetsFirstJoinedView (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
     let update = writableViewFirst store defaultDatabase update

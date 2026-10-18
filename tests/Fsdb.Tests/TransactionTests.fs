@@ -2455,6 +2455,22 @@ let tests =
               | result -> failtestf "expected both physical view targets to change, got %A" result
               Expect.equal
                   (handle session
+                      ("CREATE VIEW tx_dual_vb_unique AS SELECT b.id,b.n AS bonus,l.id AS link_id "
+                       + "FROM tx_dual_b b JOIN tx_dual_link l ON b.id=l.id") |> snd)
+                  (Affected 0UL)
+                  "second view exposes a unique bare assignment"
+              let bareSecondView delta =
+                  "UPDATE tx_dual_va va LEFT JOIN tx_dual_vb_unique vb ON va.link_id=vb.link_id "
+                  + "SET bonus=bonus" + delta + " WHERE vb.id=1"
+              Expect.equal (handle session (bareSecondView "+1") |> snd) (Affected 1UL)
+                  "bare assignment updates only the second writable view"
+              match handle session "SELECT n FROM tx_dual_b WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "22" ] ]) -> ()
+              | result -> failtestf "expected second view's physical row to change, got %A" result
+              Expect.equal (handle session (bareSecondView "-1") |> snd) (Affected 1UL)
+                  "bare assignment restores second view's physical row"
+              Expect.equal
+                  (handle session
                       "UPDATE tx_dual_vb vb JOIN tx_dual_va va ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1" |> snd)
                   (Affected 2UL)
                   "reversed view order updates both targets"
