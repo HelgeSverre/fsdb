@@ -91,7 +91,7 @@ let private isWordChar (c: char) =
 
 /// MySQL's word characters are alphanumerics plus `_` and an *in-word*
 /// apostrophe (`O'Brien` is one token, a trailing `'` is punctuation).
-let private rawTokens (text: string) : string[] =
+let private rawTokensBy isWord (text: string) : string[] =
     let tokens = ResizeArray<string>()
     let current = Text.StringBuilder()
 
@@ -102,12 +102,14 @@ let private rawTokens (text: string) : string[] =
         current.Clear() |> ignore
 
     for c in text do
-        if isWordChar c then current.Append c |> ignore
+        if isWord c then current.Append c |> ignore
         elif c = '\'' && current.Length > 0 then current.Append c |> ignore
         else flush ()
 
     flush ()
     tokens.ToArray()
+
+let private rawTokens = rawTokensBy isWordChar
 
 let private ngrams size (text: string) =
     let boundary (rune: Text.Rune) =
@@ -215,11 +217,14 @@ let private isBinaryCollation (collation: Collation) =
 
 let private tokenWith (collation: Collation) (text: string) =
     // InnoDB folds full-text case even for nonbinary case-sensitive collations.
-    let text =
+    let foldedText =
         if isBinaryCollation collation then text
         else text.ToLowerInvariant()
-    { Text = text
-      Key = collation.KeyOf text }
+    // The legacy collation's historical case pairs are not identical to
+    // Unicode's current invariant lowercase mapping (for example Ↄ/ↄ).
+    let keyText = if collation.Name = "utf8mb4_unicode_ci" then text else foldedText
+    { Text = foldedText
+      Key = collation.KeyOf keyText }
 
 let private tokensWith tokenizer collation text =
     rawTokensWith tokenizer text |> Array.map (tokenWith collation)
@@ -806,17 +811,17 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
 
     let readWord () =
         let start = i
-        while i < len && (isWordChar query.[i] || (query.[i] = '\'' && i > start)) do
+        while i < len && (BooleanWordChars.contains query.[i] || (query.[i] = '\'' && i > start)) do
             i <- i + 1
         let text = query.Substring(start, i - start).Trim('\'')
-        tokenWith collation text
+        tokenWith collation text, text
 
     let phraseWords phrase =
         let words =
             match tokenizer with
-            | Words _ -> tokensWith tokenizer collation phrase
+            | Words _ -> rawTokensBy BooleanWordChars.contains phrase |> Array.map (tokenWith collation)
             | Ngrams size ->
-                rawTokens phrase
+                rawTokensBy BooleanWordChars.contains phrase
                 |> Array.collect (fun word ->
                     if runeLength word < size then [| tokenWith collation word |]
                     else tokensWith tokenizer collation word)
@@ -890,8 +895,8 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                         | Ngrams _ -> None
 
                     acc.Add(op, BPhrase(words, proximity))
-                elif isWordChar query.[i] then
-                    let w = readWord ()
+                elif BooleanWordChars.contains query.[i] then
+                    let w, sourceWord = readWord ()
                     let prefix = i < len && query.[i] = '*'
                     if prefix then i <- i + 1
                     if w.Text.Length > 0 then
@@ -900,7 +905,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                             | Words _ -> BWord(w, prefix)
                             | Ngrams size when runeLength w.Text < size -> BWord(w, prefix)
                             | Ngrams _ ->
-                                let words = tokensWith tokenizer collation w.Text |> Array.skipWhile (isSearchable rules >> not)
+                                let words = tokensWith tokenizer collation sourceWord |> Array.skipWhile (isSearchable rules >> not)
                                 match words with
                                 | [| word |] -> BWord(word, false)
                                 | _ -> BPhrase(words, None)
@@ -1162,10 +1167,14 @@ let private tryRepeatedNgramScores candidateIds (view: ReadView<'id>) nodes =
 let internal booleanScoresInView candidateIds (view: ReadView<'id>) (query: string) =
     let candidateIds = candidatesInView candidateIds view
     let nodes = parseBooleanQuery view.Rules view.Collation query
-    tryRepeatedNgramScores candidateIds view nodes
-    |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes)
-    |> Option.defaultWith (fun () -> evalNodes candidateIds view nodes)
-    |> Map.map (fun _ score -> visibleBooleanScore score)
+    if (nodes |> List.forall (fun (operator, _) -> operator = MustNot))
+       || (candidateIds |> Option.exists Set.isEmpty) then
+        Map.empty
+    else
+        tryRepeatedNgramScores candidateIds view nodes
+        |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes)
+        |> Option.defaultWith (fun () -> evalNodes candidateIds view nodes)
+        |> Map.map (fun _ score -> visibleBooleanScore score)
 
 let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
     booleanScoresInView None (readView index) query
@@ -1262,8 +1271,13 @@ let internal tryFlatBooleanScoresDictionaryInView
 
             for posting in postings do
                 if posting.Operator = MustNot then
-                    for KeyValue(id, _) in posting.Rows do
-                        totals.Remove id |> ignore
+                    if posting.Rows.Count <= totals.Count then
+                        for KeyValue(id, _) in posting.Rows do
+                            totals.Remove id |> ignore
+                    else
+                        for id in totals.Keys |> Seq.toArray do
+                            if Map.containsKey id posting.Rows then
+                                totals.Remove id |> ignore
 
             let scores = Collections.Generic.Dictionary<'id, float>(totals.Count)
 
@@ -1274,6 +1288,10 @@ let internal tryFlatBooleanScoresDictionaryInView
                 scores.Add(id, visibleBooleanScore score))
 
             scores
+
+        let postingWork =
+            postings
+            |> List.sumBy (fun posting -> int64 posting.Rows.Count)
 
         match smallestRequiredPosting with
         | Some rows ->
@@ -1294,22 +1312,26 @@ let internal tryFlatBooleanScoresDictionaryInView
                 candidateIds
                 |> Option.map (fun candidates -> int64 candidates.Count * int64 postings.Length)
 
-            let postingWork =
-                positiveTerms
-                |> List.sumBy (fun posting -> int64 posting.Rows.Count)
-
             match candidateIds, candidateProbeWork with
+            | _, _ when positiveTerms |> List.forall (fun posting -> posting.Rows.IsEmpty) ->
+                Collections.Generic.Dictionary<'id, float>()
             | Some candidates, Some work when work < postingWork -> scoreCandidates candidates candidates.Count
             | _ -> accumulatePositivePostings ()
 
     let nodes = parseBooleanQuery view.Rules view.Collation query
-    match tryRepeatedNgramScores candidateIds view nodes
-          |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes) with
-    | Some scores ->
-        let result = Collections.Generic.Dictionary<'id, float>()
-        scores |> Map.iter (fun id score -> result.Add(id, visibleBooleanScore score))
-        Some result
-    | None -> nodes |> flatTerms [] |> Option.map scoreTerms
+    let flat = flatTerms [] nodes
+    let onlyExclusions = nodes |> List.forall (fun (operator, _) -> operator = MustNot)
+
+    if onlyExclusions || (candidateIds |> Option.exists Set.isEmpty) then
+        flat |> Option.map (fun _ -> Collections.Generic.Dictionary<'id, float>())
+    else
+        match tryRepeatedNgramScores candidateIds view nodes
+              |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes) with
+        | Some scores ->
+            let result = Collections.Generic.Dictionary<'id, float>()
+            scores |> Map.iter (fun id score -> result.Add(id, visibleBooleanScore score))
+            Some result
+        | None -> flat |> Option.map scoreTerms
 
 let internal tryFlatBooleanScoresDictionaryWithin candidateIds index query =
     tryFlatBooleanScoresDictionaryInView candidateIds (readView index) query
