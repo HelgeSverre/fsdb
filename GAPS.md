@@ -1103,6 +1103,10 @@ preserves distinct U+3100–U+31BF primary weights; the extension-block ngram
 lane matches MySQL at sizes 1–10 (288 searches per size), as does the
 base-block lane (822 searches per size). The adjacent U+31C0–U+31FF control
 also matches (330 searches per size) without an override.
+The [Han extension and Hangul Jamo audit](torture/findings/2026-10-18-general-ci-han-jamo-audit.md)
+matches MySQL across 7,356 additional two-column ngram searches at sizes 1
+and 2, covering sampled Extension A/B ideographs and both Jamo extension
+blocks without a code override.
 The [extended combining-mark probe](torture/findings/2026-10-17-general-ci-extended-combining-marks.md)
 preserves distinct U+1AB0–U+1AFF, U+1DC0–U+1DFF, and U+20D0–U+20FF
 weights in CJK text. The adjacent U+FE20–U+FE2F block needs no override.
