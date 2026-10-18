@@ -79,6 +79,19 @@ lateral reordering or distinct definer layers.
 This audit covers the stated inner-join shapes, not arbitrary join graphs,
 distinct security identities, or authorization through layered views.
 
+## Layered lateral and aggregate checks
+
+A later native 8.4.11 probe composes a checked inner view whose aggregate
+source feeds a dependent `LATERAL` source before its physical target, then
+joins that view to another aggregate source under a second CASCADED check.
+The outer view renames the physical target's writable `n` column. MySQL
+reports `IS_UPDATABLE=YES`, updates the target through that name, and rejects
+both `n=-1` (inner check) and `n=10` (outer check) with 1369. Fsdb agrees on
+metadata, affected rows, errors, and unchanged target rows after rejection.
+The [native oracle](../scripts/composed-join-view-oracle.py) and focused
+`ViewTests` regression retain this two-layer composition. Distinct definer
+grant chains for this particular lateral/aggregate layering remain open.
+
 ## Independent lateral source first
 
 Native MySQL 8.4.11 also marks a view updatable when its first source is an

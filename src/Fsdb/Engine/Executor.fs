@@ -380,6 +380,7 @@ type private EqualityMembershipDomain =
     | IntegerMembership
     | DecimalMembership
     | TextMembership of Collation.Collation
+    | BinaryMembership
 
 type private EqualityMembership =
     { Values: HashSet<Value>
@@ -487,6 +488,8 @@ let private equalityMembershipKey domain value =
     | IntegerMembership, (VInt _ | VUInt _) -> Some(canonicalIntegerKey value)
     | DecimalMembership, VDecimal _ -> Some value
     | TextMembership collation, VString text -> Some(VString(collation.KeyOf text))
+    | BinaryMembership, VBytes _ -> Some value
+    | BinaryMembership, VBinaryLiteral bytes -> Some(VBytes bytes)
     | _ -> None
 
 let private equalityMembershipDomain (store: Store) (column: ColumnDef) =
@@ -508,6 +511,7 @@ let private equalityMembershipDomain (store: Store) (column: ColumnDef) =
         |> Option.bind Collation.tryFind
         |> Option.orElseWith (fun () -> Some store.ExecutionSettings.ConnectionCollation)
         |> Option.map TextMembership
+    | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob -> Some BinaryMembership
     | _ -> None
 
 let private equalityMembershipForValues (store: Store) (column: ColumnDef) (values: Value list) =
@@ -733,6 +737,7 @@ type private StatementMemo =
       MaterializedCorrelatedDoubleExpressions: Dictionary<FromItem, Dictionary<Expr, MaterializedEqualityLookup option>>
       MaterializedCorrelatedDoubleRanges: Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>
       MaterializedCorrelatedTextExpressions: Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>
+      MaterializedCorrelatedTextRanges: Dictionary<FromItem, Dictionary<Expr * string, MaterializedRangeLookup option>>
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
@@ -766,6 +771,8 @@ let private freshStatementMemo () =
         Dictionary<FromItem, Dictionary<Expr, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedTextExpressions =
         Dictionary<FromItem, Dictionary<Expr * string, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+      MaterializedCorrelatedTextRanges =
+        Dictionary<FromItem, Dictionary<Expr * string, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedRanges =
         Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedNullBuckets =
@@ -1046,8 +1053,11 @@ let private viewTargetKey (target: ViewColumnTarget) =
 
 type private ViewTargetKey = string * string * string
 
+type private JoinViewCheck = { Predicate: Expr option }
+
 type private WritableViewSource =
     { Reference: FromItem
+      JoinedSources: Join list
       Qualifier: string
       Columns: string list
       Expressions: Map<string, Expr>
@@ -1057,9 +1067,8 @@ type private WritableViewSource =
       InsertableTargets: Set<ViewTargetKey>
       AccessPath: ViewAccess list
       ReadAccessPaths: ViewReadAccess list list
+      JoinCheck: JoinViewCheck option
       Mergeable: bool }
-
-type private JoinViewCheck = { Predicate: Expr option }
 
 type private UpdatableView =
     { ViewDatabase: string
@@ -1640,19 +1649,12 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     let outputNames = if view.Columns.IsEmpty then projected |> List.map (fun (name, _, _) -> name) else view.Columns
 
-                    let rejectsNestedCheckOption =
-                        underlying
-                        |> Option.exists (fun nested ->
-                            not nested.UpdateJoins.IsEmpty
-                            && not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase)))
-
                     if
                         unresolvedStar
                         || dependentProjection
                         || dependentPredicate
                         || not (namesMatchProjections outputNames projected)
                         || not (hasWritableProjection projected)
-                        || rejectsNestedCheckOption
                     then
                         None
                     else
@@ -1846,6 +1848,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             (table.Database |> Option.defaultValue view.Schema)
                             table.Table
                     | FromSubquery(body, _) -> derivedColumnNames body
+                    | FromLateral(body, _) -> derivedColumnNames body
                     | FromJsonTable(_, _, columns, _) -> Some(JsonTableColumn.names columns)
                     | _ -> None
 
@@ -1872,6 +1875,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                                 Some
                                     { Reference = FromTable { tableRef with Database = Some database }
+                                      JoinedSources = []
                                       Qualifier = qualifier
                                       Columns = columns
                                       Expressions = expressions
@@ -1882,6 +1886,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                       AccessPath = []
                                       ReadAccessPaths =
                                         [ [ { View = stored; Definition = statement; WritableColumns = [] } ] ]
+                                      JoinCheck = None
                                       Mergeable = false }
 
                     match tryStoredView store database tableRef.Table with
@@ -1896,36 +1901,205 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                             nested
                             |> Option.bind (fun nested ->
-                                if not nested.UpdateJoins.IsEmpty then
+                                let baseQualifier = nested.UpdateFrom.Alias |> Option.defaultValue nested.UpdateFrom.Table
+                                let joinedQualifiers = nested.UpdateJoins |> List.map (_.Table >> FromItem.tryQualifier)
+                                let outerQualifiers =
+                                    sourceItems
+                                    |> List.choose FromItem.tryQualifier
+                                    |> List.map _.ToLowerInvariant()
+                                    |> Set.ofList
+                                // Inner view aliases are private to that view. Give any
+                                // that collide with the outer FROM fresh physical names
+                                // before the joined sources are inlined.
+                                let renamedJoinAliases =
+                                    let mutable reserved =
+                                        Set.union outerQualifiers
+                                            (joinedQualifiers |> List.choose id |> List.map _.ToLowerInvariant() |> Set.ofList)
+                                    let mutable nextName = 0
+                                    let rec availableName number =
+                                        let candidate = sprintf "__fsdb_join_%d" number
+                                        if Set.contains (candidate.ToLowerInvariant()) reserved then
+                                            availableName (number + 1)
+                                        else candidate, number
+                                    joinedQualifiers
+                                    |> List.choose (function
+                                        | Some name when Set.contains (name.ToLowerInvariant()) outerQualifiers ->
+                                            let replacement, number = availableName (nextName + 1)
+                                            nextName <- number
+                                            reserved <- Set.add (replacement.ToLowerInvariant()) reserved
+                                            Some(name.ToLowerInvariant(), replacement)
+                                        | _ -> None)
+                                    |> Map.ofList
+                                let hasSubquery =
+                                    Expression.exists (function
+                                        | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _ -> true
+                                        | _ -> false)
+                                let precedingSources index =
+                                    FromTable nested.UpdateFrom
+                                    :: (nested.UpdateJoins |> List.take index |> List.map _.Table)
+                                let tryLateralBareRewrites preceding (body: SelectStmt) =
+                                    let localSources =
+                                        (body.From |> Option.toList) @ (body.Joins |> List.map _.Table)
+                                    let rebindingNames =
+                                        baseQualifier :: qualifier :: (joinedQualifiers |> List.choose id)
+                                        |> List.map _.ToLowerInvariant()
+                                        |> Set.ofList
+                                    let shadowsRebindingName =
+                                        localSources
+                                        |> List.collect FromItem.leaves
+                                        |> List.choose FromItem.tryQualifier
+                                        |> List.exists (fun name -> Set.contains (name.ToLowerInvariant()) rebindingNames)
+                                    let bareReferences = ResizeArray<string>()
+                                    let mutable hasUnsupportedReference = false
+                                    Expression.iterStatement
+                                        (function
+                                        | Col column -> bareReferences.Add(column.ToLowerInvariant())
+                                        | Star _ -> hasUnsupportedReference <- true
+                                        | expression when hasSubquery expression -> hasUnsupportedReference <- true
+                                        | _ -> ())
+                                        (Select body)
+                                    let localColumns =
+                                        localSources
+                                        |> List.map (function
+                                            | FromTable table ->
+                                                InformationSchema.relationColumns
+                                                    store.Catalog
+                                                    (table.Database |> Option.defaultValue view.Schema)
+                                                    table.Table
+                                                |> Option.map (List.map _.ToLowerInvariant() >> Set.ofList)
+                                            | _ -> None)
+                                        |> tryAllSome
+                                    let precedingColumns =
+                                        preceding
+                                        |> List.map (fun source ->
+                                            match FromItem.tryQualifier source, sourceColumnNames source with
+                                            | Some name, Some columns ->
+                                                Some(name, columns |> List.map _.ToLowerInvariant() |> Set.ofList)
+                                            | _ -> None)
+                                        |> tryAllSome
+                                    let ownerOf name =
+                                        localColumns
+                                        |> Option.bind (fun columns ->
+                                            match columns |> List.filter (Set.contains name) |> List.length with
+                                            | 1 -> Some None
+                                            | 0 ->
+                                                precedingColumns
+                                                |> Option.bind (fun sources ->
+                                                    match sources |> List.filter (snd >> Set.contains name) with
+                                                    | [ (owner, _) ] -> Some(Some owner)
+                                                    | _ -> None)
+                                            | _ -> None)
+                                    if not body.Ctes.IsEmpty || shadowsRebindingName || hasUnsupportedReference then
+                                        None
+                                    else
+                                        bareReferences
+                                        |> Seq.distinct
+                                        |> Seq.map (fun name -> ownerOf name |> Option.map (fun owner -> name, owner))
+                                        |> Seq.toList
+                                        |> tryAllSome
+                                        |> Option.map (List.choose (function name, Some owner -> Some(name, owner) | _ -> None) >> Map.ofList)
+                                let needsScopedRewrite =
+                                    not nested.UpdateJoins.IsEmpty
+                                    && ((nested.Expressions |> Map.exists (fun _ expression -> hasSubquery expression))
+                                        || (nested.Predicate |> Option.exists hasSubquery)
+                                        || (nested.UpdateJoins |> List.exists (_.On >> hasSubquery)))
+                                let cannotInlineJoins =
+                                    (joinedQualifiers
+                                     |> List.exists Option.isNone)
+                                    || (nested.UpdateJoins
+                                        |> List.mapi (fun index join ->
+                                            match join.Table with
+                                            | FromTable _ | FromSubquery _ -> false
+                                            | FromJsonTable(expression, _, _, _) ->
+                                                // Bare and scoped names need the original inner join scope.
+                                                hasSubquery expression
+                                                || Expression.exists (function Col _ -> true | _ -> false) expression
+                                            | FromLateral(PlainSelect body, _) ->
+                                                tryLateralBareRewrites (precedingSources index) body |> Option.isNone
+                                            | _ -> true)
+                                        |> List.exists id)
+                                    || not nested.SharedCteAliases.IsEmpty
+                                    || needsScopedRewrite
+
+                                if cannotInlineJoins then
                                     None
                                 else
-                                    let qualify =
-                                        Expression.rewrite (function
-                                            | Col column
-                                            | QualifiedCol(_, column) -> Some(QualifiedCol(qualifier, column))
-                                            | _ -> None)
+                                    let remapQualifier name =
+                                        if equalsIgnoreCase name baseQualifier then qualifier
+                                        else Map.tryFind (name.ToLowerInvariant()) renamedJoinAliases |> Option.defaultValue name
+
+                                    let rewriteInnerReference = function
+                                        | Col column -> Some(QualifiedCol(qualifier, column))
+                                        | QualifiedCol(source, column) ->
+                                            let renamed = remapQualifier source
+                                            if equalsIgnoreCase renamed source then None
+                                            else Some(QualifiedCol(renamed, column))
+                                        | _ -> None
+                                    let qualify = Expression.rewrite rewriteInnerReference
+
+                                    let renameJoinedSource preceding = function
+                                        | FromTable table ->
+                                            let name = table.Alias |> Option.defaultValue table.Table
+                                            match Map.tryFind (name.ToLowerInvariant()) renamedJoinAliases with
+                                            | Some renamed -> FromTable { table with Alias = Some renamed }
+                                            | None -> FromTable table
+                                        | FromSubquery(body, alias) ->
+                                            match Map.tryFind (alias.ToLowerInvariant()) renamedJoinAliases with
+                                            | Some renamed -> FromSubquery(body, renamed)
+                                            | None -> FromSubquery(body, alias)
+                                        | FromJsonTable(expression, path, columns, alias) ->
+                                            let renamed =
+                                                Map.tryFind (alias.ToLowerInvariant()) renamedJoinAliases
+                                                |> Option.defaultValue alias
+                                            FromJsonTable(qualify expression, path, columns, renamed)
+                                        | FromLateral(PlainSelect body, alias) ->
+                                            let renamed =
+                                                Map.tryFind (alias.ToLowerInvariant()) renamedJoinAliases
+                                                |> Option.defaultValue alias
+                                            let bareRewrites =
+                                                tryLateralBareRewrites preceding body
+                                                |> Option.defaultWith (fun () -> invalidOp "Unsafe LATERAL view-source rewrite")
+                                            let rewriteQualifiedReference = function
+                                                | Col column ->
+                                                    Map.tryFind (column.ToLowerInvariant()) bareRewrites
+                                                    |> Option.map (fun owner -> QualifiedCol(remapQualifier owner, column))
+                                                | QualifiedCol(source, column) ->
+                                                    let rebound = remapQualifier source
+                                                    if equalsIgnoreCase rebound source then None
+                                                    else Some(QualifiedCol(rebound, column))
+                                                | _ -> None
+                                            FromLateral(PlainSelect(Expression.rewriteSelectExpressions rewriteQualifiedReference body), renamed)
+                                        | source -> source
 
                                     let targets =
                                         nested.Targets
                                         |> Map.map (fun column target ->
-                                            { target with Qualifier = qualifier; ComponentColumn = Some column })
+                                            { target with
+                                                Qualifier = remapQualifier target.Qualifier
+                                                ComponentColumn = Some column })
 
                                     let checkPredicates =
                                         nested.CheckPredicates
                                         |> Map.toList
-                                        |> List.map (fun ((targetDatabase, targetTable, _), predicate) ->
-                                            (targetDatabase, targetTable, qualifier), predicate)
+                                        |> List.map (fun ((targetDatabase, targetTable, targetQualifier), predicate) ->
+                                            (targetDatabase, targetTable, remapQualifier targetQualifier), qualify predicate)
                                         |> Map.ofList
 
                                     let insertableTargets =
                                         nested.InsertableTargets
-                                        |> Set.map (fun (targetDatabase, targetTable, _) -> targetDatabase, targetTable, qualifier)
+                                        |> Set.map (fun (targetDatabase, targetTable, targetQualifier) ->
+                                            targetDatabase, targetTable, remapQualifier targetQualifier)
 
                                     Some
                                         { Reference =
                                             FromTable
                                                 { nested.UpdateFrom with
                                                     Alias = Some qualifier }
+                                          JoinedSources =
+                                            nested.UpdateJoins
+                                            |> List.mapi (fun index join ->
+                                                { Join.mapConditions qualify join with
+                                                    Table = renameJoinedSource (precedingSources index) join.Table })
                                           Qualifier = qualifier
                                           Columns = nested.OrderedColumns
                                           Expressions = nested.Expressions |> Map.map (fun _ expression -> qualify expression)
@@ -1936,6 +2110,13 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                           AccessPath =
                                             if sameSecurityContext then
                                                 []
+                                            elif not nested.UpdateJoins.IsEmpty then
+                                                { SecurityType = view.SecurityType
+                                                  Definer = view.Definer
+                                                  Database = stored.Schema
+                                                  Table = stored.Name
+                                                  Mode = TargetGrantOnly }
+                                                :: nested.AccessPath
                                             else
                                                 nested.AccessPath |> List.map (fun access -> { access with Mode = TargetGrantOnly })
                                           ReadAccessPaths =
@@ -1945,6 +2126,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                                   WritableColumns = nested.Targets |> Map.toList |> List.map fst }
                                             [ [ own ] ]
                                             @ (nested.ReadAccessPaths |> List.map (fun path -> own :: path))
+                                          JoinCheck = nested.JoinCheck |> Option.map (fun check -> { Predicate = check.Predicate |> Option.map qualify })
                                           Mergeable = true })
                             |> Option.orElseWith (fun () -> readOnlySource stored (Select definition) definition.Projections)
                         | Ok(Union(first, _, _, _, _) as statement) -> readOnlySource stored statement first.Projections
@@ -1970,6 +2152,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 |> Map.ofList
 
                             { Reference = FromTable { tableRef with Database = Some database }
+                              JoinedSources = []
                               Qualifier = qualifier
                               Columns = table.Columns |> List.map _.Name
                               Expressions = expressions
@@ -1979,10 +2162,12 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               InsertableTargets = Set.singleton (database, tableRef.Table, qualifier)
                               AccessPath = []
                               ReadAccessPaths = []
+                              JoinCheck = None
                               Mergeable = true })
 
                 let readOnlySource reference qualifier columns : WritableViewSource =
                     { Reference = reference
+                      JoinedSources = []
                       Qualifier = qualifier
                       Columns = columns
                       Expressions =
@@ -1995,6 +2180,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                       InsertableTargets = Set.empty
                       AccessPath = []
                       ReadAccessPaths = []
+                      JoinCheck = None
                       Mergeable = false }
 
                 let resolveSourceItem = function
@@ -2011,7 +2197,79 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                 let sources = sourceItems |> List.choose resolveSourceItem
 
-                if sources.Length <> sourceItems.Length then
+                let rec shadowsExpandedQualifier (aliases: Set<string>) (body: SelectStmt) =
+                    let shadowsSource = function
+                        | FromTable table ->
+                            let name = table.Alias |> Option.defaultValue table.Table
+                            Set.contains (name.ToLowerInvariant()) aliases
+                        | FromSubquery(query, name)
+                        | FromLateral(query, name) ->
+                            Set.contains (name.ToLowerInvariant()) aliases
+                            || (match query with
+                                | PlainSelect nested -> shadowsExpandedQualifier aliases nested
+                                | UnionSelect(first, rest, _, _, _) ->
+                                    shadowsExpandedQualifier aliases first
+                                    || (rest |> List.exists (snd >> shadowsExpandedQualifier aliases)))
+                        | FromJsonTable(_, _, _, name) -> Set.contains (name.ToLowerInvariant()) aliases
+                        | FromJoinGroup _ -> false
+
+                    let localSources =
+                        ((body.From |> Option.toList) @ (body.Joins |> List.map _.Table))
+                        |> List.collect FromItem.leaves
+
+                    (localSources |> List.exists shadowsSource)
+                    || (body.Ctes |> List.exists (fun cte ->
+                        match cte.Body with
+                        | PlainSelect nested -> shadowsExpandedQualifier aliases nested
+                        | UnionSelect(first, rest, _, _, _) ->
+                            shadowsExpandedQualifier aliases first
+                            || (rest |> List.exists (snd >> shadowsExpandedQualifier aliases))))
+                    || (expressionQueries body |> List.exists (shadowsExpandedQualifier aliases))
+
+                let expressionShadowsExpandedQualifier aliases expression =
+                    Expression.fold
+                        (fun found node ->
+                            let shadowed =
+                                Expression.subqueries node
+                                |> List.exists (shadowsExpandedQualifier aliases)
+                            if found || shadowed then Expression.Prune true else Expression.Descend false)
+                        false
+                        expression
+
+                let unsafeNestedShadow =
+                    let expandedAliases =
+                        sources
+                        |> List.filter (fun source -> not source.JoinedSources.IsEmpty)
+                        |> List.map (fun source -> source.Qualifier.ToLowerInvariant())
+                        |> Set.ofList
+                    if expandedAliases.IsEmpty then false
+                    else
+                        sourceItems
+                        |> List.exists (function
+                            | FromLateral(PlainSelect body, _) -> shadowsExpandedQualifier expandedAliases body
+                            | FromLateral(UnionSelect(first, rest, orderBy, limit, offset), _) ->
+                                shadowsExpandedQualifier expandedAliases first
+                                || (rest |> List.exists (snd >> shadowsExpandedQualifier expandedAliases))
+                                || (orderBy |> List.exists (fst >> expressionShadowsExpandedQualifier expandedAliases))
+                                || (limit |> Option.exists (expressionShadowsExpandedQualifier expandedAliases))
+                                || (offset |> Option.exists (expressionShadowsExpandedQualifier expandedAliases))
+                            | FromJsonTable(expression, _, _, _) ->
+                                expressionShadowsExpandedQualifier expandedAliases expression
+                            | _ -> false)
+
+                let unsupportedJoinedSourcePosition =
+                    let positions =
+                        sources
+                        |> List.mapi (fun index source -> if source.JoinedSources.IsEmpty then None else Some index)
+                        |> List.choose id
+                    match positions, source with
+                    | [], _
+                    | [ 0 ], FromTable _ -> false
+                    | [ position ], (FromSubquery _ | FromLateral _ | FromJsonTable _)
+                        when InformationSchema.tryLeadingReadOnlyWritableTarget source select.Joins = Some position -> false
+                    | _ -> true
+
+                if sources.Length <> sourceItems.Length || unsafeNestedShadow || unsupportedJoinedSourcePosition then
                     None
                 else
                     let coalescedNames =
@@ -2077,6 +2335,34 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 | _ -> None
                             | _ -> None)
 
+                    let rewriteOuterReference =
+                        function
+                        | QualifiedCol(sourceName, column) ->
+                            sources
+                            |> List.tryFind (fun source -> equalsIgnoreCase source.Qualifier sourceName)
+                            |> Option.bind (fun source -> source.Expressions |> Map.tryFind (column.ToLowerInvariant()))
+                        | _ -> None
+
+                    let rewriteJoinedTable =
+                        let rewriteSelect = Expression.rewriteSelectExpressions rewriteOuterReference
+                        function
+                        | FromLateral(PlainSelect body, alias) ->
+                            FromLateral(PlainSelect(rewriteSelect body), alias)
+                        | FromLateral(UnionSelect(first, rest, orderBy, limit, offset), alias) ->
+                            FromLateral(
+                                UnionSelect(
+                                    rewriteSelect first,
+                                    rest |> List.map (fun (kind, body) -> kind, rewriteSelect body),
+                                    orderBy |> List.map (fun (expression, direction) -> Expression.rewriteTree rewriteOuterReference expression, direction),
+                                    limit |> Option.map (Expression.rewriteTree rewriteOuterReference),
+                                    offset |> Option.map (Expression.rewriteTree rewriteOuterReference)
+                                ),
+                                alias
+                            )
+                        | FromJsonTable(expression, path, columns, alias) ->
+                            FromJsonTable(Expression.rewriteTree rewriteOuterReference expression, path, columns, alias)
+                        | table -> table
+
                     let projected =
                         expandedProjections
                         |> List.map (projectedColumn rewriteSources directTarget)
@@ -2125,28 +2411,43 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             List.map2
                                 (fun join source ->
                                     { join with
-                                        Table = source.Reference
+                                        Table = rewriteJoinedTable source.Reference
                                         On = rewriteSources join.On })
                                 select.Joins
                                 (List.tail sources)
 
                         let updateSources =
                             match source, sources, select.Joins with
-                            | FromTable original, { Reference = FromTable physical } :: _, _ ->
-                                Some(physical, rewrittenJoins, original, select.Joins)
-                            | (FromSubquery _ | FromLateral _ | FromJsonTable _), derived :: { Reference = FromTable physical } :: _, join :: trailing
+                            | FromTable original, { Reference = FromTable physical; JoinedSources = nestedJoins } :: _, _ ->
+                                Some(physical, nestedJoins @ rewrittenJoins, original, select.Joins)
+                            | (FromSubquery _ | FromLateral _ | FromJsonTable _), derived :: ({ Reference = FromTable physical; JoinedSources = nestedJoins } as targetSource) :: _, join :: trailing
                                 when (join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin || join.Kind = NaturalJoin) ->
+                                let physicalQualifier = physical.Alias |> Option.defaultValue physical.Table
+                                let commonColumns =
+                                    if join.Kind = NaturalJoin then
+                                        let derivedNames = derived.Columns |> List.map _.ToLowerInvariant() |> Set.ofList
+                                        targetSource.Columns
+                                        |> List.filter (fun name -> Set.contains (name.ToLowerInvariant()) derivedNames)
+                                    else join.Using
+                                let on =
+                                    commonColumns
+                                    |> List.fold (fun condition column ->
+                                        BinOp(And, condition, BinOp(Eq, QualifiedCol(physicalQualifier, column), QualifiedCol(derived.Qualifier, column))))
+                                        (rewriteSources join.On)
                                 let reordered =
                                     { join with
+                                        Kind = if not nestedJoins.IsEmpty && join.Kind = NaturalJoin then InnerJoin else join.Kind
                                         Table = derived.Reference
-                                        On = rewriteSources join.On }
+                                        On = if nestedJoins.IsEmpty then rewriteSources join.On else on
+                                        Using = if nestedJoins.IsEmpty then join.Using else [] }
                                 let authorizationJoin = { join with Table = derived.Reference }
-                                Some(physical, reordered :: List.tail rewrittenJoins, physical, authorizationJoin :: trailing)
+                                Some(physical, nestedJoins @ (reordered :: List.tail rewrittenJoins), physical, authorizationJoin :: trailing)
                             | (FromSubquery _ | FromLateral _ | FromJsonTable _), _, _ ->
                                 match InformationSchema.tryLeadingReadOnlyWritableTarget source select.Joins with
                                 | Some leadingCount when leadingCount >= 2 && leadingCount < sources.Length ->
                                     match sources.[leadingCount].Reference with
                                     | FromTable physical ->
+                                        let nestedJoins = sources.[leadingCount].JoinedSources
                                         let leadingDerived = sources |> List.take leadingCount
                                         let columnsOf qualifier =
                                             sources
@@ -2240,7 +2541,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                             let conditions = usingConditions |> List.choose id
                                             Some(
                                                 physical,
-                                                reorder rewriteSources conditions rewrittenJoins,
+                                                nestedJoins @ reorder rewriteSources conditions rewrittenJoins,
                                                 physical,
                                                 reorder id conditions authorizationJoins
                                             )
@@ -2273,8 +2574,13 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               Predicate = predicate
                               OrderBy = select.OrderBy
                               JoinCheck =
-                                if view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase) then None
-                                else Some { Predicate = predicate }
+                                if not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase)) then
+                                    Some { Predicate = predicate }
+                                else
+                                    match sources |> List.choose _.JoinCheck with
+                                    | [] -> None
+                                    | checks ->
+                                        Some { Predicate = checks |> List.fold (fun combined check -> combine combined check.Predicate) None }
                               CheckPredicates = checkPredicates
                               Insertable = not insertableTargets.IsEmpty
                               InsertableTargets = insertableTargets
@@ -4313,12 +4619,44 @@ let private bindNestedAggregates store registry dbName columnIndex qualifiers ex
         { Aggregates = []; UngroupedColumns = [] }
     else
         let sourceScope (select: SelectStmt) =
+            let projectionNames (select: SelectStmt) =
+                select.Projections
+                |> List.choose (fun projection ->
+                    match projection.Expression with
+                    | Star _ -> None
+                    | _ -> Some(projectionLabel projection))
             (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
             |> List.collect FromItem.leaves
             |> List.choose (function
                 | FromItem.Qualified qualifier as source ->
                     let columns = selectSourceColumns store dbName source |> List.choose id
-                    Some(qualifier.ToLowerInvariant(), columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList)
+                    let computedNames =
+                        match source with
+                        | FromSubquery(PlainSelect select, _)
+                        | FromLateral(PlainSelect select, _) -> projectionNames select
+                        | FromSubquery(UnionSelect(first, _, _, _, _), _)
+                        | FromLateral(UnionSelect(first, _, _, _, _), _) -> projectionNames first
+                        | FromTable table when
+                            table.Database.IsNone
+                            && (currentCteScope () |> Map.containsKey (table.Table.ToLowerInvariant())) ->
+                            []
+                        | FromTable table ->
+                            let database = table.Database |> Option.defaultValue dbName
+                            tryStoredView store database table.Table
+                            |> Option.map (fun view ->
+                                if view.Columns.IsEmpty then
+                                    match parseStoredViewStatement view with
+                                    | Ok(Select definition) -> projectionNames definition
+                                    | _ -> []
+                                else view.Columns)
+                            |> Option.defaultValue []
+                        | _ -> []
+                    Some(
+                        qualifier.ToLowerInvariant(),
+                        (columns |> List.map _.Name) @ computedNames
+                        |> List.map _.ToLowerInvariant()
+                        |> Set.ofList
+                    )
                 | _ -> None)
             |> Map.ofList
         let expressions (select: SelectStmt) =
@@ -5474,6 +5812,12 @@ let private isIntegerColumn column = column |> Option.exists (_.Type >> isIntege
 let private compareWithColumnDomain
     (leftExpr: Expr) (leftColumn: ColumnDef option) left
     (rightExpr: Expr) (rightColumn: ColumnDef option) right =
+    match left, right with
+    | VDouble _, VString text
+    | VString text, VDouble _ ->
+        let _, truncated = Value.coerceLeadingDouble text
+        if truncated then Diagnostics.numericConversion "DOUBLE" text
+    | _ -> ()
     // MySQL keeps an integer column exact against a constant DOUBLE
     // expression, but compares it approximately with a row-derived DOUBLE.
     let rowDependent expression =
@@ -5493,6 +5837,13 @@ let private compareWithColumnDomain
         -(Value.compareIntegerToDouble (bigint integer) bound)
     | _ -> Value.compare left right
 
+// CAST/CONVERT retain encoded bytes for charset-aware functions, but their
+// text comparisons still resolve through the expression's SQL collation.
+let private textComparisonOperand = function
+    | VString value -> Some value
+    | VEncodedString(charset, bytes) -> Some(Charset.decodeBytes charset bytes)
+    | _ -> None
+
 let private resolvedCompareWithColumns
     (ctx: EvalContext)
     (leftExpr: Expr)
@@ -5505,8 +5856,8 @@ let private resolvedCompareWithColumns
     : Result<int, EvalError> =
     let pa, pb = comparisonOperands leftColumn left rightColumn right
 
-    match pa, pb with
-    | VString sa, VString sb ->
+    match textComparisonOperand pa, textComparisonOperand pb with
+    | Some sa, Some sb ->
         comparisonCollation ctx operation leftExpr leftColumn rightExpr rightColumn
         |> Result.map (fun collation -> collation.ComparePrimary sa sb)
     | _ -> Ok(compareWithColumnDomain leftExpr leftColumn pa rightExpr rightColumn pb)
@@ -5570,8 +5921,8 @@ let private comparisonResult
             | Gte -> boolToValue (compared >= 0)
             | _ -> VNull
 
-        match comparedLeft, comparedRight with
-        | VString leftText, VString rightText ->
+        match textComparisonOperand comparedLeft, textComparisonOperand comparedRight with
+        | Some leftText, Some rightText ->
             comparisonCollation ctx operation leftExpr leftColumn rightExpr rightColumn
             |> Result.map (fun collation ->
                 finish
@@ -5782,9 +6133,11 @@ let private emptySubqueryScope =
 let private statementVariantFunctions =
     set
         [ "BENCHMARK"; "CONNECTION_ID"; "CURDATE"; "CURRENT_DATE"; "CURRENT_TIME"; "CURRENT_TIMESTAMP"
-          "CURRENT_USER"; "CURTIME"; "DATABASE"; "FOUND_ROWS"; "LAST_INSERT_ID"; "LOCALTIME"
+          "CURRENT_ROLE"; "CURRENT_USER"; "CURTIME"; "DATABASE"; "FOUND_ROWS"; "GET_LOCK"
+          "IS_FREE_LOCK"; "IS_USED_LOCK"; "LAST_INSERT_ID"; "LOCALTIME"
           "LOCALTIMESTAMP"; "NOW"; "RAND"; "RANDOM_BYTES"; "ROW_COUNT"; "SLEEP"; "SYSDATE"
-          "UNIX_TIMESTAMP"; "USER"; "UUID"; "UUID_SHORT"; "VERSION" ]
+          "RELEASE_ALL_LOCKS"; "RELEASE_LOCK"; "SCHEMA"; "SESSION_USER"; "UNIX_TIMESTAMP"
+          "USER"; "UTC_DATE"; "UTC_TIME"; "UTC_TIMESTAMP"; "UUID"; "UUID_SHORT"; "VERSION" ]
 
 let private tableSubqueryScope (store: Store) (dbName: string) (table: TableRef) : SubqueryScope option =
     let tableDb = table.Database |> Option.defaultValue dbName
@@ -5834,7 +6187,10 @@ let private isStatementStableFunction (registry: Registry) (name: string) : bool
     not (statementVariantFunctions.Contains key)
     && (match Map.tryFind key registry.Extensions with
         | Some extension -> extension.Deterministic
-        | None -> true)
+        | None ->
+            registry.StableScalars.Contains key
+            || Functions.isUnmodifiedBuiltinScalar key registry
+            || Functions.isUnmodifiedBuiltinAggregate key registry)
 
 let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbName: string) (scope: SubqueryScope) (expression: Expr) : bool =
     let every expressions = expressions |> List.forall (isStatementStableExpr store registry dbName scope)
@@ -6264,21 +6620,23 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     xs
                     |> traverse eval
                     |> Result.bind (fun values ->
-                        List.zip xs values
-                        |> traverse (fun (candidateExpr, candidate) ->
-                            comparisonResult
-                                ctx
-                                e
-                                (tryColumnDefForExpr ctx e)
-                                ve
-                                candidateExpr
-                                (tryColumnDefForExpr ctx candidateExpr)
-                                Eq
-                                candidate)
-                        |> Result.map (fun comparisons ->
-                            if comparisons |> List.exists ((=) (VInt 1L)) then VInt 1L
-                            elif comparisons |> List.exists ((=) VNull) then VNull
-                            else VInt 0L)))
+                        let rec compareUntilMatch sawNull = function
+                            | [] -> Ok(if sawNull then VNull else VInt 0L)
+                            | (candidateExpr, candidate) :: rest ->
+                                match comparisonResult
+                                          ctx
+                                          e
+                                          (tryColumnDefForExpr ctx e)
+                                          ve
+                                          candidateExpr
+                                          (tryColumnDefForExpr ctx candidateExpr)
+                                          Eq
+                                          candidate with
+                                | Error error -> Error error
+                                | Ok(VInt 1L) -> Ok(VInt 1L)
+                                | Ok VNull -> compareUntilMatch true rest
+                                | Ok _ -> compareUntilMatch sawNull rest
+                        List.zip xs values |> compareUntilMatch false))
     | InSubquery((Row _ as e), select) ->
         evalRowOperand ctx e
         |> Result.bind (fun value ->
@@ -11262,7 +11620,10 @@ and private streamFilteredSourceRows
     let matches = prepareWhereMatches context (Some predicate)
 
     seq {
+        let mutable inspected = 0
         for row in rows do
+            Limits.checkQueryCancellation inspected
+            inspected <- inspected + 1
             match matches row with
             | Ok true -> yield row
             | Ok false -> ()
@@ -13125,6 +13486,7 @@ and private prepareLockingRead
     : Result<Map<string, Set<RowId>>, QueryResult> =
     let sourceItems =
         (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+        |> List.collect FromItem.leaves
 
     let physicalSource =
         function
@@ -14006,7 +14368,11 @@ and private indexedColumnFor (tref: TableRef) =
                 System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase)))
         |> Option.map (fun physical -> physical.Column, Some physical.Transform)
 
+    let refersToRoutineVariable =
+        Expression.exists (function Col name -> tryRoutineVariable name |> Option.isSome | _ -> false)
+
     function
+    | expression when refersToRoutineVariable expression -> None
     | Col name -> Some(name, None)
     | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
         Some(name, None)
@@ -14223,17 +14589,18 @@ and private likePrefixRangePredicate constantValue textCharset scope (table: Tab
                         { Column = column.Name; Lower = lower; Upper = upper }))))
     | _ -> None
 
-and private collectClassifiedRangeBounds classify (whereExpr: Expr option) =
+and private collectClassifiedRangeBounds columnKey classify (whereExpr: Expr option) =
     let addBound bounds (predicate: RangeLookupBounds<_, _>) =
+        let key = columnKey predicate.Column
         let existing =
-            Map.tryFind predicate.Column bounds
+            Map.tryFind key bounds
             |> Option.defaultValue
                 { Column = predicate.Column
                   Lower = None
                   Upper = None }
 
         Map.add
-            predicate.Column
+            key
             { existing with
                 Lower = Option.orElse existing.Lower predicate.Lower
                 Upper = Option.orElse existing.Upper predicate.Upper }
@@ -14246,8 +14613,11 @@ and private collectClassifiedRangeBounds classify (whereExpr: Expr option) =
     |> Map.values
     |> List.ofSeq
 
+and private collectStringRangeBounds classify whereExpr =
+    collectClassifiedRangeBounds (fun (name: string) -> name.ToLowerInvariant()) classify whereExpr
+
 and private collectRangeBounds columnName boundValue whereExpr =
-    collectClassifiedRangeBounds (rangePredicatesFor columnName boundValue) whereExpr
+    collectStringRangeBounds (rangePredicatesFor columnName boundValue) whereExpr
 
 and private rangeLookupBounds
     (scope: ColumnReferenceScope)
@@ -14257,14 +14627,14 @@ and private rangeLookupBounds
     (tref: TableRef)
     (whereExpr: Expr option)
     : RangeLookupBounds<string, Value> list =
-    collectClassifiedRangeBounds (plannerRangePredicatesFor scope store registry table tref) whereExpr
+    collectStringRangeBounds (plannerRangePredicatesFor scope store registry table tref) whereExpr
 
 and private functionalRangeLookupBounds indexed boundValue (whereExpr: Expr option) =
     let bound expression =
         boundValue expression
         |> Option.map (fun value -> expression, value)
 
-    collectClassifiedRangeBounds (rangePredicatesFor indexed bound) whereExpr
+    collectClassifiedRangeBounds id (rangePredicatesFor indexed bound) whereExpr
 
 and private functionalRangeValues (bounds: RangeLookupBounds<'column, Expr * Value>) =
     let value = Option.map (fun ((_, value), inclusive) -> value, inclusive)
@@ -14827,13 +15197,53 @@ and private correlatedAffineEqualityProbes source (columns: ColumnDef list) cont
             inverse left right |> Option.orElseWith (fun () -> inverse right left)
         | _ -> None)
 
-and private correlatedRangeBounds source (whereExpr: Expr option) (outer: EvalContext option) =
+and private correlatedRangeBounds
+    (store: Store)
+    (projection: PhysicalProjection)
+    source
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    =
     outer
     |> Option.map (fun context ->
-        collectRangeBounds
+        functionalRangeLookupBounds
             (tryCorrelatedInnerColumn source)
             (tryCorrelatedProbeValue source context)
-            whereExpr)
+            whereExpr
+        |> List.choose (fun bounds ->
+            Option.map2
+                (fun (outputColumn: ColumnDef) (physicalColumn: ColumnDef) ->
+                    let isText =
+                        match physicalColumn.Type with
+                        | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText -> true
+                        | _ -> false
+                    let compatible =
+                        match equalityMembershipDomain store physicalColumn with
+                        | Some(TextMembership stored) ->
+                            [ bounds.Lower; bounds.Upper ]
+                            |> List.choose id
+                            |> List.forall (fun ((expression, value), _) ->
+                                match value with
+                                | VNull -> true
+                                | VString _ ->
+                                    comparisonCollation
+                                        context
+                                        "<"
+                                        (Col outputColumn.Name)
+                                        (Some outputColumn)
+                                        expression
+                                        (tryColumnDefForExpr context expression)
+                                    |> Result.toOption
+                                    |> Option.exists (fun effective -> equalsIgnoreCase stored.Name effective.Name)
+                                | _ -> false)
+                        | _ when isText -> false
+                        | _ -> true
+                    if compatible then Some(functionalRangeValues bounds) else None)
+                (resolveColumn projection.OutputColumns bounds.Column
+                 |> Result.toOption
+                 |> Option.map (fun index -> projection.OutputColumns.[index]))
+                (tryPhysicalProjectionColumn projection bounds.Column)
+            |> Option.flatten))
     |> Option.defaultValue []
 
 and private correlatedFunctionalRangeBounds
@@ -14912,6 +15322,7 @@ and private tryCorrelatedFunctionalEqualityCandidates
     qualifier
     (context: EvalContext)
     whereExpr
+    maxRows
     =
     let sourceRef = correlatedSourceRef qualifier
     let source = correlatedProbeSource qualifier projection.OutputColumns
@@ -14942,9 +15353,14 @@ and private tryCorrelatedFunctionalEqualityCandidates
                 physicalColumn.Name
                 (Some physicalTransform))
         |> Option.bind (fun index ->
-            Storage.tryProjectedEqualityRowIdsForIndex store projection.PhysicalTable index [ value ])
-        |> Option.map (Storage.rowsForRowIds projection.PhysicalTable))
-    |> intersectPhysicalRows
+            Storage.tryProjectedEqualityRowIdsForIndex store projection.PhysicalTable index [ value ]))
+    |> function
+        | [] -> None
+        | first :: remaining -> Some(remaining |> List.fold Set.intersect first)
+    |> Option.filter (fun rowIds ->
+        maxRows
+        |> Option.forall (fun limit -> rowIds |> Seq.truncate limit |> Seq.length < limit))
+    |> Option.map (Storage.rowsForRowIds projection.PhysicalTable)
 
 and private tryCorrelatedFunctionalRangeCandidates
     (store: Store)
@@ -15005,9 +15421,9 @@ and private tryCorrelatedFunctionalLookup
                 candidates projection qualifier context
                 |> Option.bind (projectPhysicalLookupRows store registry dbName projection))))
 
-and private tryCorrelatedFunctionalEqualityLookup store registry dbName sourceItem whereExpr outer =
+and private tryCorrelatedFunctionalEqualityLookup store registry dbName sourceItem whereExpr outer maxRows =
     tryCorrelatedFunctionalLookup store registry dbName sourceItem outer (fun projection qualifier context ->
-        tryCorrelatedFunctionalEqualityCandidates store registry projection qualifier context whereExpr)
+        tryCorrelatedFunctionalEqualityCandidates store registry projection qualifier context whereExpr maxRows)
 
 and private tryCorrelatedFunctionalRangeLookup store registry dbName sourceItem whereExpr outer =
     tryCorrelatedFunctionalLookup store registry dbName sourceItem outer (fun projection qualifier context ->
@@ -15105,7 +15521,7 @@ and private tryPhysicalProjectionUncached
 
                 let directColumn =
                     function
-                    | Col name -> Some name
+                    | Col name when tryRoutineVariable name |> Option.isNone -> Some name
                     | QualifiedCol(qualifier, name)
                         when qualifier.Equals(sourceQualifier, System.StringComparison.OrdinalIgnoreCase) ->
                         Some name
@@ -15371,6 +15787,13 @@ and private tryProjectedPhysicalCorrelatedInRowIds store (projection: PhysicalPr
     let indexedColumn expression =
         tryCorrelatedInnerColumn probeSource expression
         |> Option.map (fun name -> name, None)
+    let doubleBound = function
+        | VNull -> Some VNull
+        | VString _ as value -> Some value
+        | (VDouble _ | VInt _ | VUInt _ | VDecimal _ | VBit _) as value ->
+            let number = Value.toDouble value
+            if System.Double.IsFinite number then Some(VDouble number) else None
+        | _ -> None
     let boundValue (name, _) expression =
         let value =
             match expression with
@@ -15384,10 +15807,14 @@ and private tryProjectedPhysicalCorrelatedInRowIds store (projection: PhysicalPr
             |> Option.bind (fun index ->
                 let outputColumn = projection.OutputColumns.[index]
                 tryPhysicalProjectionColumn projection name
-                |> Option.bind (equalityMembershipDomain store)
-                |> Option.filter (fun domain ->
-                    compatibleCorrelatedMembershipBound context outputColumn domain expression value)
-                |> Option.map (fun _ -> value)))
+                |> Option.bind (fun physicalColumn ->
+                    match physicalColumn.Type with
+                    | TDouble _ -> doubleBound value
+                    | _ ->
+                        equalityMembershipDomain store physicalColumn
+                        |> Option.filter (fun domain ->
+                            compatibleCorrelatedMembershipBound context outputColumn domain expression value)
+                        |> Option.map (fun _ -> value))))
 
     let candidateIds (probe: IndexInProbe) =
         let names = probe.Columns |> List.map fst
@@ -15618,7 +16045,7 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
 
                 let rangePolicy = if membership.IsSome then CandidateNarrowing else CostedRead
                 let ranges =
-                    correlatedRangeBounds probeSource (Some branch) outer
+                    correlatedRangeBounds store projection probeSource (Some branch) outer
                     |> List.choose (tryProjectedPhysicalRangeCandidates rangePolicy store projection)
 
                 let likePrefixes =
@@ -15631,7 +16058,14 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
                         outer
                         |> Option.map (fun context ->
-                            [ tryCorrelatedFunctionalEqualityCandidates store registry projection qualifier context (Some branch)
+                            let ordinary =
+                                (equality |> Option.toList) @ (affine |> Option.toList) @ (absolute |> Option.toList)
+                                @ (nulls |> Option.toList) @ (membership |> Option.toList)
+                                @ (likePrefixes |> Option.toList) @ ranges
+
+                            let maxRows = ordinary |> List.sortBy List.length |> List.tryHead |> Option.map List.length
+
+                            [ tryCorrelatedFunctionalEqualityCandidates store registry projection qualifier context (Some branch) maxRows
                               tryCorrelatedFunctionalRangeCandidates store registry projection qualifier context (Some branch) ]
                             |> List.choose id)
                         |> Option.defaultValue []
@@ -15670,7 +16104,7 @@ and private tryProjectedPhysicalCorrelatedRangeLookup
     |> Option.bind (fun qualifier ->
         tryPhysicalProjection store registry dbName source
         |> Option.bind (fun projection ->
-            correlatedRangeBounds (correlatedProbeSource qualifier projection.OutputColumns) whereExpr outer
+            correlatedRangeBounds store projection (correlatedProbeSource qualifier projection.OutputColumns) whereExpr outer
             |> List.tryPick (tryProjectedPhysicalRangeRows store registry dbName projection)))
 
 and private tryProjectedPhysicalCorrelatedIntersectionLookup
@@ -15707,7 +16141,7 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
 
                 let rangePolicy = if membership.IsEmpty then CostedRead else CandidateNarrowing
                 let ranges =
-                    correlatedRangeBounds probeSource whereExpr outer
+                    correlatedRangeBounds store projection probeSource whereExpr outer
                     |> List.choose (tryProjectedPhysicalRangeCandidates rangePolicy store projection)
 
                 let likePrefixes =
@@ -15720,7 +16154,13 @@ and private tryProjectedPhysicalCorrelatedIntersectionLookup
                     if storedRowsMatchReadRows store projection.PhysicalTable.Columns then
                         outer
                         |> Option.map (fun context ->
-                            [ tryCorrelatedFunctionalEqualityCandidates store registry projection qualifier context whereExpr
+                            let ordinary =
+                                (equality |> Option.toList) @ (nulls |> Option.toList) @ ranges
+                                @ (likePrefixes |> Option.toList) @ membership
+
+                            let maxRows = ordinary |> List.sortBy List.length |> List.tryHead |> Option.map List.length
+
+                            [ tryCorrelatedFunctionalEqualityCandidates store registry projection qualifier context whereExpr maxRows
                               tryCorrelatedFunctionalRangeCandidates store registry projection qualifier context whereExpr ]
                             |> List.choose id)
                         |> Option.defaultValue []
@@ -15854,10 +16294,10 @@ and private tryMaterializedCorrelatedLookup
                                 | _ -> Some [])
                         | _ -> None)
 
-            // Integer arithmetic needs an exact result domain before its
+            // Integer expressions need an exact result domain before their
             // signed and unsigned values can share one equality key.
             let rec integerKeyExpression = function
-                | LiteralValue(VInt _ | VUInt _) -> true
+                | LiteralValue(VInt _ | VUInt _ | VNull) -> true
                 | (Col _ | QualifiedCol _) as expression ->
                     (tryCorrelatedInnerColumn probeSource expression
                      |> Option.bind (resolveColumn columns >> Result.toOption)
@@ -15866,6 +16306,10 @@ and private tryMaterializedCorrelatedLookup
                 | Neg expression -> integerKeyExpression expression
                 | FuncCall(name, [ expression ]) when equalsIgnoreCase name "ABS" ->
                     integerKeyExpression expression
+                | FuncCall(name, arguments) when equalsIgnoreCase name "COALESCE" ->
+                    not arguments.IsEmpty && List.forall integerKeyExpression arguments
+                | FuncCall(name, [ left; right ]) when equalsIgnoreCase name "IFNULL" ->
+                    integerKeyExpression left && integerKeyExpression right
                 | BinOp((Add | Sub | Mul), left, right) ->
                     integerKeyExpression left && integerKeyExpression right
                 | _ -> false
@@ -15958,18 +16402,27 @@ and private tryMaterializedCorrelatedLookup
                 | VInt _ | VUInt _ | VDecimal _ | VBit _ as value ->
                     let number = Value.toDouble value
                     if System.Double.IsFinite number then Some number else None
+                | VString text when not (System.String.IsNullOrWhiteSpace text) ->
+                    match System.Double.TryParse(
+                        text,
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture
+                    ) with
+                    | true, number when System.Double.IsFinite number -> Some number
+                    | _ -> None
                 | _ -> None
 
             // Numeric bounds compare with a DOUBLE result in the approximate
             // domain, including exact values that round to the same double.
-            // Text bounds retain the scan because their coercion is broader.
+            // Fully numeric strings use that domain too; strings requiring a
+            // truncated conversion retain the scan and its warning count.
             let doubleExpressionCandidates predicate =
                 let doubleKey = function
                     | VDouble number when System.Double.IsFinite number -> Some(VDouble number)
                     | _ -> None
                 let probeKey value =
                     match value with
-                    | VInt _ | VUInt _ | VDecimal _ | VBit _ as value ->
+                    | VInt _ | VUInt _ | VDecimal _ | VBit _ | VString _ as value ->
                         finiteNumericDouble value |> Option.map VDouble
                     | value -> doubleKey value
 
@@ -15992,11 +16445,35 @@ and private tryMaterializedCorrelatedLookup
                                 doubleLookup indexed |> Option.bind (fun lookup -> lookup [ value ])
                             | _ -> None)
 
+                let inCandidate indexed bounds =
+                    if not (rowLocalExpression indexed) then
+                        None
+                    else
+                        let boundValue = function
+                            | Cast(LiteralValue VNull, _) -> Some VNull
+                            | expression -> tryCorrelatedProbeValue probeSource context expression
+                        bounds
+                        |> List.map boundValue
+                        |> tryAllSome
+                        |> Option.bind (fun values ->
+                            if values |> List.forall (fun value -> value = VNull || (probeKey value |> Option.isSome)) then
+                                doubleLookup indexed
+                                |> Option.bind (fun lookup ->
+                                    values
+                                    |> List.map (fun value -> lookup [ value ])
+                                    |> tryAllSome
+                                    |> Option.map (fun groups ->
+                                        let seen = HashSet<Value[]>(HashIdentity.Reference)
+                                        groups |> List.collect id |> List.filter seen.Add))
+                            else
+                                None)
+
                 predicate
                 |> optionalConjuncts
                 |> List.choose (function
                     | BinOp(Eq, left, right) ->
                         candidate left right |> Option.orElseWith (fun () -> candidate right left)
+                    | In(indexed, bounds) -> inCandidate indexed bounds
                     | _ -> None)
                 |> intersectSharedRows
 
@@ -16077,6 +16554,102 @@ and private tryMaterializedCorrelatedLookup
                         lookup (value range.Lower) (value range.Upper)))
                 |> intersectSharedRows
 
+            let textComparisonCollation operation indexed bound =
+                resolveOperandCollation operation
+                    (collationOperand (rowContext [||]) indexed None)
+                    (collationOperand context bound (tryColumnDefForExpr context bound))
+
+            let textRangeCandidates predicate =
+                let rangeLookup expression (collation: Collation.Collation) =
+                    let lookups =
+                        getMemoized memo.MaterializedCorrelatedTextRanges source (fun () ->
+                            Dictionary<Expr * string, MaterializedRangeLookup option>())
+
+                    getMemoized lookups (expression, collation.Name) (fun () ->
+                        let sourceRows = List.toArray rows
+                        let entries = ResizeArray<string * int>()
+                        let mutable compatible = true
+                        for index in 0 .. sourceRows.Length - 1 do
+                            if compatible then
+                                match evalExpr (rowContext sourceRows.[index]) expression with
+                                | Ok(VString text) -> entries.Add(text, index)
+                                | Ok VNull -> ()
+                                | _ -> compatible <- false
+
+                        if not compatible then None
+                        else
+                            let sorted = entries.ToArray()
+                            Array.sortInPlaceWith
+                                (fun (left, _) (right, _) -> collation.ComparePrimary left right)
+                                sorted
+
+                            let firstMatching bound inclusive =
+                                let mutable lo, hi = 0, sorted.Length
+                                while lo < hi do
+                                    let middle = lo + (hi - lo) / 2
+                                    let comparison = collation.ComparePrimary (fst sorted.[middle]) bound
+                                    if comparison < 0 || (comparison = 0 && not inclusive) then
+                                        lo <- middle + 1
+                                    else hi <- middle
+                                lo
+
+                            Some(fun lower upper ->
+                                let compatibleBound = function
+                                    | None | Some(VNull, _) | Some(VString _, _) -> true
+                                    | _ -> false
+                                if not (compatibleBound lower && compatibleBound upper) then None
+                                elif lower |> Option.exists (fst >> (=) VNull)
+                                     || upper |> Option.exists (fst >> (=) VNull) then Some []
+                                else
+                                    let first =
+                                        lower
+                                        |> Option.map (fun (value, inclusive) ->
+                                            match value with VString text -> firstMatching text inclusive | _ -> 0)
+                                        |> Option.defaultValue 0
+                                    let afterLast =
+                                        upper
+                                        |> Option.map (fun (value, inclusive) ->
+                                            match value with VString text -> firstMatching text (not inclusive) | _ -> sorted.Length)
+                                        |> Option.defaultValue sorted.Length
+                                    sorted.[first .. afterLast - 1]
+                                    |> Array.map snd
+                                    |> Array.sort
+                                    |> Array.map (fun index -> sourceRows.[index])
+                                    |> Array.toList
+                                    |> Some))
+
+                let indexed expression =
+                    if rowLocalExpression expression
+                       && Option.isNone (tryCorrelatedInnerColumn probeSource expression) then
+                        Some expression
+                    else None
+                let bound expression =
+                    tryCorrelatedProbeValue probeSource context expression
+                    |> Option.map (fun value -> expression, value)
+
+                predicate
+                |> optionalConjuncts
+                |> List.collect (rangePredicatesFor indexed bound)
+                |> List.choose (fun range ->
+                    let bounds = [ range.Lower; range.Upper ] |> List.choose id
+                    let collations =
+                        bounds
+                        |> List.choose (fun ((expression, value), _) ->
+                            match value with
+                            | VString _ | VNull ->
+                                textComparisonCollation "<" range.Column expression
+                                |> Result.toOption
+                            | _ -> None)
+                    match collations with
+                    | collation :: rest when collations.Length = bounds.Length
+                                             && rest |> List.forall (fun other -> equalsIgnoreCase collation.Name other.Name) ->
+                        rangeLookup range.Column collation
+                        |> Option.bind (fun lookup ->
+                            let value = Option.map (fun ((_, value), inclusive) -> value, inclusive)
+                            lookup (value range.Lower) (value range.Upper))
+                    | _ -> None)
+                |> intersectSharedRows
+
             // The evaluated text expression is a statement-local key over a
             // materialized source. Its collation belongs to the comparison,
             // not necessarily to the source column or the connection.
@@ -16089,9 +16662,7 @@ and private tryMaterializedCorrelatedLookup
                         |> Option.bind (fun value ->
                             match value with
                             | VString _ | VNull ->
-                                resolveOperandCollation "="
-                                    (collationOperand (rowContext [||]) indexed None)
-                                    (collationOperand context bound (tryColumnDefForExpr context bound))
+                                textComparisonCollation "=" indexed bound
                                 |> Result.toOption
                                 |> Option.bind (fun collation ->
                                     let lookups =
@@ -16115,7 +16686,26 @@ and private tryMaterializedCorrelatedLookup
                 |> intersectSharedRows
 
             let equalityCandidates predicate =
-                let equalities = correlatedProbeEqualities probeSource predicate (Some context) |> Option.defaultValue []
+                let equalities =
+                    predicate
+                    |> optionalConjuncts
+                    |> List.choose (fun expression ->
+                        match expression, tryCorrelatedProbeEqualityPredicate probeSource context expression with
+                        | BinOp((Eq | NullSafeEq), left, right), Some(name, value) ->
+                            let bound =
+                                match tryCorrelatedInnerColumn probeSource left with
+                                | Some inner when equalsIgnoreCase inner name -> right
+                                | _ -> left
+
+                            resolveColumn columns name
+                            |> Result.toOption
+                            |> Option.bind (fun index ->
+                                let column = columns.[index]
+                                equalityMembershipDomain store column
+                                |> Option.filter (fun domain ->
+                                    compatibleCorrelatedMembershipBound context column domain bound value)
+                                |> Option.map (fun _ -> name, value))
+                        | _ -> None)
 
                 // One statement-local key covers every usable equality.
                 let probes =
@@ -16304,6 +16894,7 @@ and private tryMaterializedCorrelatedLookup
                       doubleExpressionCandidates (Some branch)
                       doubleRangeCandidates (Some branch)
                       textExpressionCandidates (Some branch)
+                      textRangeCandidates (Some branch)
                       absoluteCandidates (Some branch)
                       affineCandidates (Some branch)
                       nullCandidates (Some branch)
@@ -16329,6 +16920,7 @@ and private tryMaterializedCorrelatedLookup
               doubleExpressionCandidates whereExpr
               doubleRangeCandidates whereExpr
               textExpressionCandidates whereExpr
+              textRangeCandidates whereExpr
               absoluteCandidates whereExpr
               affineCandidates whereExpr
               nullCandidates whereExpr
@@ -16483,7 +17075,8 @@ and private tryCorrelatedSourceLookup
 
         let direct =
             match equality with
-            | Some(_, rows) when rows.Length <= 1 -> equality
+            // A pair is cheaper to filter than to probe through every other eligible index.
+            | Some(_, rows) when rows.Length <= 2 -> equality
             | _ ->
                 let equalityUnion = tryCorrelatedEqualityUnionLookup store dbName table whereExpr outer
                 let projectedUnion =
@@ -16492,13 +17085,19 @@ and private tryCorrelatedSourceLookup
                     else
                         None
 
-                [ equality
-                  equalityUnion
-                  projectedUnion
-                  nullLookup ()
-                  tryProjectedPhysicalCorrelatedAbsoluteLookup store registry dbName source whereExpr outer
-                  tryProjectedPhysicalCorrelatedAffineLookup store registry dbName source whereExpr outer
-                  tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
+                let ordinary =
+                    [ equality
+                      equalityUnion
+                      projectedUnion
+                      nullLookup ()
+                      tryProjectedPhysicalCorrelatedAbsoluteLookup store registry dbName source whereExpr outer
+                      tryProjectedPhysicalCorrelatedAffineLookup store registry dbName source whereExpr outer ]
+                    |> fewestRows
+
+                [ ordinary
+                  tryCorrelatedFunctionalEqualityLookup
+                      store registry dbName source whereExpr outer
+                      (ordinary |> Option.map (snd >> List.length)) ]
                 |> fewestRows
 
         let physicalFastPath =
@@ -16507,7 +17106,7 @@ and private tryCorrelatedSourceLookup
 
         (if physicalFastPath then
              (match direct with
-              | Some(_, rows) when rows.Length <= 1 -> None
+              | Some(_, rows) when rows.Length <= 2 -> None
               | Some _ -> physicalIntersection ()
               | None when hasMultipleConjunctiveRanges || (hasMembershipPredicate && hasRangePredicate) || hasNullTestPredicate -> physicalIntersection ()
               | None -> None)
@@ -16532,12 +17131,18 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith (fun () ->
             physicalIntersection ()
             |> Option.orElseWith (fun () ->
-                [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
-                  tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
-                  nullLookup ()
-                  tryProjectedPhysicalCorrelatedAbsoluteLookup store registry dbName source whereExpr outer
-                  tryProjectedPhysicalCorrelatedAffineLookup store registry dbName source whereExpr outer
-                  tryCorrelatedFunctionalEqualityLookup store registry dbName source whereExpr outer ]
+                let ordinary =
+                    [ tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
+                      tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer
+                      nullLookup ()
+                      tryProjectedPhysicalCorrelatedAbsoluteLookup store registry dbName source whereExpr outer
+                      tryProjectedPhysicalCorrelatedAffineLookup store registry dbName source whereExpr outer ]
+                    |> fewestRows
+
+                [ ordinary
+                  tryCorrelatedFunctionalEqualityLookup
+                      store registry dbName source whereExpr outer
+                      (ordinary |> Option.map (snd >> List.length)) ]
                 |> fewestRows
                 |> chooseWithRanges false))
         |> Option.orElseWith materializedLookup
@@ -16607,7 +17212,16 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
                 equalities
                 |> List.map (fun (column, _, value) -> column.Name, value)
                 |> tryStoredEqualityMatchLookup outer.Store projection.PhysicalTable
-                |> Option.map (snd >> _.CandidateCount)
+                |> Option.bind (fun (matched, lookup) ->
+                    // A candidate bucket is a final COUNT only when every equality
+                    // is represented by a distinct, complete stored key part.
+                    // Prefix keys and uncovered predicates still need WHERE.
+                    if matched.UsesWholeStoredValues
+                       && matched.KeyColumnCount = equalities.Length
+                       && (matched.ColumnIndices |> Set.ofList |> Set.count) = equalities.Length then
+                        Some lookup.CandidateCount
+                    else
+                        None)
 
         tryPhysicalProjection outer.Store outer.Registry outer.DbName source
         |> Option.filter (fun projection -> storedRowsMatchReadRows outer.Store projection.PhysicalTable.Columns)
@@ -18247,22 +18861,37 @@ and private resolveGroupByRef (columnIndex: Map<string, int list>) (projections:
     | Col name -> resolveGroupOrHavingCol columnIndex projections name
     | _ -> Ok(resolvePositionalOrAlias projections expr)
 
-/// HAVING aliases may occur anywhere in the condition tree.
-and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: Projection list) (expr: Expr) : Result<Expr, EvalError> =
-    let sub = resolveHavingRef columnIndex projections
+/// HAVING aliases may occur anywhere in the condition tree, but an aggregate
+/// argument resolves a source column before an output alias of the same name.
+and private resolveHavingRef
+    (registry: Registry)
+    (columnIndex: Map<string, int list>)
+    (projections: Projection list)
+    (insideAggregate: bool)
+    (expr: Expr)
+    : Result<Expr, EvalError> =
+    let sub = resolveHavingRef registry columnIndex projections insideAggregate
 
     match expr with
     | Placeholder _ -> Ok expr
     | UserVariable _
     | SystemVariable _ -> Ok expr
     | MatchAgainst(cols, q, mode) -> sub q |> Result.map (fun q2 -> MatchAgainst(cols, q2, mode))
+    | Col name when insideAggregate ->
+        resolveGroupOrHavingCol columnIndex projections name
+        |> Result.bind (fun resolved ->
+            if containsAggregate registry resolved then Error(1111, "Invalid use of group function")
+            else Ok resolved)
     | Col name ->
         match projections |> List.tryPick (function
             | { Expression = projection; Alias = Some alias } when equalsIgnoreCase alias name -> Some projection
             | _ -> None) with
         | Some projection -> Ok projection
         | None -> resolveGroupOrHavingCol columnIndex projections name
-    | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
+    | FuncCall(name, args) ->
+        let resolveArgument =
+            resolveHavingRef registry columnIndex projections (insideAggregate || isAggregateFunctionName registry name)
+        args |> traverse resolveArgument |> Result.map (fun args' -> FuncCall(name, args'))
     | Row values -> values |> traverse sub |> Result.map Row
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
     | AssignUserVariable(name, value) -> sub value |> Result.map (fun value' -> AssignUserVariable(name, value'))
@@ -18724,6 +19353,7 @@ and private validateOnlyFullGroupBy
 
     let physicalSources =
         (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+        |> List.collect FromItem.leaves
         |> List.choose (function
             | FromTable tableRef ->
                 let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
@@ -18734,7 +19364,7 @@ and private validateOnlyFullGroupBy
                 | _ -> None
             | _ -> None)
 
-    let uniqueKeys =
+    let uniqueKeyCandidates =
         physicalSources
         |> List.collect (fun (sourceColumns, offset, table) ->
             table.Indexes
@@ -18747,20 +19377,27 @@ and private validateOnlyFullGroupBy
                         |> List.tryFindIndex (fun column -> equalsIgnoreCase column.Name name)
                         |> Option.map (fun position -> offset + position, sourceColumns.[position]))
 
-                if sameLength keyColumns index.Columns && keyColumns |> List.forall (snd >> _.Nullable >> not) then
-                    Some(keyColumns |> List.map fst, [ offset .. offset + sourceColumns.Length - 1 ])
+                if sameLength keyColumns index.Columns then
+                    Some(keyColumns, [ offset .. offset + sourceColumns.Length - 1 ])
                 else
                     None))
 
+    let uniqueKeys =
+        uniqueKeyCandidates
+        |> List.choose (fun (keyColumns, source) ->
+            if keyColumns |> List.forall (snd >> _.Nullable >> not) then
+                Some(keyColumns |> List.map fst, source)
+            else
+                None)
+
     let resolveGroupExprs () = select.GroupBy |> traverse (resolveGroupByRef columnIndex select.Projections)
 
-    let expandDetermined equalities keys initial =
+    let expandDetermined dependencies keys initial =
         let rec expand determined =
             let throughEqualities =
-                equalities
-                |> List.fold (fun found (left, right) ->
-                    if Set.contains left found then Set.add right found
-                    elif Set.contains right found then Set.add left found
+                dependencies
+                |> List.fold (fun found (source, target, required) ->
+                    if Set.contains source found && Set.isSubset required found then Set.add target found
                     else found) determined
 
             let throughKeys =
@@ -18851,9 +19488,117 @@ and private validateOnlyFullGroupBy
     else
         resolveGroupExprs ()
         |> Result.bind (fun groupExprs ->
-            let equalities =
-                (select.Where |> Option.map (fun expr -> equalityPairs expr []) |> Option.defaultValue [])
-                @ (select.Joins |> List.collect (fun join -> equalityPairs join.On []))
+            let bothWays (left, right) =
+                [ left, right, Set.empty; right, left, Set.empty ]
+
+            let whereDependencies =
+                select.Where
+                |> Option.map (fun expr -> equalityPairs expr [] |> List.collect bothWays)
+                |> Option.defaultValue []
+
+            let sourceBindings source =
+                FromItem.leaves source
+                |> List.choose (fun leaf ->
+                    FromItem.tryQualifier leaf
+                    |> Option.bind (fun qualifier ->
+                        qualifiers
+                        |> Map.tryFind (qualifier.ToLowerInvariant())
+                        |> Option.map (fun (sourceColumns, _) -> qualifier, sourceColumns)))
+
+            let initialSources = select.From |> Option.toList |> List.collect sourceBindings
+
+            let effectiveJoins, _ =
+                select.Joins
+                |> List.mapFold (fun (leftOperand, precedingSources) join ->
+                    let rightSources = sourceBindings join.Table
+                    let effectiveOn =
+                        resolvedJoinCondition precedingSources rightSources leftOperand join
+                        |> Result.toOption
+                        |> Option.defaultValue join.On
+                    let nextOperand =
+                        match leftOperand with
+                        | Some left -> Some(FromJoinGroup(left, [ join ]))
+                        | None -> Some join.Table
+                    (join, effectiveOn), (nextOperand, precedingSources @ rightSources))
+                    (select.From, initialSources)
+
+            let joinFacts =
+                effectiveJoins
+                |> List.map (fun (join, effectiveOn) ->
+                    let equalities = equalityPairs effectiveOn []
+
+                    match join.Kind with
+                    | LeftJoin | NaturalLeftJoin | RightJoin | NaturalRightJoin ->
+                        let rightPositions =
+                            FromItem.leaves join.Table
+                            |> List.choose (fun source ->
+                                FromItem.tryQualifier source
+                                |> Option.bind (fun qualifier -> Map.tryFind (qualifier.ToLowerInvariant()) qualifiers))
+                            |> List.collect (fun (sourceColumns, offset) ->
+                                [ offset .. offset + sourceColumns.Length - 1 ])
+                            |> Set.ofList
+
+                        let preserved position =
+                            if join.Kind = LeftJoin || join.Kind = NaturalLeftJoin then
+                                not (Set.contains position rightPositions)
+                            else
+                                Set.contains position rightPositions
+
+                        let onReferences = expressionColumns effectiveOn
+                        let resolvedReferences = onReferences |> List.choose tryColumnPosition
+                        let onScope =
+                            { Qualifiers = qualifiers |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+                              Columns = columns |> List.map (_.Name >> fun name -> name.ToLowerInvariant()) |> Set.ofList }
+
+                        // An unknown source boundary or unresolved ON reference cannot
+                        // establish a dependency across the nullable side.
+                        if Set.isEmpty rightPositions
+                           || resolvedReferences.Length <> onReferences.Length
+                           || not (isStatementStableExpr store registry dbName onScope effectiveOn) then
+                            [], []
+                        else
+                            // Every preserved-side ON input must be fixed: another
+                            // input can decide whether a row is null-complemented.
+                            let required = resolvedReferences |> List.filter preserved |> Set.ofList
+
+                            let dependencies =
+                                equalities
+                                |> List.collect (fun (left, right) ->
+                                    match preserved left, preserved right with
+                                    | true, false -> [ left, right, required ]
+                                    | false, true -> [ right, left, required ]
+                                    | false, false -> bothWays (left, right)
+                                    | true, true -> [])
+
+                            let nullableSide =
+                                if join.Kind = LeftJoin || join.Kind = NaturalLeftJoin then
+                                    rightPositions
+                                else
+                                    [ 0 .. Set.minElement rightPositions - 1 ] |> Set.ofList
+
+                            let nullRejected =
+                                equalities
+                                |> List.collect (fun (left, right) -> [ left; right ])
+                                |> Set.ofList
+
+                            // A nullable UNIQUE part becomes non-NULL in every
+                            // matched row when an ON equality uses it. In the
+                            // unmatched rows the whole nullable side is NULL.
+                            let conditionalKeys =
+                                uniqueKeyCandidates
+                                |> List.choose (fun (keyColumns, source) ->
+                                    if source |> List.forall (fun position -> Set.contains position nullableSide)
+                                       && keyColumns |> List.forall (fun (position, column) ->
+                                           not column.Nullable || Set.contains position nullRejected) then
+                                        Some(keyColumns |> List.map fst, source)
+                                    else
+                                        None)
+
+                            dependencies, conditionalKeys
+                    | _ -> equalities |> List.collect bothWays, [])
+
+            let joinDependencies = joinFacts |> List.collect fst
+            let outerUniqueKeys = joinFacts |> List.collect snd
 
             let initial =
                 groupExprs
@@ -18864,14 +19609,14 @@ and private validateOnlyFullGroupBy
                     |> Option.map (fun expr -> singletonColumns expr grouped)
                     |> Option.defaultValue grouped
 
-            let determined = expandDetermined equalities uniqueKeys initial
+            let determined = expandDetermined (whereDependencies @ joinDependencies) (uniqueKeys @ outerUniqueKeys) initial
 
             select.Projections
             |> List.mapi (fun index { Expression = expr } -> groupingError "SELECT list" (index + 1) groupExprs determined expr)
             |> traverse id
             |> Result.bind (fun _ ->
                 select.Having
-                |> Option.map (resolveHavingRef columnIndex select.Projections)
+                |> Option.map (resolveHavingRef registry columnIndex select.Projections false)
                 |> Option.defaultValue (Ok(Lit(VInt 1L)))
                 |> Result.bind (groupingError "HAVING clause" 1 groupExprs determined))
             |> Result.bind (fun _ ->
@@ -18962,7 +19707,7 @@ and private runGroupedSelect
     let ctxFor =
         if Map.isEmpty jsonViewSourceNames then baseCtxFor
         else fun row -> { baseCtxFor row with JsonViewSourceNames = jsonViewSourceNames }
-    let havingExpression = select.Having |> Option.map (resolveHavingRef columnIndex select.Projections)
+    let havingExpression = select.Having |> Option.map (resolveHavingRef registry columnIndex select.Projections false)
     let tryProjectedExpressionIndex expression =
         orderProjections |> List.tryFindIndex (fun projection -> projection.Expression = expression)
     let orderExpressions =
@@ -20800,22 +21545,28 @@ and private fullTextScoresForTable
                         |> FullText.restrictReadView Set.empty)
                     |> fun view ->
                         visibleIds |> Option.fold (fun view ids -> FullText.restrictReadView ids view) view
-                let scores =
+                let syntaxError =
                     match mode with
-                    | NaturalLanguage ->
-                        FullText.tryNaturalSingleTermScoresDictionaryInView candidateIds view queryText
-                        |> Option.map HashedScores
-                        |> Option.defaultWith (fun () ->
-                            FullText.naturalScoresInView candidateIds view queryText |> OrderedScores)
-                    | BooleanMode ->
-                        FullText.tryFlatBooleanScoresDictionaryInView candidateIds view queryText
-                        |> Option.map HashedScores
-                        |> Option.defaultWith (fun () ->
-                            FullText.booleanScoresInView candidateIds view queryText |> OrderedScores)
-                    | QueryExpansion ->
-                        FullText.expansionScoresInView candidateIds view queryText |> OrderedScores
-
-                Ok(node, mode, scores)
+                    | BooleanMode -> FullText.booleanSyntaxErrorInView view queryText
+                    | _ -> None
+                match syntaxError with
+                | Some message -> Error(1064, message)
+                | None ->
+                    let scores =
+                        match mode with
+                        | NaturalLanguage ->
+                            FullText.tryNaturalSingleTermScoresDictionaryInView candidateIds view queryText
+                            |> Option.map HashedScores
+                            |> Option.defaultWith (fun () ->
+                                FullText.naturalScoresInView candidateIds view queryText |> OrderedScores)
+                        | BooleanMode ->
+                            FullText.tryFlatBooleanScoresDictionaryInView candidateIds view queryText
+                            |> Option.map HashedScores
+                            |> Option.defaultWith (fun () ->
+                                FullText.booleanScoresInView candidateIds view queryText |> OrderedScores)
+                        | QueryExpansion ->
+                            FullText.expansionScoresInView candidateIds view queryText |> OrderedScores
+                    Ok(node, mode, scores)
             | None, _ -> Error(1191, "Can't find FULLTEXT index matching the column list")
             | _, None -> Error(1210, "Incorrect arguments to AGAINST")
         | MatchAgainst _ -> Error(1210, "Incorrect arguments to AGAINST")
@@ -21853,7 +22604,7 @@ and private runSelect
     // `containsAggregate`/`GroupBy.IsEmpty` routing above) — so it's just
     // ANDed onto the same per-row `matches` check here.
     let matchesWhere = prepareWhereMatches ctxFor whereExpr
-    let havingExpression = select.Having |> Option.map (resolveHavingRef columnIndex projections)
+    let havingExpression = select.Having |> Option.map (resolveHavingRef registry columnIndex projections false)
     let constantHaving =
         havingExpression |> Option.bind (fun resolved -> resolved |> Result.toOption) |> Option.bind (fun expression ->
             let context = { ctxFor [||] with Clause = HavingClause }
@@ -22245,6 +22996,44 @@ let evaluateRowPredicate
     |> Result.map (truthy >> (=) (Some true))
     |> Result.mapError Err
 
+/// Uses the primary key as the final ordering key when a limited write scans
+/// a complete visible index order.
+let private mutationPrimaryTieOrder (table: Table option) qualifier (orderBy: OrderKey list) limit =
+    match table, orderBy, limit with
+    | Some table, (_ :: _), Some _ ->
+        let named =
+            orderBy
+            |> List.choose (function
+                | Col name, direction -> Some(name, direction)
+                | QualifiedCol(owner, name), direction when equalsIgnoreCase owner qualifier ->
+                    Some(name, direction)
+                | _ -> None)
+        if named.Length <> orderBy.Length then []
+        else
+            let direction = named.Head |> snd
+            if named |> List.exists (fun (_, other) -> other <> direction) then []
+            else
+                let orderedNames = named |> List.map fst
+                let indexes = Storage.orderedIndexKeyColumns table
+                let matches (indexNames: string list) =
+                    indexNames.Length >= orderedNames.Length
+                    && List.forall2 equalsIgnoreCase
+                        (indexNames |> List.take orderedNames.Length) orderedNames
+                let completeOrder =
+                    indexes
+                    |> List.exists (fun (indexName, indexNames) ->
+                        matches indexNames
+                        && (equalsIgnoreCase indexName "PRIMARY"
+                            || indexNames.Length = orderedNames.Length))
+                if not completeOrder then []
+                else
+                    indexes
+                    |> List.tryPick (fun (indexName, names) ->
+                        if equalsIgnoreCase indexName "PRIMARY" then Some names else None)
+                    |> Option.defaultValue []
+                    |> List.map (fun name -> Col name, direction)
+    | _ -> []
+
 /// The physical rows a single-table `UPDATE`/`DELETE` actually mutates,
 /// retaining their stable identifiers for the storage write:
 /// every row `matches` (the `WHERE`, or everything when there's none),
@@ -22261,6 +23050,7 @@ let private selectMutationTargets
     (rows: (RowId * Value[]) seq)
     (matches: Value[] -> Result<bool, EvalError>)
     (orderBy: OrderKey list)
+    (tieOrder: OrderKey list)
     (limit: int option)
     : Result<(RowId * Value[]) list, EvalError> =
     let rows = trackExaminedRows rows
@@ -22280,14 +23070,23 @@ let private selectMutationTargets
         matchedRows ()
         |> Result.bind (fun matched ->
             let dirs = orderBy |> List.map snd
+            let tieDirs = tieOrder |> List.map snd
 
             matched
             |> traverse (fun ((_, row) as positioned) ->
                 orderBy
                 |> traverse (fun (e, _) -> evalOrderKey (ctxFor row) e)
-                |> Result.map (fun keys -> keys, positioned))
+                |> Result.bind (fun keys ->
+                    tieOrder
+                    |> traverse (fun (e, _) -> evalOrderKey (ctxFor row) e)
+                    |> Result.map (fun tieKeys -> keys, tieKeys, positioned)))
             |> Result.map (fun keyed ->
-                let ordered = keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) |> List.map snd
+                let ordered =
+                    keyed
+                    |> List.sortWith (fun (ka, ta, _) (kb, tb, _) ->
+                        let order = compareByOrderKeys dirs ka kb
+                        if order <> 0 then order else compareByOrderKeys tieDirs ta tb)
+                    |> List.map (fun (_, _, positioned) -> positioned)
 
                 match limit with
                 | Some count -> ordered |> List.truncate (max 0 count)
@@ -22690,7 +23489,109 @@ let private rewriteViewExpression (view: UpdatableView) (expression: Expr) =
             | None -> Some(QualifiedCol("__fsdb_view", name))
         | _ -> None) expression
 
+let private writableViewFirst (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
+    // The mutation wrapper removes declarations after materializing them.
+    // Later view rewrites must still recognize names in that active scope.
+    let isCte (table: TableRef) =
+        table.Database.IsNone
+        && ((update.Ctes |> List.exists (fun cte -> equalsIgnoreCase cte.CteName table.Table))
+            || Map.containsKey (table.Table.ToLowerInvariant()) (currentCteScope ()))
+    let isPhysical (table: TableRef) =
+        not (isCte table)
+        && (physicalFastPathTable store defaultDatabase table |> Option.isSome)
+    let isStoredView (table: TableRef) =
+        not (isCte table)
+        && (tryStoredViewDefinition store (table.Database |> Option.defaultValue defaultDatabase) table.Table
+            |> Option.isSome)
+
+    let rec move prior remaining =
+        match remaining with
+        | ({ Table = FromTable source; Using = [] } as join) :: rest
+            when join.Kind = LeftJoin || join.Kind = RightJoin ->
+            let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
+            match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
+            | Some view ->
+                let qualifier = source.Alias |> Option.defaultValue source.Table
+                let writesView =
+                    update.Assignments
+                    |> List.exists (fun assignment ->
+                        match assignment.Table with
+                        | Some owner -> equalsIgnoreCase owner qualifier
+                        | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+                if writesView then
+                    let preceding =
+                        match prior with
+                        | [] -> FromTable update.From
+                        | earlier -> FromJoinGroup(FromTable update.From, List.rev earlier)
+                    { update with
+                        From = source
+                        Joins = { join with
+                                    Kind = if join.Kind = LeftJoin then RightJoin else LeftJoin
+                                    Table = preceding } :: rest }
+                else update
+            | None when isPhysical source -> move (join :: prior) rest
+            | None -> update
+        | ({ Kind = InnerJoin; Table = FromTable source; Using = [] } as join) :: rest ->
+            let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
+            match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
+            | Some view ->
+                let qualifier = source.Alias |> Option.defaultValue source.Table
+                let writesView =
+                    update.Assignments
+                    |> List.exists (fun assignment ->
+                        match assignment.Table with
+                        | Some owner -> equalsIgnoreCase owner qualifier
+                        | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+
+                if not writesView then
+                    move (join :: prior) rest
+                else
+                    // Keep the old first source before its prior joins, so
+                    // LATERAL and JSON_TABLE dependencies remain in scope.
+                    // Attach this join's predicate to the last prior operand,
+                    // where every referenced alias has been bound.
+                    let joins =
+                        match prior with
+                        | [] -> { join with Table = FromTable update.From } :: rest
+                        | last :: earlierReversed ->
+                            let carried = { last with On = BinOp(And, last.On, join.On) }
+                            { join with Table = FromTable update.From; On = Lit(VInt 1L) }
+                            :: (List.rev (carried :: earlierReversed) @ rest)
+                    { update with From = source; Joins = joins }
+            // An independent read-only view can remain ahead of a later
+            // writable view while that target is moved into first position.
+            | None when isPhysical source || isStoredView source || isCte source ->
+                move (join :: prior) rest
+            | None -> update
+        | ({ Kind = InnerJoin; Table = (FromSubquery _ | FromLateral _ | FromJsonTable _); Using = [] } as join) :: rest ->
+            move (join :: prior) rest
+        | _ -> update
+
+    // Move a later assigned view while CTE names are still available. The
+    // mutation wrapper clears Update.Ctes before executing the inner write.
+    if isPhysical update.From || isCte update.From then move [] update.Joins
+    else
+        let database = update.From.Database |> Option.defaultValue defaultDatabase
+        let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
+        let firstViewIsUnassigned =
+            match tryUpdatableView store database update.From.Table with
+            | Some view ->
+                update.Assignments
+                |> List.forall (fun assignment ->
+                    match assignment.Table with
+                    | Some owner -> not (equalsIgnoreCase owner qualifier)
+                    | None -> not (Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets))
+            | None ->
+                tryStoredViewDefinition store database update.From.Table
+                |> Option.exists (fun _ ->
+                    update.Assignments
+                    |> List.forall (fun assignment ->
+                        assignment.Table |> Option.forall (fun owner -> not (equalsIgnoreCase owner qualifier))))
+
+        if firstViewIsUnassigned then move [] update.Joins else update
+
 let private targetsFirstJoinedView (store: Store) (defaultDatabase: string) (update: UpdateStmt) =
+    let update = writableViewFirst store defaultDatabase update
     let database = update.From.Database |> Option.defaultValue defaultDatabase
     let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
 
@@ -22701,6 +23602,108 @@ let private targetsFirstJoinedView (store: Store) (defaultDatabase: string) (upd
             match assignment.Table with
             | Some owner -> equalsIgnoreCase owner qualifier
             | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets))
+
+/// View-local aliases must stay distinct when a joined UPDATE flattens
+/// multiple view definitions into one mutation source list.
+let private freshenViewAliases (store: Store) (defaultDatabase: string) (update: UpdateStmt) (view: UpdatableView) =
+    let used = HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+    let qualifier (table: TableRef) = table.Alias |> Option.defaultValue table.Table
+
+    for join in update.Joins do
+        for source in FromItem.leaves join.Table do
+            match source with
+            | FromTable table ->
+                used.Add(qualifier table) |> ignore
+                let database = table.Database |> Option.defaultValue defaultDatabase
+                match tryUpdatableView store database table.Table with
+                | Some externalView ->
+                    used.Add(qualifier externalView.UpdateFrom) |> ignore
+                    for nested in externalView.UpdateJoins do
+                        for leaf in FromItem.leaves nested.Table do
+                            FromItem.tryQualifier leaf |> Option.iter (fun name -> used.Add name |> ignore)
+                | None -> ()
+            | source -> FromItem.tryQualifier source |> Option.iter (fun name -> used.Add name |> ignore)
+
+    let externalAliases = used |> Seq.map _.ToLowerInvariant() |> Set.ofSeq
+    let baseAlias = qualifier view.UpdateFrom
+    used.Add baseAlias |> ignore
+    let joinSources = view.UpdateJoins |> List.collect (fun join -> FromItem.leaves join.Table)
+    let joinedAliases =
+        joinSources
+        |> List.choose FromItem.tryQualifier
+        |> List.distinct
+    joinedAliases |> List.iter (fun name -> used.Add name |> ignore)
+    let mutable next = 0
+    let aliases =
+        (baseAlias
+         :: (joinSources
+             |> List.choose (function
+                 | FromTable table -> Some(qualifier table)
+                 | FromSubquery(_, alias) -> Some alias
+                 | FromLateral(_, alias) -> Some alias
+                 | FromJsonTable(_, _, _, alias) -> Some alias
+                 | _ -> None)))
+        |> List.distinct
+        |> List.choose (fun name ->
+            if not (Set.contains (name.ToLowerInvariant()) externalAliases) then None
+            else
+                let mutable fresh = ""
+                let mutable available = false
+                while not available do
+                    next <- next + 1
+                    fresh <- "__fsdb_view_join_" + string next
+                    available <- used.Add fresh
+                Some(name.ToLowerInvariant(), fresh))
+        |> Map.ofList
+
+    if aliases.IsEmpty then view
+    else
+        let renamed (name: string) = Map.tryFind (name.ToLowerInvariant()) aliases
+        let replace = function
+            | QualifiedCol(owner, column) -> renamed owner |> Option.map (fun fresh -> QualifiedCol(fresh, column))
+            | _ -> None
+        let rewrite expression = Expression.rewrite replace expression
+        let rewriteLateralSelect = Expression.rewriteSelectOuterAliases aliases
+        let rewriteBody = function
+            | PlainSelect select -> PlainSelect(rewriteLateralSelect select)
+            | UnionSelect(first, rest, orderBy, limit, offset) ->
+                UnionSelect(
+                    rewriteLateralSelect first,
+                    rest |> List.map (fun (kind, select) -> kind, rewriteLateralSelect select),
+                    orderBy |> List.map (fun (expression, direction) -> rewrite expression, direction),
+                    limit |> Option.map rewrite,
+                    offset |> Option.map rewrite)
+        let rec rewriteSource = function
+            | FromTable table ->
+                match renamed (qualifier table) with
+                | Some fresh -> FromTable { table with Alias = Some fresh }
+                | None -> FromTable table
+            | FromSubquery(select, alias) ->
+                FromSubquery(select, renamed alias |> Option.defaultValue alias)
+            | FromLateral(select, alias) ->
+                FromLateral(rewriteBody select, renamed alias |> Option.defaultValue alias)
+            | FromJsonTable(expression, path, columns, alias) ->
+                FromJsonTable(rewrite expression, path, columns, renamed alias |> Option.defaultValue alias)
+            | FromJoinGroup(source, joins) -> FromJoinGroup(rewriteSource source, joins |> List.map rewriteJoin)
+        and rewriteJoin join =
+            { join with Table = rewriteSource join.Table; On = rewrite join.On }
+        let rewriteTarget (target: ViewColumnTarget) =
+            match renamed target.Qualifier with
+            | Some fresh -> { target with Qualifier = fresh }
+            | None -> target
+        let rewriteKey (database, table, owner) =
+            database, table, renamed owner |> Option.defaultValue owner
+        { view with
+            UpdateFrom =
+                match rewriteSource (FromTable view.UpdateFrom) with
+                | FromTable table -> table
+                | _ -> view.UpdateFrom
+            UpdateJoins = view.UpdateJoins |> List.map rewriteJoin
+            Targets = view.Targets |> Map.map (fun _ target -> rewriteTarget target)
+            Expressions = view.Expressions |> Map.map (fun _ expression -> rewrite expression)
+            Predicate = view.Predicate |> Option.map rewrite
+            CheckPredicates = view.CheckPredicates |> Map.toList |> List.map (fun (key, predicate) -> rewriteKey key, rewrite predicate) |> Map.ofList
+            JoinCheck = view.JoinCheck |> Option.map (fun check -> { check with Predicate = check.Predicate |> Option.map rewrite }) }
 
 let private resolveViewColumn (view: UpdatableView) (column: string) =
     match Map.tryFind (column.ToLowerInvariant()) view.Columns with
@@ -26696,8 +27699,56 @@ let rec executeAs
             (fun targetStore tableColumns _ candidate ->
                 finishInsertRow targetStore db table tableColumns candidate)
 
-    let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement (originalUpdate: UpdateStmt option) =
+    let executeViewWrite (view: UpdatableView) (runtimeView: UpdatableView) (target: ViewColumnTarget) (runtimeTarget: ViewColumnTarget) statement (originalUpdate: UpdateStmt option) =
         let targetKey = target.Database, target.Table, target.Qualifier
+        let runtimeTargetKey = runtimeTarget.Database, runtimeTarget.Table, runtimeTarget.Qualifier
+        let sourceAliases (source: UpdatableView) =
+            (source.UpdateFrom.Alias |> Option.defaultValue source.UpdateFrom.Table)
+            :: (source.UpdateJoins
+                |> List.collect (fun join -> FromItem.leaves join.Table)
+                |> List.choose FromItem.tryQualifier)
+        let originalAliases = sourceAliases view
+        let runtimeAliases = sourceAliases runtimeView
+        let restoreAliases =
+            List.zip runtimeAliases originalAliases
+            |> List.map (fun (runtime, original) -> runtime.ToLowerInvariant(), original)
+            |> Map.ofList
+        let restoreExpression expression =
+            Expression.rewrite (function
+                | QualifiedCol(owner, column) ->
+                    restoreAliases
+                    |> Map.tryFind (owner.ToLowerInvariant())
+                    |> Option.map (fun original -> QualifiedCol(original, column))
+                | _ -> None) expression
+        let writesView (update: UpdateStmt) (assignment: Assignment) =
+            let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
+            assignment.Table |> Option.forall (fun owner -> equalsIgnoreCase owner qualifier)
+        let viewAuthorizationStatement =
+            match statement, originalUpdate with
+            | Update rewritten, Some original ->
+                let assignments =
+                    List.zip original.Assignments rewritten.Assignments
+                    |> List.choose (fun (exposed, physical) ->
+                        if not (writesView original exposed) then None
+                        else
+                            match view.Targets |> Map.tryFind (exposed.Column.ToLowerInvariant()) with
+                            | Some mapped ->
+                                Some
+                                    { physical with
+                                        Table = Some mapped.Qualifier
+                                        Value = restoreExpression physical.Value }
+                            | None -> Some physical)
+                // The caller's original command checks other targets. A view
+                // definer authorizes only the component reached through it.
+                Update
+                    { rewritten with
+                        From = view.UpdateFrom
+                        Joins = view.UpdateJoins
+                        Assignments = assignments
+                        Where = view.Predicate
+                        OrderBy = []
+                        Limit = None }
+            | _ -> statement
         let writableAccessView database table =
             tryStoredView store database table
             |> Option.bind (fun stored ->
@@ -26723,11 +27774,11 @@ let rec executeAs
 
         let retarget (access: ViewAccess) =
             if access.Mode = OriginalWrite then
-                statement
+                viewAuthorizationStatement
             else
                 let qualified = SqlText.objectName (Some access.Database) access.Table
 
-                match statement with
+                match viewAuthorizationStatement with
                 | Insert(_, columns, rows, updates, ignore) -> Insert(qualified, exposedInsertColumns access columns, rows, updates, ignore)
                 | InsertSelect(_, columns, select, updates, ignore) -> InsertSelect(qualified, exposedInsertColumns access columns, select, updates, ignore)
                 | Replace(_, columns, rows) -> Replace(qualified, columns, rows)
@@ -26937,14 +27988,18 @@ let rec executeAs
 
                         let assignments =
                             original.Assignments
-                            |> List.map (fun (assignment: Assignment) ->
-                                match view.Targets |> Map.tryFind (assignment.Column.ToLowerInvariant()) with
-                                | Some target ->
-                                    { assignment with
-                                        Table = Some target.Qualifier
-                                        Column = target.ComponentColumn |> Option.defaultValue target.Column
-                                        Value = sourceExpression assignment.Value }
-                                | None -> assignment)
+                            |> List.choose (fun (assignment: Assignment) ->
+                                if not (writesView original assignment) then
+                                    None
+                                else
+                                    match view.Targets |> Map.tryFind (assignment.Column.ToLowerInvariant()) with
+                                    | Some target ->
+                                        Some
+                                            { assignment with
+                                                Table = Some target.Qualifier
+                                                Column = target.ComponentColumn |> Option.defaultValue target.Column
+                                                Value = sourceExpression assignment.Value }
+                                    | None -> Some assignment)
 
                         { update with
                             Assignments = assignments
@@ -26969,8 +28024,14 @@ let rec executeAs
                                     |> Result.mapError ViewGrantDenied)
                                 |> Result.bind (fun effective ->
                                     (match originalUpdate with
-                                     | Some original when original.Assignments.Length = authorizationUpdate.Assignments.Length ->
-                                         Ok(List.zip original.Assignments authorizationUpdate.Assignments)
+                                     | Some original ->
+                                         let exposedAssignments =
+                                             original.Assignments
+                                             |> List.filter (writesView original)
+                                         if exposedAssignments.Length = authorizationUpdate.Assignments.Length then
+                                             Ok(List.zip exposedAssignments authorizationUpdate.Assignments)
+                                         else
+                                             invalid ()
                                      | _ -> invalid ())
                                     |> Result.bind (traverse (fun (exposed, assignment) ->
                                         match Map.tryFind (exposed.Column.ToLowerInvariant()) view.Targets with
@@ -27070,13 +28131,13 @@ let rec executeAs
                 DynamicScope.withValue sharedViewCteScope (Some { Aliases = view.SharedCteAliases; Pending = true }) (fun () ->
                     executeAs store authorized dbName ids foundRows currentAccount statement)
 
-            let checkPredicate = Map.tryFind targetKey view.CheckPredicates
+            let checkPredicate = Map.tryFind runtimeTargetKey runtimeView.CheckPredicates
 
             let joinCheck =
-                if view.UpdateJoins.IsEmpty then None
-                else view.JoinCheck |> Option.map (fun check -> view.UpdateFrom, view.UpdateJoins, check.Predicate)
+                if runtimeView.UpdateJoins.IsEmpty then None
+                else runtimeView.JoinCheck |> Option.map (fun check -> runtimeView.UpdateFrom, runtimeView.UpdateJoins, check.Predicate)
 
-            match checkPredicate, view.Predicate, joinCheck with
+            match checkPredicate, runtimeView.Predicate, joinCheck with
             | None, None, None -> execute ()
             | checkPredicate, visibilityPredicate, joinCheck ->
                 DynamicScope.withValue
@@ -27084,7 +28145,7 @@ let rec executeAs
                     (Some
                         { Database = target.Database
                           Table = target.Table
-                          Qualifier = target.Qualifier
+                          Qualifier = runtimeTarget.Qualifier
                           View = view.ViewDatabase + "." + normalizeTableName view.ViewName
                           CheckPredicate = checkPredicate
                           VisibilityPredicate = visibilityPredicate
@@ -27104,6 +28165,7 @@ let rec executeAs
 
     match stmt with
     | Update update when not update.Ctes.IsEmpty ->
+        let update = writableViewFirst store dbName update
         let expressions =
             (update.Assignments |> List.map _.Value)
             @ Option.toList update.Where
@@ -28303,7 +29365,7 @@ let rec executeAs
                                 Fields = baseFields
                                 Assignments = assignments }
 
-                    executeViewWrite view target rewritten None
+                    executeViewWrite view view target target rewritten None
 
     | LoadData load ->
         let db, table = splitQualified dbName load.Table
@@ -28449,7 +29511,7 @@ let rec executeAs
                 | Ok(), Ok assignments ->
                     let rewritten = Insert(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
 
-                    executeViewWrite view target rewritten None
+                    executeViewWrite view view target target rewritten None
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -28503,7 +29565,7 @@ let rec executeAs
                 | Ok(), Ok assignments ->
                     let rewritten = InsertSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select, assignments, ignoreDuplicates)
 
-                    executeViewWrite view target rewritten None
+                    executeViewWrite view view target target rewritten None
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -28577,7 +29639,7 @@ let rec executeAs
             | Ok(target, baseColumns) ->
                 let rewritten = Replace(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs)
 
-                executeViewWrite view target rewritten None
+                executeViewWrite view view target target rewritten None
 
     | Replace(table, columns, rowsExprs) ->
         let db, table = splitQualified dbName table
@@ -28605,7 +29667,7 @@ let rec executeAs
             | Ok(target, baseColumns) ->
                 let rewritten = ReplaceSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select)
 
-                executeViewWrite view target rewritten None
+                executeViewWrite view view target target rewritten None
 
     | ReplaceSelect(table, columns, select) ->
         let db, table = splitQualified dbName table
@@ -28635,7 +29697,7 @@ let rec executeAs
             | Ok(target, _), Ok rewrittenAssignments ->
                 let rewritten = ReplaceSet(SqlText.objectName (Some target.Database) target.Table, rewrittenAssignments)
 
-                executeViewWrite view target rewritten None
+                executeViewWrite view view target target rewritten None
 
     | ReplaceSet(table, assignments) ->
         let db, table = splitQualified dbName table
@@ -28687,20 +29749,36 @@ let rec executeAs
     | Update updateStmt
         when not updateStmt.Joins.IsEmpty
              && targetsFirstJoinedView store dbName updateStmt ->
+        let updateStmt = writableViewFirst store dbName updateStmt
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
 
         match tryUpdatableView store viewDb updateStmt.From.Table with
         | None -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
         | Some view ->
+            let runtimeView = freshenViewAliases store dbName updateStmt view
             let viewQualifier = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
-            let baseQualifier = view.UpdateFrom.Alias |> Option.defaultValue view.UpdateFrom.Table
-            let joinedColumns =
+            let baseQualifier = runtimeView.UpdateFrom.Alias |> Option.defaultValue runtimeView.UpdateFrom.Table
+            let joinedOwners =
                 updateStmt.Joins
                 |> List.collect (fun join -> FromItem.leaves join.Table)
-                |> List.collect (fun source -> selectSourceColumns store dbName source |> List.choose id)
-                |> List.map (fun column -> column.Name.ToLowerInvariant())
-                |> Set.ofList
+                |> List.collect (fun source ->
+                    match FromItem.tryQualifier source with
+                    | Some owner ->
+                        selectSourceColumns store dbName source
+                        |> List.choose id
+                        |> List.map (fun column -> column.Name.ToLowerInvariant(), owner)
+                    | None -> [])
+                |> List.groupBy fst
+                |> List.map (fun (name, sources) -> name, sources |> List.map snd |> List.distinct)
+                |> Map.ofList
+            let owners (column: string) = joinedOwners |> Map.tryFind (column.ToLowerInvariant()) |> Option.defaultValue []
+            let viewExposes (column: string) =
+                view.OrderedColumns
+                |> List.exists (fun name -> equalsIgnoreCase name column)
             let mutable ambiguousColumn = None
+            let callerCurrentUser =
+                Functions.lookup "CURRENT_USER" registry
+                |> Option.map (fun currentUser -> currentUser [])
             let qualifyView expression =
                 rewriteExprWith (function
                     | Col name -> Some(QualifiedCol(baseQualifier, name))
@@ -28708,60 +29786,101 @@ let rec executeAs
 
             let rewrite expression =
                 rewriteExprWith (function
+                    | FuncCall(name, []) when equalsIgnoreCase name "CURRENT_USER" ->
+                        callerCurrentUser |> Option.map Lit
                     | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier viewQualifier ->
-                        Map.tryFind (name.ToLowerInvariant()) view.Expressions
+                        Map.tryFind (name.ToLowerInvariant()) runtimeView.Expressions
                         |> Option.map qualifyView
                         |> Option.orElse (Some(QualifiedCol("__fsdb_view", name)))
-                    | Col name when Map.containsKey (name.ToLowerInvariant()) view.Expressions ->
-                        if Set.contains (name.ToLowerInvariant()) joinedColumns then
+                    | Col name when Map.containsKey (name.ToLowerInvariant()) runtimeView.Expressions ->
+                        if not (owners name).IsEmpty then
                             ambiguousColumn <- Some name
                             None
                         else
-                            Map.tryFind (name.ToLowerInvariant()) view.Expressions |> Option.map qualifyView
+                            Map.tryFind (name.ToLowerInvariant()) runtimeView.Expressions |> Option.map qualifyView
+                    | Col name ->
+                        match owners name with
+                        | [ owner ] -> Some(QualifiedCol(owner, name))
+                        | _ -> None
                     | _ -> None) expression
 
             match
                 updateStmt.Assignments
                 |> traverse (fun assignment ->
                     if assignment.Table |> Option.exists (fun qualifier -> not (equalsIgnoreCase qualifier viewQualifier)) then
-                        Error(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
-                    elif assignment.Table.IsNone && Set.contains (assignment.Column.ToLowerInvariant()) joinedColumns then
+                        Ok(assignment, None)
+                    elif assignment.Table.IsNone && viewExposes assignment.Column && not (owners assignment.Column).IsEmpty then
                         Error(1052, sprintf "Column '%s' in field list is ambiguous" assignment.Column)
+                    elif assignment.Table.IsNone && not (viewExposes assignment.Column) then
+                        match owners assignment.Column with
+                        | [ owner ] -> Ok({ assignment with Table = Some owner }, None)
+                        | [] -> Error(1054, sprintf "Unknown column '%s' in field list" assignment.Column)
+                        | _ -> Error(1052, sprintf "Column '%s' in field list is ambiguous" assignment.Column)
                     else
                         match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets with
-                        | Some target -> Ok(assignment, target)
+                        | Some target -> Ok(assignment, Some target)
                         | None -> Error(1054, sprintf "Unknown column '%s' in field list" assignment.Column))
             with
             | Error(code, message) -> ids, Err(code, message)
             | Ok assignments ->
                 let targets =
                     assignments
-                    |> List.map (fun (_, target) -> target.Database.ToLowerInvariant(), target.Table.ToLowerInvariant(), target.Qualifier.ToLowerInvariant())
+                    |> List.choose (fun (_, target) ->
+                        target
+                        |> Option.map (fun target ->
+                            target.Database.ToLowerInvariant(), target.Table.ToLowerInvariant(), target.Qualifier.ToLowerInvariant()))
                     |> List.distinct
 
                 if targets.Length > 1 then
                     ids, Err(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName)
                 else
+                    let rewriteDependentSource =
+                        Expression.rewriteFromItemOuterReferences (function
+                            | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier viewQualifier ->
+                                Map.tryFind (name.ToLowerInvariant()) runtimeView.Expressions
+                                |> Option.map qualifyView
+                            | _ -> None)
+                    let externalJoins =
+                        updateStmt.Joins
+                        |> List.map (fun join ->
+                            { Join.mapConditions rewrite join with
+                                Table = rewriteDependentSource join.Table })
+                    let viewPredicate = runtimeView.Predicate |> Option.map qualifyView
+                    let externalJoins, globalViewPredicate =
+                        match externalJoins, viewPredicate with
+                        | [ join ], Some predicate when join.Kind = RightJoin ->
+                            [ { join with On = BinOp(And, join.On, predicate) } ], None
+                        | _ -> externalJoins, viewPredicate
                     let rewritten =
                         { updateStmt with
-                            From = view.UpdateFrom
-                            Joins = view.UpdateJoins @ (updateStmt.Joins |> List.map (Join.mapConditions rewrite))
+                            From = runtimeView.UpdateFrom
+                            Joins = runtimeView.UpdateJoins @ externalJoins
                             Assignments =
                                 assignments
                                 |> List.map (fun (assignment, target) ->
-                                    { assignment with
-                                        Table = Some target.Qualifier
-                                        Column = target.Column
-                                        Value = rewrite assignment.Value })
-                            Where = combineViewPredicate (view.Predicate |> Option.map qualifyView) (updateStmt.Where |> Option.map rewrite)
+                                    match target with
+                                    | Some _ ->
+                                        let runtimeTarget =
+                                            runtimeView.Targets.[assignment.Column.ToLowerInvariant()]
+                                        { assignment with
+                                            Table = Some runtimeTarget.Qualifier
+                                            Column = runtimeTarget.Column
+                                            Value = rewrite assignment.Value }
+                                    | None -> { assignment with Value = rewrite assignment.Value })
+                            Where = combineViewPredicate globalViewPredicate (updateStmt.Where |> Option.map rewrite)
                             OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                             Limit = updateStmt.Limit |> Option.map rewrite }
 
                     match ambiguousColumn with
                     | Some name -> ids, Err(1052, sprintf "Column '%s' in field list is ambiguous" name)
                     | None ->
-                        let target = assignments |> List.head |> snd
-                        executeViewWrite view target (Update rewritten) (Some updateStmt)
+                        let exposed, target =
+                            assignments
+                            |> List.pick (fun (assignment, mapped) -> mapped |> Option.map (fun target -> assignment, target))
+                        let runtimeTarget = runtimeView.Targets.[exposed.Column.ToLowerInvariant()]
+                        let classified =
+                            { updateStmt with Assignments = assignments |> List.map fst }
+                        executeViewWrite view runtimeView target runtimeTarget (Update rewritten) (Some classified)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty && tryStoredView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome ->
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
@@ -28829,7 +29948,7 @@ let rec executeAs
                             Limit = updateStmt.Limit |> Option.map rewrite }
 
                     let target = assignments |> List.head |> snd
-                    executeViewWrite view target (Update rewritten) (Some updateStmt)
+                    executeViewWrite view view target target (Update rewritten) (Some updateStmt)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -28928,7 +30047,8 @@ let rec executeAs
                 with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
-                    match selectMutationTargets ctxFor positionedRows check updateStmt.OrderBy (Option.map rowCount updateStmt.Limit) with
+                    let tieOrder = mutationPrimaryTieOrder tableRoot tableAlias updateStmt.OrderBy updateStmt.Limit
+                    match selectMutationTargets ctxFor positionedRows check updateStmt.OrderBy tieOrder (Option.map rowCount updateStmt.Limit) with
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok targetRows ->
                         let targetImages = targetRows |> Map.ofList
@@ -29266,7 +30386,7 @@ let rec executeAs
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
             let target = view.Targets |> Map.values |> Seq.head
-            executeViewWrite view target (Delete rewritten) None
+            executeViewWrite view view target target (Delete rewritten) None
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
@@ -29340,7 +30460,8 @@ let rec executeAs
             match withSourceMetadataProbe (fun () -> whereMatches ctxFor probePredicate (probeRow columns)) with
             | Error(code, message) -> ids, Err(code, message)
             | Ok _ ->
-                match selectMutationTargets ctxFor positionedRows check deleteStmt.OrderBy (Option.map rowCount deleteStmt.Limit) with
+                let tieOrder = mutationPrimaryTieOrder tableRoot tableAlias deleteStmt.OrderBy deleteStmt.Limit
+                match selectMutationTargets ctxFor positionedRows check deleteStmt.OrderBy tieOrder (Option.map rowCount deleteStmt.Limit) with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok targetRows ->
                     let targetImages = targetRows |> Map.ofList
@@ -29806,6 +30927,287 @@ let transactionWriteTargets
         |> Result.toOption
         |> Option.bind (insertTargets tableName columns)
 
+    let combineTargets (targets: (string * string * WriteLockTargets) list) : (string * string * WriteLockTargets) list =
+        targets
+        |> List.groupBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+        |> List.map (fun (_, grouped) ->
+            let database, table, _ = List.head grouped
+            database,
+            table,
+            { RowIds = grouped |> List.collect (fun (_, _, target) -> target.RowIds) |> List.distinct
+              Keys = grouped |> List.collect (fun (_, _, target) -> target.Keys) |> List.distinct })
+        // Every writer claims tables in the same order, regardless of join order.
+        |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+    let pendingOrderedInsertKeys (tableRef: TableRef) where orderBy limit =
+        let database = tableRef.Database |> Option.defaultValue dbName
+        let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+        match limit, physicalFastPathTable store dbName tableRef with
+        | Some limitExpr, Some table when rowCount limitExpr > 0 ->
+            let orderedColumns =
+                orderBy
+                |> List.choose (fun (expression, direction) ->
+                    match expression with
+                    | Col name -> Some(name, direction)
+                    | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some(name, direction)
+                    | _ -> None)
+            let orderedIndex =
+                if orderedColumns.IsEmpty || orderedColumns.Length <> orderBy.Length then None
+                else
+                    Storage.orderedIndexKeyColumns table
+                    |> List.tryFind (fun (_, indexColumns) ->
+                        indexColumns.Length >= orderedColumns.Length
+                        && List.forall2
+                            (fun indexColumn (orderedColumn, _) -> equalsIgnoreCase indexColumn orderedColumn)
+                            (indexColumns |> List.take orderedColumns.Length)
+                            orderedColumns)
+            let primaryColumns =
+                Storage.orderedIndexKeyColumns table
+                |> List.tryPick (fun (name, names) ->
+                    if equalsIgnoreCase name "PRIMARY" then Some names else None)
+                |> Option.defaultValue []
+            let primaryKeyTypes =
+                primaryColumns
+                |> List.map (fun name ->
+                    table.Columns
+                    |> List.find (fun column -> equalsIgnoreCase column.Name name)
+                    |> fun column -> column.Type)
+            if orderedIndex.IsNone then
+                // Filesort expressions can scan past the visible LIMIT
+                // frontier. MySQL waits for pending primary-key inserts on
+                // either side of that frontier before choosing its rows.
+                if orderBy.IsEmpty || primaryColumns.IsEmpty then []
+                else
+                    Storage.activeOrderedKeyClaims store database tableRef.Table "PRIMARY" primaryKeyTypes primaryKeyTypes
+                    |> List.map (fun (_, _, claim) -> claim)
+            else
+                let indexName, indexColumns = Option.get orderedIndex
+                let columnIndices =
+                    orderedColumns |> List.map fst
+                    |> List.map (fun name -> table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name))
+                let keyTypes =
+                    indexColumns
+                    |> List.map (fun name ->
+                        table.Columns
+                        |> List.find (fun column -> equalsIgnoreCase column.Name name)
+                        |> fun column -> column.Type)
+                let primaryColumnIndices =
+                    primaryColumns
+                    |> List.map (fun name ->
+                        table.Columns |> List.findIndex (fun column -> equalsIgnoreCase column.Name name))
+                let directions = orderedColumns |> List.map snd
+                let comparePart left right =
+                    match left, right with
+                    | OrderedNull, OrderedNull -> 0
+                    | OrderedNull, _ -> -1
+                    | _, OrderedNull -> 1
+                    | OrderedNumber a, OrderedNumber b -> Operators.compare a b
+                    | OrderedText a, OrderedText b -> System.String.CompareOrdinal(a, b)
+                    | _ -> 0
+                let rec compareOrdered left right directions =
+                    match left, right, directions with
+                    | a :: restA, b :: restB, direction :: restDirections ->
+                        let order = comparePart a b
+                        if order = 0 then compareOrdered restA restB restDirections
+                        elif direction = Asc then order
+                        else -order
+                    | _ -> 0
+                let orderedValue (column: ColumnDef) value =
+                    match value with
+                    | VNull -> Some OrderedNull
+                    | VInt integer -> Some(OrderedNumber(decimal integer))
+                    | VUInt integer
+                    | VBit(_, integer) -> Some(OrderedNumber(decimal integer))
+                    | VDate date -> Some(OrderedNumber(decimal date.DayNumber))
+                    | VString text when (match column.Type with TChar _ | TVarchar _ -> true | _ -> false) ->
+                        Some(OrderedText((column.Collation |> Collation.findOrDefault).KeyOf text))
+                    | VEncodedString(charset, bytes)
+                        when (match column.Type with TChar _ | TVarchar _ -> true | _ -> false) ->
+                        let text = Charset.decodeBytes charset bytes
+                        Some(OrderedText((column.Collation |> Collation.findOrDefault).KeyOf text))
+                    | _ -> None
+                let storedKey (row: Value[]) =
+                    let values =
+                        columnIndices
+                        |> List.choose (fun index -> orderedValue table.Columns.[index] row.[index])
+                    if values.Length = columnIndices.Length then Some values else None
+                let storedPrimaryKey (row: Value[]) =
+                    let values =
+                        primaryColumnIndices
+                        |> List.choose (fun index -> orderedValue table.Columns.[index] row.[index])
+                    if values.Length = primaryColumnIndices.Length && not values.IsEmpty then Some values
+                    else None
+                let pending =
+                    Storage.activeOrderedKeyClaims store database tableRef.Table indexName keyTypes primaryKeyTypes
+                    |> List.map (fun (key, primaryKey, claim) ->
+                        key |> List.take columnIndices.Length, primaryKey, claim)
+                if pending.IsEmpty then []
+                else
+                    let mixedDirections =
+                        match directions with
+                        | first :: rest -> rest |> List.exists (fun direction -> direction <> first)
+                        | [] -> false
+                    let completeIndexOrder =
+                        equalsIgnoreCase indexName "PRIMARY" || orderedColumns.Length = indexColumns.Length
+                    let primaryDirections = List.replicate primaryColumns.Length directions.Head
+                    let compareEntry (leftKey, leftPrimary) (rightKey, rightPrimary) =
+                        let order = compareOrdered leftKey rightKey directions
+                        if order <> 0 || not completeIndexOrder then order
+                        else
+                            match leftPrimary, rightPrimary with
+                            | Some left, Some right -> compareOrdered left right primaryDirections
+                            | _ -> 0
+                    let hasRuntimeEffects =
+                        where
+                        |> Option.exists (Expression.exists (function
+                            | FuncCall _ | UserVariable _ | AssignUserVariable _ | SystemVariable _
+                            | Subquery _ | Exists _ | InSubquery _ | QuantifiedComparison _
+                            | MatchAgainst _ | WindowOver _ | Placeholder _ -> true
+                            | _ -> false))
+                    let indexedNames =
+                        (table.Columns |> List.filter _.PrimaryKey |> List.map _.Name)
+                        @ (Storage.orderedIndexKeyColumns table |> List.collect snd)
+                    let hasIndexedFilter =
+                        where
+                        |> Option.exists (Expression.exists (function
+                            | Col name | QualifiedCol(_, name) ->
+                                indexedNames |> List.exists (equalsIgnoreCase name)
+                            | _ -> false))
+
+                    let keyFor name ordered primary =
+                        let lookup names keys =
+                            List.zip names keys
+                            |> List.tryPick (fun (column, key) ->
+                                if equalsIgnoreCase name column then Some key else None)
+                        lookup (orderedColumns |> List.map fst) ordered
+                        |> Option.orElseWith (fun () ->
+                            primary |> Option.bind (lookup primaryColumns))
+
+                    let keyComparison name key bound =
+                        match key, bound with
+                        | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) ->
+                            Some(Value.compare (VDecimal number) bound)
+                        | OrderedText key, VString text ->
+                            table.Columns
+                            |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+                            |> Option.map (fun column ->
+                                let other = (column.Collation |> Collation.findOrDefault).KeyOf text
+                                System.String.CompareOrdinal(key, other))
+                        | _ -> None
+
+                    let comparisonIsFalse operation comparison =
+                        match operation with
+                        | Eq -> comparison <> 0
+                        | Neq -> comparison = 0
+                        | Lt -> comparison >= 0
+                        | Lte -> comparison > 0
+                        | Gt -> comparison <= 0
+                        | Gte -> comparison < 0
+                        | _ -> false
+
+                    let excludesPending ordered primary =
+                        let comparableLiteral = function
+                            | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VString _ as value) -> Some value
+                            | _ -> None
+                        let columnName = function
+                            | Col name -> Some name
+                            | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some name
+                            | _ -> None
+                        let excludesIn column candidates negated =
+                            match columnName column with
+                            | Some name ->
+                                match keyFor name ordered primary with
+                                | Some key ->
+                                    let comparison candidate =
+                                        comparableLiteral candidate
+                                        |> Option.bind (keyComparison name key)
+                                    if negated then
+                                        candidates |> List.exists (fun candidate -> comparison candidate = Some 0)
+                                    else
+                                        not candidates.IsEmpty
+                                        && (candidates
+                                            |> List.forall (fun candidate ->
+                                                comparison candidate |> Option.exists ((<>) 0)))
+                                | None -> false
+                            | None -> false
+                        let excludesNonNull column =
+                            columnName column
+                            |> Option.bind (fun name -> keyFor name ordered primary)
+                            |> Option.exists (function OrderedNull -> true | _ -> false)
+                        let excludesNull column =
+                            columnName column
+                            |> Option.bind (fun name -> keyFor name ordered primary)
+                            |> Option.exists (function OrderedNull -> false | _ -> true)
+                        where
+                        |> optionalConjuncts
+                        |> List.exists (function
+                            // Ordinary comparisons to a literal NULL can never be WHERE-true.
+                            // This excludes pending rows without relying on their key values.
+                            | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), left, right)
+                                when (right = Lit VNull && (columnName left |> Option.isSome))
+                                     || (left = Lit VNull && (columnName right |> Option.isSome)) -> true
+                            | BinOp(operation, left, right) ->
+                                let excludes column literal reverse =
+                                    match columnName column, comparableLiteral literal with
+                                    | Some name, Some bound ->
+                                        keyFor name ordered primary
+                                        |> Option.bind (fun key -> keyComparison name key bound)
+                                        |> Option.exists (fun comparison ->
+                                            comparisonIsFalse operation (if reverse then -comparison else comparison))
+                                    | _ -> false
+                                excludes left right false || excludes right left true
+                            | In(column, candidates) -> excludesIn column candidates false
+                            | Not(In(column, candidates)) -> excludesIn column candidates true
+                            | IsNotNull column -> excludesNonNull column
+                            | IsNull column -> excludesNull column
+                            | _ -> false)
+
+                    let pending =
+                        if hasIndexedFilter then
+                            pending |> List.filter (fun (ordered, primary, _) -> not (excludesPending ordered primary))
+                        else pending
+                    let allKeys = pending |> List.map (fun (_, _, claim) -> claim)
+
+                    // The audited mixed-direction order waits even beyond the visible frontier.
+                    if mixedDirections || hasRuntimeEffects then allKeys
+                    else
+                        let columns = table.Columns
+                        let ctxFor =
+                            contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None
+                        let matched = ResizeArray<OrderedIndexKeyPart list * OrderedIndexKeyPart list option>()
+                        let mutable valid = true
+
+                        Diagnostics.suppress (fun () ->
+                            for _, row in table.RowsArray.Indexed do
+                                if valid then
+                                    match storedKey row with
+                                    | Some key ->
+                                        match whereMatches ctxFor where row with
+                                        | Ok true -> matched.Add(key, storedPrimaryKey row)
+                                        | Ok false -> ()
+                                        | Error _ -> valid <- false
+                                    | _ -> valid <- false)
+
+                        let count = rowCount limitExpr
+                        // InnoDB's audited secondary-index ordered write still
+                        // observes a pending insert past the selected frontier
+                        // while fewer than two LIMIT-sized visible matches exist.
+                        if not valid || matched.Count < count
+                           || (not (equalsIgnoreCase indexName "PRIMARY")
+                               && not hasIndexedFilter && matched.Count / 2 < count) then allKeys
+                        else
+                            let ordered = matched |> Seq.sortWith compareEntry |> Seq.toArray
+                            let frontier = ordered.[count - 1]
+                            pending
+                            |> List.choose (fun (key, primary, claim) ->
+                                let order = compareOrdered key (fst frontier) directions
+                                if order < 0 then Some claim
+                                elif order > 0 then None
+                                elif not completeIndexOrder then Some claim
+                                elif primary.IsNone || (snd frontier).IsNone then Some claim
+                                elif compareEntry (key, primary) frontier < 0 then Some claim
+                                else None)
+        | _ -> []
+
     let joinedTargets (from: TableRef) (joins: Join list) (names: string list) predicate =
         let joinedTables =
             joins
@@ -29824,15 +31226,7 @@ let transactionWriteTargets
             |> function Some target -> Ok target | None -> Error())
         |> Result.toOption
         |> Option.defaultValue []
-        |> List.groupBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
-        |> List.map (fun (_, grouped) ->
-            let database, table, _ = List.head grouped
-            database,
-            table,
-            { RowIds = grouped |> List.collect (fun (_, _, target) -> target.RowIds) |> List.distinct
-              Keys = grouped |> List.collect (fun (_, _, target) -> target.Keys) |> List.distinct })
-        // Every writer claims tables in the same order, regardless of join order.
-        |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+        |> combineTargets
 
     match statement with
     | Update update when update.Joins.IsEmpty ->
@@ -29860,14 +31254,28 @@ let transactionWriteTargets
                 else
                     joinedTargets view.UpdateFrom view.UpdateJoins [ target.Qualifier ] predicate
             | _ -> []
-        | None -> targets update.From update.Where |> Option.toList
+        | None ->
+            let keys = pendingOrderedInsertKeys update.From update.Where update.OrderBy update.Limit
+            targets update.From update.Where
+            |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
+            |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
-        let viewDatabase = update.From.Database |> Option.defaultValue dbName
-
-        let viewTargets =
-            tryUpdatableView store viewDatabase update.From.Table
+        let update = writableViewFirst store dbName update
+        let viewTargetFor (source: TableRef) allowUnqualified =
+            let viewDatabase = source.Database |> Option.defaultValue dbName
+            let resolvedView =
+                if source.Database.IsNone && Set.contains (source.Table.ToLowerInvariant()) cteNames then None
+                else tryUpdatableView store viewDatabase source.Table
+            resolvedView
             |> Option.bind (fun view ->
-                update.Assignments
+                let viewQualifier = source.Alias |> Option.defaultValue source.Table
+                let viewAssignments =
+                    update.Assignments
+                    |> List.filter (fun assignment ->
+                        match assignment.Table with
+                        | Some owner -> equalsIgnoreCase owner viewQualifier
+                        | None -> allowUnqualified && Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+                viewAssignments
                 |> traverse (fun assignment ->
                     Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
                     |> function Some target -> Ok target | None -> Error())
@@ -29875,7 +31283,6 @@ let transactionWriteTargets
                 |> Option.bind (function
                     | [] -> None
                     | first :: rest when rest |> List.forall (fun target -> viewTargetKey target = viewTargetKey first) ->
-                        let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
                         let physicalEquality (qualifier: string) (name: string) (literal: Expr) =
                             Map.tryFind (name.ToLowerInvariant()) view.Targets
                             |> Option.filter (fun column ->
@@ -29903,10 +31310,41 @@ let transactionWriteTargets
                               Partitions = []
                               IndexHints = [] }
                             physicalPredicate
+                        |> Option.map (fun target -> view, target)
                     | _ -> None))
 
-        match viewTargets with
-        | Some target -> [ target ]
+        match viewTargetFor update.From true with
+        | Some(view, target) ->
+            let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
+            let otherViewTargets =
+                update.Joins
+                |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
+                |> List.choose (function FromTable source -> viewTargetFor source false |> Option.map snd | _ -> None)
+            let outerTables =
+                update.Joins
+                |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
+                |> List.choose (function FromTable table -> Some table | _ -> None)
+                |> List.choose (fun table ->
+                    physicalFastPathTable store dbName table
+                    |> Option.map (fun physical -> table, physical))
+            let externalNames =
+                update.Assignments
+                |> List.choose (fun assignment ->
+                    match assignment.Table with
+                    | Some owner when not (equalsIgnoreCase owner viewQualifier) -> Some owner
+                    | Some _ -> None
+                    | None ->
+                        let owners =
+                            outerTables
+                            |> List.filter (fun (_, table) ->
+                                table.Columns |> List.exists (fun column -> equalsIgnoreCase column.Name assignment.Column))
+                        if Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets then None
+                        else
+                            match owners with
+                            | [ (table, _) ] -> Some(table.Alias |> Option.defaultValue table.Table)
+                            | _ -> None)
+            target :: (otherViewTargets @ joinedTargets update.From update.Joins externalNames None)
+            |> combineTargets
         | None ->
             let projectedNames body =
                 let projections =
@@ -29998,7 +31436,11 @@ let transactionWriteTargets
                 |> combineViewPredicate view.Predicate
 
             targets view.UpdateFrom predicate |> Option.toList
-        | _ -> targets delete.From delete.Where |> Option.toList
+        | _ ->
+            let keys = pendingOrderedInsertKeys delete.From delete.Where delete.OrderBy delete.Limit
+            targets delete.From delete.Where
+            |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
+            |> Option.toList
     | Delete delete when not delete.Joins.IsEmpty ->
         joinedTargets delete.From delete.Joins delete.Targets delete.Where
     | Insert(tableName, columns, rows, _, _)

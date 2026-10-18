@@ -176,6 +176,30 @@ def main():
                          f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
                          "(WITH seq AS (SELECT s.k AS k) SELECT k AS lookup_key FROM seq) l ON TRUE "
                          "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_recursive_shadowed_local_cte",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH RECURSIVE seq(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM seq WHERE k<s.k) "
+                         "SELECT k AS lookup_key FROM seq ORDER BY k LIMIT 1) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_recursive_local_cte",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH RECURSIVE local(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM local WHERE k<s.k) "
+                         "SELECT k AS lookup_key FROM local ORDER BY k LIMIT 1) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_recursive_late_shadowed_cte",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH RECURSIVE copied AS (SELECT k FROM seq WHERE k=s.k), "
+                         "seq(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM seq WHERE k<s.k) "
+                         "SELECT copied.k AS lookup_key FROM copied JOIN seq ON seq.k=copied.k) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_recursive_late_shadowed_volatile_cte",
+                         "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
+                         "SELECT k+1,r FROM seq WHERE k<3) "
+                         "SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH RECURSIVE copied AS (SELECT k FROM seq WHERE k=s.k AND r=s.r), "
+                         "seq(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM seq WHERE k<s.k) "
+                         "SELECT copied.k AS lookup_key FROM copied JOIN seq ON seq.k=copied.k) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
                         ("recursive_lateral_late_shadowed_local_cte",
                          f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
                          "(WITH copied AS (SELECT k FROM seq WHERE k=s.k), "
@@ -196,6 +220,22 @@ def main():
                          "UNION ALL SELECT k FROM seq WHERE k=s.k AND FALSE) "
                          "SELECT k AS lookup_key FROM copied) l ON TRUE "
                          "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_union_derived_source",
+                         f"{recursive} SELECT t.id,t.n FROM "
+                         "(SELECT k FROM seq UNION ALL SELECT k FROM seq WHERE k=0) d "
+                         "JOIN target t ON t.id=d.k"),
+                        ("recursive_ordered_union_derived_source",
+                         f"{recursive} SELECT t.id,t.n FROM "
+                         "(SELECT k FROM seq UNION ALL SELECT k FROM seq WHERE k=0 "
+                         "ORDER BY (SELECT MAX(k) FROM seq) LIMIT 3) d "
+                         "JOIN target t ON t.id=d.k"),
+                        ("recursive_plain_derived_source",
+                         f"{recursive} SELECT t.id,t.n FROM "
+                         "(SELECT k FROM seq) d JOIN target t ON t.id=d.k"),
+                        ("recursive_local_cte_derived_source",
+                         f"{recursive} SELECT t.id,t.n FROM "
+                         "(WITH copied AS (SELECT k FROM seq) SELECT k FROM copied) d "
+                         "JOIN target t ON t.id=d.k"),
                         ("recursive_lateral_volatile_union_cte",
                          "WITH RECURSIVE seq(k,r) AS (SELECT 1,RAND() UNION ALL "
                          "SELECT k+1,r FROM seq WHERE k<3) "
@@ -208,6 +248,20 @@ def main():
                          f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
                          "(WITH copied AS (SELECT k FROM seq WHERE k=s.k "
                          "UNION ALL SELECT k FROM seq WHERE k=s.k ORDER BY k LIMIT 1) "
+                         "SELECT k AS lookup_key FROM copied) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_ordered_union_subquery_cte",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH copied AS (SELECT k FROM seq WHERE k=s.k "
+                         "UNION ALL SELECT k FROM seq WHERE k=s.k "
+                         "ORDER BY (SELECT 1) LIMIT 1) "
+                         "SELECT k AS lookup_key FROM copied) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_ordered_union_reread_cte",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH copied AS (SELECT k FROM seq WHERE k=s.k "
+                         "UNION ALL SELECT k FROM seq WHERE k=s.k "
+                         "ORDER BY (SELECT MAX(k) FROM seq) LIMIT 1) "
                          "SELECT k AS lookup_key FROM copied) l ON TRUE "
                          "JOIN target t ON t.id=l.lookup_key"),
                         ("recursive_lateral_volatile_limited_union_cte",
@@ -257,11 +311,50 @@ def main():
                         "WHERE table_schema='probe' AND table_name='recursive_only'"
                     )
                     assert cursor.fetchone() == ("YES",)  # MySQL metadata overstates this view.
+                    for suffix, body, expected in [
+                        ("expression", "SELECT k+1 AS x FROM seq", "NO"),
+                        ("distinct", "SELECT DISTINCT k FROM seq", "NO"),
+                        ("group", "SELECT k,COUNT(*) AS c FROM seq GROUP BY k", "NO"),
+                        ("join", "SELECT a.k FROM seq a JOIN seq b ON a.k=b.k", "YES"),
+                        ("derived", "SELECT d.k FROM (SELECT k FROM seq) d", "YES"),
+                        ("derived_group", "SELECT d.k FROM (SELECT COUNT(*) AS k FROM seq) d", "YES"),
+                        ("derived_distinct", "SELECT d.k FROM (SELECT DISTINCT k FROM seq) d", "YES"),
+                    ]:
+                        name = "recursive_only_" + suffix
+                        cursor.execute(f"CREATE VIEW {name} AS {recursive} {body}")
+                        cursor.execute(
+                            "SELECT IS_UPDATABLE FROM information_schema.views "
+                            "WHERE table_schema='probe' AND table_name=%s", (name,)
+                        )
+                        assert cursor.fetchone() == (expected,), name
+                        if expected == "YES":
+                            try:
+                                cursor.execute(f"UPDATE {name} SET k=4")
+                                raise AssertionError(f"{name} unexpectedly accepted UPDATE")
+                            except pymysql.MySQLError as error:
+                                assert error.args[0] == 1288, (name, error.args)
                     try:
                         cursor.execute("UPDATE recursive_only SET k=4")
                         raise AssertionError("recursive-only view accepted UPDATE")
                     except pymysql.MySQLError as error:
                         assert error.args[0] == 1288, error.args
+
+                    for algorithm, expected in [("MERGE", "YES"), ("TEMPTABLE", "NO"),
+                                                ("UNDEFINED", "YES")]:
+                        name = "recursive_algorithm_" + algorithm.lower()
+                        cursor.execute(f"CREATE ALGORITHM={algorithm} VIEW {name} AS {recursive} SELECT k FROM seq")
+                        cursor.execute(
+                            "SELECT IS_UPDATABLE FROM information_schema.views "
+                            "WHERE table_schema='probe' AND table_name=%s", (name,)
+                        )
+                        assert cursor.fetchone() == (expected,), name
+                        outer = "recursive_outer_" + algorithm.lower()
+                        cursor.execute(f"CREATE VIEW {outer} AS SELECT k FROM {name}")
+                        cursor.execute(
+                            "SELECT IS_UPDATABLE FROM information_schema.views "
+                            "WHERE table_schema='probe' AND table_name=%s", (outer,)
+                        )
+                        assert cursor.fetchone() == (expected,), outer
 
                     waiter = connect(socket)
                     waiter.select_db("probe")

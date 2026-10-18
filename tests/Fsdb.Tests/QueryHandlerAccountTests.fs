@@ -1945,6 +1945,46 @@ let tests =
               | ResultSet(_, [ [ Some "routine_view"; Some "incremented" ] ]) -> ()
               | other -> failtestf "expected visible routine dependency, got %A" other
 
+          testCase "ORDER BY alias on a narrow view cannot expose a hidden base column"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE alias_auth"
+              let root, _ = handle root "CREATE TABLE alias_auth.vault (id INT, secret INT)"
+              let root, _ = handle root "INSERT INTO alias_auth.vault VALUES (1, 9)"
+              let root, _ = handle root "CREATE VIEW alias_auth.public_vault AS SELECT id FROM alias_auth.vault"
+              let root, _ = handle root "CREATE USER alias_reader"
+              let _, _ = handle root "GRANT SELECT ON alias_auth.public_vault TO alias_reader"
+              let reader = { create 2 store with User = "alias_reader"; Database = Some "alias_auth" }
+              let reader, result = handle reader "SELECT id AS secret FROM public_vault WHERE id=1 ORDER BY (@leak := secret)"
+              Expect.equal result (ResultSet([ "secret" ], [ [ Some "1" ] ])) "projected row"
+              Expect.equal (handle reader "SELECT @leak" |> snd) (ResultSet([ "@leak" ], [ [ Some "1" ] ])) "ORDER BY sees projected alias"
+
+          testCase "nested aggregate binds a computed inner alias before a protected outer column"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE aggregate_auth"
+              let root, _ = handle root "CREATE TABLE aggregate_auth.items (id INT, hidden INT)"
+              let root, _ = handle root "INSERT INTO aggregate_auth.items VALUES (1, 9)"
+              let root, _ = handle root "CREATE VIEW aggregate_auth.constant_view AS SELECT 0 AS hidden"
+              let root, _ = handle root "CREATE USER aggregate_reader"
+              let root, _ = handle root "GRANT SELECT(id) ON aggregate_auth.items TO aggregate_reader"
+              let root, _ = handle root "GRANT SELECT ON aggregate_auth.constant_view TO aggregate_reader"
+              let reader = { create 2 store with User = "aggregate_reader"; Database = Some "aggregate_auth" }
+              Expect.equal
+                  (handle reader "SELECT (SELECT MAX(hidden) FROM (SELECT 0 AS hidden) d) AS v FROM items WHERE id=1" |> snd)
+                  (ResultSet([ "v" ], [ [ Some "0" ] ]))
+                  "computed inner alias shadows the protected outer column"
+              Expect.equal
+                  (handle reader "SELECT (SELECT MAX(hidden) FROM constant_view) AS v FROM items WHERE id=1" |> snd)
+                  (ResultSet([ "v" ], [ [ Some "0" ] ]))
+                  "a computed view column also shadows the protected outer column"
+              Expect.equal
+                  (handle { root with Database = Some "aggregate_auth" } "SELECT (SELECT MAX(items.hidden)) AS v FROM items WHERE id=1" |> snd)
+                  (ResultSet([ "v" ], [ [ Some "9" ] ]))
+                  "a real outer-column aggregate still binds to the outer scope"
+
           testCase "column grants authorize only referenced and written columns"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

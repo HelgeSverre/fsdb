@@ -17,8 +17,9 @@ folds small kana after width and script normalization and protects those
 three quote forms with collision-escaped keys. Original text still determines
 ngram token boundaries. MySQL's ngram parser also returns no Boolean matches
 for unbalanced `(` or `)`; FSDB now rejects the whole malformed ngram query
-while leaving balanced groups to the existing parser. MySQL's ordinary word
-FULLTEXT parser raises error 1064 for this syntax and remains a separate gap.
+while leaving balanced groups to the existing parser. The separate
+[ordinary word-parser audit](2026-10-17-word-boolean-group-syntax.md) now raises
+MySQL error 1064 for the same unbalanced groups.
 
 The enlarged oracle reports zero membership or relevance differences across
 936 queries at **each** configured ngram size from 1 through 10, covering

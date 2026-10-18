@@ -131,3 +131,33 @@ also exposed a decimal-to-binary64 halfway conversion error at 2⁵³+1: the
 CLR direct cast rounded to 2⁵³+2, while MySQL rounded to 2⁵³. Parsing the
 exact decimal digits now gives the matching single rounding for numeric
 comparisons and range bounds.
+
+## Fully numeric string bounds
+
+A correlated DOUBLE expression can also use its statement-local equality or
+range key when the outer string is fully numeric and converts to a finite
+DOUBLE. MySQL 8.4.11 returns the same rows without warnings for the audited
+string equality, inequality, and `BETWEEN` cases, including a value above
+2⁵³ that rounds to an existing DOUBLE key. The executor regression reduces
+the narrow string equality and `BETWEEN` probes from more than 1,000 residual
+calls to fewer than 80 across six outer rows. A string with trailing text
+(`12.5x`) still takes the scan path: MySQL emits conversion warnings for it,
+so narrowing the residual evaluation would change the warning count.
+
+## Correlated DOUBLE expression IN candidates
+
+The same finite DOUBLE expression key now unions candidates for a positive
+`IN` list of stable outer values. Every bound must be a finite numeric value,
+a fully numeric string, or NULL; otherwise the predicate keeps its scan.
+Duplicate bounds share row identities, NULL contributes no WHERE-true rows,
+and complete OR branches can union this candidate set with another branch.
+The original predicate remains the residual check.
+
+The [native MySQL 8.4.11 oracle](../scripts/correlated-materialized-double-oracle.py)
+agrees on five audited `IN` forms over numeric, clean-string, duplicate,
+and NULL bounds, including a rounded value above 2⁵³. The malformed `12.5x`
+bound still scans and preserves MySQL's conversion warnings. In the focused
+1,000-row regression, `d.k+0e0 IN (o.s,o.x)` initially made 7,035 residual
+calls across six outer rows; the keyed path stays below 80. The maintained
+[four-row profile](../scripts/correlated-materialized-double-profile.fsx)
+measures seven residual calls for the same `IN` shape.
