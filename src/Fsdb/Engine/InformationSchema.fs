@@ -1677,12 +1677,36 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
     let sources = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
     let cteNames = select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
 
-    let referenceCount name =
-        sources
-        |> List.filter (function
-            | FromTable table -> table.Database.IsNone && eqI table.Table name
-            | _ -> false)
-        |> List.length
+    let rec sourceReferences name = function
+        | FromTable table ->
+            table.Database.IsNone && eqI table.Table name
+        | FromJoinGroup(first, joins) ->
+            sourceReferences name first
+            || (joins |> List.exists (fun join -> sourceReferences name join.Table))
+        | FromSubquery(query, _) | FromLateral(query, _) -> queryReferences name query
+        | _ -> false
+
+    and selectReferences name (body: SelectStmt) =
+        let cteReferences, shadowsOuter =
+            body.Ctes
+            |> List.fold (fun (found, shadowed) cte ->
+                // Earlier definitions can still read the outer binding before
+                // a later local CTE with the same name shadows it.
+                let shadowsBody = shadowed || (cte.Recursive && eqI cte.CteName name)
+                let references = not shadowsBody && queryReferences name cte.Body
+                found || references, shadowed || eqI cte.CteName name) (false, false)
+        cteReferences
+        || (not shadowsOuter
+            && ((body.From |> Option.exists (sourceReferences name))
+                || (body.Joins |> List.exists (fun join -> sourceReferences name join.Table))))
+
+    and queryReferences name = function
+        | PlainSelect body -> selectReferences name body
+        | UnionSelect(first, rest, _, _, _) ->
+            selectReferences name first
+            || (rest |> List.exists (snd >> selectReferences name))
+
+    let referencesCte name = sources |> List.exists (sourceReferences name)
 
     let rec expandedProjections knownCtes (body: SelectStmt) =
         let hasStar =
@@ -1758,7 +1782,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         match cte.Body with
         | PlainSelect body
             when not cte.Recursive
-                 && referenceCount cte.CteName > 0
+                 && referencesCte cte.CteName
                  && body.Ctes.IsEmpty
                  && (body.From |> Option.exists independent)
                  && (body.Joins |> List.forall (_.Table >> independent)) ->
@@ -1783,7 +1807,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             tryInlineBody cte |> Option.map (fun body -> cte.CteName.ToLowerInvariant(), body))
 
     let referencedCtes =
-        select.Ctes |> List.filter (fun cte -> referenceCount cte.CteName > 0)
+        select.Ctes |> List.filter (fun cte -> referencesCte cte.CteName)
     let hasRecursiveCte = select.Ctes |> List.exists _.Recursive
 
     let recursiveNames =
@@ -1842,10 +1866,10 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                       Offset = None
                       Locking = [] }
                 FromSubquery(PlainSelect wrapper, table.Alias |> Option.defaultValue table.Table)
-            | FromSubquery(PlainSelect body, alias) when body.Ctes.IsEmpty ->
-                FromSubquery(PlainSelect(expandSelect activeNames rewriteExpressions body), alias)
+            | FromSubquery(query, alias) ->
+                FromSubquery(expandQuery activeNames rewriteExpressions query, alias)
             | FromLateral(PlainSelect body, alias) ->
-                FromLateral(PlainSelect(expandSelect activeNames rewriteExpressions body), alias)
+                FromLateral(expandQuery activeNames rewriteExpressions (PlainSelect body), alias)
             | FromJoinGroup(first, joins) ->
                 FromJoinGroup(
                     expand activeNames rewriteExpressions first,
@@ -1864,6 +1888,17 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
 
         and expandExpression activeNames expression = Expression.rewriteTree (replaceExpression activeNames) expression
 
+        and expandQuery activeNames rewriteExpressions = function
+            | PlainSelect body -> PlainSelect(expandSelect activeNames rewriteExpressions body)
+            | UnionSelect(first, rest, orderBy, limit, offset) ->
+                UnionSelect(
+                    expandSelect activeNames true first,
+                    rest |> List.map (fun (kind, body) -> kind, expandSelect activeNames true body),
+                    orderBy |> List.map (fun (expression, direction) -> expandExpression activeNames expression, direction),
+                    limit |> Option.map (expandExpression activeNames),
+                    offset |> Option.map (expandExpression activeNames)
+                )
+
         and expandSelect activeNames rewriteExpressions body =
             let localNames =
                 body.Ctes
@@ -1878,17 +1913,13 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             let ctes, _ =
                 body.Ctes
                 |> List.mapFold (fun visibleNames cte ->
-                    let expanded =
-                        match cte.Body with
-                        | PlainSelect nested -> { cte with Body = PlainSelect(expandSelect visibleNames true nested) }
-                        | UnionSelect(first, rest, orderBy, limit, offset) ->
-                            { cte with
-                                Body =
-                                    UnionSelect(
-                                        expandSelect visibleNames true first,
-                                        rest |> List.map (fun (kind, nested) -> kind, expandSelect visibleNames true nested),
-                                        orderBy, limit, offset
-                                    ) }
+                    // A recursive CTE binds its own name within its body.
+                    // A local binding with the outer CTE's name must not be
+                    // rewritten as a reference to that outer binding.
+                    let bodyNames =
+                        if cte.Recursive then Map.remove (cte.CteName.ToLowerInvariant()) visibleNames
+                        else visibleNames
+                    let expanded = { cte with Body = expandQuery bodyNames true cte.Body }
                     expanded, Map.remove (cte.CteName.ToLowerInvariant()) visibleNames) activeNames
             { body with
                 Projections = directExpressions.Projections
@@ -1955,28 +1986,29 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         | FromJoinGroup(first, joins) ->
             canWrapNestedSource first
             && (joins |> List.forall (_.Table >> canWrapNestedSource))
-        | FromSubquery(PlainSelect body, _) | FromLateral(PlainSelect body, _) ->
-            canWrapNestedSelect body
+        | FromSubquery(query, _) | FromLateral(query, _) -> canWrapNestedQuery query
         | FromJsonTable(source, _, _, _) -> Expression.collectSubqueries source |> List.isEmpty
-        | _ -> false
+
+    and canWrapNestedQuery = function
+        | PlainSelect body -> canWrapNestedSelect body
+        | UnionSelect(first, rest, orderBy, limit, offset) ->
+            let canWrapExpression expression =
+                Expression.collectSubqueries expression |> List.forall canWrapNestedSelect
+            canWrapNestedSelect first
+            && (rest |> List.forall (snd >> canWrapNestedSelect))
+            && (orderBy |> List.forall (fst >> canWrapExpression))
+            && (limit |> Option.forall canWrapExpression)
+            && (offset |> Option.forall canWrapExpression)
 
     and canWrapNestedSelect (body: SelectStmt) =
         (body.Ctes
          |> List.forall (fun cte ->
-             not cte.Recursive
-             && (not (Set.contains (cte.CteName.ToLowerInvariant()) cteNames)
+             (cte.Recursive
+              || not (Set.contains (cte.CteName.ToLowerInvariant()) cteNames)
                  || (match cte.Body with
                      | PlainSelect nested -> nested.From.IsNone && nested.Joins.IsEmpty && nested.Ctes.IsEmpty
                      | _ -> false))
-             && (match cte.Body with
-                 | PlainSelect nested -> canWrapNestedSelect nested
-                 | UnionSelect(first, rest, orderBy, limit, offset) ->
-                     (orderBy |> List.forall (fst >> Expression.collectSubqueries >> List.isEmpty))
-                     && (limit |> Option.forall (Expression.collectSubqueries >> List.isEmpty))
-                     && (offset |> Option.forall (Expression.collectSubqueries >> List.isEmpty))
-                     && canWrapNestedSelect first
-                     && (rest |> List.forall (snd >> canWrapNestedSelect))
-                 )))
+             && canWrapNestedQuery cte.Body))
         && (body.From |> Option.forall canWrapNestedSource)
         && (body.Joins |> List.forall (_.Table >> canWrapNestedSource))
         && not (Expression.statementExists
@@ -1987,6 +2019,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
 
     let recursiveCompanionSource = function
         | FromTable _ -> true
+        | FromSubquery(query, _) -> canWrapNestedQuery query
         | FromLateral(PlainSelect body, _) -> canWrapNestedSelect body
         | FromLateral(body, _) -> not (queryNeedsCteScope body)
         | FromJsonTable(source, _, _, _) -> Expression.collectSubqueries source |> List.isEmpty
@@ -2024,7 +2057,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             Joins = select.Joins |> List.map (fun join -> { join with Table = expand join.Table })
             Ctes = [] }
 
-let private isUpdatableView (catalog: Catalog) (schema: string) (definition: string) =
+let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) =
     let views = viewCatalogEntries catalog
 
     let isPhysicalTable defaultSchema (source: TableRef) =
@@ -2035,7 +2068,8 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
         |> Option.bind (Map.tryFind (source.Table.ToLowerInvariant()))
         |> Option.isSome
 
-    let rec check seen schema definition =
+    let rec check seen (view: SystemCatalog.View.Entry) =
+        let schema = view.Schema
         let sourceAllowsUpdates (source: TableRef) =
             let sourceSchema = source.Database |> Option.defaultValue schema
             let key = sourceSchema.ToLowerInvariant(), source.Table.ToLowerInvariant()
@@ -2047,19 +2081,41 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                 |> List.tryFind (fun view ->
                     view.Schema.Equals(sourceSchema, StringComparison.OrdinalIgnoreCase)
                     && view.Name.Equals(source.Table, StringComparison.OrdinalIgnoreCase))
-                |> Option.exists (fun view -> not (Set.contains key seen) && check (Set.add key seen) sourceSchema view.Definition)
+                |> Option.exists (fun sourceView ->
+                    not (Set.contains key seen) && check (Set.add key seen) sourceView)
 
-        match Fsdb.Parser.parse definition with
-        | Ok(Select parsed) ->
-            let select = parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
+        match view.Algorithm.Equals("TEMPTABLE", StringComparison.OrdinalIgnoreCase),
+              Fsdb.Parser.parse view.Definition with
+        | true, _ -> false
+        | _, Ok(Select parsed) ->
+            // Direct CTE projections have MySQL's updatable metadata even when
+            // the source CTE itself is read-only.
+            let directCteSource =
+                parsed.Joins.IsEmpty
+                && (match parsed.From with
+                    | Some(FromTable table) when table.Database.IsNone ->
+                        parsed.Ctes
+                        |> List.exists (fun cte -> cte.CteName.Equals(table.Table, StringComparison.OrdinalIgnoreCase))
+                    | _ -> false)
+            let select =
+                if directCteSource then { parsed with Ctes = [] }
+                else parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
             match select.From with
             | Some source ->
                 let sourceAllowsUpdates = function
+                    | FromTable table when
+                        table.Database.IsNone
+                        && (select.Ctes |> List.exists (fun cte -> eqI cte.CteName table.Table)) -> true
                     | FromTable table -> sourceAllowsUpdates table
+                    // MySQL's view metadata treats a derived or CTE source as
+                    // updatable when the outer SELECT exposes its columns, even
+                    // when the source itself cannot accept a write.
+                    | FromSubquery _ -> true
                     | _ -> false
                 let sourceOrderAllowsUpdates =
                     match source, select.Joins with
                     | FromTable _, _ -> true
+                    | FromSubquery _, [] -> true
                     | (FromSubquery _ | FromLateral _ | FromJsonTable _), _ :: _ ->
                         tryLeadingReadOnlyWritableTarget source select.Joins |> Option.isSome
                     | _ -> false
@@ -2071,15 +2127,12 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                          || join.Kind = CrossJoin
                          || join.Kind = NaturalJoin)
                         && (match join.Table with FromTable _ | FromSubquery _ | FromLateral _ | FromJsonTable _ -> true | _ -> false))
-                let shapeAllowsUpdates =
-                    ((select.Joins.IsEmpty && match source with FromTable _ -> true | _ -> false)
-                     || (sourceOrderAllowsUpdates && joinsSupported && not select.Joins.IsEmpty))
-                    && not select.Distinct
+                let queryAllowsUpdates =
+                    not select.Distinct
                     && not select.CalculateFoundRows
                     && select.GroupBy.IsEmpty
                     && not select.Rollup
                     && select.Windows.IsEmpty
-                    && select.Ctes.IsEmpty
                     && select.Having.IsNone
                     && select.Limit.IsNone
                     && select.Offset.IsNone
@@ -2088,25 +2141,37 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                         |> List.exists (fun { Expression = expression } ->
                             match expression with
                             | Col _
-                            | QualifiedCol _ -> true
+                            | QualifiedCol _
+                            | Star _ -> true
                             | _ -> false))
 
-                if not shapeAllowsUpdates then
-                    false
-                elif not select.Joins.IsEmpty then
+                let writableSource =
                     sourceAllowsUpdates source
                     || (select.Joins |> List.exists (fun join -> sourceAllowsUpdates join.Table))
+                let ordinaryShape =
+                    sourceOrderAllowsUpdates
+                    && joinsSupported
+                    && select.Ctes.IsEmpty
+                    && writableSource
+                // MySQL reports a direct outer projection over a recursive
+                // read-only source as updatable, although UPDATE rejects it.
+                let recursiveReadOnlyShape =
+                    (parsed.Ctes |> List.exists _.Recursive)
+                    && (match source with FromSubquery _ -> true | _ -> false)
+                    && joinsSupported
+                if not queryAllowsUpdates then
+                    false
                 else
-                    sourceAllowsUpdates source
+                    ordinaryShape || recursiveReadOnlyShape || directCteSource
             | _ -> false
         | _ -> false
 
-    check Set.empty schema definition
+    check Set.empty view
 
 let private viewsRows (catalog: Catalog) : Value[] list =
     viewCatalogEntries catalog
     |> List.map (fun view ->
-        [| vs "def"; vs view.Schema; vs view.Name; vs (canonicalViewDefinition catalog view.Schema true view.Definition); vs view.CheckOption; vs (if isUpdatableView catalog view.Schema view.Definition then "YES" else "NO"); vs view.Definer
+        [| vs "def"; vs view.Schema; vs view.Name; vs (canonicalViewDefinition catalog view.Schema true view.Definition); vs view.CheckOption; vs (if isUpdatableView catalog view then "YES" else "NO"); vs view.Definer
            vs view.SecurityType; vs view.CharacterSetClient; vs view.CollationConnection |])
 
 let private viewTableUsageColumns =

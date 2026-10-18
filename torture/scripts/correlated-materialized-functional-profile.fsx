@@ -53,4 +53,7 @@ match inResult with
           [ Some(Value.VInt 3L); Some(Value.VInt 0L) ] ]) ->
     printfn "ABS(d.k)+0 IN (o.x,o.x+1): expected rows; residual calls=%d" calls
 | _ -> failwithf "Unexpected integer IN result: %A" inResult
+probe "COALESCE(d.k,0)"
+probe "IFNULL(d.k,0)"
+probe "COALESCE(d.k,NULL,0)"
 (connection :> System.IDisposable).Dispose()

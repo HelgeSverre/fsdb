@@ -1629,6 +1629,52 @@ let tests =
               let session, _ = handle session "SELECT 1"
               Expect.isEmpty session.Diagnostics "ordinary statements replace the diagnostics area"
 
+          testCase "indexed and scanned DOUBLE string comparisons retain MySQL warning counts"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE double_warning_rows(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))"
+              let session, _ = handle session "INSERT INTO double_warning_rows VALUES(1,12.5),(2,0.0),(3,1.7976931348623157e308)"
+              for hint, text, expected, warningCount in
+                  [ "", "12.5x", "1", 1
+                    "", "1e309", "0", 0
+                    "", "Infinity", "1", 1
+                    "IGNORE INDEX(ix_k)", "12.5x", "1", 3
+                    "IGNORE INDEX(ix_k)", "1e309", "1", 3
+                    "IGNORE INDEX(ix_k)", "Infinity", "1", 3 ] do
+                  let sql =
+                      "SELECT COUNT(*) FROM double_warning_rows " + hint + " WHERE k='" + text + "'"
+                  let current, result = handle session sql
+                  match result with
+                  | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected text
+                  | other -> failtestf "expected scanned DOUBLE count for %s, got %A" text other
+                  Expect.equal (current.Diagnostics |> List.map _.Code) (List.replicate warningCount 1292)
+                      (text + " warns once per evaluated candidate")
+
+          testCase "correlated DOUBLE IN warnings follow indexed and scanned plans"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE double_in_bounds(id INT PRIMARY KEY,s VARCHAR(32))"
+              let session, _ = handle session "INSERT INTO double_in_bounds VALUES(1,'12.5x'),(2,'1e309'),(3,'Infinity'),(4,'12.5')"
+              let session, _ = handle session "CREATE TABLE double_in_rows(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))"
+              let session, _ = handle session "INSERT INTO double_in_rows VALUES(1,12.5),(2,0.0),(3,1.7976931348623157e308)"
+              for hint, boundId, expected, warningCount in
+                  [ "", 1, "1", 1
+                    "", 2, "0", 0
+                    "", 3, "1", 1
+                    "", 4, "1", 0
+                    "IGNORE INDEX(ix_k)", 1, "1", 5
+                    "IGNORE INDEX(ix_k)", 2, "1", 5
+                    "IGNORE INDEX(ix_k)", 3, "1", 5
+                    "IGNORE INDEX(ix_k)", 4, "1", 0 ] do
+                  let sql =
+                      "SELECT (SELECT COUNT(*) FROM double_in_rows d " + hint
+                      + " WHERE d.k IN(o.s,o.s)) FROM double_in_bounds o WHERE o.id=" + string boundId
+                  let current, result = handle session sql
+                  match result with
+                  | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count expected (hint + string boundId)
+                  | other -> failtestf "expected correlated DOUBLE IN count, got %A" other
+                  Expect.equal current.DiagnosticsCount warningCount (hint + string boundId + " warning count")
+
           testCase "non-strict omitted columns report their implicit defaults"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

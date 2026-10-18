@@ -133,6 +133,8 @@ type ResultCollation =
 /// Case-insensitive scalar, aggregate, and extension registrations.
 type Registry =
     { Scalars: Map<string, Scalar>
+      /// Session-bound scalar wrappers explicitly known to have no observable effects.
+      StableScalars: Set<string>
       ScalarMetadata: Map<string, ColumnMetadata>
       ScalarParameters: Map<string, ColumnMetadata list>
       TextArguments: Map<string, int -> bool>
@@ -146,6 +148,7 @@ type Registry =
 
 let empty: Registry =
     { Scalars = Map.empty
+      StableScalars = Set.empty
       ScalarMetadata = Map.empty
       ScalarParameters = Map.empty
       TextArguments = Map.empty
@@ -164,6 +167,7 @@ let private replaceScalar (name: string) metadata (fn: Scalar) (registry: Regist
 
     { registry with
         Scalars = Map.add name fn registry.Scalars
+        StableScalars = Set.remove name registry.StableScalars
         ScalarMetadata = scalarMetadata
         ScalarParameters = Map.remove name registry.ScalarParameters
         TextArguments = Map.remove name registry.TextArguments
@@ -176,6 +180,12 @@ let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
 
 let registerScalarWithMetadata (name: string) metadata (fn: Scalar) (registry: Registry) : Registry =
     replaceScalar name (Some metadata) fn registry
+
+let internal markScalarsStable (names: string list) (registry: Registry) : Registry =
+    { registry with
+        StableScalars =
+            names
+            |> List.fold (fun stable name -> Set.add (name.ToUpperInvariant()) stable) registry.StableScalars }
 
 let internal registerScalarWithSignature
     (name: string)
@@ -5992,8 +6002,19 @@ let private geometryIsValidFn: Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] ->
-        let geometry = geometryArgument "ST_ISVALID" value |> requirePlanar "ST_ISVALID"
-        VInt(if geometryIsValidPlanar geometry then 1L else 0L)
+        let geometry = geometryArgument "ST_ISVALID" value
+        let referenceSystem = spatialReferenceSystem "ST_ISVALID" geometry.Srid
+
+        let valid =
+            if referenceSystem.SemiMajorAxis.IsSome then
+                match geographicValidity referenceSystem geometry with
+                | Some result -> result
+                | None ->
+                    requirePlanar "ST_ISVALID" geometry |> ignore
+                    false
+            else geometryIsValidPlanar geometry
+
+        VInt(if valid then 1L else 0L)
     | _ -> nativeParameterCountError "st_isvalid"
 
 let private pointCoordinateFn functionName select: Scalar =
@@ -6323,8 +6344,20 @@ let private geometryDistanceSphereFn: Scalar =
 
         let radius = suppliedRadius |> Option.defaultWith (fun () -> defaultRadius functionName first.Srid)
 
-        sphericalPointSetDistance radius (coordinates functionName first) (coordinates functionName second)
-        |> Option.map VDouble
+        // SRID 0 is reinterpreted using pi/180; geographic WKB is decoded
+        // using the SRS's stored angular unit. The tiny difference matters
+        // near the poles, where cos(latitude) is close to zero.
+        let toRadians =
+            if first.Srid = 0 then
+                fun degrees -> degrees * Math.PI / 180.0
+            else
+                fun degrees -> degrees * 0.017453292519943278
+
+        sphericalPointSetDistance radius toRadians (coordinates functionName first) (coordinates functionName second)
+        |> Option.map (fun distance ->
+            if Double.IsInfinity distance then
+                raise (SqlError(3049, "Overflow error: INFINITY in function st_distance_sphere."))
+            VDouble distance)
         |> Option.defaultValue VNull
 
     function

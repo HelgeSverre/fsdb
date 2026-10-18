@@ -1047,6 +1047,67 @@ let tests =
 
               handle a "ROLLBACK" |> ignore
 
+          testCase "a qualified foreign key doesn't serialize writes to an unrelated database"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql in
+                  [ "CREATE DATABASE fk_parent_db"
+                    "CREATE DATABASE fk_child_db"
+                    "CREATE DATABASE fk_unrelated_db"
+                    "CREATE TABLE fk_parent_db.parent (id INT PRIMARY KEY)"
+                    "CREATE TABLE fk_child_db.child (parent_id INT, FOREIGN KEY (parent_id) REFERENCES fk_parent_db.parent (id))"
+                    "CREATE TABLE fk_unrelated_db.t (id INT PRIMARY KEY)"
+                    "INSERT INTO fk_parent_db.parent VALUES (1)" ] do
+                  match handle setup sql |> snd with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+
+              let parentSlot = store.Databases.["fk_parent_db"]
+              use entered = new Threading.ManualResetEventSlim(false)
+              use release = new Threading.ManualResetEventSlim(false)
+              let blocker =
+                  Threading.Tasks.Task.Run(fun () ->
+                      lock parentSlot (fun () ->
+                          entered.Set()
+                          release.Wait()))
+
+              Expect.isTrue (entered.Wait(TimeSpan.FromSeconds 1.0)) "the parent slot is held"
+              let writer =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle (create 2 store) "INSERT INTO fk_unrelated_db.t VALUES (1)" |> snd)
+
+              let completedWhileBlocked = writer.Wait(TimeSpan.FromSeconds 1.0)
+              let transaction =
+                  Threading.Tasks.Task.Run(fun () ->
+                      let session, _ = handle (create 3 store) "BEGIN"
+                      let session, inserted = handle session "INSERT INTO fk_unrelated_db.t VALUES (2)"
+                      let _, committed = handle session "COMMIT"
+                      inserted, committed)
+              let transactionCompletedWhileBlocked = transaction.Wait(TimeSpan.FromSeconds 1.0)
+              use childStarted = new Threading.ManualResetEventSlim(false)
+              let childWriter =
+                  Threading.Tasks.Task.Run(fun () ->
+                      childStarted.Set()
+                      handle (create 4 store) "INSERT INTO fk_child_db.child VALUES (1)" |> snd)
+              let childStartedWhileBlocked = childStarted.Wait(TimeSpan.FromSeconds 1.0)
+              let childCompletedWhileBlocked =
+                  try
+                      childStartedWhileBlocked && childWriter.Wait(TimeSpan.FromMilliseconds 100.0)
+                  finally
+                      release.Set()
+              Expect.isTrue (blocker.Wait(TimeSpan.FromSeconds 5.0)) "the blocker exits"
+              Expect.isTrue (writer.Wait(TimeSpan.FromSeconds 5.0)) "the writer exits"
+              Expect.isTrue (transaction.Wait(TimeSpan.FromSeconds 5.0)) "the transaction exits"
+              Expect.isTrue (childWriter.Wait(TimeSpan.FromSeconds 5.0)) "the child writer exits"
+              Expect.isTrue completedWhileBlocked "the unrelated write completes without the parent slot"
+              Expect.isTrue transactionCompletedWhileBlocked "the unrelated transaction commits without the parent slot"
+              Expect.isTrue childStartedWhileBlocked "the child write starts"
+              Expect.isFalse childCompletedWhileBlocked "the child write waits for the parent slot"
+              Expect.equal writer.Result (Affected 1UL) "the unrelated write succeeds"
+              Expect.equal transaction.Result (Affected 1UL, Affected 0UL) "the unrelated transaction succeeds"
+              Expect.equal childWriter.Result (Affected 1UL) "the child write succeeds after the parent slot releases"
+
           testCase "row locks in separate databases use separate namespaces"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -2022,6 +2083,814 @@ let tests =
                       | ResultSet(_, rows) -> Expect.equal rows expectedRows (statement + $" (indexed={indexed})")
                       | actual -> failtestf "expected a result set after %s, got %A" statement actual
 
+          testCase "limited ordered writes reselect two rows after contention"
+          <| fun _ ->
+              let cases =
+                  [ "(1,0),(2,0),(3,3)", -1, "id", "n=n+1",
+                    [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "4" ] ],
+                    [ [ Some "1"; Some "-1" ] ]
+                    "(1,0),(2,1),(3,3)", 2, "n,id", "n=n+10",
+                    [ [ Some "1"; Some "12" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "3" ] ],
+                    [ [ Some "3"; Some "3" ] ]
+                    "(1,0),(2,1),(3,2)", 3, "n,id", "n=n+10",
+                    [ [ Some "1"; Some "3" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "12" ] ],
+                    [ [ Some "1"; Some "3" ] ] ]
+
+              for indexed in [ false; true ] do
+                  for initialRows, ownerValue, ordering, increment, updatedRows, remainingRows in cases do
+                      for update in [ true; false ] do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          let index = if indexed then ", KEY ix_n(n)" else ""
+                          handle setup ("CREATE TABLE tx_limited_rebase_two (id INT PRIMARY KEY, n INT" + index + ")") |> ignore
+                          handle setup ("INSERT INTO tx_limited_rebase_two VALUES " + initialRows) |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let owner, firstWrite =
+                              handle owner ($"UPDATE tx_limited_rebase_two SET n={ownerValue} WHERE id=1")
+                          Expect.equal firstWrite (Affected 1UL) "the owner changes the first candidate"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          let action =
+                              if update then $"UPDATE tx_limited_rebase_two SET {increment}"
+                              else "DELETE FROM tx_limited_rebase_two"
+                          let statement = $"{action} WHERE n>=0 ORDER BY {ordering} LIMIT 2"
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes"
+                          let waiter, result = waiting.Result
+                          Expect.isTrue blocked "limited writer waits for the first candidate"
+                          Expect.equal result (Affected 2UL) "limited writer changes two rebased targets"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                          match handle setup "SELECT id,n FROM tx_limited_rebase_two ORDER BY id" |> snd with
+                          | ResultSet(_, rows) ->
+                              Expect.equal rows (if update then updatedRows else remainingRows) (statement + $" (indexed={indexed})")
+                          | actual -> failtestf "expected a result set after %s, got %A" statement actual
+
+          testCase "limited ordered writes reselect after two owners commit"
+          <| fun _ ->
+              for indexed in [ false; true ] do
+                  for update in [ true; false ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      let index = if indexed then ", KEY ix_n(n)" else ""
+                      handle setup ("CREATE TABLE tx_limited_two_waits (id INT PRIMARY KEY, n INT" + index + ")") |> ignore
+                      handle setup "INSERT INTO tx_limited_two_waits VALUES (1,0),(2,1),(3,2),(4,3)" |> ignore
+                      let first, _ = handle (create 2 store) "BEGIN"
+                      let second, _ = handle (create 3 store) "BEGIN"
+                      let first, firstWrite = handle first "UPDATE tx_limited_two_waits SET n=-1 WHERE id=1"
+                      Expect.equal firstWrite (Affected 1UL) "first owner changes its row"
+                      let second, secondWrite = handle second "UPDATE tx_limited_two_waits SET n=-2 WHERE id=2"
+                      Expect.equal secondWrite (Affected 1UL) "second owner changes its row"
+                      let waiter, _ = handle (create 4 store) "BEGIN"
+                      let action =
+                          if update then "UPDATE tx_limited_two_waits SET n=n+10"
+                          else "DELETE FROM tx_limited_two_waits"
+                      let statement = $"{action} WHERE n>=0 ORDER BY id LIMIT 2"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              handle waiter statement)
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                      let firstWait = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "first owner commits"
+                      let secondWait = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "second owner commits"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes after both commits"
+                      let waiter, result = waiting.Result
+                      Expect.isTrue firstWait "limited writer waits for the first owner"
+                      Expect.isTrue secondWait "limited writer waits for the second owner"
+                      Expect.equal result (Affected 2UL) "limited writer changes two reselected rows"
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                      let expected =
+                          if update then
+                              [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "-2" ]; [ Some "3"; Some "12" ]; [ Some "4"; Some "13" ] ]
+                          else [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "-2" ] ]
+                      match handle setup "SELECT id,n FROM tx_limited_two_waits ORDER BY id" |> snd with
+                      | ResultSet(_, rows) -> Expect.equal rows expected (statement + $" (indexed={indexed})")
+                      | actual -> failtestf "expected a result set after %s, got %A" statement actual
+
+          testCase "limited ordered writes reselect after a contended first row is deleted"
+          <| fun _ ->
+              for limit in [ 1; 2; 3 ] do
+                  for indexed in [ false; true ] do
+                      for verb in [ "UPDATE"; "DELETE" ] do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          let index = if indexed then ", KEY ix_n(n)" else ""
+                          handle setup ("CREATE TABLE tx_limited_deleted_candidate (id INT PRIMARY KEY,n INT" + index + ")")
+                          |> ignore
+                          let rows =
+                              [ 1 .. limit + 1 ]
+                              |> List.map (fun id -> sprintf "(%d,0)" id)
+                              |> String.concat ","
+                          handle setup ("INSERT INTO tx_limited_deleted_candidate VALUES " + rows) |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let owner, deleted = handle owner "DELETE FROM tx_limited_deleted_candidate WHERE id=1"
+                          Expect.equal deleted (Affected 1UL) "the owner deletes the first candidate"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          let action =
+                              if verb = "UPDATE" then "UPDATE tx_limited_deleted_candidate SET n=n+1"
+                              else "DELETE FROM tx_limited_deleted_candidate"
+                          let statement = sprintf "%s WHERE n>=0 ORDER BY id LIMIT %d" action limit
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes"
+                          let waiter, result = waiting.Result
+                          Expect.isTrue blocked "limited writer waits for the deleted candidate"
+                          Expect.equal result (Affected(uint64 limit)) "limited writer fills the vacated result slot"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                          let expectedRows =
+                              if verb = "UPDATE" then
+                                  [ 2 .. limit + 1 ]
+                                  |> List.map (fun id -> [ Some(string id); Some "1" ])
+                              else []
+                          match handle setup "SELECT id,n FROM tx_limited_deleted_candidate ORDER BY id" |> snd with
+                          | ResultSet(_, actual) ->
+                              Expect.equal actual expectedRows (statement + $" (indexed={indexed})")
+                          | actual -> failtestf "expected a result set after %s, got %A" statement actual
+
+          testCase "limited ordered write waits only for inserts across its primary-key frontier"
+          <| fun _ ->
+              for idType, verb, direction, insertedId, shouldWait, changedIds, initialN, baseIds, limit in
+                  [ for idType in [ "INT"; "BIGINT UNSIGNED" ] do
+                        for verb in [ "UPDATE"; "DELETE" ] do
+                            for direction, insertedId, shouldWait, changedIds, initialN, baseIds, limit in
+                                [ "ASC", 0, true, [ 0 ], 0, [ 1; 2 ], 1
+                                  "ASC", 100, false, [ 1 ], 0, [ 1; 2 ], 1
+                                  "DESC", 100, true, [ 100 ], 0, [ 1; 2 ], 1
+                                  "DESC", 0, false, [ 2 ], 0, [ 1; 2 ], 1
+                                  "ASC", 100, true, [ 100 ], -1, [ 1; 2 ], 1
+                                  "ASC", 0, true, [ 0; 1 ], 0, [ 1; 2; 3 ], 2
+                                  "ASC", 100, false, [ 1; 2 ], 0, [ 1; 2; 3 ], 2
+                                  "DESC", 100, true, [ 100; 3 ], 0, [ 1; 2; 3 ], 2
+                                  "DESC", 0, false, [ 3; 2 ], 0, [ 1; 2; 3 ], 2 ] do
+                                yield idType, verb, direction, insertedId, shouldWait, changedIds, initialN, baseIds, limit ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup (sprintf "CREATE TABLE tx_limited_insert_candidate (id %s PRIMARY KEY,n INT)" idType)
+                  |> ignore
+                  let initialRows =
+                      baseIds
+                      |> List.map (fun id -> sprintf "(%d,%d)" id initialN)
+                      |> String.concat ","
+                  handle setup ("INSERT INTO tx_limited_insert_candidate VALUES" + initialRows)
+                  |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_limited_insert_candidate VALUES(%d,0)" insertedId)
+                  Expect.equal inserted (Affected 1UL) "owner inserts an ordered candidate"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let action =
+                      if verb = "UPDATE" then "UPDATE tx_limited_insert_candidate SET n=n+1"
+                      else "DELETE FROM tx_limited_insert_candidate"
+                  let statement = sprintf "%s WHERE n>=0 ORDER BY id %s LIMIT %d" action direction limit
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait (statement + " wait behavior")
+                  Expect.equal result (Affected(uint64 limit)) "limited writer fills the ordered result"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                  let expectedRows =
+                      insertedId :: baseIds
+                      |> List.sort
+                      |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
+                      |> List.map (fun id ->
+                          let n = if List.contains id changedIds then 1 elif id = insertedId then 0 else initialN
+                          [ Some(string id); Some(string n) ])
+                  match handle setup "SELECT id,n FROM tx_limited_insert_candidate ORDER BY id" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expectedRows statement
+                  | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
+
+          testCase "limited filesort write waits for pending inserts on either side of the frontier"
+          <| fun _ ->
+              for limit in [ 1; 2; 3 ] do
+                  for verb in [ "UPDATE"; "DELETE" ] do
+                    for insertedId in [ 0; 100 ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      handle setup "CREATE TABLE tx_limited_expression(id INT PRIMARY KEY,n INT)" |> ignore
+                      let initialIds = [ 1 .. limit + 1 ]
+                      let values = initialIds |> List.map (fun id -> sprintf "(%d,0)" id) |> String.concat ","
+                      handle setup ("INSERT INTO tx_limited_expression VALUES" + values) |> ignore
+                      let owner, _ = handle (create 2 store) "BEGIN"
+                      let owner, inserted =
+                          handle owner (sprintf "INSERT INTO tx_limited_expression VALUES(%d,0)" insertedId)
+                      Expect.equal inserted (Affected 1UL) "owner inserts a pending key"
+                      let waiter, _ = handle (create 3 store) "BEGIN"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let action =
+                          if verb = "UPDATE" then "UPDATE tx_limited_expression SET n=n+1"
+                          else "DELETE FROM tx_limited_expression"
+                      let statement = action + sprintf " WHERE n>=0 ORDER BY id+0 LIMIT %d" limit
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              handle waiter statement)
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "filesort writer starts"
+                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "filesort writer resumes"
+                      let waiter, result = waiting.Result
+                      Expect.isTrue blocked (statement + " waits for the pending insert")
+                      Expect.equal result (Affected(uint64 limit)) "filesort writer fills its limit"
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "filesort writer commits"
+                      let changedIds = insertedId :: initialIds |> List.sort |> List.take limit
+                      let expected =
+                          insertedId :: initialIds
+                          |> List.sort
+                          |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
+                          |> List.map (fun id ->
+                              [ Some(string id)
+                                Some(if List.contains id changedIds then "1" else "0") ])
+                      match handle setup "SELECT id,n FROM tx_limited_expression ORDER BY id" |> snd with
+                      | ResultSet(_, rows) -> Expect.equal rows expected statement
+                      | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
+
+          testCase "limited ordered write respects DATE primary-key insert frontiers"
+          <| fun _ ->
+              for verb, direction, insertedId, shouldWait, changedId in
+                  [ for verb in [ "UPDATE"; "DELETE" ] do
+                        for direction, insertedId, shouldWait, changedId in
+                            [ "ASC", "2026-01-01", true, "2026-01-01"
+                              "ASC", "2026-01-04", false, "2026-01-02"
+                              "DESC", "2026-01-04", true, "2026-01-04"
+                              "DESC", "2026-01-01", false, "2026-01-03" ] do
+                            yield verb, direction, insertedId, shouldWait, changedId ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_date_insert_candidate(id DATE PRIMARY KEY,n INT)" |> ignore
+                  handle setup "INSERT INTO tx_date_insert_candidate VALUES('2026-01-02',0),('2026-01-03',0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted = handle owner (sprintf "INSERT INTO tx_date_insert_candidate VALUES('%s',0)" insertedId)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a date key"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  let action =
+                      if verb = "UPDATE" then "UPDATE tx_date_insert_candidate SET n=n+1"
+                      else "DELETE FROM tx_date_insert_candidate"
+                  let statement = action + " WHERE n>=0 ORDER BY id " + direction + " LIMIT 1"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait (statement + " wait behavior")
+                  Expect.equal result (Affected 1UL) "the inserted row fills the first slot"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                  let expected =
+                      [ "2026-01-02"; "2026-01-03"; insertedId ]
+                      |> List.sort
+                      |> List.filter (fun id -> verb = "UPDATE" || id <> changedId)
+                      |> List.map (fun id -> [ Some id; Some(if id = changedId then "1" else "0") ])
+                  match handle setup "SELECT id,n FROM tx_date_insert_candidate ORDER BY id" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expected statement
+                  | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
+
+          testCase "limited ordered write respects composite primary-key insert frontiers"
+          <| fun _ ->
+              let baseKeys = [ 1, 1; 1, 3; 2, 1 ]
+              for verb, firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit in
+                  [ for verb in [ "UPDATE"; "DELETE" ] do
+                        for firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit in
+                            [ "ASC", "ASC", (1, 0), true, [ 1, 0 ], 1
+                              "ASC", "ASC", (3, 1), false, [ 1, 1 ], 1
+                              "DESC", "DESC", (3, 1), true, [ 3, 1 ], 1
+                              "DESC", "DESC", (1, 0), false, [ 2, 1 ], 1
+                              "ASC", "DESC", (1, 4), true, [ 1, 4 ], 1
+                              "ASC", "DESC", (2, 0), true, [ 1, 3 ], 1
+                              "DESC", "ASC", (2, 0), true, [ 2, 0 ], 1
+                              "DESC", "ASC", (1, 4), true, [ 2, 1 ], 1
+                              "ASC", "ASC", (1, 2), true, [ 1, 1; 1, 2 ], 2
+                              "ASC", "ASC", (3, 1), false, [ 1, 1; 1, 3 ], 2
+                              "DESC", "DESC", (2, 2), true, [ 2, 2; 2, 1 ], 2
+                              "DESC", "DESC", (1, 0), false, [ 2, 1; 1, 3 ], 2 ] do
+                            yield verb, firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_composite_insert_candidate(a INT,b INT,n INT,PRIMARY KEY(a,b))" |> ignore
+                  handle setup "INSERT INTO tx_composite_insert_candidate VALUES(1,1,0),(1,3,0),(2,1,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let a, b = insertedKey
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_composite_insert_candidate VALUES(%d,%d,0)" a b)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a composite key"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  let action =
+                      if verb = "UPDATE" then "UPDATE tx_composite_insert_candidate SET n=n+1"
+                      else "DELETE FROM tx_composite_insert_candidate"
+                  let statement = action + " WHERE n>=0 ORDER BY a " + firstDirection + ",b " + secondDirection + sprintf " LIMIT %d" limit
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait (statement + " wait behavior")
+                  Expect.equal result (Affected(uint64 limit)) "the composite frontier fills the result"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                  let expected =
+                      insertedKey :: baseKeys
+                      |> List.sort
+                      |> List.filter (fun key -> verb = "UPDATE" || not (List.contains key changedKeys))
+                      |> List.map (fun (a, b) ->
+                          [ Some(string a); Some(string b); Some(if List.contains (a, b) changedKeys then "1" else "0") ])
+                  match handle setup "SELECT a,b,n FROM tx_composite_insert_candidate ORDER BY a,b" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expected statement
+                  | actual -> failtestf "expected composite rows after %s, got %A" statement actual
+
+          testCase "limited ordered write respects text primary-key insert frontiers"
+          <| fun _ ->
+              for collation in [ "utf8mb4_bin"; "utf8mb4_0900_ai_ci" ] do
+                  for verb in [ "UPDATE"; "DELETE" ] do
+                      let cases =
+                          [ "ASC", "", true, [ "" ], 1
+                            "ASC", "a", true, [ "a" ], 1
+                            "ASC", "z", false, [ "b" ], 1
+                            "DESC", "z", true, [ "z" ], 1
+                            "DESC", "a", false, [ "d" ], 1
+                            "ASC", "c", true, [ "b"; "c" ], 2
+                            "ASC", "z", false, [ "b"; "d" ], 2
+                            "DESC", "c", true, [ "d"; "c" ], 2
+                            "DESC", "a", false, [ "d"; "b" ], 2 ]
+                          @ if collation = "utf8mb4_bin" then
+                                [ "ASC", "Ä", false, [ "b"; "d" ], 2
+                                  "DESC", "Ä", true, [ "Ä"; "d" ], 2 ]
+                            else
+                                [ "ASC", "Ä", true, [ "Ä"; "b" ], 2
+                                  "DESC", "Ä", false, [ "d"; "b" ], 2 ]
+                      for direction, insertedId, shouldWait, changedIds, limit in cases do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          handle setup
+                              (sprintf "CREATE TABLE tx_text_insert_candidate(id VARCHAR(10) COLLATE %s PRIMARY KEY,n INT)" collation)
+                          |> ignore
+                          handle setup "INSERT INTO tx_text_insert_candidate VALUES('b',0),('d',0)" |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let owner, inserted =
+                              handle owner (sprintf "INSERT INTO tx_text_insert_candidate VALUES('%s',0)" insertedId)
+                          Expect.equal inserted (Affected 1UL) "owner inserts a text key"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          let action =
+                              if verb = "UPDATE" then "UPDATE tx_text_insert_candidate SET n=n+1"
+                              else "DELETE FROM tx_text_insert_candidate"
+                          let statement = action + " WHERE n>=0 ORDER BY id " + direction + sprintf " LIMIT %d" limit
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                          let waiter, result = waiting.Result
+                          Expect.equal blocked shouldWait (statement + " wait behavior")
+                          Expect.equal result (Affected(uint64 limit)) "the text frontier fills the result"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                          let expected =
+                              insertedId :: [ "b"; "d" ]
+                              |> List.sortBy (fun id -> if collation = "utf8mb4_0900_ai_ci" && id = "Ä" then "a" else id)
+                              |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
+                              |> List.map (fun id -> [ Some id; Some(if List.contains id changedIds then "1" else "0") ])
+                          match handle setup "SELECT id,n FROM tx_text_insert_candidate ORDER BY id" |> snd with
+                          | ResultSet(_, rows) -> Expect.equal rows expected statement
+                          | actual -> failtestf "expected text rows after %s, got %A" statement actual
+
+          testCase "limited ordered write respects composite text primary-key insert frontiers"
+          <| fun _ ->
+              let baseKeys = [ "b", 1; "b", 3; "d", 1 ]
+              for collation in [ "utf8mb4_bin"; "utf8mb4_0900_ai_ci" ] do
+                  for verb in [ "UPDATE"; "DELETE" ] do
+                      let cases =
+                          [ "ASC", "ASC", ("b", 0), true, [ "b", 0 ], 1
+                            "ASC", "ASC", ("b", 4), false, [ "b", 1 ], 1
+                            "ASC", "ASC", ("b", 2), true, [ "b", 1; "b", 2 ], 2
+                            "ASC", "DESC", ("b", 2), true, [ "b", 3 ], 1
+                            "DESC", "ASC", ("b", 2), true, [ "d", 1 ], 1 ]
+                          @ if collation = "utf8mb4_bin" then
+                                [ "ASC", "ASC", ("Ä", 0), false, [ "b", 1 ], 1
+                                  "DESC", "DESC", ("Ä", 0), true, [ "Ä", 0 ], 1 ]
+                            else
+                                [ "ASC", "ASC", ("Ä", 0), true, [ "Ä", 0 ], 1
+                                  "DESC", "DESC", ("Ä", 0), false, [ "d", 1 ], 1 ]
+                      for firstDirection, secondDirection, insertedKey, shouldWait, changedKeys, limit in cases do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          handle setup
+                              (sprintf "CREATE TABLE tx_text_pair_candidate(a VARCHAR(10) COLLATE %s,b INT,n INT,PRIMARY KEY(a,b))" collation)
+                          |> ignore
+                          handle setup "INSERT INTO tx_text_pair_candidate VALUES('b',1,0),('b',3,0),('d',1,0)" |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let a, b = insertedKey
+                          let owner, inserted =
+                              handle owner (sprintf "INSERT INTO tx_text_pair_candidate VALUES('%s',%d,0)" a b)
+                          Expect.equal inserted (Affected 1UL) "owner inserts a composite text key"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          let action =
+                              if verb = "UPDATE" then "UPDATE tx_text_pair_candidate SET n=n+1"
+                              else "DELETE FROM tx_text_pair_candidate"
+                          let statement =
+                              action + " WHERE n>=0 ORDER BY a " + firstDirection + ",b " + secondDirection
+                              + sprintf " LIMIT %d" limit
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer completes"
+                          let waiter, result = waiting.Result
+                          Expect.equal blocked shouldWait (statement + " wait behavior")
+                          Expect.equal result (Affected(uint64 limit)) "the composite text frontier fills the result"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                          let expected =
+                              insertedKey :: baseKeys
+                              |> List.filter (fun key -> verb = "UPDATE" || not (List.contains key changedKeys))
+                              |> List.map (fun (a, b) ->
+                                  (a, string b), (if List.contains (a, b) changedKeys then "1" else "0"))
+                              |> Map.ofList
+                          match handle setup "SELECT a,b,n FROM tx_text_pair_candidate ORDER BY a,b" |> snd with
+                          | ResultSet(_, rows) ->
+                              let actual =
+                                  rows
+                                  |> List.map (function
+                                      | [ Some a; Some b; Some n ] -> (a, b), n
+                                      | row -> failtestf "unexpected composite text row: %A" row)
+                                  |> Map.ofList
+                              Expect.equal actual expected statement
+                          | actual -> failtestf "expected composite text rows after %s, got %A" statement actual
+
+          testCase "limited ordered write respects secondary-index insert frontiers"
+          <| fun _ ->
+              let cases =
+                  [ "ASC", 0, "0", true, 0
+                    "ASC", 3, "3", false, 1
+                    "DESC", 3, "3", true, 3
+                    "DESC", 0, "0", false, 2
+                    "ASC", 0, "NULL", true, 0 ]
+              for verb in [ "UPDATE"; "DELETE" ] do
+                for direction, insertedId, rankSql, shouldWait, changedId in cases do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_secondary_order(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  handle setup "INSERT INTO tx_secondary_order VALUES(1,1,0),(2,2,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_secondary_order VALUES(%d,%s,0)" insertedId rankSql)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a secondary-order candidate"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let statement =
+                              (if verb = "UPDATE" then "UPDATE tx_secondary_order SET n=n+1"
+                               else "DELETE FROM tx_secondary_order")
+                              + " WHERE n>=0 ORDER BY rank_value " + direction + " LIMIT 1"
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "secondary ordered writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "secondary ordered writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait "secondary-order frontier wait matches MySQL"
+                  Expect.equal result (Affected 1UL) "one secondary-ordered row changes"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                  match handle setup "SELECT id,n FROM tx_secondary_order ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          ([ 1; 2; insertedId ] |> List.sort)
+                          |> List.filter (fun id -> verb = "UPDATE" || id <> changedId)
+                          |> List.map (fun id -> [ Some(string id); Some(if id = changedId then "1" else "0") ])
+                      Expect.equal rows expected "secondary-order write reselects after the insert"
+                  | other -> failtestf "expected secondary-order rows, got %A" other
+
+          testCase "limited ordered write reselects secondary-index inserts at LIMIT two"
+          <| fun _ ->
+              let cases =
+                  [ "ASC", 0, "0", true, [ 0; 1 ]
+                    "ASC", 4, "4", true, [ 1; 2 ]
+                    "DESC", 4, "4", true, [ 4; 3 ]
+                    "DESC", 0, "0", true, [ 3; 2 ]
+                    "ASC", 0, "NULL", true, [ 0; 1 ] ]
+              for verb in [ "UPDATE"; "DELETE" ] do
+                for direction, insertedId, rankSql, shouldWait, changedIds in cases do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_secondary_two(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  handle setup "INSERT INTO tx_secondary_two VALUES(1,1,0),(2,2,0),(3,3,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_secondary_two VALUES(%d,%s,0)" insertedId rankSql)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a secondary-order candidate"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let statement =
+                              (if verb = "UPDATE" then "UPDATE tx_secondary_two SET n=n+1"
+                               else "DELETE FROM tx_secondary_two")
+                              + " WHERE n>=0 ORDER BY rank_value " + direction + " LIMIT 2"
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "secondary LIMIT two writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "secondary LIMIT two writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait "secondary LIMIT two frontier wait"
+                  Expect.equal result (Affected 2UL) "two secondary-ordered rows change"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                  match handle setup "SELECT id,n FROM tx_secondary_two ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          ([ 1; 2; 3; insertedId ] |> List.sort)
+                          |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
+                          |> List.map (fun id ->
+                              [ Some(string id); Some(if List.contains id changedIds then "1" else "0") ])
+                      Expect.equal rows expected "secondary LIMIT two write reselects after insert"
+                  | other -> failtestf "expected secondary LIMIT two rows, got %A" other
+
+          testCase "impossible NULL comparison skips pending ordered insert"
+          <| fun _ ->
+              for verb in [ "UPDATE"; "DELETE" ] do
+                for predicate in [ "rank_value=NULL"; "rank_value<>NULL"; "NULL<rank_value" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_null_order(id INT PRIMARY KEY,n INT,rank_value INT,KEY ix_rank(rank_value))" |> ignore
+                  handle setup "INSERT INTO tx_null_order VALUES(1,0,1),(2,0,2),(3,0,3)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted = handle owner "INSERT INTO tx_null_order VALUES(4,0,0)"
+                  Expect.equal inserted (Affected 1UL) "owner inserts an ordered candidate"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let action =
+                              if verb = "UPDATE" then "UPDATE tx_null_order SET n=n+1"
+                              else "DELETE FROM tx_null_order"
+                          handle waiter (action + " WHERE " + predicate + " ORDER BY rank_value LIMIT 2"))
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "NULL comparison writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "ROLLBACK" |> snd) (Affected 0UL) "owner rolls back the insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "NULL comparison writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.isFalse blocked "impossible NULL comparison must not wait"
+                  Expect.equal result (Affected 0UL) "impossible NULL comparison affects no rows"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+
+          testCase "limited secondary ordered write waits through MySQL's short-table frontier"
+          <| fun _ ->
+              let cases =
+                  [ 1, 1; 1, 2; 2, 3; 2, 4; 3, 5; 3, 6; 4, 7; 4, 8 ]
+                  |> List.map (fun (limit, visibleRows) -> limit, visibleRows, " WHERE n>=0", visibleRows < 2 * limit)
+              let cases = cases @ [ 2, 3, "", true; 2, 3, " WHERE id<=2", false; 2, 3, " WHERE rank_value<=2", false ]
+              for limit, visibleRows, predicate, shouldWait in cases do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_secondary_short(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  let rows =
+                      [ 1 .. visibleRows ]
+                      |> List.map (fun id -> sprintf "(%d,%d,0)" id id)
+                      |> String.concat ","
+                  handle setup ("INSERT INTO tx_secondary_short VALUES" + rows) |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_secondary_short VALUES(%d,%d,0)" (visibleRows + 1) (visibleRows + 1))
+                  Expect.equal inserted (Affected 1UL) "owner inserts beyond the visible frontier"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter (sprintf "UPDATE tx_secondary_short SET n=n+1%s ORDER BY rank_value ASC LIMIT %d" predicate limit))
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "secondary ordered writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "secondary ordered writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal blocked shouldWait "short-table wait matches MySQL"
+                  Expect.equal result (Affected(uint64 limit)) "writer changes limited rows"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                  match handle setup "SELECT id,n FROM tx_secondary_short ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          [ 1 .. visibleRows + 1 ]
+                          |> List.map (fun id -> [ Some(string id); Some(if id <= limit then "1" else "0") ])
+                      Expect.equal rows expected "short-table writer retains the selected frontier"
+                  | other -> failtestf "expected secondary short-table rows, got %A" other
+
+          testCase "indexed filters classify pending secondary keys before the ordered frontier"
+          <| fun _ ->
+              for verb in [ "UPDATE"; "DELETE" ] do
+                for filter, shouldWait, selected in
+                    [ "id<=2", false, [ 1; 2 ]
+                      "id IN (1,2)", false, [ 1; 2 ]
+                      "id IN (1,2,4)", true, [ 4; 1 ]
+                      "id NOT IN (4,5)", false, [ 1; 2 ]
+                      "rank_value IS TRUE", true, [ 1; 2 ] ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_filtered_frontier(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  handle setup "INSERT INTO tx_filtered_frontier VALUES(1,1,0),(2,2,0),(3,3,0)" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted = handle owner "INSERT INTO tx_filtered_frontier VALUES(4,0,0)"
+                  Expect.equal inserted (Affected 1UL) "owner inserts before the ordering frontier"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let statement =
+                              (if verb = "UPDATE" then "UPDATE tx_filtered_frontier SET n=n+1"
+                               else "DELETE FROM tx_filtered_frontier")
+                              + " WHERE " + filter + " ORDER BY rank_value ASC LIMIT 2"
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "filtered writer starts"
+                  let completedBeforeCommit = waiting.Wait(TimeSpan.FromMilliseconds 100.0)
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the pending insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "filtered writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal completedBeforeCommit (not shouldWait) "ordered writer wait matches MySQL"
+                  Expect.equal result (Affected 2UL) "two filtered rows change"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "filtered writer commits"
+                  match handle setup "SELECT id,n FROM tx_filtered_frontier ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          [ 1 .. 4 ]
+                          |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id selected))
+                          |> List.map (fun id ->
+                              [ Some(string id)
+                                Some(if List.contains id selected then "1" else "0") ])
+                      Expect.equal rows expected "the indexed filter selects only its matching rows"
+                  | other -> failtestf "expected filtered frontier rows, got %A" other
+
+          testCase "indexed NULL filters and tied secondary keys schedule limited writes"
+          <| fun _ ->
+              let cases =
+                  [ "IS NOT NULL", "ASC", "NULL", 4, false, [ 1; 2 ]
+                    "IS NOT NULL", "ASC", "0", 4, true, [ 4; 1 ]
+                    "IS NULL", "ASC", "NULL", 0, true, [ 0; 1 ]
+                    "IS NULL", "ASC", "NULL", 4, false, [ 1; 2 ]
+                    "IS NULL", "ASC", "0", 0, false, [ 1; 2 ]
+                    "IS NULL", "ASC", "0", 4, false, [ 1; 2 ]
+                    "IS NULL", "DESC", "0", 0, false, [ 2; 1 ]
+                    "IS NULL", "DESC", "0", 4, false, [ 2; 1 ]
+                    "IS NOT NULL", "ASC", "2", 0, true, [ 1; 0 ]
+                    "IS NOT NULL", "ASC", "2", 4, false, [ 1; 2 ]
+                    "IS NOT NULL", "DESC", "2", 0, false, [ 3; 2 ]
+                    "IS NOT NULL", "DESC", "2", 4, true, [ 3; 4 ] ]
+              for predicate, direction, pendingRank, pendingId, shouldWait, selected in cases do
+                for verb in [ "UPDATE"; "DELETE" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  handle setup "CREATE TABLE tx_null_frontier(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore
+                  let initialRows =
+                      if predicate = "IS NULL" then
+                          "(1,NULL,0),(2,NULL,0),(3,3,0)"
+                      else "(1,1,0),(2,2,0),(3,3,0)"
+                  handle setup ("INSERT INTO tx_null_frontier VALUES" + initialRows) |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, inserted =
+                      handle owner (sprintf "INSERT INTO tx_null_frontier VALUES(%d,%s,0)" pendingId pendingRank)
+                  Expect.equal inserted (Affected 1UL) "owner inserts a tied or filtered key"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          let statement =
+                              (if verb = "UPDATE" then "UPDATE tx_null_frontier SET n=n+1"
+                               else "DELETE FROM tx_null_frontier")
+                              + sprintf " WHERE rank_value %s ORDER BY rank_value %s LIMIT 2" predicate direction
+                          handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "NULL-filter writer starts"
+                  let completedBeforeCommit = waiting.Wait(TimeSpan.FromMilliseconds 100.0)
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the pending insert"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "NULL-filter writer completes"
+                  let waiter, result = waiting.Result
+                  Expect.equal completedBeforeCommit (not shouldWait) "NULL-filter wait matches MySQL"
+                  Expect.equal result (Affected 2UL) "two matching rows change"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                  match handle setup "SELECT id,n FROM tx_null_frontier ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      let expected =
+                          pendingId :: [ 1; 2; 3 ]
+                          |> List.sort
+                          |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id selected))
+                          |> List.map (fun id ->
+                              [ Some(string id); Some(if List.contains id selected then "1" else "0") ])
+                      Expect.equal rows expected "NULL-filter write selects the MySQL rows"
+                  | other -> failtestf "expected NULL-filter rows, got %A" other
+
+          testCase "indexed text filters classify pending secondary keys"
+          <| fun _ ->
+              let cases =
+                  [ "utf8mb4_bin", "z", "id<='f'", false, [ "b"; "d" ]
+                    "utf8mb4_bin", "a", "id<='f'", true, [ "a"; "b" ]
+                    "utf8mb4_0900_ai_ci", "Ä", "id<='f'", true, [ "Ä"; "b" ]
+                    "utf8mb4_bin", "Ä", "id IN ('a','b','d')", false, [ "b"; "d" ]
+                    "utf8mb4_bin", "a", "id IN ('a','b','d')", true, [ "a"; "b" ]
+                    "utf8mb4_0900_ai_ci", "Ä", "id IN ('a','b','d')", true, [ "Ä"; "b" ]
+                    "utf8mb4_0900_ai_ci", "Ä", "id IN ('b','d','z')", false, [ "b"; "d" ] ]
+              for collation, insertedId, predicate, shouldWait, selected in cases do
+                  for verb in [ "UPDATE"; "DELETE" ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      handle setup
+                          ("CREATE TABLE tx_text_filter(id VARCHAR(16) COLLATE " + collation
+                           + " PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))")
+                      |> ignore
+                      handle setup "INSERT INTO tx_text_filter VALUES('b',1,0),('d',2,0),('f',3,0)" |> ignore
+                      let owner, _ = handle (create 2 store) "BEGIN"
+                      let owner, inserted =
+                          handle owner ("INSERT INTO tx_text_filter VALUES('" + insertedId + "',0,0)")
+                      Expect.equal inserted (Affected 1UL) "owner inserts a secondary-order candidate"
+                      let waiter, _ = handle (create 3 store) "BEGIN"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              let command =
+                                  if verb = "UPDATE" then "UPDATE tx_text_filter SET n=n+1"
+                                  else "DELETE FROM tx_text_filter"
+                              handle waiter (command + " WHERE " + predicate + " ORDER BY rank_value ASC LIMIT 2"))
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "text-filter writer starts"
+                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the insert"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "text-filter writer completes"
+                      let waiter, result = waiting.Result
+                      Expect.equal blocked shouldWait "text primary filter wait matches MySQL"
+                      Expect.equal result (Affected 2UL) "two filtered rows change"
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                      match handle setup "SELECT id,n FROM tx_text_filter" |> snd with
+                      | ResultSet(_, rows) ->
+                          let actual =
+                              rows
+                              |> List.map (function
+                                  | [ Some id; Some n ] -> id, n
+                                  | row -> failtestf "unexpected text-filter row: %A" row)
+                              |> Map.ofList
+                          let expected =
+                              [ "b"; "d"; "f"; insertedId ]
+                              |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id selected))
+                              |> List.map (fun id -> id, if List.contains id selected then "1" else "0")
+                              |> Map.ofList
+                          Expect.equal actual expected "text-filter write selects MySQL rows"
+                      | other -> failtestf "expected text-filter rows, got %A" other
+
+          testCase "equal non-unique secondary keys do not serialize inserts"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_equal_secondary(id INT PRIMARY KEY,rank_value INT,KEY ix_rank(rank_value))" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, inserted = handle owner "INSERT INTO tx_equal_secondary VALUES(1,0)"
+              Expect.equal inserted (Affected 1UL) "first insert holds its ordered-key claim"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter "INSERT INTO tx_equal_secondary VALUES(2,0)")
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "second insert starts"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 1.0))
+                  "equal non-unique secondary values do not block independent primary keys"
+              let waiter, second = waiting.Result
+              Expect.equal second (Affected 1UL) "second insert succeeds"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "second insert commits"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "first insert commits"
+
           testCase "an autocommit full-scan delete rechecks the row after a competing commit"
           <| fun _ ->
               for predicate, affected, remaining in
@@ -2366,34 +3235,49 @@ let tests =
 
           testCase "nested joined view updates wait for the physical target"
           <| fun _ ->
-              for fromClause, assignment in
-                  [ "tx_nested_target t JOIN tx_nested_internal l ON l.id=t.id", "v.n=v.n+1"
-                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "v.n=v.n+1"
-                    "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "n=n+1" ] do
+              for fromClause, assignment, viewPosition in
+                  [ for fromClause, assignment in
+                        [ "tx_nested_target t JOIN tx_nested_internal l ON l.id=t.id", "v.n=v.n+1"
+                          "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "v.n=v.n+1"
+                          "tx_nested_internal l JOIN tx_nested_target t ON l.id=t.id", "n=n+1" ] do
+                        for position in 1..3 do
+                            yield fromClause, assignment, position ] do
                   let store = Fsdb.Storage.create ()
                   let setup = create 1 store
                   handle setup "CREATE TABLE tx_nested_target (id INT PRIMARY KEY, n INT)" |> ignore
                   handle setup "CREATE TABLE tx_nested_internal (id INT PRIMARY KEY)" |> ignore
                   handle setup "CREATE TABLE tx_nested_outer (id INT PRIMARY KEY)" |> ignore
+                  handle setup "CREATE TABLE tx_nested_other (id INT PRIMARY KEY)" |> ignore
                   handle setup "INSERT INTO tx_nested_target VALUES (1, 0)" |> ignore
                   handle setup "INSERT INTO tx_nested_internal VALUES (1)" |> ignore
                   handle setup "INSERT INTO tx_nested_outer VALUES (1)" |> ignore
+                  handle setup "INSERT INTO tx_nested_other VALUES (1)" |> ignore
                   handle setup ("CREATE VIEW tx_nested_view AS SELECT t.id, t.n FROM " + fromClause)
                   |> ignore
                   let owner, _ = handle (create 2 store) "BEGIN"
                   let owner, ownerWrite = handle owner "UPDATE tx_nested_target SET n=n+1 WHERE id=1"
                   Expect.equal ownerWrite (Affected 1UL) "the owner updates the base row"
                   let waiter, _ = handle (create 3 store) "BEGIN"
+                  let joinedSource viewName =
+                      if viewPosition = 1 then
+                          viewName + " v JOIN tx_nested_outer x ON x.id=v.id"
+                      elif viewPosition = 2 then
+                          "tx_nested_outer x JOIN " + viewName + " v ON x.id=v.id"
+                      else
+                          "tx_nested_outer x JOIN tx_nested_other y ON y.id=x.id JOIN "
+                          + viewName + " v ON v.id=y.id"
                   let sql =
-                      "UPDATE tx_nested_view v JOIN tx_nested_outer x ON x.id=v.id "
+                      "UPDATE " + joinedSource "tx_nested_view" + " "
                       + "SET " + assignment + " WHERE v.id=1"
                   let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter sql)
-                  Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the nested joined writer waits"
+                  if waiting.Wait(TimeSpan.FromMilliseconds 100.0) then
+                      let _, result = waiting.Result
+                      failtestf "nested joined writer should wait for %s, got %A" sql result
                   Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
                   Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the joined writer resumes"
                   let waiter, result = waiting.GetAwaiter().GetResult()
                   Expect.equal result (Affected 1UL) "the joined writer updates the rebased row"
-                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the waiter commits"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) ("the waiter commits: " + sql)
                   match handle setup "SELECT n FROM tx_nested_target WHERE id=1" |> snd with
                   | ResultSet(_, [ [ Some "2" ] ]) -> ()
                   | result -> failtestf "expected both increments, got %A" result
@@ -2404,7 +3288,7 @@ let tests =
                        + " WITH CASCADED CHECK OPTION")
                   |> ignore
                   let rejectedSql =
-                      "UPDATE tx_nested_checked v JOIN tx_nested_outer x ON x.id=v.id "
+                      "UPDATE " + joinedSource "tx_nested_checked" + " "
                       + "SET v.id=2 WHERE v.id=1"
                   match handle setup rejectedSql |> snd with
                   | Err(1369, _) -> ()
@@ -2419,6 +3303,908 @@ let tests =
                       | Err(1052, _) -> ()
                       | result -> failtestf "expected ambiguous bare n error 1052, got %A" result
 
+          testCase "joined UPDATE writes two distinct updatable views"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              handle session "CREATE TABLE tx_dual_a(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "CREATE TABLE tx_dual_b(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "CREATE TABLE tx_dual_link(id INT PRIMARY KEY)" |> ignore
+              handle session "INSERT INTO tx_dual_a VALUES(1,10)" |> ignore
+              handle session "INSERT INTO tx_dual_b VALUES(1,20)" |> ignore
+              handle session "INSERT INTO tx_dual_link VALUES(1)" |> ignore
+              handle session "CREATE VIEW tx_dual_va AS SELECT a.id,a.n,l.id AS link_id FROM tx_dual_a a JOIN tx_dual_link l ON a.id=l.id WHERE l.id=1" |> ignore
+              handle session "CREATE VIEW tx_dual_vb AS SELECT b.id,b.n,l.id AS link_id FROM tx_dual_b b JOIN tx_dual_link l ON b.id=l.id" |> ignore
+              let sql =
+                  "UPDATE tx_dual_va va JOIN tx_dual_vb vb ON va.link_id=vb.link_id "
+                  + "SET va.n=va.n+1,vb.n=vb.n+1"
+              Expect.equal (handle session sql |> snd) (Affected 2UL) "both view targets update"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "11"; Some "21" ] ]) -> ()
+              | result -> failtestf "expected both physical view targets to change, got %A" result
+              Expect.equal
+                  (handle session
+                      ("CREATE VIEW tx_dual_vb_unique AS SELECT b.id,b.n AS bonus,l.id AS link_id "
+                       + "FROM tx_dual_b b JOIN tx_dual_link l ON b.id=l.id") |> snd)
+                  (Affected 0UL)
+                  "second view exposes a unique bare assignment"
+              let bareSecondView delta =
+                  "UPDATE tx_dual_va va LEFT JOIN tx_dual_vb_unique vb ON va.link_id=vb.link_id "
+                  + "SET bonus=bonus" + delta + " WHERE vb.id=1"
+              Expect.equal (handle session (bareSecondView "+1") |> snd) (Affected 1UL)
+                  "bare assignment updates only the second writable view"
+              match handle session "SELECT n FROM tx_dual_b WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "22" ] ]) -> ()
+              | result -> failtestf "expected second view's physical row to change, got %A" result
+              Expect.equal (handle session (bareSecondView "-1") |> snd) (Affected 1UL)
+                  "bare assignment restores second view's physical row"
+              Expect.equal
+                  (handle session
+                      "CREATE VIEW tx_dual_read_counts AS SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id" |> snd)
+                  (Affected 0UL)
+                  "aggregate read-only view creates"
+              let aggregateFirst delta =
+                  "UPDATE tx_dual_read_counts rc JOIN tx_dual_vb_unique vb ON rc.id=vb.link_id "
+                  + "SET bonus=bonus" + delta + " WHERE vb.id=1"
+              Expect.equal (handle session (aggregateFirst "+1") |> snd) (Affected 1UL)
+                  "later writable view updates after aggregate source"
+              Expect.equal (handle session (aggregateFirst "-1") |> snd) (Affected 1UL)
+                  "aggregate-first update restores later view row"
+              let cteFirst delta =
+                  "WITH c AS (SELECT id FROM tx_dual_link) "
+                  + "UPDATE c JOIN tx_dual_va va ON c.id=va.link_id "
+                  + "SET va.n=va.n" + delta + " WHERE c.id=1"
+              Expect.equal (handle session (cteFirst "+1") |> snd) (Affected 1UL)
+                  "CTE-first update reaches the later writable view"
+              Expect.equal (handle session (cteFirst "-1") |> snd) (Affected 1UL)
+                  "CTE-first update restores the view row"
+              let cteFirstTwoViews delta =
+                  "WITH c AS (SELECT id FROM tx_dual_link) "
+                  + "UPDATE c JOIN tx_dual_va va ON c.id=va.link_id "
+                  + "JOIN tx_dual_vb vb ON va.link_id=vb.link_id "
+                  + "SET va.n=va.n" + delta + ",vb.n=vb.n" + delta + " WHERE c.id=1"
+              Expect.equal (handle session (cteFirstTwoViews "+1") |> snd) (Affected 2UL)
+                  "CTE-first update reaches both later writable views"
+              Expect.equal (handle session (cteFirstTwoViews "-1") |> snd) (Affected 2UL)
+                  "CTE-first update restores both view rows"
+              for source in
+                  [ "WITH c AS (SELECT id FROM tx_dual_link) UPDATE c "
+                    + "JOIN LATERAL (SELECT c.id AS link_id) q ON TRUE "
+                    + "JOIN tx_dual_va va ON q.link_id=va.link_id "
+                    + "JOIN LATERAL (SELECT va.link_id AS next_id) r ON TRUE "
+                    + "JOIN tx_dual_vb vb ON r.next_id=vb.link_id"
+                    "WITH c AS (SELECT id FROM tx_dual_link) UPDATE c "
+                    + "JOIN tx_dual_va va ON c.id=va.link_id "
+                    + "JOIN JSON_TABLE(JSON_ARRAY(va.link_id),'$[*]' COLUMNS(next_id INT PATH '$')) r ON TRUE "
+                    + "JOIN tx_dual_vb vb ON r.next_id=vb.link_id" ] do
+                  let update delta =
+                      source + " SET va.n=va.n" + delta + ",vb.n=vb.n" + delta + " WHERE c.id=1"
+                  Expect.equal (handle session (update "+1") |> snd) (Affected 2UL)
+                      "dependent source reaches both writable views"
+                  Expect.equal (handle session (update "-1") |> snd) (Affected 2UL)
+                      "dependent source restores both view rows"
+              let shadowedLateral =
+                  "WITH c AS (SELECT id FROM tx_dual_link) UPDATE c "
+                  + "JOIN tx_dual_va va ON c.id=va.link_id "
+                  + "JOIN LATERAL (SELECT va.link_id AS next_id FROM (SELECT 99 AS link_id) va) r ON TRUE "
+                  + "JOIN tx_dual_vb vb ON r.next_id=vb.link_id "
+                  + "SET va.n=va.n+1,vb.n=vb.n+1 WHERE c.id=1"
+              Expect.equal (handle session shadowedLateral |> snd) (Affected 0UL)
+                  "the lateral body's local va alias shadows the writable view"
+              let aggregateFirstTwoViews delta =
+                  "UPDATE tx_dual_read_counts rc JOIN tx_dual_va va ON rc.id=va.link_id "
+                  + "LEFT JOIN tx_dual_vb vb ON va.link_id=vb.link_id "
+                  + "SET va.n=va.n" + delta + ",vb.n=vb.n" + delta + " WHERE rc.id=1"
+              Expect.equal (handle session (aggregateFirstTwoViews "+1") |> snd) (Affected 2UL)
+                  "aggregate-first source can update two later writable views"
+              Expect.equal (handle session (aggregateFirstTwoViews "-1") |> snd) (Affected 2UL)
+                  "aggregate-first two-view update restores both rows"
+              let aggregateFirstOnlySecond delta =
+                  "UPDATE tx_dual_read_counts rc JOIN tx_dual_va va ON rc.id=va.link_id "
+                  + "LEFT JOIN tx_dual_vb vb ON va.link_id=vb.link_id "
+                  + "SET vb.n=vb.n" + delta + " WHERE rc.id=1"
+              Expect.equal (handle session (aggregateFirstOnlySecond "+1") |> snd) (Affected 1UL)
+                  "aggregate and unassigned view precede a writable view"
+              Expect.equal (handle session (aggregateFirstOnlySecond "-1") |> snd) (Affected 1UL)
+                  "later writable view restores its row"
+              Expect.equal
+                  (handle session
+                      "UPDATE tx_dual_vb vb JOIN tx_dual_va va ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1" |> snd)
+                  (Affected 2UL)
+                  "reversed view order updates both targets"
+              handle session
+                  ("CREATE VIEW tx_dual_checked AS SELECT a.id,a.n FROM tx_dual_a a "
+                   + "JOIN tx_dual_link l ON a.id=l.id WITH CASCADED CHECK OPTION")
+              |> ignore
+              match handle session
+                  ("UPDATE tx_dual_checked vc JOIN tx_dual_vb vb ON vc.id=vb.id "
+                   + "SET vc.id=2,vb.n=vb.n+1") |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected joined view CHECK OPTION error, got %A" result
+              match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "12"; Some "22" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve both targets, got %A" result
+              handle session
+                  ("CREATE VIEW tx_dual_vb_same AS SELECT a.id,a.n FROM tx_dual_b a "
+                   + "JOIN tx_dual_link lb ON a.id=lb.id")
+              |> ignore
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_va va JOIN tx_dual_vb_same vb ON va.id=vb.id "
+                       + "SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                  (Affected 2UL)
+                  "two view-local physical targets may share alias a"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "13"; Some "23" ] ]) -> ()
+              | result -> failtestf "expected both same-alias view targets to change, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_vb_same vb JOIN tx_dual_va va ON va.id=vb.id "
+                       + "SET vb.n=vb.n+1,va.n=va.n+1") |> snd)
+                  (Affected 2UL)
+                  "reversed same-alias target order updates both views"
+              match handle session
+                  ("UPDATE tx_dual_checked vc JOIN tx_dual_vb_same vb ON vc.id=vb.id "
+                   + "SET vc.id=2,vb.n=vb.n+1") |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected renamed target CHECK OPTION error, got %A" result
+              match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "14"; Some "24" ] ]) -> ()
+              | result -> failtestf "renamed target CHECK OPTION must preserve both rows, got %A" result
+              for sql in
+                  [ "CREATE VIEW tx_dual_va_derived AS SELECT a.id,a.n,r.id AS link_id FROM tx_dual_a a JOIN (SELECT id FROM tx_dual_link) r ON a.id=r.id"
+                    "CREATE VIEW tx_dual_vb_derived AS SELECT b.id,b.n,r.id AS link_id FROM tx_dual_b b JOIN (SELECT id FROM tx_dual_link) r ON b.id=r.id" ] do
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "expected derived view creation, got %d: %s" code message
+                  | _ -> ()
+              for name in [ "tx_dual_va_derived"; "tx_dual_vb_derived" ] do
+                  match handle session ("UPDATE " + name + " SET n=n WHERE id=1") |> snd with
+                  | Err(code, message) -> failtestf "expected standalone derived view update for %s, got %d: %s" name code message
+                  | _ -> ()
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_va_derived va JOIN tx_dual_vb_derived vb ON va.link_id=vb.link_id "
+                       + "SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                  (Affected 2UL)
+                  "two derived read sources may share view-local alias r"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "15"; Some "25" ] ]) -> ()
+              | result -> failtestf "expected both derived-source view targets to change, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_vb_derived vb JOIN tx_dual_va_derived va ON va.id=vb.id "
+                       + "SET vb.n=vb.n+1,va.n=va.n+1") |> snd)
+                  (Affected 2UL)
+                  "reversed derived-source view order updates both targets"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "16"; Some "26" ] ]) -> ()
+              | result -> failtestf "expected reversed derived-source view targets to change, got %A" result
+              for sql in
+                  [ "CREATE VIEW tx_dual_va_grouped AS SELECT a.id,a.n,r.id AS link_id FROM tx_dual_a a JOIN (SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id) r ON a.id=r.id"
+                    "CREATE VIEW tx_dual_vb_grouped AS SELECT b.id,b.n,r.id AS link_id FROM tx_dual_b b JOIN (SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id) r ON b.id=r.id" ] do
+                  match handle session sql |> snd with
+                  | Affected 0UL -> ()
+                  | result -> failtestf "expected grouped read-source view creation, got %A" result
+              for source, expected in
+                  [ "tx_dual_va_grouped va JOIN tx_dual_vb_grouped vb ON va.link_id=vb.link_id", [ Some "17"; Some "27" ]
+                    "tx_dual_vb_grouped vb JOIN tx_dual_va_grouped va ON va.id=vb.id", [ Some "18"; Some "28" ] ] do
+                  let update = "UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1"
+                  Expect.equal (handle session update |> snd) (Affected 2UL) "grouped read sources keep both views writable"
+                  match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+                  | ResultSet(_, [ row ]) -> Expect.equal row expected "both grouped view targets update"
+                  | result -> failtestf "expected grouped view target rows, got %A" result
+              for sql in
+                  [ "CREATE VIEW tx_dual_va_grouped_lateral AS SELECT a.id,a.n,q.link_id FROM tx_dual_a a JOIN (SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id) r ON a.id=r.id JOIN LATERAL (SELECT r.id AS link_id) q ON TRUE"
+                    "CREATE VIEW tx_dual_vb_grouped_lateral AS SELECT b.id,b.n,q.link_id FROM tx_dual_b b JOIN (SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id) r ON b.id=r.id JOIN LATERAL (SELECT r.id AS link_id) q ON TRUE" ] do
+                  match handle session sql |> snd with
+                  | Affected 0UL -> ()
+                  | result -> failtestf "expected grouped lateral view creation, got %A" result
+              for source, expected in
+                  [ "tx_dual_va_grouped_lateral va JOIN tx_dual_vb_grouped_lateral vb ON va.link_id=vb.link_id", [ Some "19"; Some "29" ]
+                    "tx_dual_vb_grouped_lateral vb JOIN tx_dual_va_grouped_lateral va ON va.id=vb.id", [ Some "20"; Some "30" ] ] do
+                  let update = "UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1"
+                  Expect.equal (handle session update |> snd) (Affected 2UL) "dependent grouped sources keep both views writable"
+                  match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+                  | ResultSet(_, [ row ]) -> Expect.equal row expected "both grouped lateral view targets update"
+                  | result -> failtestf "expected grouped lateral target rows, got %A" result
+              let checkedGrouped =
+                  "CREATE VIEW tx_dual_va_grouped_checked AS SELECT a.id,a.n,q.link_id FROM tx_dual_a a "
+                  + "JOIN (SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id) r ON a.id=r.id "
+                  + "JOIN LATERAL (SELECT r.id AS link_id) q ON TRUE "
+                  + "WHERE a.id=1 WITH CASCADED CHECK OPTION"
+              Expect.equal (handle session checkedGrouped |> snd) (Affected 0UL) "grouped lateral checked view creates"
+              match handle session
+                  ("UPDATE tx_dual_va_grouped_checked va JOIN tx_dual_vb_grouped_lateral vb "
+                   + "ON va.link_id=vb.link_id SET va.id=2,vb.n=vb.n+1") |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected grouped lateral CHECK OPTION error, got %A" result
+              match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "20"; Some "30" ] ]) -> ()
+              | result -> failtestf "grouped lateral CHECK OPTION must preserve both targets, got %A" result
+              let owner, _ = handle (create 10 store) "BEGIN"
+              let owner, held = handle owner "UPDATE tx_dual_a SET n=n+10 WHERE id=1"
+              Expect.equal held (Affected 1UL) "the owner holds the first grouped view target"
+              let waiter, _ = handle (create 11 store) "BEGIN"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter
+                          ("UPDATE tx_dual_va_grouped_lateral va JOIN tx_dual_vb_grouped_lateral vb "
+                           + "ON va.link_id=vb.link_id SET va.n=va.n+1,vb.n=vb.n+1"))
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "grouped view writer starts"
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "grouped view writer waits for the held row"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "grouped view writer resumes"
+              let waiter, result = waiting.Result
+              Expect.equal result (Affected 2UL) "both grouped view targets rebase"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "grouped view writer commits"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "31"; Some "31" ] ]) -> ()
+              | result -> failtestf "expected both rebased grouped view values, got %A" result
+              Expect.equal (handle session "INSERT INTO tx_dual_b VALUES(3,40)" |> snd) (Affected 1UL) "unmatched right view row creates"
+              Expect.equal (handle session "INSERT INTO tx_dual_link VALUES(3)" |> snd) (Affected 1UL) "unmatched right view link creates"
+              let rightOwner, _ = handle (create 12 store) "BEGIN"
+              let rightOwner, heldRight = handle rightOwner "UPDATE tx_dual_b SET n=n+10 WHERE id=3"
+              Expect.equal heldRight (Affected 1UL) "owner holds the right-only physical target"
+              let rightWaiter, _ = handle (create 13 store) "BEGIN"
+              use rightStarted = new Threading.ManualResetEventSlim(false)
+              let rightWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      rightStarted.Set()
+                      handle rightWaiter
+                          ("UPDATE tx_dual_va_grouped_lateral va RIGHT JOIN tx_dual_vb_grouped_lateral vb "
+                           + "ON va.link_id=vb.link_id SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.id=3"))
+              Expect.isTrue (rightStarted.Wait(TimeSpan.FromSeconds 1.0)) "right-only view writer starts"
+              Expect.isFalse (rightWaiting.Wait(TimeSpan.FromMilliseconds 100.0)) "right-only view writer waits for held row"
+              Expect.equal (handle rightOwner "COMMIT" |> snd) (Affected 0UL) "right-row owner commits"
+              Expect.isTrue (rightWaiting.Wait(TimeSpan.FromSeconds 5.0)) "right-only view writer resumes"
+              let rightWaiter, rightResult = rightWaiting.Result
+              Expect.equal rightResult (Affected 1UL) "right-only physical row rebases"
+              Expect.equal (handle rightWaiter "COMMIT" |> snd) (Affected 0UL) "right-only view writer commits"
+              match handle session "SELECT n FROM tx_dual_b WHERE id=3" |> snd with
+              | ResultSet(_, [ [ Some "51" ] ]) -> ()
+              | result -> failtestf "expected rebased right-only row, got %A" result
+              Expect.equal (handle session "DELETE FROM tx_dual_b WHERE id=3" |> snd) (Affected 1UL) "right-only test row removes"
+              Expect.equal (handle session "DELETE FROM tx_dual_link WHERE id=3" |> snd) (Affected 1UL) "right-only test link removes"
+              handle session "UPDATE tx_dual_a SET n=16" |> ignore
+              handle session "UPDATE tx_dual_b SET n=26" |> ignore
+              for sql in
+                  [ "CREATE VIEW tx_dual_va_lateral AS SELECT a.id,a.n,r.link_id FROM tx_dual_a a JOIN LATERAL (SELECT a.id AS link_id) r ON TRUE"
+                    "CREATE VIEW tx_dual_vb_lateral AS SELECT b.id,b.n,r.link_id FROM tx_dual_b b JOIN LATERAL (SELECT b.id AS link_id) r ON TRUE" ] do
+                  match handle session sql |> snd with
+                  | Affected 0UL -> ()
+                  | result -> failtestf "expected lateral view creation, got %A" result
+              for name in [ "tx_dual_va_lateral"; "tx_dual_vb_lateral" ] do
+                  match handle session ("SELECT id,n,link_id FROM " + name) |> snd with
+                  | ResultSet(_, [ [ Some "1"; Some _; Some "1" ] ]) -> ()
+                  | result -> failtestf "expected lateral view rows for %s, got %A" name result
+                  match handle session ("UPDATE " + name + " SET n=n WHERE id=1") |> snd with
+                  | Affected 0UL -> ()
+                  | result -> failtestf "expected standalone lateral view update for %s, got %A" name result
+              for source, left, right in
+                  [ "tx_dual_va_lateral va JOIN tx_dual_vb_lateral vb ON va.link_id=vb.link_id", "17", "27"
+                    "tx_dual_vb_lateral vb JOIN tx_dual_va_lateral va ON va.id=vb.id", "18", "28" ] do
+                  Expect.equal
+                      (handle session ("UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                      (Affected 2UL)
+                      "two lateral read sources may share view-local alias r"
+                  match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+                  | ResultSet(_, [ [ Some actualLeft; Some actualRight ] ]) ->
+                      Expect.equal (actualLeft, actualRight) (left, right)
+                          "both lateral-source view targets change"
+                  | result -> failtestf "expected lateral-source view targets, got %A" result
+              for sql in
+                  [ "CREATE VIEW tx_dual_va_json AS SELECT a.id,a.n,r.link_id FROM tx_dual_a a JOIN JSON_TABLE(CONCAT('[',a.id,']'),'$[*]' COLUMNS(link_id INT PATH '$')) r ON TRUE"
+                    "CREATE VIEW tx_dual_vb_json AS SELECT b.id,b.n,r.link_id FROM tx_dual_b b JOIN JSON_TABLE(CONCAT('[',b.id,']'),'$[*]' COLUMNS(link_id INT PATH '$')) r ON TRUE" ] do
+                  match handle session sql |> snd with
+                  | Affected 0UL -> ()
+                  | result -> failtestf "expected JSON_TABLE view creation, got %A" result
+              for source, left, right in
+                  [ "tx_dual_va_json va JOIN tx_dual_vb_json vb ON va.link_id=vb.link_id", "19", "29"
+                    "tx_dual_vb_json vb JOIN tx_dual_va_json va ON va.id=vb.id", "20", "30" ] do
+                  Expect.equal
+                      (handle session ("UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                      (Affected 2UL)
+                      "two JSON_TABLE read sources may share view-local alias r"
+                  match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+                  | ResultSet(_, [ [ Some actualLeft; Some actualRight ] ]) ->
+                      Expect.equal (actualLeft, actualRight) (left, right)
+                          "both JSON_TABLE-source view targets change"
+                  | result -> failtestf "expected JSON_TABLE-source view targets, got %A" result
+              match handle session
+                  "CREATE VIEW tx_dual_vb_lateral_same AS SELECT a.id,a.n,r.link_id FROM tx_dual_b a JOIN LATERAL (SELECT a.id AS link_id) r ON TRUE"
+                  |> snd with
+              | Affected 0UL -> ()
+              | result -> failtestf "expected same-base-alias lateral view, got %A" result
+              for source, left, right in
+                  [ "tx_dual_va_lateral va JOIN tx_dual_vb_lateral_same vb ON va.link_id=vb.link_id", "21", "31"
+                    "tx_dual_vb_lateral_same vb JOIN tx_dual_va_lateral va ON va.id=vb.id", "22", "32" ] do
+                  Expect.equal
+                      (handle session ("UPDATE " + source + " SET va.n=va.n+1,vb.n=vb.n+1") |> snd)
+                      (Affected 2UL)
+                      "writable base and dependent lateral aliases stay view-local"
+                  match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+                  | ResultSet(_, [ [ Some actualLeft; Some actualRight ] ]) ->
+                      Expect.equal (actualLeft, actualRight) (left, right)
+                          "both same-alias lateral targets change"
+                  | result -> failtestf "expected same-alias lateral targets, got %A" result
+              match handle session
+                  ("CREATE VIEW tx_dual_checked_lateral AS SELECT a.id,a.n,r.link_id FROM tx_dual_a a "
+                   + "JOIN LATERAL (SELECT a.id AS link_id) r ON TRUE WHERE a.id=1 "
+                   + "WITH CASCADED CHECK OPTION")
+                  |> snd with
+              | Affected 0UL -> ()
+              | result -> failtestf "expected checked lateral view creation, got %A" result
+              match handle session
+                  ("UPDATE tx_dual_checked_lateral va JOIN tx_dual_vb_lateral_same vb "
+                   + "ON va.link_id=vb.link_id SET va.id=2,vb.n=vb.n+1") |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected dependent CHECK OPTION error 1369, got %A" result
+              match handle session "SELECT a.id,a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "22"; Some "32" ] ]) -> ()
+              | result -> failtestf "dependent CHECK OPTION must preserve both targets, got %A" result
+              match handle session
+                  ("CREATE VIEW tx_dual_vb_lateral_shadow AS SELECT a.id,a.n,r.link_id FROM tx_dual_b a "
+                   + "JOIN LATERAL (SELECT a.id AS link_id FROM (SELECT 2 AS id) a) r ON TRUE")
+                  |> snd with
+              | Affected 0UL -> ()
+              | result -> failtestf "expected locally shadowed lateral view, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_va_lateral va JOIN tx_dual_vb_lateral_shadow vb "
+                       + "ON va.id=vb.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.link_id=2") |> snd)
+                  (Affected 2UL)
+                  "local lateral alias must not be renamed with the writable base"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "23"; Some "33" ] ]) -> ()
+              | result -> failtestf "locally shadowed lateral view must update both targets, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_vb_lateral_shadow vb JOIN tx_dual_va_lateral va "
+                       + "ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1 WHERE vb.link_id=2") |> snd)
+                  (Affected 2UL)
+                  "reversed locally shadowed lateral view updates both targets"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "24"; Some "34" ] ]) -> ()
+              | result -> failtestf "reversed locally shadowed lateral view must update both targets, got %A" result
+              match handle session
+                  ("CREATE VIEW tx_dual_vb_lateral_nested_shadow AS SELECT a.id,a.n,r.link_id FROM tx_dual_b a "
+                   + "JOIN LATERAL (SELECT (SELECT a.id FROM (SELECT 2 AS id) a) AS link_id) r ON TRUE")
+                  |> snd with
+              | Affected 0UL -> ()
+              | result -> failtestf "expected nested lateral shadow view, got %A" result
+              Expect.equal
+                  (handle session
+                      ("UPDATE tx_dual_vb_lateral_nested_shadow vb JOIN tx_dual_va_lateral va "
+                       + "ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1 WHERE vb.link_id=2") |> snd)
+                  (Affected 2UL)
+                  "nested local lateral alias must not be renamed with the writable base"
+              match handle session "SELECT a.n,b.n FROM tx_dual_a a JOIN tx_dual_b b ON a.id=b.id" |> snd with
+              | ResultSet(_, [ [ Some "25"; Some "35" ] ]) -> ()
+              | result -> failtestf "nested lateral shadow must update both targets, got %A" result
+
+          testCase "joined view can supply read rows while another source is updated"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              handle session "CREATE TABLE tx_read_view_target(id INT PRIMARY KEY,n INT,m INT DEFAULT 0)" |> ignore
+              handle session "CREATE TABLE tx_read_view_link(id INT PRIMARY KEY)" |> ignore
+              handle session "CREATE TABLE tx_read_view_outer(id INT PRIMARY KEY,n INT,m INT DEFAULT 0)" |> ignore
+              handle session "CREATE TABLE tx_read_view_other(id INT PRIMARY KEY)" |> ignore
+              handle session "INSERT INTO tx_read_view_target(id,n) VALUES(1,10)" |> ignore
+              handle session "INSERT INTO tx_read_view_link VALUES(1)" |> ignore
+              handle session "INSERT INTO tx_read_view_outer(id,n) VALUES(1,0)" |> ignore
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session
+                  "CREATE VIEW tx_read_joined_view AS SELECT t.id,t.n FROM tx_read_view_target t JOIN tx_read_view_link l ON l.id=t.id"
+              |> ignore
+              for source in
+                  [ "tx_read_view_outer x JOIN tx_read_joined_view v ON x.id=v.id"
+                    "tx_read_joined_view v JOIN tx_read_view_outer x ON x.id=v.id"
+                    "tx_read_view_outer x JOIN tx_read_view_other y ON y.id=x.id JOIN tx_read_joined_view v ON v.id=y.id" ] do
+                  handle session "UPDATE tx_read_view_outer SET n=0" |> ignore
+                  let sql = "UPDATE " + source + " SET x.n=x.n+1 WHERE v.id=1"
+                  Expect.equal (handle session sql |> snd) (Affected 1UL) source
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected outer row update through joined view read, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "10" ] ]) -> ()
+                  | result -> failtestf "joined view source must remain read-only, got %A" result
+                  let multiSql = "UPDATE " + source + " SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+                  Expect.equal (handle session multiSql |> snd) (Affected 2UL) (source + " updates both targets")
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                  | result -> failtestf "expected physical outer row update, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "11" ] ]) -> ()
+                  | result -> failtestf "expected joined view target update, got %A" result
+                  handle session "UPDATE tx_read_view_outer SET m=0" |> ignore
+                  let bareSql = "UPDATE " + source + " SET m=m+1,v.n=v.n+1 WHERE v.id=1"
+                  Expect.equal (handle session bareSql |> snd) (Affected 2UL)
+                      (source + " resolves bare m to the outer target")
+                  match handle session "SELECT m FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected bare outer assignment, got %A" result
+                  handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              for source in
+                  [ "tx_read_joined_view v LEFT JOIN tx_read_view_outer x ON x.id=v.id"
+                    "tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id"
+                    "tx_read_joined_view v RIGHT JOIN tx_read_view_outer x ON x.id=v.id" ] do
+                  handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+                  let sql = "UPDATE " + source + " SET v.n=v.n+1 WHERE v.id=1"
+                  Expect.equal (handle session sql |> snd) (Affected 1UL) source
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "11" ] ]) -> ()
+                  | result -> failtestf "expected view target update through outer join, got %A" result
+              handle session "INSERT INTO tx_read_view_outer(id,n) VALUES(3,0)" |> ignore
+              let missingViewRow =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id "
+                  + "SET v.n=v.n+1 WHERE x.id=3"
+              Expect.equal (handle session missingViewRow |> snd) (Affected 0UL)
+                  "a nullable missing view row cannot be updated"
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id IN (1,3)" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              let outerMultiSql id =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id "
+                  + sprintf "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=%d" id
+              Expect.equal (handle session (outerMultiSql 1) |> snd) (Affected 2UL)
+                  "matched outer join updates both physical targets"
+              Expect.equal (handle session (outerMultiSql 3) |> snd) (Affected 1UL)
+                  "missing nullable view row leaves the preserving target writable"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=3" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected preserving outer row update, got %A" result
+              for source in
+                  [ "tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id LEFT JOIN tx_read_joined_view v ON v.id=y.id"
+                    "tx_read_view_outer x LEFT JOIN tx_read_joined_view v ON v.id=x.id LEFT JOIN tx_read_view_other y ON y.id=v.id" ] do
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let sql = "UPDATE " + source + " SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+                  Expect.equal (handle session sql |> snd) (Affected 2UL)
+                      "three-source outer join updates both matched targets"
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected preserving target update, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected view target update, got %A" result
+              handle session "DELETE FROM tx_read_view_other WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let missingIntermediate =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "LEFT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+              Expect.equal (handle session missingIntermediate |> snd) (Affected 1UL)
+                  "a missing intermediate row keeps the first target writable"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected preserving target update, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing intermediate row must leave the view target untouched, got %A" result
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session
+                  ("CREATE VIEW tx_read_three_checked AS SELECT t.id,t.n FROM tx_read_view_target t "
+                   + "JOIN tx_read_view_link l ON l.id=t.id WITH CASCADED CHECK OPTION")
+              |> ignore
+              let rejectedThreeSource =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "LEFT JOIN tx_read_three_checked v ON v.id=y.id "
+                  + "SET x.n=x.n+1,v.id=2 WHERE x.id=1"
+              match handle session rejectedThreeSource |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected three-source CHECK OPTION rejection, got %A" result
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve the first target, got %A" result
+              match handle session "SELECT id,n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "0" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve the view target, got %A" result
+              let rightPreserving =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              Expect.equal (handle session rightPreserving |> snd) (Affected 2UL)
+                  "a right-preserving view updates both matched physical targets"
+              handle session "DELETE FROM tx_read_view_other WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              Expect.equal (handle session rightPreserving |> snd) (Affected 1UL)
+                  "the view target survives a missing preceding left-join row"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing preceding row must leave the outer target unchanged, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "right-preserving view row should update, got %A" result
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session "CREATE TABLE tx_read_view_last(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let rejectedFourSource =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_three_checked v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2,z.n=z.n+1 WHERE v.id=1"
+              match handle session rejectedFourSource |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected four-source CHECK OPTION rejection, got %A" result
+              for table, column, expected in
+                  [ "tx_read_view_outer", "n", "0"
+                    "tx_read_view_target", "id", "1"
+                    "tx_read_view_last", "n", "0" ] do
+                  match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + "." + column + " survives CHECK OPTION")
+                  | result -> failtestf "expected unchanged %s.%s, got %A" table column result
+              let extendedRightPreserving =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1 WHERE v.id=1"
+              let countIf present = if present then 1 else 0
+              for hasIntermediate, hasLast in [ true, true; true, false; false, true; false, false ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  if hasIntermediate then
+                      handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  if hasLast then
+                      handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let expectedCount = 1 + countIf hasIntermediate + countIf hasLast
+                  Expect.equal (handle session extendedRightPreserving |> snd) (Affected(uint64 expectedCount))
+                      "the wider outer tree updates only matched physical targets"
+                  match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some value ] ]) ->
+                      Expect.equal value (string (countIf hasIntermediate)) "the preceding target follows its join"
+                  | result -> failtestf "expected preceding target row, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | result -> failtestf "expected preserved view target update, got %A" result
+                  match handle session "SELECT n FROM tx_read_view_last WHERE id=1" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows (if hasLast then [ [ Some "1" ] ] else [])
+                          "the final target follows its optional join"
+                  | result -> failtestf "expected optional target rows, got %A" result
+              handle session "CREATE TABLE tx_read_view_fifth(id INT PRIMARY KEY,n INT)" |> ignore
+              handle session "DELETE FROM tx_read_view_other" |> ignore
+              handle session "DELETE FROM tx_read_view_last" |> ignore
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+              handle session "INSERT INTO tx_read_view_fifth VALUES(1,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let rejectedFiveSource =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_three_checked v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "RIGHT JOIN tx_read_view_fifth w ON w.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2,z.n=z.n+1,w.n=w.n+1 WHERE w.id=1"
+              match handle session rejectedFiveSource |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected five-source CHECK OPTION rejection, got %A" result
+              for table, column, expected in
+                  [ "tx_read_view_outer", "n", "0"
+                    "tx_read_view_target", "id", "1"
+                    "tx_read_view_last", "n", "0"
+                    "tx_read_view_fifth", "n", "0" ] do
+                  match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + "." + column + " survives five-source CHECK OPTION")
+                  | result -> failtestf "expected unchanged %s.%s, got %A" table column result
+              for hasIntermediate, hasLast in [ true, false; false, true; false, false ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  if hasIntermediate then
+                      handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  if hasLast then
+                      handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  match handle session rejectedFiveSource |> snd with
+                  | Err(1369, _) -> ()
+                  | result -> failtestf "expected optional five-source CHECK OPTION rejection, got %A" result
+                  for table, column, expected in
+                      [ "tx_read_view_outer", "n", "0"
+                        "tx_read_view_target", "id", "1"
+                        "tx_read_view_fifth", "n", "0" ] do
+                      match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                      | ResultSet(_, [ [ Some actual ] ]) ->
+                          Expect.equal actual expected (table + " survives optional CHECK OPTION")
+                      | result -> failtestf "expected unchanged %s.%s, got %A" table column result
+                  match handle session "SELECT n FROM tx_read_view_last WHERE id=1" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows (if hasLast then [ [ Some "0" ] ] else [])
+                          "optional z target survives CHECK OPTION"
+                  | result -> failtestf "expected optional target after CHECK OPTION, got %A" result
+              let fiveSource rowId =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "RIGHT JOIN tx_read_view_fifth w ON w.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1,w.n=w.n+1 "
+                  + sprintf "WHERE w.id=%d" rowId
+              for hasIntermediate, hasLast in [ true, true; true, false; false, true; false, false ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  handle session "DELETE FROM tx_read_view_fifth" |> ignore
+                  if hasIntermediate then
+                      handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  if hasLast then
+                      handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  handle session "INSERT INTO tx_read_view_fifth VALUES(1,0)" |> ignore
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let expectedCount = 2 + countIf hasIntermediate + countIf hasLast
+                  Expect.equal (handle session (fiveSource 1) |> snd) (Affected(uint64 expectedCount))
+                      "the fifth right join updates its matched physical targets"
+                  for table, expected in
+                      [ "tx_read_view_outer", countIf hasIntermediate
+                        "tx_read_view_target", 1
+                        "tx_read_view_fifth", 1 ] do
+                      match handle session (sprintf "SELECT n FROM %s WHERE id=1" table) |> snd with
+                      | ResultSet(_, [ [ Some actual ] ]) ->
+                          Expect.equal actual (string expected) (table + " follows the five-source join")
+                      | result -> failtestf "expected five-source result for %s, got %A" table result
+                  match handle session "SELECT n FROM tx_read_view_last WHERE id=1" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows (if hasLast then [ [ Some "1" ] ] else [])
+                          "the optional target remains nullable in the five-source join"
+                  | result -> failtestf "expected optional five-source rows, got %A" result
+              handle session "DELETE FROM tx_read_view_fifth" |> ignore
+              handle session "INSERT INTO tx_read_view_fifth VALUES(99,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              Expect.equal (handle session (fiveSource 99) |> snd) (Affected 1UL)
+                  "the fifth right join preserves its row without a view match"
+              for table, rowId, expected in
+                  [ "tx_read_view_outer", 1, "0"
+                    "tx_read_view_target", 1, "0"
+                    "tx_read_view_fifth", 99, "1" ] do
+                  match handle session (sprintf "SELECT n FROM %s WHERE id=%d" table rowId) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + " preserves unmatched five-source writes")
+                  | result -> failtestf "expected unmatched five-source row from %s, got %A" table result
+              handle session "DELETE FROM tx_read_view_other" |> ignore
+              handle session "DELETE FROM tx_read_view_last" |> ignore
+              handle session "DELETE FROM tx_read_view_fifth" |> ignore
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+              handle session "INSERT INTO tx_read_view_fifth VALUES(1,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, held = handle owner "UPDATE tx_read_view_fifth SET n=10 WHERE id=1"
+              Expect.equal held (Affected 1UL) "owner holds the fifth target"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              use fifthStarted = new Threading.ManualResetEventSlim(false)
+              let fifthWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      fifthStarted.Set()
+                      handle waiter (fiveSource 1))
+              Expect.isTrue (fifthStarted.Wait(TimeSpan.FromSeconds 1.0)) "five-source writer starts"
+              Expect.isFalse (fifthWaiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  "the fifth target blocks the joined write"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "fifth target owner commits"
+              Expect.isTrue (fifthWaiting.Wait(TimeSpan.FromSeconds 5.0)) "five-source writer resumes"
+              let waiter, result = fifthWaiting.Result
+              Expect.equal result (Affected 4UL) "all four physical targets update after the fifth-target wait"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "five-source writer commits"
+              for table, expected in
+                  [ "tx_read_view_outer", "1"
+                    "tx_read_view_target", "1"
+                    "tx_read_view_last", "1"
+                    "tx_read_view_fifth", "11" ] do
+                  match handle session (sprintf "SELECT n FROM %s WHERE id=1" table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + " rebases after the fifth-target wait")
+                  | result -> failtestf "expected rebased five-source row from %s, got %A" table result
+              for heldTable in [ "tx_read_view_target"; "tx_read_view_outer"; "tx_read_view_last" ] do
+                  handle session "DELETE FROM tx_read_view_other" |> ignore
+                  handle session "DELETE FROM tx_read_view_last" |> ignore
+                  handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+                  handle session "INSERT INTO tx_read_view_last VALUES(1,0)" |> ignore
+                  handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+                  handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, held = handle owner (sprintf "UPDATE %s SET n=10 WHERE id=1" heldTable)
+                  Expect.equal held (Affected 1UL) "owner holds one outer-join target"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter extendedRightPreserving)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "outer joined writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.isTrue blocked (heldTable + " blocks the outer joined write")
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "outer joined writer resumes"
+                  let waiter, result = waiting.Result
+                  Expect.equal result (Affected 3UL) "all three matched targets update after the wait"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) (heldTable + " outer joined writer commits")
+                  for table in [ "tx_read_view_outer"; "tx_read_view_target"; "tx_read_view_last" ] do
+                      let expected = if table = heldTable then "11" else "1"
+                      match handle session (sprintf "SELECT n FROM %s WHERE id=1" table) |> snd with
+                      | ResultSet(_, [ [ Some actual ] ]) ->
+                          Expect.equal actual expected (heldTable + " rebases " + table)
+                      | result -> failtestf "expected committed row from %s, got %A" table result
+              handle session "UPDATE tx_read_view_outer SET n=0,m=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_last SET n=0 WHERE id=1" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, held = handle owner "UPDATE tx_read_view_outer SET m=10 WHERE id=1"
+              Expect.equal held (Affected 1UL) "owner holds the outer-only column"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              use bareStarted = new Threading.ManualResetEventSlim(false)
+              let bareWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      bareStarted.Set()
+                      handle waiter
+                          ("UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                           + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                           + "LEFT JOIN tx_read_view_last z ON z.id=v.id "
+                           + "SET m=m+1,v.n=v.n+1,z.n=z.n+1 WHERE v.id=1"))
+              Expect.isTrue (bareStarted.Wait(TimeSpan.FromSeconds 1.0)) "bare outer writer starts"
+              Expect.isFalse (bareWaiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  "bare outer-only assignment waits for its physical row"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits outer-only column"
+              Expect.isTrue (bareWaiting.Wait(TimeSpan.FromSeconds 5.0)) "bare outer writer resumes"
+              let waiter, bareResult = bareWaiting.Result
+              Expect.equal bareResult (Affected 3UL) "all three targets update after bare outer wait"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "bare outer writer commits"
+              for table, column, expected in
+                  [ "tx_read_view_outer", "m", "11"
+                    "tx_read_view_outer", "n", "0"
+                    "tx_read_view_target", "n", "1"
+                    "tx_read_view_last", "n", "1" ] do
+                  match handle session (sprintf "SELECT %s FROM %s WHERE id=1" column table) |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) ->
+                      Expect.equal actual expected (table + "." + column + " rebases")
+                  | result -> failtestf "expected committed %s.%s, got %A" table column result
+              handle session "DELETE FROM tx_read_view_last" |> ignore
+              handle session "INSERT INTO tx_read_view_last VALUES(99,0)" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0 WHERE id=1" |> ignore
+              let finalRightPreserving =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_view_other y ON y.id=x.id "
+                  + "RIGHT JOIN tx_read_joined_view v ON v.id=y.id "
+                  + "RIGHT JOIN tx_read_view_last z ON z.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1,z.n=z.n+1 WHERE z.id=99"
+              Expect.equal (handle session finalRightPreserving |> snd) (Affected 1UL)
+                  "the final right join updates its physical row without a view match"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing view match must leave the first target unchanged, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "missing view match must leave the view target unchanged, got %A" result
+              match handle session "SELECT n FROM tx_read_view_last WHERE id=99" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected final preserving target update, got %A" result
+              handle session "INSERT INTO tx_read_view_other VALUES(1)" |> ignore
+              handle session
+                  ("CREATE VIEW tx_read_filtered_view AS SELECT t.id,t.n FROM tx_read_view_target t "
+                   + "JOIN tx_read_view_link l ON l.id=t.id WHERE t.n>0")
+              |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id IN (1,3)" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=0" |> ignore
+              for source in
+                  [ "tx_read_view_outer x LEFT JOIN tx_read_filtered_view v ON v.id=x.id"
+                    "tx_read_filtered_view v RIGHT JOIN tx_read_view_outer x ON v.id=x.id" ] do
+                  for id in [ 1; 3 ] do
+                      handle session (sprintf "UPDATE tx_read_view_outer SET n=0 WHERE id=%d" id) |> ignore
+                      let sql = "UPDATE " + source + sprintf " SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=%d" id
+                      Expect.equal (handle session sql |> snd) (Affected 1UL)
+                          "a filtered-out or absent view row cannot suppress the preserving target"
+                      match handle session (sprintf "SELECT n FROM tx_read_view_outer WHERE id=%d" id) |> snd with
+                      | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                      | result -> failtestf "expected preserving outer row update, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "filtered view target should remain unchanged, got %A" result
+              handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              handle session "UPDATE tx_read_view_outer SET n=0 WHERE id=1" |> ignore
+              let matchedFiltered =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_filtered_view v ON v.id=x.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE x.id=1"
+              Expect.equal (handle session matchedFiltered |> snd) (Affected 2UL)
+                  "a matching filtered view still updates both targets"
+              handle session "UPDATE tx_read_view_outer SET n=2 WHERE id=1" |> ignore
+              handle session "UPDATE tx_read_view_target SET n=10" |> ignore
+              let owner, _ = handle (create 3 store) "BEGIN"
+              let owner, ownerResult = handle owner "UPDATE tx_read_view_target SET n=n+1 WHERE id=1"
+              Expect.equal ownerResult (Affected 1UL) "owner holds the view's physical row"
+              let waiter, _ = handle (create 4 store) "BEGIN"
+              let contended =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_joined_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter contended)
+              if waiting.Wait(TimeSpan.FromMilliseconds 100.0) then
+                  let _, result = waiting.Result
+                  failtestf "multi-target view write should wait, got %A" result
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "multi-target view write resumes"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 2UL) "both physical rows update after rebasing"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "waiter commits"
+              match handle session "SELECT n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | result -> failtestf "expected rebased outer update, got %A" result
+              match handle session "SELECT n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "12" ] ]) -> ()
+              | result -> failtestf "expected rebased view target update, got %A" result
+              handle session
+                  "CREATE VIEW tx_read_checked AS SELECT t.id,t.n FROM tx_read_view_target t JOIN tx_read_view_link l ON l.id=t.id WITH CASCADED CHECK OPTION"
+              |> ignore
+              let rejected =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_checked v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2 WHERE v.id=1"
+              match handle session rejected |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected multi-target CHECK OPTION rejection, got %A" result
+              let rejectedOuter =
+                  "UPDATE tx_read_view_outer x LEFT JOIN tx_read_checked v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.id=2 WHERE x.id=1"
+              match handle session rejectedOuter |> snd with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected outer-join CHECK OPTION rejection, got %A" result
+              match handle session "SELECT id,n FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "3" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve outer target, got %A" result
+              match handle session "SELECT id,n FROM tx_read_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "12" ] ]) -> ()
+              | result -> failtestf "CHECK OPTION must preserve view target, got %A" result
+              handle session "CREATE USER tx_read_limited_definer" |> ignore
+              handle session "GRANT SELECT, UPDATE ON fsdb.tx_read_view_target TO tx_read_limited_definer" |> ignore
+              handle session "GRANT SELECT ON fsdb.tx_read_view_link TO tx_read_limited_definer" |> ignore
+              handle session
+                  "CREATE DEFINER='tx_read_limited_definer'@'%' SQL SECURITY DEFINER VIEW tx_read_limited_view AS SELECT t.id,t.n FROM tx_read_view_target t JOIN tx_read_view_link l ON l.id=t.id"
+              |> ignore
+              let limited =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_limited_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              Expect.equal (handle session limited |> snd) (Affected 2UL)
+                  "the caller updates the outer target even when the view definer lacks its grant"
+              handle session "ALTER TABLE tx_read_view_outer ADD COLUMN who VARCHAR(100)" |> ignore
+              let callerIdentity =
+                  match handle session "SELECT CURRENT_USER()" |> snd with
+                  | ResultSet(_, [ [ Some value ] ]) -> value
+                  | result -> failtestf "expected caller identity, got %A" result
+              let identityWrite =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_limited_view v ON x.id=v.id "
+                  + "SET x.who=CURRENT_USER(),v.n=v.n+1 WHERE v.id=1"
+              Expect.equal (handle session identityWrite |> snd) (Affected 2UL)
+                  "the outer assignment uses the caller identity"
+              match handle session "SELECT who FROM tx_read_view_outer WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some value ] ]) -> Expect.equal value callerIdentity "outer CURRENT_USER is the caller"
+              | result -> failtestf "expected outer CURRENT_USER value, got %A" result
+              handle session "CREATE USER tx_read_outer_definer" |> ignore
+              handle session "GRANT SELECT, UPDATE ON fsdb.tx_read_limited_view TO tx_read_outer_definer" |> ignore
+              handle session
+                  "CREATE DEFINER='tx_read_outer_definer'@'%' SQL SECURITY DEFINER VIEW tx_read_outer_view AS SELECT id,n FROM tx_read_limited_view"
+              |> ignore
+              let layered =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_outer_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              Expect.equal (handle session layered |> snd) (Affected 2UL)
+                  "layered view write retains the separate outer target"
+              handle session "CREATE USER tx_read_view_writer" |> ignore
+              handle session "GRANT SELECT, UPDATE ON fsdb.tx_read_joined_view TO tx_read_view_writer" |> ignore
+              handle session "GRANT SELECT ON fsdb.tx_read_view_outer TO tx_read_view_writer" |> ignore
+              let writer = { create 2 store with User = "tx_read_view_writer" }
+              let denied =
+                  "UPDATE tx_read_view_outer x JOIN tx_read_joined_view v ON x.id=v.id "
+                  + "SET x.n=x.n+1,v.n=v.n+1 WHERE v.id=1"
+              match handle writer denied |> snd with
+              | Err(1143, _) -> ()
+              | result -> failtestf "expected missing outer UPDATE column grant, got %A" result
+
           testCase "nested joined view update checks the caller's outer join reads"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -2426,23 +4212,34 @@ let tests =
               handle root "CREATE TABLE tx_nested_secure_target (id INT PRIMARY KEY, n INT)" |> ignore
               handle root "CREATE TABLE tx_nested_secure_inner (id INT PRIMARY KEY)" |> ignore
               handle root "CREATE TABLE tx_nested_secure_outer (id INT PRIMARY KEY)" |> ignore
+              handle root "CREATE TABLE tx_nested_secure_other (id INT PRIMARY KEY)" |> ignore
               handle root "INSERT INTO tx_nested_secure_target VALUES (1, 0)" |> ignore
               handle root "INSERT INTO tx_nested_secure_inner VALUES (1)" |> ignore
               handle root "INSERT INTO tx_nested_secure_outer VALUES (1)" |> ignore
+              handle root "INSERT INTO tx_nested_secure_other VALUES (1)" |> ignore
               handle root
                   "CREATE VIEW tx_nested_secure_view AS SELECT t.id,t.n FROM tx_nested_secure_target t JOIN tx_nested_secure_inner l ON l.id=t.id"
               |> ignore
               handle root "CREATE USER nested_writer" |> ignore
               handle root "GRANT SELECT, UPDATE ON fsdb.tx_nested_secure_view TO nested_writer" |> ignore
               let writer = { create 2 store with User = "nested_writer" }
-              let sql =
-                  "UPDATE tx_nested_secure_view v JOIN tx_nested_secure_outer x ON x.id=v.id "
-                  + "SET v.n=v.n+1 WHERE v.id=1"
-              match handle writer sql |> snd with
-              | Err(1143, _) | Err(1142, _) -> ()
-              | result -> failtestf "expected denied outer join read, got %A" result
+              let sources =
+                  [ "tx_nested_secure_view v JOIN tx_nested_secure_outer x ON x.id=v.id"
+                    "tx_nested_secure_outer x JOIN tx_nested_secure_view v ON x.id=v.id"
+                    "tx_nested_secure_outer x JOIN tx_nested_secure_other y ON y.id=x.id JOIN tx_nested_secure_view v ON v.id=y.id" ]
+              let sql source = "UPDATE " + source + " SET v.n=v.n+1 WHERE v.id=1"
+              for source in sources do
+                  match handle writer (sql source) |> snd with
+                  | Err(1143, _) | Err(1142, _) -> ()
+                  | result -> failtestf "expected denied outer join read, got %A" result
               handle root "GRANT SELECT ON fsdb.tx_nested_secure_outer TO nested_writer" |> ignore
-              Expect.equal (handle writer sql |> snd) (Affected 1UL) "granted lookup read permits the update"
+              for source in sources |> List.take 2 do
+                  Expect.equal (handle writer (sql source) |> snd) (Affected 1UL) "granted lookup read permits the update"
+              match handle writer (sql sources.[2]) |> snd with
+              | Err(1143, _) | Err(1142, _) -> ()
+              | result -> failtestf "expected denied second lookup read, got %A" result
+              handle root "GRANT SELECT ON fsdb.tx_nested_secure_other TO nested_writer" |> ignore
+              Expect.equal (handle writer (sql sources.[2]) |> snd) (Affected 1UL) "both lookup reads permit the update"
 
           testCase "disjoint joined view updates do not wait for another physical row"
           <| fun _ ->

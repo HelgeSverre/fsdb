@@ -210,6 +210,33 @@ def main():
                                 f"FROM outer_bounds o WHERE o.id={bound}"
                             )
                             assert cursor.fetchone() == ((2,) if bound == 7 else (1,)), (source, bound)
+                    cursor.execute("CREATE TABLE warning_rows(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))")
+                    cursor.execute("INSERT INTO warning_rows VALUES(1,12.5),(2,0.0),(3,1.7976931348623157e308)")
+                    for hint, warning_cases in (
+                        ("", (("12.5x", 1, 1), ("1e309", 0, 0), ("Infinity", 1, 1))),
+                        ("IGNORE INDEX(ix_k)", (("12.5x", 1, 3), ("1e309", 1, 3), ("Infinity", 1, 3))),
+                    ):
+                        for text, count, warnings in warning_cases:
+                            cursor.execute("UPDATE outer_bounds SET s=%s WHERE id=7", (text,))
+                            cursor.execute(
+                                "SELECT (SELECT COUNT(*) FROM warning_rows d " + hint
+                                + " WHERE d.k=o.s) FROM outer_bounds o WHERE o.id=7"
+                            )
+                            assert cursor.fetchone()[0] == count, (hint, text)
+                            assert cursor._result.warning_count == warnings, (hint, text, cursor._result.warning_count)
+                    for hint, in_warning_cases in (
+                        ("", (("12.5x", 1, 1), ("1e309", 0, 0), ("Infinity", 1, 1), ("12.5", 1, 0))),
+                        ("IGNORE INDEX(ix_k)", (("12.5x", 1, 5), ("1e309", 1, 5),
+                                                ("Infinity", 1, 5), ("12.5", 1, 0))),
+                    ):
+                        for text, count, warnings in in_warning_cases:
+                            cursor.execute("UPDATE outer_bounds SET s=%s WHERE id=7", (text,))
+                            cursor.execute(
+                                "SELECT (SELECT COUNT(*) FROM warning_rows d " + hint
+                                + " WHERE d.k IN(o.s,o.s)) FROM outer_bounds o WHERE o.id=7"
+                            )
+                            assert cursor.fetchone()[0] == count, (hint, text)
+                            assert cursor._result.warning_count == warnings, (hint, text, cursor._result.warning_count)
                     cursor.execute(
                         "SELECT x=i,x+0e0=i,9007199254740992e0=i,"
                         "9007199254740992e0+0e0=i "
@@ -218,7 +245,7 @@ def main():
                     assert cursor.fetchone() == (1, 1, 0, 0)
                     print(f"MySQL {version}: {len(cases)} DOUBLE equalities, {len(in_cases)} IN forms, "
                           f"{len(range_cases)} ranges, {len(outside_range_cases)} outside ranges, "
-                          "and physical string bounds match")
+                          "and physical string bounds and warning cases match")
             finally:
                 if connection:
                     connection.close()
