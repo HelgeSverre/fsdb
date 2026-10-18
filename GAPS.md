@@ -1051,6 +1051,9 @@ now matches the audited spacing, format-control, and Korean Jamo ngram cases
 under both `utf8mb4_unicode_ci` and `utf8mb4_unicode_520_ci`. The full
 two-column corpus matches at token sizes 1–10 for each collation. Broader
 collation behavior and MeCab remain open.
+The [`utf8mb4_general_ci` supplementary-key probe](torture/findings/2026-10-17-general-ci-supplementary-ngram.md)
+now shares MySQL's sampled fallback weight across supplementary scalars;
+broader `general_ci` ngram and relevance differences remain.
 
 An [audited two-column ngram inner join](torture/findings/2026-10-07-fulltext-join-bounds.md#oracle-and-regressions)
 also propagates equality, range, and `IN` owner bounds before full-text row

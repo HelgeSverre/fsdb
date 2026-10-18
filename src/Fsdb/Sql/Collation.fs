@@ -281,8 +281,8 @@ let private foldLegacyCompatibilityIdeographs (value: string) =
             else result.Append(c) |> ignore
         result.ToString()
 
-// MySQL's UCA 4.0 utf8mb4 collation gives every supplementary scalar the
-// same fallback primary weight, including emoji and CJK extensions.
+// MySQL's older utf8mb4_unicode_ci and utf8mb4_general_ci collations give
+// supplementary scalars a shared fallback primary weight.
 let private foldLegacySupplementary (value: string) =
     if not (value |> Seq.exists (fun c -> c = '\uE090' || Char.IsHighSurrogate c)) then value
     else
@@ -413,7 +413,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
 
     let foldText (value: string) =
         match name with
-        | "utf8mb4_general_ci" -> value.Replace("ß", "s").Replace("ẞ", "s")
+        | "utf8mb4_general_ci" ->
+            value.Replace("ß", "s").Replace("ẞ", "s") |> foldLegacySupplementary
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci"
         | "utf8mb4_unicode_520_ci" ->
