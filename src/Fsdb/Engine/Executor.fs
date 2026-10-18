@@ -15861,10 +15861,10 @@ and private tryMaterializedCorrelatedLookup
                                 | _ -> Some [])
                         | _ -> None)
 
-            // Integer arithmetic needs an exact result domain before its
+            // Integer expressions need an exact result domain before their
             // signed and unsigned values can share one equality key.
             let rec integerKeyExpression = function
-                | LiteralValue(VInt _ | VUInt _) -> true
+                | LiteralValue(VInt _ | VUInt _ | VNull) -> true
                 | (Col _ | QualifiedCol _) as expression ->
                     (tryCorrelatedInnerColumn probeSource expression
                      |> Option.bind (resolveColumn columns >> Result.toOption)
@@ -15873,6 +15873,10 @@ and private tryMaterializedCorrelatedLookup
                 | Neg expression -> integerKeyExpression expression
                 | FuncCall(name, [ expression ]) when equalsIgnoreCase name "ABS" ->
                     integerKeyExpression expression
+                | FuncCall(name, arguments) when equalsIgnoreCase name "COALESCE" ->
+                    not arguments.IsEmpty && List.forall integerKeyExpression arguments
+                | FuncCall(name, [ left; right ]) when equalsIgnoreCase name "IFNULL" ->
+                    integerKeyExpression left && integerKeyExpression right
                 | BinOp((Add | Sub | Mul), left, right) ->
                     integerKeyExpression left && integerKeyExpression right
                 | _ -> false
