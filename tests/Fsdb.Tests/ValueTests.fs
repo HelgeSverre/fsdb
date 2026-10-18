@@ -1902,6 +1902,17 @@ let tests =
                             Expect.isFalse (col.Equals left right) (name + " distinguishes " + left + " and " + right)
                             Expect.isTrue (col.ComparePrimary left right < 0) (name + " follows implicit weight order")
 
+                testCase "Unicode 5.2 enclosed alphanumerics retain implicit primary weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_520_ci" |> Option.get
+                    for left, right in [ "🄋", "🄌"; "🄰", "🅰"; "🄫", "🄲" ] do
+                        Expect.isFalse (col.Equals left right) (left + " and " + right + " stay distinct")
+                        Expect.notEqual (col.KeyOf left) (col.KeyOf right) "index keys stay distinct"
+                    Expect.isTrue (col.ComparePrimary "🄋" "🄌" < 0) "implicit weights follow scalar order"
+                    Expect.isFalse (col.Equals "🄋" "\uE0BE\uEA0B") "literal marker text cannot alias a key"
+                    let newer = Fsdb.Collation.tryFind "utf8mb4_0900_ai_ci" |> Option.get
+                    Expect.isTrue (newer.Equals "🄰" "🅰") "the Unicode 9.0 collation keeps its expansion"
+
                 testTheory
                     "collations identify when equality fixes one full-order position"
                     [ "utf8mb4_0900_bin", true

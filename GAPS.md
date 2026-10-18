@@ -986,6 +986,11 @@ ngram postings. The audited size 1–3 corpus agrees with MySQL across natural,
 Boolean, and query-expansion searches under both collations and the older
 `utf8mb4_unicode_ci` fallback. The assigned U+1B130–U+1B16F extension also
 matches audited size-1 through size-3 searches under Unicode 5.2 and 9.0.
+The [U+1F100–U+1F1FF enclosed alphanumeric audit](torture/findings/2026-10-18-enclosed-alphanumeric-520-ngram.md)
+also preserves 193 distinct Unicode 5.2 implicit-weight scalars in
+collation keys and two-column ngram postings; the maintained range oracle
+checks natural, Boolean, and expansion searches across startup token sizes
+1–10. Unicode 9.0 keeps its separate expansion behavior.
 
 The [general Unicode letterlike-symbol audit](torture/findings/2026-10-17-general-ci-letterlike-weights.md)
 matches MySQL's U+2100–U+21FF primary-weight classes in two-column

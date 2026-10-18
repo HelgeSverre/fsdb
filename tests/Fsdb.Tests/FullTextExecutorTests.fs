@@ -390,6 +390,19 @@ let tests =
               Expect.equal (search "中。") [ "4" ] "the ordinary period does not match its vertical form"
               Expect.equal (search "中︒") [ "5" ] "the vertical period keeps its implicit UCA 4.0 weight"
 
+          testCase "Unicode 5.2 ngrams keep implicit enclosed alphanumerics distinct"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE enclosed_520(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_520_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO enclosed_520 VALUES(1,'中🄋文'),(2,'中🄌文'),(3,'中🄰文'),(4,'中🅰文')" |> ignore
+              let search term =
+                  let sql = $"SELECT id FROM enclosed_520 WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (search "中🄋") [ "1" ] "the first implicit weight finds only its own posting"
+              Expect.equal (search "中🄌") [ "2" ] "adjacent implicit weights remain separate"
+              Expect.equal (search "中🄰") [ "3" ] "implicit A does not collapse into another enclosed A"
+              Expect.equal (search "中🅰") [ "4" ] "the other enclosed A has its own posting"
+
           testCase "legacy Unicode ngrams retain small comma token boundaries"
           <| fun _ ->
               let store = create ()

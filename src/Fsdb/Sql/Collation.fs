@@ -219,13 +219,8 @@ let private foldUnicode520CombiningHalfMarks (value: string) =
             else result.Append(c) |> ignore
         result.ToString()
 
-// MySQL's Unicode 5.2 collation gives assigned supplementary kana in
-// U+1B000–U+1B16F distinct implicit weights. Its 9.0 collation gives the
-// first two explicit weights and the remaining scalars distinct implicit
-// weights. ICU merges some Hiragana/Katakana spellings, notably archaic WU.
-let private foldSupplementaryKanaImplicit unicode520 (value: string) =
-    let marker = '\uE0B2'
-    if not (value.Contains marker || value.Contains '\uD82C') then value
+let private foldSupplementaryImplicit (marker: char) (highSurrogate: char) firstScalar firstWeight hasWeight (value: string) =
+    if not (value.Contains marker || value.Contains highSurrogate) then value
     else
         let result = StringBuilder(value.Length)
         let mutable index = 0
@@ -233,12 +228,11 @@ let private foldSupplementaryKanaImplicit unicode520 (value: string) =
             let c = value.[index]
             if c = marker then
                 result.Append(marker).Append(marker) |> ignore
-            elif c = '\uD82C' && index + 1 < value.Length
+            elif c = highSurrogate && index + 1 < value.Length
                  && Char.IsLowSurrogate value.[index + 1] then
                 let scalar = Char.ConvertToUtf32(c, value.[index + 1])
-                if scalar >= 0x1B000 && scalar < 0x1B170
-                   && (unicode520 || scalar >= 0x1B002) then
-                    result.Append(marker).Append(char (0xE600 + scalar - 0x1B000)) |> ignore
+                if hasWeight scalar then
+                    result.Append(marker).Append(char (firstWeight + scalar - firstScalar)) |> ignore
                     index <- index + 1
                 else
                     result.Append(c).Append(value.[index + 1]) |> ignore
@@ -246,6 +240,33 @@ let private foldSupplementaryKanaImplicit unicode520 (value: string) =
             else result.Append(c) |> ignore
             index <- index + 1
         result.ToString()
+
+// MySQL's Unicode 5.2 collation gives assigned supplementary kana in
+// U+1B000–U+1B16F distinct implicit weights. Its 9.0 collation gives the
+// first two explicit weights and the remaining scalars distinct implicit
+// weights. ICU merges some Hiragana/Katakana spellings, notably archaic WU.
+let private foldSupplementaryKanaImplicit unicode520 value =
+    let hasWeight scalar =
+        scalar >= 0x1B000 && scalar < 0x1B170
+        && (unicode520 || scalar >= 0x1B002)
+    foldSupplementaryImplicit '\uE0B2' '\uD82C' 0x1B000 0xE600 hasWeight value
+
+// UCA 5.2 gives these enclosed alphanumeric scalars implicit, distinct
+// weights. Newer ICU folds many of them into letters or other enclosed forms.
+// The ranges are the scalars whose MySQL 8.4 unicode_520_ci WEIGHT_STRING is
+// FBC3 followed by the low 16 bits of the scalar.
+let private unicode520EnclosedImplicitRanges =
+    [| 0x1F10B, 0x1F10F; 0x1F12F, 0x1F130; 0x1F132, 0x1F13C
+       0x1F13E, 0x1F13E; 0x1F140, 0x1F141; 0x1F143, 0x1F145
+       0x1F147, 0x1F149; 0x1F14F, 0x1F156; 0x1F158, 0x1F15E
+       0x1F160, 0x1F178; 0x1F17A, 0x1F17A; 0x1F17D, 0x1F17E
+       0x1F180, 0x1F189; 0x1F18E, 0x1F18F; 0x1F191, 0x1F1FF |]
+
+let private foldUnicode520EnclosedImplicit value =
+    let hasWeight scalar =
+        unicode520EnclosedImplicitRanges
+        |> Array.exists (fun (first, last) -> scalar >= first && scalar <= last)
+    foldSupplementaryImplicit '\uE0BE' '\uD83C' 0x1F100 0xEA00 hasWeight value
 
 // MySQL's UCA 4.0 and 5.2 tables retain implicit primary weights for marks
 // assigned later. UCA 4.0 gives all of U+1DC0–U+1DFF distinct weights; 5.2
@@ -621,6 +642,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
             |> foldLegacyExtendedCombiningMarks true
             |> foldLegacyUnicodeJamo |> foldSupplementaryKanaImplicit true
+            |> foldUnicode520EnclosedImplicit
         | "utf8mb4_unicode_ci" ->
             value |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms
