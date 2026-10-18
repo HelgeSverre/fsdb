@@ -210,6 +210,15 @@ MySQL's relation strategy. The next candidate fix should reproduce the
 geographic winding and segment-relation decisions, then pass the entire
 line/point corpus; changing only a tolerance or sampled step is unsupported.
 
+A follow-up after fixing `ST_DISTANCE_SPHERE` tested whether MySQL's stored
+geographic angular unit (`0.017453292519943278` radians per degree for EPSG
+4326), rather than `pi / 180`, also explains this point/ring discrepancy.
+Using that unit in fsdb's spherical ring vectors left the differential oracle
+unchanged: 12 line mismatches among 412 pairs, one near-hole point mismatch
+among 189, and zero near-exterior control mismatches. The trial was reverted.
+The relation gap still requires the geographic winding/overlay strategy rather
+than this coordinate-conversion adjustment alone.
+
 The near-polar point has a further ring-composition wrinkle. MySQL 8.4.11
 reports `POINT(86 1.00001)` inside the standalone exterior polygon and
 outside the standalone hole polygon, yet outside their combined polygon.
