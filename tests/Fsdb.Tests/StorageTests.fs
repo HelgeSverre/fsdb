@@ -887,6 +887,42 @@ let tests =
                         (set [ 1; 2 ])
                         "containing bounds"
 
+                testCase "priority-ordered geometry bounds cannot make a deep spatial tree"
+                <| fun _ ->
+                    let priority id =
+                        let mutable value = uint64 (uint32 (hash id)) + 0x9e3779b97f4a7c15UL
+                        value <- (value ^^^ (value >>> 30)) * 0xbf58476d1ce4e5b9UL
+                        value <- (value ^^^ (value >>> 27)) * 0x94d049bb133111ebUL
+                        value ^^^ (value >>> 31)
+
+                    let positions =
+                        [ 1 .. 1024 ]
+                        |> List.sortBy priority
+                        |> List.mapi (fun offset id -> id, float offset)
+                        |> Map.ofList
+
+                    let index =
+                        [ 1 .. 1024 ]
+                        |> List.fold (fun index id ->
+                            let x = positions.[id]
+                            SpatialIndex.add id { MinX = x; MinY = 0.0; MaxX = x + 0.5; MaxY = 0.5 } index) SpatialIndex.empty
+
+                    let depth = SpatialIndex.maximumDepth index
+                    Expect.isTrue (depth <= 32) (sprintf "spatial tree depth was %d for 1024 rows" depth)
+
+                    let reduced =
+                        [ 2 .. 2 .. 1024 ] |> List.fold (fun current id -> SpatialIndex.remove id current) index
+
+                    Expect.isTrue (SpatialIndex.maximumDepth reduced <= 32) "removal preserves bounded depth"
+                    Expect.equal (SpatialIndex.count reduced) 512 "half the bounds remain"
+                    Expect.equal (SpatialIndex.count index) 1024 "the original root is immutable"
+
+                    for id in [ 1; 2; 511; 512; 1023; 1024 ] do
+                        let x = positions.[id]
+                        let query = { MinX = x; MinY = 0.0; MaxX = x + 0.5; MaxY = 0.5 }
+                        let matches = SpatialIndex.search SpatialIndex.Intersects query reduced
+                        Expect.equal (Set.contains id matches) (id % 2 = 1) (sprintf "row %d after removal" id)
+
                 testCase "replacement and removal preserve immutable roots"
                 <| fun _ ->
                     let originalBounds =
@@ -944,16 +980,36 @@ let tests =
                             && candidate.MinY <= query.MinY
                             && candidate.MaxY >= query.MaxY
 
-                    for _ in 1 .. 100 do
-                        let query = randomBounds ()
+                    let verify label entries index =
+                        for _ in 1 .. 100 do
+                            let query = randomBounds ()
 
-                        for relation in [ SpatialIndex.Intersects; SpatialIndex.Within; SpatialIndex.Contains ] do
-                            let expected =
-                                entries
-                                |> List.choose (fun (id, candidate) -> if matches relation query candidate then Some id else None)
-                                |> Set.ofList
+                            for relation in [ SpatialIndex.Intersects; SpatialIndex.Within; SpatialIndex.Contains ] do
+                                let expected =
+                                    entries
+                                    |> List.choose (fun (id, candidate) -> if matches relation query candidate then Some id else None)
+                                    |> Set.ofList
 
-                            Expect.equal (SpatialIndex.search relation query index) expected "indexed bounds match the scan"
+                                Expect.equal (SpatialIndex.search relation query index) expected (label + " indexed bounds match the scan")
+
+                    verify "inserted" entries index
+
+                    let retained = entries |> List.filter (fun (id, _) -> id % 3 <> 0)
+                    let reduced =
+                        [ 3 .. 3 .. 500 ]
+                        |> List.fold (fun current id -> SpatialIndex.remove id current) index
+                    verify "after deletion" retained reduced
+
+                    let replaced =
+                        retained
+                        |> List.map (fun (id, bounds) ->
+                            if id % 5 = 0 then id, { bounds with MaxX = bounds.MaxX + 25.0 }
+                            else id, bounds)
+                    let updated =
+                        replaced
+                        |> List.fold (fun current (id, bounds) ->
+                            if id % 5 = 0 then SpatialIndex.add id bounds current else current) reduced
+                    verify "after replacement" replaced updated
 
                 testCase "stored spatial indexes follow row mutations incrementally"
                 <| fun _ ->

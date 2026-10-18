@@ -2,7 +2,7 @@
 
 Build Fsdb.Cli in Release first. Requires native mysqld/mysqladmin and PyMySQL.
 Each token size uses disposable servers and data directories.
-Use --legacy-punctuation or --legacy-radicals for the expanded
+Use --legacy-punctuation, --legacy-radicals, or --legacy-range for the expanded
 utf8mb4_unicode_ci corpora.
 """
 
@@ -174,18 +174,34 @@ def scores_agree(expected, actual):
 
 def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None, collation_override=None):
     prefix = '中' * (size - 1)
-    legacy_chars = (LEGACY_RADICALS if legacy_radicals else
-                    LEGACY_PUNCTUATION if legacy_punctuation else
-                    [chr(code) for code in range(*legacy_range) if chr(code).isprintable()]
-                    if legacy_range is not None else None)
+    if legacy_radicals:
+        legacy_chars = LEGACY_RADICALS
+    elif legacy_punctuation:
+        legacy_chars = LEGACY_PUNCTUATION
+    elif legacy_range is not None:
+        legacy_chars = [chr(code) for code in range(*legacy_range) if chr(code).isprintable()]
+    else:
+        legacy_chars = None
     documents = ([(prefix + char + '文', '') for char in legacy_chars]
                  if legacy_chars is not None else DOCUMENTS)
     if legacy_range == (0x2F800, 0x2F900):
         documents += [(prefix + char + '文', '') for char in ("𠀀", "😀", "丽", "並")]
+    if legacy_range == (0xAC00, 0xAD00):
+        documents += [(prefix + char + '文', '') for char in ("가", "ㄱㅏ", "각")]
+    if legacy_range == (0x1DC0, 0x1E00):
+        documents += [(prefix + '\u036c' + '文', '')]
     terms = ([prefix + char for char in legacy_chars]
              if legacy_chars is not None else TERMS)
     if legacy_range is not None:
         terms += [f'"{prefix + char}"' for char in legacy_chars]
+    if legacy_range in ((0xFE20, 0xFE30), (0x1AB0, 0x1B00),
+                        (0x1DC0, 0x1E00), (0x20D0, 0x2100)):
+        terms += [prefix + char + '文' for char in legacy_chars]
+        terms += [char + prefix for char in legacy_chars]
+    if legacy_range == (0x1DC0, 0x1E00):
+        terms += [prefix + '\u036c', '\u036c' + prefix, prefix + '\u036c' + '文']
+    if legacy_range == (0xAC00, 0xAD00):
+        terms += [prefix + char for char in ("가", "각", "가", "ㄱㅏ", "각")]
     modes = MODES
     collation = collation_override or ("utf8mb4_unicode_ci" if legacy_chars is not None else None)
     with tempfile.TemporaryDirectory(prefix=f"fsdb-ngram-{size}-") as directory:
@@ -239,8 +255,46 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     }
                     matched = result(mysql_connection, prefix + "⼀", "IN NATURAL LANGUAGE MODE")
                     assert representative.issubset(set(matched)), (size, matched)
+                if legacy_range == (0x1B000, 0x1B130):
+                    matched = result(mysql_connection, prefix + "𛀀", "IN NATURAL LANGUAGE MODE")
+                    assert 1 in matched, (size, matched)
 
                 mismatches = []
+                equality_checks = 0
+                if legacy_range is not None:
+                    equality_sql = (
+                        "SELECT _utf8mb4%s COLLATE utf8mb4_unicode_ci "
+                        "= _utf8mb4%s COLLATE utf8mb4_unicode_ci"
+                    )
+                    for char in legacy_chars:
+                        expanded = unicodedata.normalize("NFKC", char)
+                        if expanded == char:
+                            continue
+                        equality_checks += 1
+                        expected = query(mysql_connection, equality_sql, (char, expanded))
+                        actual = query(fsdb_connection, equality_sql, (char, expanded))
+                        if actual != expected:
+                            mismatches.append(("legacy equality", char, expanded, expected, actual))
+                    extra_pairs = []
+                    if legacy_range == (0x3000, 0x3200):
+                        kana = "クシストヌハヒフヘホムラリルレロ"
+                        extra_pairs = [(chr(0x31F0 + offset), char) for offset, char in enumerate(kana)]
+                        extra_pairs += [("ゟ", "より"), ("ヿ", "コト"), ("ㄍ", "ㆣ"),
+                                        ("ㄮ", "ㄜ"), ("ㆻ", "ㄍ")]
+                    elif legacy_range == (0xFA00, 0xFB00):
+                        extra_pairs = [("郞", "郞"), ("並", "並"),
+                                       ("逸", "逸"), ("艹", "艹")]
+                    elif legacy_range == (0x2F800, 0x2F900):
+                        extra_pairs = [("丽", "丸"), ("丽", "𠀀"), ("丽", "😀"),
+                                       ("丽", "\U00010000"), ("丽", "\U0001D11E"),
+                                       ("丽", "\U000E0100"), ("丽", "\U0010FFFD"),
+                                       ("丽", "丽"), ("丽", "並")]
+                    for left, right in extra_pairs:
+                        equality_checks += 1
+                        expected = query(mysql_connection, equality_sql, (left, right))
+                        actual = query(fsdb_connection, equality_sql, (left, right))
+                        if actual != expected:
+                            mismatches.append(("legacy equality", left, right, expected, actual))
                 for mode in modes:
                     for term in terms:
                         expected = result(mysql_connection, term, mode)
@@ -251,9 +305,11 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                         actual_scores = scored_result(fsdb_connection, term, mode)
                         if not scores_agree(expected_scores, actual_scores):
                             mismatches.append((mode, term, "relevance", expected_scores, actual_scores))
-                print(f"size {size}: {len(modes) * len(terms)} queries; {len(mismatches)} mismatches")
-                for mismatch in mismatches:
+                print(f"size {size}: {len(modes) * len(terms)} ngram queries, {equality_checks} legacy equalities; {len(mismatches)} mismatches")
+                for mismatch in mismatches[:40]:
                     print(mismatch)
+                if len(mismatches) > 40:
+                    print(f"... {len(mismatches) - 40} more mismatches")
                 return len(mismatches)
             finally:
                 if fsdb_connection:
@@ -280,7 +336,7 @@ if __name__ == "__main__":
     corpus.add_argument("--legacy-punctuation", action="store_true")
     corpus.add_argument("--legacy-radicals", action="store_true")
     corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
-    parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_ja_0900_as_cs_ks"))
+    parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_ja_0900_as_cs_ks"))
     args = parser.parse_args()
     legacy_range = None
     if args.legacy_range:
@@ -291,5 +347,4 @@ if __name__ == "__main__":
         except ValueError:
             parser.error("--legacy-range requires hexadecimal START:END")
     sizes = args.sizes or list(range(1, 11))
-    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals,
-                                     legacy_range, args.collation) for size in sizes) else 0)
+    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals, legacy_range, args.collation) for size in sizes) else 0)
