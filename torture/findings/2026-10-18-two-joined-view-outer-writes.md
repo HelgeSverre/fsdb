@@ -1,13 +1,13 @@
 # Two writable joined views under outer UPDATE joins
 
 The [native MySQL 8.4.11 differential oracle](../scripts/two-joined-view-outer-oracle.py)
-compares nine UPDATE statements against fsdb. Two independently
+compares ten UPDATE statements against fsdb. Two independently
 writable inner-join views share their internal physical/read aliases. The
 matrix uses both LEFT and RIGHT outer joins, with a fully matched row and
 rows missing from either view. A second pair of views joins grouped read
 sources and dependent `LATERAL` projections before the outer UPDATE join.
 
-All nine statements match MySQL's affected-row count and the resulting rows
+All ten statements match MySQL's affected-row count and the resulting rows
 in both physical target tables. A `CASCADED CHECK OPTION` on the grouped
 lateral view also rejects an invalid two-target update with error 1369 and
 leaves both tables unchanged. This extends the existing inner two-view and
@@ -34,7 +34,14 @@ previously returned error 1146 for that view name as though it were a base
 table. The writable-view source reorder now also moves a later assigned view
 ahead of an unassigned first view. The oracle matches both the ordinary
 update and a fourth contended rebase on that second view; an F# regression
-pins the original 1146 case. The complete suite passed 3,721 tests.
+pins the original 1146 case.
+
+A read-only aggregate view can also precede that writable second view. MySQL
+updates `bonus` through the second view, whereas fsdb previously returned
+1146 for the view name. The source reorder now recognizes a stored first
+view even when it is non-updatable, while leaving local CTE names untouched.
+Both the ordinary and contended aggregate-first cases match MySQL. The F#
+regression and all 3,721 suite tests pass.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:

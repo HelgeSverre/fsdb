@@ -106,6 +106,7 @@ def main():
                     "CREATE VIEW vb AS SELECT t.id,t.n,l.id AS link_id FROM b t JOIN link l ON t.id=l.id",
                     "CREATE VIEW vb_unique AS SELECT t.id,t.n AS bonus,l.id AS link_id "
                     "FROM b t JOIN link l ON t.id=l.id",
+                    "CREATE VIEW read_counts AS SELECT id,COUNT(*) AS hits FROM link GROUP BY id",
                     "CREATE VIEW va_complex AS SELECT t.id,t.n,q.link_id FROM a t "
                     "JOIN (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) r ON t.id=r.id "
                     "JOIN LATERAL (SELECT r.id AS link_id) q ON TRUE",
@@ -130,6 +131,8 @@ def main():
                     "UPDATE vb_complex vb RIGHT JOIN va_complex va ON va.link_id=vb.link_id "
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=2",
                     "UPDATE va LEFT JOIN vb_unique vb ON va.link_id=vb.link_id "
+                    "SET bonus=bonus+1 WHERE vb.id=1",
+                    "UPDATE read_counts rc JOIN vb_unique vb ON rc.id=vb.link_id "
                     "SET bonus=bonus+1 WHERE vb.id=1",
                 ]
                 for sql in cases:
@@ -167,6 +170,8 @@ def main():
                     ("b", 3, "UPDATE va_complex va RIGHT JOIN vb_complex vb ON va.link_id=vb.link_id "
                      "SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.id=3"),
                     ("b", 1, "UPDATE va LEFT JOIN vb_unique vb ON va.link_id=vb.link_id "
+                     "SET bonus=bonus+1 WHERE vb.id=1"),
+                    ("b", 1, "UPDATE read_counts rc JOIN vb_unique vb ON rc.id=vb.link_id "
                      "SET bonus=bonus+1 WHERE vb.id=1"),
                 ]
                 for table, row_id, sql in contended:

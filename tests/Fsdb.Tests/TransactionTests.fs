@@ -2471,6 +2471,18 @@ let tests =
                   "bare assignment restores second view's physical row"
               Expect.equal
                   (handle session
+                      "CREATE VIEW tx_dual_read_counts AS SELECT id,COUNT(*) AS hits FROM tx_dual_link GROUP BY id" |> snd)
+                  (Affected 0UL)
+                  "aggregate read-only view creates"
+              let aggregateFirst delta =
+                  "UPDATE tx_dual_read_counts rc JOIN tx_dual_vb_unique vb ON rc.id=vb.link_id "
+                  + "SET bonus=bonus" + delta + " WHERE vb.id=1"
+              Expect.equal (handle session (aggregateFirst "+1") |> snd) (Affected 1UL)
+                  "later writable view updates after aggregate source"
+              Expect.equal (handle session (aggregateFirst "-1") |> snd) (Affected 1UL)
+                  "aggregate-first update restores later view row"
+              Expect.equal
+                  (handle session
                       "UPDATE tx_dual_vb vb JOIN tx_dual_va va ON va.id=vb.id SET vb.n=vb.n+1,va.n=va.n+1" |> snd)
                   (Affected 2UL)
                   "reversed view order updates both targets"
