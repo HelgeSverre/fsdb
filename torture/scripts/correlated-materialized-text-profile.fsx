@@ -39,7 +39,7 @@ for expression in [ "d.k"; "LOWER(d.k)" ] do
 
 connection.Query "CREATE TABLE range_bounds(id INT PRIMARY KEY,x VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
 connection.Query "INSERT INTO range_bounds VALUES(1,'word99'),(2,'zzzz'),(3,NULL)" |> ignore
-for predicate in [ "LOWER(d.k)>=o.x"; "LOWER(d.k) BETWEEN o.x AND CONCAT(o.x,'9')" ] do
+for predicate in [ "LOWER(d.k)>=o.x"; "LOWER(d.k) BETWEEN o.x AND CONCAT(o.x,'9')"; "LOWER(d.k) NOT BETWEEN 'a' AND o.x" ] do
     calls <- 0
     let sql =
         "SELECT o.id,(SELECT COUNT(*) FROM (SELECT DISTINCT id,k FROM inner_rows) d "

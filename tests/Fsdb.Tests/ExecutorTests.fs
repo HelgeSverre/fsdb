@@ -13253,6 +13253,7 @@ let tests =
                           "LOWER(d.k)>o.x", [ 10; 0; 0 ]
                           "o.x<=LOWER(d.k)", [ 11; 0; 0 ]
                           "LOWER(d.k) BETWEEN o.x AND CONCAT(o.x,'9')", [ 11; 0; 0 ]
+                          "LOWER(d.k) NOT BETWEEN 'a' AND o.x", [ 10; 0; 0 ]
                           "LOWER(d.k) COLLATE utf8mb4_0900_ai_ci >= o.x", [ 11; 0; 0 ]
                           "LOWER(d.k)>=o.x OR d.id=1", [ 12; 1; 1 ] ] do
                         calls <- 0
