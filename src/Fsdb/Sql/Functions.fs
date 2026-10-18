@@ -133,6 +133,8 @@ type ResultCollation =
 /// Case-insensitive scalar, aggregate, and extension registrations.
 type Registry =
     { Scalars: Map<string, Scalar>
+      /// Session-bound scalar wrappers explicitly known to have no observable effects.
+      StableScalars: Set<string>
       ScalarMetadata: Map<string, ColumnMetadata>
       ScalarParameters: Map<string, ColumnMetadata list>
       TextArguments: Map<string, int -> bool>
@@ -146,6 +148,7 @@ type Registry =
 
 let empty: Registry =
     { Scalars = Map.empty
+      StableScalars = Set.empty
       ScalarMetadata = Map.empty
       ScalarParameters = Map.empty
       TextArguments = Map.empty
@@ -164,6 +167,7 @@ let private replaceScalar (name: string) metadata (fn: Scalar) (registry: Regist
 
     { registry with
         Scalars = Map.add name fn registry.Scalars
+        StableScalars = Set.remove name registry.StableScalars
         ScalarMetadata = scalarMetadata
         ScalarParameters = Map.remove name registry.ScalarParameters
         TextArguments = Map.remove name registry.TextArguments
@@ -176,6 +180,12 @@ let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
 
 let registerScalarWithMetadata (name: string) metadata (fn: Scalar) (registry: Registry) : Registry =
     replaceScalar name (Some metadata) fn registry
+
+let internal markScalarsStable (names: string list) (registry: Registry) : Registry =
+    { registry with
+        StableScalars =
+            names
+            |> List.fold (fun stable name -> Set.add (name.ToUpperInvariant()) stable) registry.StableScalars }
 
 let internal registerScalarWithSignature
     (name: string)

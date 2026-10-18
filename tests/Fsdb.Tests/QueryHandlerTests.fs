@@ -9717,6 +9717,35 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected pre-function transaction write to stay committed, got %A" other
 
+          testCase "correlated predicates evaluate nondeterministic stored functions per candidate"
+          <| fun _ ->
+              let mutable session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }
+
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+
+              for sql in
+                  [ "CREATE TABLE outer_t(id INT PRIMARY KEY)"
+                    "CREATE TABLE inner_t(id INT PRIMARY KEY,k INT,KEY ix_k(k))"
+                    "INSERT INTO outer_t VALUES(1),(2),(3)"
+                    "INSERT INTO inner_t VALUES(1,1),(2,1),(3,2),(4,2),(5,3),(6,3),(7,4),(8,4),(9,5),(10,5)"
+                    "CREATE FUNCTION bump(x INT) RETURNS INT NOT DETERMINISTIC NO SQL RETURN x + (@calls := @calls + 1)*0"
+                    "SET @calls=0" ] do
+                  match execute sql with
+                  | Affected _ -> ()
+                  | result -> failtestf "%s failed: %A" sql result
+
+              match execute "SELECT o.id,(SELECT COUNT(*) FROM inner_t i WHERE i.k=bump(o.id)) FROM outer_t o ORDER BY o.id" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "1"; Some "2" ]; [ Some "2"; Some "2" ]; [ Some "3"; Some "2" ] ] "correlated counts"
+              | result -> failtestf "expected correlated counts, got %A" result
+
+              match execute "SELECT @calls" with
+              | ResultSet(_, [ [ Some "30" ] ]) -> ()
+              | result -> failtestf "expected MySQL's 30 stored-function calls, got %A" result
+
           testCase "stored function writes share the invoking statement transaction"
           <| fun _ ->
               let mutable session = { create 1 (Fsdb.Storage.create ()) with Database = Some "fsdb" }

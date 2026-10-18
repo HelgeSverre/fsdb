@@ -5793,9 +5793,11 @@ let private emptySubqueryScope =
 let private statementVariantFunctions =
     set
         [ "BENCHMARK"; "CONNECTION_ID"; "CURDATE"; "CURRENT_DATE"; "CURRENT_TIME"; "CURRENT_TIMESTAMP"
-          "CURRENT_USER"; "CURTIME"; "DATABASE"; "FOUND_ROWS"; "LAST_INSERT_ID"; "LOCALTIME"
+          "CURRENT_ROLE"; "CURRENT_USER"; "CURTIME"; "DATABASE"; "FOUND_ROWS"; "GET_LOCK"
+          "IS_FREE_LOCK"; "IS_USED_LOCK"; "LAST_INSERT_ID"; "LOCALTIME"
           "LOCALTIMESTAMP"; "NOW"; "RAND"; "RANDOM_BYTES"; "ROW_COUNT"; "SLEEP"; "SYSDATE"
-          "UNIX_TIMESTAMP"; "USER"; "UUID"; "UUID_SHORT"; "VERSION" ]
+          "RELEASE_ALL_LOCKS"; "RELEASE_LOCK"; "SCHEMA"; "SESSION_USER"; "UNIX_TIMESTAMP"
+          "USER"; "UTC_DATE"; "UTC_TIME"; "UTC_TIMESTAMP"; "UUID"; "UUID_SHORT"; "VERSION" ]
 
 let private tableSubqueryScope (store: Store) (dbName: string) (table: TableRef) : SubqueryScope option =
     let tableDb = table.Database |> Option.defaultValue dbName
@@ -5845,7 +5847,10 @@ let private isStatementStableFunction (registry: Registry) (name: string) : bool
     not (statementVariantFunctions.Contains key)
     && (match Map.tryFind key registry.Extensions with
         | Some extension -> extension.Deterministic
-        | None -> true)
+        | None ->
+            registry.StableScalars.Contains key
+            || Functions.isUnmodifiedBuiltinScalar key registry
+            || Functions.isUnmodifiedBuiltinAggregate key registry)
 
 let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbName: string) (scope: SubqueryScope) (expression: Expr) : bool =
     let every expressions = expressions |> List.forall (isStatementStableExpr store registry dbName scope)

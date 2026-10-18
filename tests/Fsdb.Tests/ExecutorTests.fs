@@ -12706,18 +12706,48 @@ let tests =
                         |> registerScalar "OUTER_KEY" outerKey
                         |> registerExtension (ScalarFunction.create "OUTER_KEY" (fun _ values -> outerKey values) |> ScalarFunction.effectful)
 
+                    let correlatedCountsSql =
+                        "SELECT users.id, (SELECT COUNT(*) FROM orders candidate "
+                        + "WHERE candidate.user_id = OUTER_KEY(users.id)) FROM users WHERE users.id <= 3"
+
                     match
                         run
                             store
                             effectful
-                            ("SELECT users.id, (SELECT COUNT(*) FROM orders candidate "
-                             + "WHERE candidate.user_id = OUTER_KEY(users.id)) FROM users WHERE users.id <= 3")
+                            correlatedCountsSql
                     with
                     | ResultSet(_, rows) ->
                         Expect.equal (rows |> List.map (fun row -> row.[1])) [ Some "20"; Some "20"; Some "20" ] "effectful keys retain results"
                     | other -> failtestf "expected effectful correlated counts, got %A" other
 
                     Expect.isGreaterThan effects 1000 "an effectful outer expression is not hoisted into an index probe"
+
+                    effects <- 0
+
+                    match
+                        run
+                            store
+                            (builtins |> registerScalar "OUTER_KEY" outerKey)
+                            correlatedCountsSql
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal (rows |> List.map (fun row -> row.[1])) [ Some "20"; Some "20"; Some "20" ] "unannotated scalar keys retain results"
+                    | other -> failtestf "expected unannotated scalar correlated counts, got %A" other
+
+                    Expect.isGreaterThan effects 1000 "an unannotated scalar cannot be assumed free of effects"
+
+                    effects <- 0
+                    let stable =
+                        builtins
+                        |> registerScalar "OUTER_KEY" outerKey
+                        |> registerExtension (ScalarFunction.create "OUTER_KEY" (fun _ values -> outerKey values))
+
+                    match run store stable correlatedCountsSql with
+                    | ResultSet(_, rows) ->
+                        Expect.equal (rows |> List.map (fun row -> row.[1])) [ Some "20"; Some "20"; Some "20" ] "deterministic extension keys retain results"
+                    | other -> failtestf "expected deterministic extension correlated counts, got %A" other
+
+                    Expect.isLessThan effects 10 "an explicitly deterministic extension retains the indexed probe"
 
                 testCase "correlated indexed OR probes only matching inner rows"
                 <| fun _ ->
