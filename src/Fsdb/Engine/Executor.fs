@@ -16622,7 +16622,16 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
                 equalities
                 |> List.map (fun (column, _, value) -> column.Name, value)
                 |> tryStoredEqualityMatchLookup outer.Store projection.PhysicalTable
-                |> Option.map (snd >> _.CandidateCount)
+                |> Option.bind (fun (matched, lookup) ->
+                    // A candidate bucket is a final COUNT only when every equality
+                    // is represented by a distinct, complete stored key part.
+                    // Prefix keys and uncovered predicates still need WHERE.
+                    if matched.UsesWholeStoredValues
+                       && matched.KeyColumnCount = equalities.Length
+                       && (matched.ColumnIndices |> Set.ofList |> Set.count) = equalities.Length then
+                        Some lookup.CandidateCount
+                    else
+                        None)
 
         tryPhysicalProjection outer.Store outer.Registry outer.DbName source
         |> Option.filter (fun projection -> storedRowsMatchReadRows outer.Store projection.PhysicalTable.Columns)
