@@ -27,10 +27,6 @@ check, but a separate guard rejected any outer CHECK OPTION over that source.
 Removing that guard makes this shape work; the focused Expecto regression
 checks the result and rejection.
 
-This does not cover an outer view that adds its own join to an inner joined
-view. In four separately probed MySQL 8.4.11 shapes, an outer LATERAL,
-JSON_TABLE, derived, or derived-USING source still produces an updatable view
-and enforces its CHECK OPTION. Fsdb currently returns 1368 when creating each
-such checked view. Supporting them requires composing the inner view's join
-sources with the outer join while preserving qualifiers, check predicates,
-and view-security boundaries.
+Outer views that add LATERAL, JSON_TABLE, derived, or derived-USING sources
+above an inner joined view are covered by the
+[layered joined-source follow-up](2026-10-17-nested-joined-view-source.md).

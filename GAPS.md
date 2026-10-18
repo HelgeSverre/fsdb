@@ -796,9 +796,10 @@ ordering across multi-source layers remains open.
 now report 1356 for revoked source grants before a physical target join-key
 denial; a revoked target read alone still reports 1143. An audited
 parenthesized inner-join operand containing a derived and physical source is
-also writable and preserves their distinct 1356/1143 grant diagnostics. Other
-The target-first correlated `LATERAL` source under two definers also remains
-writable and reports 1356 for either revoked source read. Other derived,
+also writable and preserves their distinct 1356/1143 grant diagnostics.
+Target-first and aggregate-derived-first dependent `LATERAL` sources under two
+definers also remain writable. The latter reports 1356 for a revoked read on
+either source and 1143 for a revoked writable-target read. Other derived,
 lateral, and grouped grant paths remain unaudited.
 Joined UPDATE also reaches a mergeable component view with a distinct definer.
 The outer definer must retain access to the component view, while that view's
@@ -942,7 +943,7 @@ trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; `INSERT ... SET`, `IGNORE`, ODKU, and audited component CHECK OPTION cases work; audited three-layer outer views and renamed column grants work; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, and [a checked single-source layer above a joined view](torture/findings/2026-10-17-checked-layered-join-view.md) compose writable targets; aggregate/UNION/`JSON_TABLE` read-only join components and audited independent and [recursive/dependent CTE](torture/findings/2026-10-16-recursive-cte-joined-view.md) read sources also precede a joined UPDATE target; an outer joined layer over an inner joined view, broader CTE compositions, and remaining expression shapes stay open | medium | subset |
+| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; `INSERT ... SET`, `IGNORE`, ODKU, and audited component CHECK OPTION cases work; audited three-layer outer views and renamed column grants work; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, [a checked single-source layer above a joined view](torture/findings/2026-10-17-checked-layered-join-view.md), and [audited joined layers over a joined writable source](torture/findings/2026-10-17-nested-joined-view-source.md), including private inner aliases reused by outer joins, qualified inner `JSON_TABLE` joins and inner `LATERAL` joins with qualified references or unambiguous bare local or known preceding-source columns, including LATERAL outputs, and a nested target after multiple read-only derived sources, compose writable targets; aggregate/UNION/`JSON_TABLE` read-only join components and audited independent and [recursive/dependent CTE](torture/findings/2026-10-16-recursive-cte-joined-view.md) read sources also precede a joined UPDATE target; additional layered source orders, security combinations, CTE compositions, and expression shapes stay open | medium | subset |
 | View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 
 ## 10. Stored routines, events, schedulers

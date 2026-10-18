@@ -41,13 +41,16 @@ def exercise(connection):
         "CREATE TABLE target(id INT PRIMARY KEY,n INT)",
         "CREATE TABLE flags(id INT PRIMARY KEY,flag INT)",
         "CREATE TABLE aux(id INT PRIMARY KEY,aux INT)",
+        "CREATE TABLE aux_shadow(id INT PRIMARY KEY,aux INT,n INT)",
         "INSERT INTO target VALUES(1,0),(2,0)",
         "INSERT INTO flags VALUES(1,7)",
         "INSERT INTO aux VALUES(1,9)",
+        "INSERT INTO aux_shadow VALUES(1,9,-1)",
         "CREATE USER inner_owner", "CREATE USER outer_owner",
         "GRANT SELECT,UPDATE ON probe.target TO inner_owner",
         "GRANT SELECT ON probe.flags TO inner_owner",
         "GRANT SELECT ON probe.aux TO inner_owner",
+        "GRANT SELECT ON probe.aux_shadow TO inner_owner",
         "GRANT CREATE VIEW ON probe.* TO inner_owner,outer_owner",
         "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW inner_join AS "
         "SELECT t.id,t.n,d1.flag,d2.aux "
@@ -174,6 +177,182 @@ def exercise(connection):
             results.append((f"{label} revoked {key} {grant}", outcome(connection, update)))
             if source == "target":
                 run(connection, f"GRANT {grant} ON probe.{source} TO {owner}")
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW json_joined_inner AS "
+        "SELECT t.id,t.n,j.x FROM target t JOIN "
+        "JSON_TABLE(JSON_ARRAY(t.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=t.id "
+        "WHERE t.n>=0 WITH CASCADED CHECK OPTION",
+        "GRANT SELECT,UPDATE ON probe.json_joined_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW json_joined_outer AS "
+        "SELECT v.id,v.n,v.x,j.k FROM json_joined_inner v "
+        "JOIN (SELECT 1 AS k) j ON j.k=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION",
+    ]:
+        run(connection, sql)
+    results.append(("joined JSON layer metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='json_joined_outer'")))
+    results.append(("joined JSON layer update", outcome(connection,
+                    "UPDATE json_joined_outer SET n=7 WHERE id=1")))
+    results.append(("joined JSON inner check", outcome(connection,
+                    "UPDATE json_joined_outer SET n=-1 WHERE id=1")))
+    results.append(("joined JSON outer check", outcome(connection,
+                    "UPDATE json_joined_outer SET n=10 WHERE id=1")))
+    run(connection, "REVOKE SELECT ON probe.target FROM inner_owner")
+    results.append(("joined JSON revoked target SELECT", outcome(connection,
+                    "UPDATE json_joined_outer SET n=7 WHERE id=1")))
+    run(connection, "GRANT SELECT ON probe.target TO inner_owner")
+    run(connection, "REVOKE UPDATE ON probe.json_joined_inner FROM outer_owner")
+    results.append(("joined JSON revoked component UPDATE", outcome(connection,
+                    "UPDATE json_joined_outer SET n=7 WHERE id=1")))
+    run(connection, "GRANT UPDATE ON probe.json_joined_inner TO outer_owner")
+    run(connection, "GRANT UPDATE ON probe.json_chain_inner TO outer_owner")
+    run(connection,
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW json_chain_joined_outer AS "
+        "SELECT v.id,v.n,v.x,v.y,j.k FROM json_chain_inner v "
+        "JOIN (SELECT 1 AS k) j ON j.k=v.id WHERE v.n<10 WITH CASCADED CHECK OPTION")
+    results.append(("joined JSON chain metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='json_chain_joined_outer'")))
+    results.append(("joined JSON chain update", outcome(connection,
+                    "UPDATE json_chain_joined_outer SET n=8 WHERE id=1")))
+    results.append(("joined JSON chain check", outcome(connection,
+                    "UPDATE json_chain_joined_outer SET n=10 WHERE id=1")))
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_joined_inner AS "
+        "SELECT t.id,t.n,d.aux FROM target t JOIN LATERAL "
+        "(SELECT a.aux FROM aux a WHERE a.id=t.id) d ON d.aux>0 "
+        "WHERE t.n>=0 WITH CASCADED CHECK OPTION",
+        "GRANT SELECT,UPDATE ON probe.lateral_joined_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_joined_outer AS "
+        "SELECT v.id,v.n,v.aux,q.mark FROM lateral_joined_inner v "
+        "JOIN (SELECT 1 AS mark) q ON q.mark=v.id "
+        "WHERE v.n<10 WITH CASCADED CHECK OPTION",
+    ]:
+        results.append(("joined lateral create", outcome(connection, sql)))
+    results.append(("joined lateral metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_joined_outer'")))
+    for label, value in (("update", 7), ("inner check", -1), ("outer check", 10)):
+        results.append((f"joined lateral {label}", outcome(connection,
+                        f"UPDATE lateral_joined_outer SET n={value} WHERE id=1")))
+    run(connection, "REVOKE SELECT ON probe.aux FROM inner_owner")
+    results.append(("joined lateral revoked source SELECT", outcome(connection,
+                    "UPDATE lateral_joined_outer SET n=7 WHERE id=1")))
+    run(connection, "GRANT SELECT ON probe.aux TO inner_owner")
+    run(connection, "REVOKE UPDATE ON probe.lateral_joined_inner FROM outer_owner")
+    results.append(("joined lateral revoked component UPDATE", outcome(connection,
+                    "UPDATE lateral_joined_outer SET n=7 WHERE id=1")))
+    run(connection, "GRANT UPDATE ON probe.lateral_joined_inner TO outer_owner")
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_chain_inner AS "
+        "SELECT t.id,t.n,d.aux,e.bump FROM target t "
+        "JOIN LATERAL (SELECT a.aux FROM aux a WHERE a.id=t.id) d ON d.aux>0 "
+        "JOIN LATERAL (SELECT d.aux+1 AS bump) e ON e.bump>0 "
+        "WHERE t.n>=0 WITH CASCADED CHECK OPTION",
+        "GRANT SELECT,UPDATE ON probe.lateral_chain_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_chain_outer AS "
+        "SELECT v.id,v.n,v.aux,v.bump,d.mark FROM lateral_chain_inner v "
+        "JOIN (SELECT 1 AS mark) d ON d.mark=v.id "
+        "WHERE v.n<10 WITH CASCADED CHECK OPTION",
+    ]:
+        results.append(("joined lateral chain create", outcome(connection, sql)))
+    results.append(("joined lateral chain metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_chain_outer'")))
+    results.append(("joined lateral chain update", outcome(connection,
+                    "UPDATE lateral_chain_outer SET n=8 WHERE id=1")))
+    results.append(("joined lateral chain check", outcome(connection,
+                    "UPDATE lateral_chain_outer SET n=10 WHERE id=1")))
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_chain_bare_inner AS "
+        "SELECT t.id,t.n,d.aux,e.bump FROM target t "
+        "JOIN LATERAL (SELECT a.aux FROM aux a WHERE a.id=t.id) d ON d.aux>0 "
+        "JOIN LATERAL (SELECT aux+1 AS bump) e ON e.bump>0 "
+        "WHERE t.n>=0 WITH CASCADED CHECK OPTION",
+        "GRANT SELECT,UPDATE ON probe.lateral_chain_bare_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_chain_bare_outer AS "
+        "SELECT v.id,v.n,v.aux,v.bump,d.mark FROM lateral_chain_bare_inner v "
+        "JOIN (SELECT 1 AS mark) d ON d.mark=v.id "
+        "WHERE v.n<10 WITH CASCADED CHECK OPTION",
+    ]:
+        results.append(("joined lateral chain-bare create", outcome(connection, sql)))
+    results.append(("joined lateral chain-bare metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_chain_bare_outer'")))
+    results.append(("joined lateral chain-bare update", outcome(connection,
+                    "UPDATE lateral_chain_bare_outer SET n=7 WHERE id=1")))
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_local_bare_inner AS "
+        "SELECT t.id,t.n,d.aux FROM target t "
+        "JOIN LATERAL (SELECT aux FROM aux a WHERE a.id=t.id) d ON d.aux>0 "
+        "WHERE t.n>=0 WITH CASCADED CHECK OPTION",
+        "GRANT SELECT,UPDATE ON probe.lateral_local_bare_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_local_bare_outer AS "
+        "SELECT v.id,v.n,v.aux,q.mark FROM lateral_local_bare_inner v "
+        "JOIN (SELECT 1 AS mark) q ON q.mark=v.id "
+        "WHERE v.n<10 WITH CASCADED CHECK OPTION",
+    ]:
+        results.append(("joined lateral local-bare create", outcome(connection, sql)))
+    results.append(("joined lateral local-bare metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_local_bare_outer'")))
+    results.append(("joined lateral local-bare update", outcome(connection,
+                    "UPDATE lateral_local_bare_outer SET n=9 WHERE id=1")))
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_outer_bare_inner AS "
+        "SELECT t.id,t.n,d.aux FROM target t "
+        "JOIN LATERAL (SELECT a.aux FROM aux a WHERE a.id=t.id AND n>=0) d ON d.aux>0 "
+        "WHERE t.n>=0 WITH CASCADED CHECK OPTION",
+        "GRANT SELECT,UPDATE ON probe.lateral_outer_bare_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_outer_bare_outer AS "
+        "SELECT v.id,v.n,v.aux,q.mark FROM lateral_outer_bare_inner v "
+        "JOIN (SELECT 1 AS mark) q ON q.mark=v.id "
+        "WHERE v.n<10 WITH CASCADED CHECK OPTION",
+    ]:
+        results.append(("joined lateral outer-bare create", outcome(connection, sql)))
+    results.append(("joined lateral outer-bare metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_outer_bare_outer'")))
+    results.append(("joined lateral outer-bare update", outcome(connection,
+                    "UPDATE lateral_outer_bare_outer SET n=8 WHERE id=1")))
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_shadow_inner AS "
+        "SELECT t.id,t.n,d.aux FROM target t "
+        "JOIN LATERAL (SELECT a.aux FROM aux_shadow a WHERE a.id=t.id AND n>=0) d ON d.aux>0 "
+        "WHERE t.n>=0 WITH CASCADED CHECK OPTION",
+        "GRANT SELECT,UPDATE ON probe.lateral_shadow_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_shadow_outer AS "
+        "SELECT v.id,v.n,v.aux,q.mark FROM lateral_shadow_inner v "
+        "JOIN (SELECT 1 AS mark) q ON q.mark=v.id "
+        "WHERE v.n<10 WITH CASCADED CHECK OPTION",
+    ]:
+        results.append(("joined lateral shadow create", outcome(connection, sql)))
+    results.append(("joined lateral shadow metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_shadow_outer'")))
+    results.append(("joined lateral shadow update", outcome(connection,
+                    "UPDATE lateral_shadow_outer SET n=9 WHERE id=1")))
+    run(connection, "GRANT SELECT ON probe.flags TO inner_owner")
+    for sql in [
+        "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_before_target_inner AS "
+        "SELECT t.id,t.n,f.flag,d.aux FROM "
+        "(SELECT id,SUM(flag) flag FROM flags GROUP BY id) f "
+        "JOIN LATERAL (SELECT a.aux FROM aux a WHERE a.id=f.id) d ON d.aux>0 "
+        "JOIN target t ON t.id=f.id",
+        "GRANT SELECT,UPDATE ON probe.lateral_before_target_inner TO outer_owner",
+        "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_before_target_outer "
+        "AS SELECT id,n AS metric FROM lateral_before_target_inner",
+    ]:
+        results.append(("lateral before target create", outcome(connection, sql)))
+    before_target_update = "UPDATE lateral_before_target_outer SET metric=metric+1 WHERE id=1"
+    results.append(("lateral before target metadata", outcome(connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                    "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_before_target_outer'")))
+    results.append(("lateral before target initial", outcome(connection, before_target_update)))
+    for table in ("flags", "aux", "target"):
+        run(connection, f"REVOKE SELECT ON probe.{table} FROM inner_owner")
+        results.append((f"lateral before target revoked {table}", outcome(connection, before_target_update)))
+        run(connection, f"GRANT SELECT ON probe.{table} TO inner_owner")
     results.append(("final rows", outcome(connection, "SELECT id,n FROM target ORDER BY id")))
     return results
 
