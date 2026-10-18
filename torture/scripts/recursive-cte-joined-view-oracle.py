@@ -176,6 +176,16 @@ def main():
                          f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
                          "(WITH seq AS (SELECT s.k AS k) SELECT k AS lookup_key FROM seq) l ON TRUE "
                          "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_recursive_shadowed_local_cte",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH RECURSIVE seq(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM seq WHERE k<s.k) "
+                         "SELECT k AS lookup_key FROM seq ORDER BY k LIMIT 1) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
+                        ("recursive_lateral_recursive_local_cte",
+                         f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
+                         "(WITH RECURSIVE local(k) AS (SELECT s.k UNION ALL SELECT k+1 FROM local WHERE k<s.k) "
+                         "SELECT k AS lookup_key FROM local ORDER BY k LIMIT 1) l ON TRUE "
+                         "JOIN target t ON t.id=l.lookup_key"),
                         ("recursive_lateral_late_shadowed_local_cte",
                          f"{recursive} SELECT t.id,t.n FROM seq s JOIN LATERAL "
                          "(WITH copied AS (SELECT k FROM seq WHERE k=s.k), "

@@ -1878,15 +1878,21 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             let ctes, _ =
                 body.Ctes
                 |> List.mapFold (fun visibleNames cte ->
+                    // A recursive CTE binds its own name within its body.
+                    // A local binding with the outer CTE's name must not be
+                    // rewritten as a reference to that outer binding.
+                    let bodyNames =
+                        if cte.Recursive then Map.remove (cte.CteName.ToLowerInvariant()) visibleNames
+                        else visibleNames
                     let expanded =
                         match cte.Body with
-                        | PlainSelect nested -> { cte with Body = PlainSelect(expandSelect visibleNames true nested) }
+                        | PlainSelect nested -> { cte with Body = PlainSelect(expandSelect bodyNames true nested) }
                         | UnionSelect(first, rest, orderBy, limit, offset) ->
                             { cte with
                                 Body =
                                     UnionSelect(
-                                        expandSelect visibleNames true first,
-                                        rest |> List.map (fun (kind, nested) -> kind, expandSelect visibleNames true nested),
+                                        expandSelect bodyNames true first,
+                                        rest |> List.map (fun (kind, nested) -> kind, expandSelect bodyNames true nested),
                                         orderBy, limit, offset
                                     ) }
                     expanded, Map.remove (cte.CteName.ToLowerInvariant()) visibleNames) activeNames
@@ -1963,8 +1969,8 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
     and canWrapNestedSelect (body: SelectStmt) =
         (body.Ctes
          |> List.forall (fun cte ->
-             not cte.Recursive
-             && (not (Set.contains (cte.CteName.ToLowerInvariant()) cteNames)
+             (cte.Recursive
+              || not (Set.contains (cte.CteName.ToLowerInvariant()) cteNames)
                  || (match cte.Body with
                      | PlainSelect nested -> nested.From.IsNone && nested.Joins.IsEmpty && nested.Ctes.IsEmpty
                      | _ -> false))

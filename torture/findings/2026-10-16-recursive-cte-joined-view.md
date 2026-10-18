@@ -35,7 +35,7 @@ keeps the existing physical row-lock path for that shape.
 
 ## Nested and dependent read sources
 
-The native oracle now covers 38 writable layouts. A recursive CTE can feed a
+The native oracle covers nested and dependent writable layouts. A recursive CTE can feed a
 nested derived table or a joined derived source inside a dependent CTE. It can
 also be followed directly by a FROM-less dependent `LATERAL` projection or a
 `JSON_TABLE` whose input reads the recursive source's exposed column. MySQL
@@ -105,5 +105,16 @@ metadata to `NO` in MySQL 8.4.11; `MERGE` and `UNDEFINED` remain `YES`.
 An outer direct view inherits each result. Fsdb previously reported `YES`
 for the TEMPTABLE case because its metadata classifier inspected only the
 definition text. It now checks the saved algorithm at every view layer.
+A local recursive CTE inside a dependent `LATERAL` source also leaves the
+physical target writable. The native oracle now covers both a local recursive
+`seq` that shadows the outer recursive `seq` and a differently named local
+recursive `local`; both report `IS_UPDATABLE=YES` and update the target once.
+Fsdb previously classified the shadowed form as non-updatable. The view
+rewrite now admits the local recursive source and removes its own binding
+name from the outer rewrite scope while expanding its seed and recursive
+branch. The focused regression checks metadata, UPDATE, and the accumulated
+physical row value for both variants. The native oracle covers 40 writable
+recursive-source layouts.
+
 More complex recursive/dependent source compositions, layered security, and
 other concurrent write shapes still need separate audits.
