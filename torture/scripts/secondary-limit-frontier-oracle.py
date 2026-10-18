@@ -67,7 +67,9 @@ def main():
                           (2, 3, "rank_value IS NOT NULL", True, 0, "UPDATE"),
                           (2, 3, "rank_value IS NOT NULL", True, 0, "DELETE"),
                           (2, 3, "rank_value IS NOT NULL", False, None, "UPDATE"),
-                          (2, 3, "rank_value IS NOT NULL", False, None, "DELETE")]
+                          (2, 3, "rank_value IS NOT NULL", False, None, "DELETE"),
+                          (2, 3, "rank_value IS TRUE", True, 0, "UPDATE"),
+                          (2, 3, "rank_value IS TRUE", True, 0, "DELETE")]
                 for limit, size, predicate, should_wait, inserted_rank, verb in cases:
                     waiter = connect(socket)
                     try:

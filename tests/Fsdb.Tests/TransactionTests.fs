@@ -2543,7 +2543,8 @@ let tests =
                     [ "id<=2", false, [ 1; 2 ]
                       "id IN (1,2)", false, [ 1; 2 ]
                       "id IN (1,2,4)", true, [ 4; 1 ]
-                      "id NOT IN (4,5)", false, [ 1; 2 ] ] do
+                      "id NOT IN (4,5)", false, [ 1; 2 ]
+                      "rank_value IS TRUE", true, [ 1; 2 ] ] do
                   let store = Fsdb.Storage.create ()
                   let setup = create 1 store
                   handle setup "CREATE TABLE tx_filtered_frontier(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))" |> ignore

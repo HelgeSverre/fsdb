@@ -229,6 +229,14 @@ separate semantics. The native oracle and focused transaction regression
 cover `rank_value=NULL`, `rank_value<>NULL`, and `NULL<rank_value` for both
 write verbs.
 
+An `IS TRUE` filter does not have the same wait behavior as those impossible
+NULL comparisons. With visible ranks 1, 2, and 3 and a pending rank-zero
+insert ordered before them, MySQL 8.4.11 waits for both `UPDATE` and `DELETE`
+under `WHERE rank_value IS TRUE ORDER BY rank_value LIMIT 2`, then selects
+visible rows 1 and 2. Fsdb already agrees. The native oracle and focused
+transaction regression pin this boundary, so pending-key exclusion remains
+limited to the predicate forms proved above.
+
 ## Equal secondary-key frontiers
 
 A pending row can enter a limited write even when its secondary ordering key
