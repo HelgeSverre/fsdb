@@ -22,4 +22,21 @@ sources agree. The focused regression checks the same counts and fewer than
 80 residual calls per shape. The original physical baseline exceeded 2,000
 calls for the one-member direct source. An explicit, different comparison
 collation keeps the correct row and scans rather than applying the stored
-key's order. Functional text expressions remain separate planner work.
+key's order.
+
+## Functional text key follow-up
+
+`LOWER(d.code) NOT IN(LOWER(u.lo))` still scanned all 1,001 rows despite a
+maintained `LOWER(code)` index; the leading residual ran 2,004 times on the
+two-row outer probe. The correlated physical planner now recognizes a stored
+text-result functional key when the comparison uses its collation. It splits
+`NOT IN` into two strict functional ranges, chooses the smallest candidate
+union across list members, and keeps the original predicate as the final
+filter. Direct and pass-through sources use the same stored row identities.
+
+The native MySQL 8.4.11 oracle now covers one and two members, reversed
+selectivity, a NULL member, a complete OR, and an explicit mismatched
+collation for both source shapes. The focused regression checks identical
+counts and fewer than 80 residual calls for compatible cases; the mismatched
+collation still scans. Other functional text expressions and stable
+materialized expression keys remain to audit.

@@ -15216,6 +15216,36 @@ and private canSplitCorrelatedInequality store source (columns: ColumnDef list) 
 
     compatible left right || compatible right left
 
+and private canSplitProjectedFunctionalTextInequality
+    (registry: Registry)
+    (projection: PhysicalProjection)
+    qualifier
+    (context: EvalContext)
+    left
+    right
+    =
+    let sourceRef = correlatedSourceRef qualifier
+    let source = correlatedProbeSource qualifier projection.OutputColumns
+    let compatible indexed bound =
+        match storedFunctionalColumnFor registry sourceRef indexed,
+              tryCorrelatedProbeValue source context bound with
+        | Some(columnName, transform), Some(VString _ | VNull as value)
+            when FunctionalIndex.hasTextResult transform ->
+            resolveColumn projection.OutputColumns columnName
+            |> Result.toOption
+            |> Option.map (fun index -> projection.OutputColumns.[index])
+            |> Option.bind (fun outputColumn ->
+                tryPhysicalFunctionalColumn projection columnName transform
+                |> Option.map (fun (physicalColumn, physicalTransform) ->
+                    value = VNull
+                    || (functionalComparisonUsesStoredCollation
+                            context outputColumn transform "<" indexed bound
+                        && functionalComparisonUsesStoredCollation
+                            context physicalColumn physicalTransform "<" indexed bound)))
+            |> Option.defaultValue false
+        | _ -> false
+    compatible left right || compatible right left
+
 and private tryEqualityPredicate columnName boundValue = function
     | BinOp((Eq | NullSafeEq as comparison), left, right) ->
         Option.map2
@@ -16254,7 +16284,13 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
 
             tryCompleteOrCandidates
                 whereExpr
-                (canSplitCorrelatedInequality store probeSource projection.OutputColumns outer)
+                (fun left right ->
+                    canSplitCorrelatedInequality store probeSource projection.OutputColumns outer left right
+                    || (storedRowsMatchReadRows store projection.PhysicalTable.Columns
+                        && (outer
+                            |> Option.exists (fun context ->
+                                canSplitProjectedFunctionalTextInequality
+                                    registry projection qualifier context left right))))
                 branchCandidates
                 merge
                 (snd >> List.length)))
