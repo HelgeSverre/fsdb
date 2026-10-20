@@ -31595,21 +31595,58 @@ let transactionWriteTargets
                 |> List.exists (fun column ->
                     equalsIgnoreCase column.Name name
                     && (match column.Type with TTime _ -> true | _ -> false))
+            let temporalColumnType name =
+                table.Columns
+                |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+                |> Option.bind (fun column ->
+                    match column.Type with
+                    | TDateTime _ | TTimestamp _ -> Some column.Type
+                    | _ -> None)
             let timeBound = function
                 | VTime value -> Some(decimal (timeTicks value))
                 | VString text ->
                     Temporal.tryParseTimeValue text
                     |> Option.map (timeTicks >> decimal)
                 | _ -> None
+            let dateTimeBound = function
+                | VDate date -> Some(date.ToDateTime(System.TimeOnly.MinValue))
+                | VDateTime value | VTimestamp value -> Some value
+                | VString text ->
+                    match System.DateTime.TryParseExact(
+                        text,
+                        [| "yyyy-MM-dd"; "yyyy-MM-dd HH:mm:ss"; "yyyy-MM-dd HH:mm:ss.FFFFFFF" |],
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None
+                    ) with
+                    | true, value -> Some value
+                    | _ -> None
+                | _ -> None
+            let temporalBound columnType bound =
+                match columnType, bound with
+                | TTimestamp _, VTimestamp utc -> Some(decimal utc.Ticks)
+                | _ ->
+                    dateTimeBound bound
+                    |> Option.bind (fun value ->
+                        match columnType with
+                        | TDateTime _ -> Some(decimal value.Ticks)
+                        | TTimestamp _ ->
+                            try
+                                Some(decimal (sqlTimeZoneToUtc store.ExecutionSettings.TimeZone value).Ticks)
+                            with :? System.ArgumentException -> None
+                        | _ -> None)
             let keyComparison name key bound =
                 match key, bound with
                 | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _)
-                    when not (isDateColumn name || isTimeColumn name) ->
+                    when not (isDateColumn name || isTimeColumn name || (temporalColumnType name).IsSome) ->
                     Some(Value.compare (VDecimal number) bound)
                 | OrderedNumber number, bound when isDateColumn name ->
                     dateBound bound |> Option.map (fun value -> Operators.compare number value)
                 | OrderedNumber number, bound when isTimeColumn name ->
                     timeBound bound |> Option.map (fun value -> Operators.compare number value)
+                | OrderedNumber number, bound when (temporalColumnType name).IsSome ->
+                    temporalColumnType name
+                    |> Option.bind (fun columnType -> temporalBound columnType bound)
+                    |> Option.map (fun value -> Operators.compare number value)
                 | OrderedText key, VString text ->
                     table.Columns
                     |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
@@ -31638,7 +31675,7 @@ let transactionWriteTargets
                     | _ -> false
 
                 let comparableLiteral = function
-                    | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VString _ | VTime _ as value) -> Some value
+                    | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VString _ | VDate _ | VDateTime _ | VTimestamp _ | VTime _ as value) -> Some value
                     | _ -> None
                 let columnName = function
                     | Col name -> Some name
@@ -31738,11 +31775,15 @@ let transactionWriteTargets
                                 | LiteralValue(VInt _ | VUInt _ | VDecimal _) -> true
                                 | LiteralValue(VDate _) when column.Type = TDate -> true
                                 | LiteralValue(VTime _) when (match column.Type with TTime _ -> true | _ -> false) -> true
+                                | LiteralValue(VDate _ | VDateTime _ | VTimestamp _ as bound)
+                                    when (match column.Type with TDateTime _ | TTimestamp _ -> true | _ -> false) ->
+                                    temporalBound column.Type bound |> Option.isSome
                                 | LiteralValue(VString text) ->
                                     match column.Type with
                                     | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText -> true
                                     | TDate -> dateBound (VString text) |> Option.isSome
                                     | TTime _ -> timeBound (VString text) |> Option.isSome
+                                    | TDateTime _ | TTimestamp _ -> temporalBound column.Type (VString text) |> Option.isSome
                                     | _ -> false
                                 | _ -> false
                             match key with
@@ -31814,6 +31855,7 @@ let transactionWriteTargets
                     | VBit(_, integer) -> Some(OrderedNumber(decimal integer))
                     | VDate date -> Some(OrderedNumber(decimal date.DayNumber))
                     | VTime time -> Some(OrderedNumber(decimal (timeTicks time)))
+                    | VDateTime value | VTimestamp value -> Some(OrderedNumber(decimal value.Ticks))
                     | VString text when (match column.Type with TChar _ | TVarchar _ -> true | _ -> false) ->
                         Some(OrderedText((column.Collation |> Collation.findOrDefault).KeyOf text))
                     | VEncodedString(charset, bytes)

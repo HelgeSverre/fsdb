@@ -342,6 +342,17 @@ excluding a claim; unrecognized bounds remain conservative. The shared
 transaction regression checks waits, affected counts, and final rows for
 both UPDATE and DELETE.
 
+The temporal oracle also covers thirteen cases each for `DATETIME(6)` and
+`TIMESTAMP(6)` at UTC, plus thirteen `TIMESTAMP(6)` cases at `+02:00`, ordered
+by `DATE_ADD(rank_value, INTERVAL 0 SECOND)`. These check strict and inclusive
+indexed bounds, a pending key beyond the visible limit, an upper next-key
+boundary, pending `NULL`, and `IGNORE INDEX`. Fsdb now decodes pending
+DATETIME and TIMESTAMP keys and compares valid ISO literal bounds against
+their stored ticks. TIMESTAMP bounds use the waiting session's time zone to
+compare with stored UTC ticks. The shared transaction regression checks waits,
+affected counts, and final rows for both write verbs. Other temporal spellings
+and time-zone edge cases remain outside this audit.
+
 Fsdb now observes the pending ordered claim for a keyless filesort when its
 first indexed column appears in the ORDER BY expression. It rules out a
 pending key proven below an indexed lower bound only when that index is
