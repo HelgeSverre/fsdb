@@ -15,6 +15,7 @@ modes. Runs used disposable servers and the configured ngram token size.
 | U+17000–U+170FF | `utf8mb4_unicode_520_ci`, `utf8mb4_0900_ai_ci`, `utf8mb4_ja_0900_as_cs_ks` | 1–2 | 9,216 | 0 |
 | U+18800–U+188FF | the same three collations | 1–2 | 9,216 | 0 |
 | U+17000–U+170FF | `utf8mb4_general_ci` | 3 | 1,536 | 0 |
+| U+17000–U+170FF | `utf8mb4_unicode_ci` | 1–2 | 3,072 | 0 |
 
 The broad general-collation lane totals 82,956 searches. The smaller
 Supplement count reflects the harness's printable-scalar selection in that
