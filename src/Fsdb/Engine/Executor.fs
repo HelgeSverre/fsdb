@@ -31481,14 +31481,168 @@ let transactionWriteTargets
                     table.Columns
                     |> List.find (fun column -> equalsIgnoreCase column.Name name)
                     |> fun column -> column.Type)
+            let excludesPending keyColumns ordered primary =
+                let keyFor name =
+                    let lookup names keys =
+                        List.zip names keys
+                        |> List.tryPick (fun (column, key) ->
+                            if equalsIgnoreCase name column then Some key else None)
+                    lookup keyColumns ordered
+                    |> Option.orElseWith (fun () ->
+                        primary |> Option.bind (lookup primaryColumns))
+
+                let keyComparison name key bound =
+                    match key, bound with
+                    | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) ->
+                        Some(Value.compare (VDecimal number) bound)
+                    | OrderedText key, VString text ->
+                        table.Columns
+                        |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+                        |> Option.map (fun column ->
+                            let other = (column.Collation |> Collation.findOrDefault).KeyOf text
+                            System.String.CompareOrdinal(key, other))
+                    | _ -> None
+
+                let comparisonIsFalse operation comparison =
+                    match operation with
+                    | Eq -> comparison <> 0
+                    | Neq -> comparison = 0
+                    | Lt -> comparison >= 0
+                    | Lte -> comparison > 0
+                    | Gt -> comparison <= 0
+                    | Gte -> comparison < 0
+                    | _ -> false
+
+                let comparableLiteral = function
+                    | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VString _ as value) -> Some value
+                    | _ -> None
+                let columnName = function
+                    | Col name -> Some name
+                    | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some name
+                    | _ -> None
+                let excludesIn column candidates negated =
+                    match columnName column with
+                    | Some name ->
+                        match keyFor name with
+                        | Some key ->
+                            let comparison candidate =
+                                comparableLiteral candidate
+                                |> Option.bind (keyComparison name key)
+                            if negated then
+                                candidates |> List.exists (fun candidate -> comparison candidate = Some 0)
+                            else
+                                not candidates.IsEmpty
+                                && (candidates
+                                    |> List.forall (fun candidate ->
+                                        comparison candidate |> Option.exists ((<>) 0)))
+                        | None -> false
+                    | None -> false
+                let excludesNonNull column =
+                    columnName column
+                    |> Option.bind keyFor
+                    |> Option.exists (function OrderedNull -> true | _ -> false)
+                let excludesNull column =
+                    columnName column
+                    |> Option.bind keyFor
+                    |> Option.exists (function OrderedNull -> false | _ -> true)
+                where
+                |> optionalConjuncts
+                |> List.exists (function
+                    // Ordinary comparisons to a literal NULL can never be WHERE-true.
+                    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), left, right)
+                        when (right = Lit VNull && (columnName left |> Option.isSome))
+                             || (left = Lit VNull && (columnName right |> Option.isSome)) -> true
+                    | BinOp(operation, left, right) ->
+                        let excludes column literal reverse =
+                            match columnName column, comparableLiteral literal with
+                            | Some name, Some bound ->
+                                keyFor name
+                                |> Option.bind (fun key -> keyComparison name key bound)
+                                |> Option.exists (fun comparison ->
+                                    comparisonIsFalse operation (if reverse then -comparison else comparison))
+                            | _ -> false
+                        excludes left right false || excludes right left true
+                    | In(column, candidates) -> excludesIn column candidates false
+                    | Not(In(column, candidates)) -> excludesIn column candidates true
+                    | IsNotNull column -> excludesNonNull column
+                    | IsNull column -> excludesNull column
+                    | _ -> false)
             if orderedIndex.IsNone then
                 // Filesort expressions can scan past the visible LIMIT
-                // frontier. MySQL waits for pending primary-key inserts on
-                // either side of that frontier before choosing its rows.
-                if orderBy.IsEmpty || primaryColumns.IsEmpty then []
-                else
+                // frontier. Observe an ordered claim from the key that
+                // supplies the pending insert, even on a keyless table.
+                if orderBy.IsEmpty then []
+                elif not primaryColumns.IsEmpty then
                     Storage.activeOrderedKeyClaims store database tableRef.Table "PRIMARY" primaryKeyTypes primaryKeyTypes
                     |> List.map (fun (_, _, claim) -> claim)
+                else
+                    let orderReferences name =
+                        orderBy
+                        |> List.exists (fun (expression, _) ->
+                            Expression.exists (function
+                                | Col column -> equalsIgnoreCase column name
+                                | QualifiedCol(owner, column) ->
+                                    equalsIgnoreCase owner qualifier && equalsIgnoreCase column name
+                                | _ -> false) expression)
+                    let orderedSource =
+                        Storage.orderedIndexKeyColumns table
+                        |> List.tryFind (fun (name, columns) ->
+                            not (equalsIgnoreCase name "PRIMARY")
+                            && (columns |> List.tryHead |> Option.exists orderReferences))
+                    orderedSource
+                    |> Option.map (fun (name, columns) ->
+                        let mayUseIndex = indexAllowedBy (indexHintsFor IndexJoin tableRef) name
+                        let keyTypes =
+                            columns
+                            |> List.map (fun columnName ->
+                                table.Columns
+                                |> List.find (fun column -> equalsIgnoreCase column.Name columnName)
+                                |> fun column -> column.Type)
+                        let excludesFromIndexedRange ordered =
+                            let columnName = List.head columns
+                            let key = List.head ordered
+                            let comparison bound =
+                                match key, bound with
+                                | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) ->
+                                    Some(Value.compare (VDecimal number) bound)
+                                | _ -> None
+                            let matchesColumn = function
+                                | Col name -> equalsIgnoreCase name columnName
+                                | QualifiedCol(owner, name) ->
+                                    equalsIgnoreCase owner qualifier && equalsIgnoreCase name columnName
+                                | _ -> false
+                            let numericLiteral = function
+                                | LiteralValue(VInt _ | VUInt _ | VDecimal _) -> true
+                                | _ -> false
+                            match key with
+                            | OrderedNull ->
+                                where
+                                |> optionalConjuncts
+                                |> List.exists (function
+                                    | BinOp((Lt | Lte | Gt | Gte), column, literal)
+                                        when matchesColumn column && numericLiteral literal -> true
+                                    | BinOp((Lt | Lte | Gt | Gte), literal, column)
+                                        when matchesColumn column && numericLiteral literal -> true
+                                    | _ -> false)
+                            | _ ->
+                                where
+                                |> optionalConjuncts
+                                |> List.exists (function
+                                    // A strict lower range skips earlier keys. An
+                                    // upper range still waits at its next-key gap.
+                                    | BinOp(Gt, column, LiteralValue bound) when matchesColumn column ->
+                                        comparison bound |> Option.exists (fun value -> value <= 0)
+                                    | BinOp(Gte, column, LiteralValue bound) when matchesColumn column ->
+                                        comparison bound |> Option.exists (fun value -> value < 0)
+                                    | BinOp(Lt, LiteralValue bound, column) when matchesColumn column ->
+                                        comparison bound |> Option.exists (fun value -> value <= 0)
+                                    | BinOp(Lte, LiteralValue bound, column) when matchesColumn column ->
+                                        comparison bound |> Option.exists (fun value -> value < 0)
+                                    | _ -> false)
+                        Storage.activeOrderedKeyClaims store database tableRef.Table name keyTypes primaryKeyTypes
+                        |> List.choose (fun (ordered, _, claim) ->
+                            if mayUseIndex && excludesFromIndexedRange ordered then None else Some claim))
+                    |> Option.defaultValue []
             else
                 let indexName, indexColumns = Option.get orderedIndex
                 let columnIndices =
@@ -31583,97 +31737,11 @@ let transactionWriteTargets
                                 indexedNames |> List.exists (equalsIgnoreCase name)
                             | _ -> false))
 
-                    let keyFor name ordered primary =
-                        let lookup names keys =
-                            List.zip names keys
-                            |> List.tryPick (fun (column, key) ->
-                                if equalsIgnoreCase name column then Some key else None)
-                        lookup (orderedColumns |> List.map fst) ordered
-                        |> Option.orElseWith (fun () ->
-                            primary |> Option.bind (lookup primaryColumns))
-
-                    let keyComparison name key bound =
-                        match key, bound with
-                        | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) ->
-                            Some(Value.compare (VDecimal number) bound)
-                        | OrderedText key, VString text ->
-                            table.Columns
-                            |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
-                            |> Option.map (fun column ->
-                                let other = (column.Collation |> Collation.findOrDefault).KeyOf text
-                                System.String.CompareOrdinal(key, other))
-                        | _ -> None
-
-                    let comparisonIsFalse operation comparison =
-                        match operation with
-                        | Eq -> comparison <> 0
-                        | Neq -> comparison = 0
-                        | Lt -> comparison >= 0
-                        | Lte -> comparison > 0
-                        | Gt -> comparison <= 0
-                        | Gte -> comparison < 0
-                        | _ -> false
-
-                    let excludesPending ordered primary =
-                        let comparableLiteral = function
-                            | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VString _ as value) -> Some value
-                            | _ -> None
-                        let columnName = function
-                            | Col name -> Some name
-                            | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some name
-                            | _ -> None
-                        let excludesIn column candidates negated =
-                            match columnName column with
-                            | Some name ->
-                                match keyFor name ordered primary with
-                                | Some key ->
-                                    let comparison candidate =
-                                        comparableLiteral candidate
-                                        |> Option.bind (keyComparison name key)
-                                    if negated then
-                                        candidates |> List.exists (fun candidate -> comparison candidate = Some 0)
-                                    else
-                                        not candidates.IsEmpty
-                                        && (candidates
-                                            |> List.forall (fun candidate ->
-                                                comparison candidate |> Option.exists ((<>) 0)))
-                                | None -> false
-                            | None -> false
-                        let excludesNonNull column =
-                            columnName column
-                            |> Option.bind (fun name -> keyFor name ordered primary)
-                            |> Option.exists (function OrderedNull -> true | _ -> false)
-                        let excludesNull column =
-                            columnName column
-                            |> Option.bind (fun name -> keyFor name ordered primary)
-                            |> Option.exists (function OrderedNull -> false | _ -> true)
-                        where
-                        |> optionalConjuncts
-                        |> List.exists (function
-                            // Ordinary comparisons to a literal NULL can never be WHERE-true.
-                            // This excludes pending rows without relying on their key values.
-                            | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), left, right)
-                                when (right = Lit VNull && (columnName left |> Option.isSome))
-                                     || (left = Lit VNull && (columnName right |> Option.isSome)) -> true
-                            | BinOp(operation, left, right) ->
-                                let excludes column literal reverse =
-                                    match columnName column, comparableLiteral literal with
-                                    | Some name, Some bound ->
-                                        keyFor name ordered primary
-                                        |> Option.bind (fun key -> keyComparison name key bound)
-                                        |> Option.exists (fun comparison ->
-                                            comparisonIsFalse operation (if reverse then -comparison else comparison))
-                                    | _ -> false
-                                excludes left right false || excludes right left true
-                            | In(column, candidates) -> excludesIn column candidates false
-                            | Not(In(column, candidates)) -> excludesIn column candidates true
-                            | IsNotNull column -> excludesNonNull column
-                            | IsNull column -> excludesNull column
-                            | _ -> false)
-
                     let pending =
                         if hasIndexedFilter then
-                            pending |> List.filter (fun (ordered, primary, _) -> not (excludesPending ordered primary))
+                            pending
+                            |> List.filter (fun (ordered, primary, _) ->
+                                not (excludesPending (orderedColumns |> List.map fst) ordered primary))
                         else pending
                     let allKeys = pending |> List.map (fun (_, _, claim) -> claim)
 
