@@ -178,6 +178,18 @@ def main():
                     "UPDATE read_counts rc JOIN va ON rc.id=va.link_id "
                     "LEFT JOIN vb ON va.link_id=vb.link_id "
                     "SET vb.n=vb.n+1 WHERE rc.id=1",
+                    "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
+                    "JOIN va ON g.id=va.link_id "
+                    "JOIN LATERAL (SELECT l.id AS link_id,COUNT(*) AS hits FROM link l "
+                    "WHERE l.id=g.id AND l.id=va.link_id GROUP BY l.id) q ON TRUE "
+                    "JOIN vb ON vb.link_id=q.link_id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE g.id=1",
+                    "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
+                    "JOIN va ON g.id=va.link_id "
+                    "JOIN LATERAL (SELECT MAX(l.id) AS link_id FROM link l "
+                    "WHERE l.id=g.id AND l.id=va.link_id) q ON TRUE "
+                    "LEFT JOIN vb ON vb.link_id=q.link_id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE g.id=1",
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)

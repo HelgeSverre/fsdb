@@ -1059,7 +1059,7 @@ aliases, writable physical target aliases, or independent derived read-source
 aliases match; [dependent `LATERAL` and `JSON_TABLE` read aliases](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
 also remain scoped across both writable views in audited two-target UPDATEs.
 The [joined-view source oracle](torture/findings/2026-10-18-two-joined-view-outer-writes.md)
-now also matches MySQL for twenty-three UPDATE cases, including LEFT/RIGHT joins with matched or
+now also matches MySQL for twenty-five UPDATE cases, including LEFT/RIGHT joins with matched or
 missing view rows, shared internal aliases, grouped lateral read sources,
 atomic `CHECK OPTION` rejection, and fifteen contended rebases. Joined updates
 now claim every assigned writable view's physical target before taking their
@@ -1081,7 +1081,10 @@ retain references to the first view's exposed columns during expansion; a
 local lateral alias with the same name still shadows the outer view.
 Grouped derived aliases and dependent `LATERAL` aliases now also stay scoped
 across both writable views, including an atomic CHECK OPTION rejection and a
-contended two-target rebase; broader grouped dependency trees remain unaudited.
+contended two-target rebase. A grouped derived table can also lead an UPDATE
+before an inner-joined writable view, followed by a grouped or scalar LATERAL
+source and a second writable view under INNER or LEFT JOIN. Broader grouped
+dependency trees remain unaudited.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
 before a local upload or server-side file read; ordinary inserts remain
 available through their supported forms.

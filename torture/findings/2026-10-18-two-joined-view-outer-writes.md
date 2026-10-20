@@ -1,13 +1,13 @@
 # Two writable joined views under outer UPDATE joins
 
 The [native MySQL 8.4.11 differential oracle](../scripts/two-joined-view-outer-oracle.py)
-compares twenty-three UPDATE statements against fsdb. Two independently
+compares twenty-five UPDATE statements against fsdb. Two independently
 writable inner-join views share their internal physical/read aliases. The
 matrix uses both LEFT and RIGHT outer joins, with a fully matched row and
 rows missing from either view. A second pair of views joins grouped read
 sources and dependent `LATERAL` projections before the outer UPDATE join.
 
-All twenty-three statements match MySQL's affected-row count and the resulting rows
+All twenty-five statements match MySQL's affected-row count and the resulting rows
 in both physical target tables. A `CASCADED CHECK OPTION` on the grouped
 lateral view also rejects an invalid two-target update with error 1369 and
 leaves both tables unchanged. This extends the existing inner two-view and
@@ -84,12 +84,21 @@ declared inside a lateral body, which must shadow the outer writable view.
 The three ordinary cases and two contended rebases holding `vb` match MySQL;
 the focused F# regression covers both dependent source forms and shadowing.
 
+Two further statements start the UPDATE with an independent grouped derived
+table, then inner-join the first writable view. A dependent grouped or scalar
+`LATERAL` source precedes the second writable view under INNER or LEFT JOIN.
+MySQL updates both views; fsdb previously rejected the leading `(` as syntax.
+The parser now swaps the first two inner-join operands, preserving their ON
+predicate and the order of all later dependent joins. Both statements match
+MySQL's affected-row count and final physical rows; an F# regression pins
+both forms.
+
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:
 
 ```sh
 dotnet build src/Fsdb.Cli -c Release
-python3 torture/scripts/two-joined-view-outer-oracle.py
+uv run --with pymysql python torture/scripts/two-joined-view-outer-oracle.py
 ```
 
 Wider outer-join trees, nested security layers, and contention involving two
