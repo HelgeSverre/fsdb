@@ -615,9 +615,22 @@ let private materializedRangeLookup
     |> Result.toOption
     |> Option.bind (fun columnIndex ->
         let column = columns.[columnIndex]
+        let validDateBound = function
+            | VDate _ -> true
+            | VString text ->
+                System.DateOnly.TryParseExact(
+                    text,
+                    "yyyy-MM-dd",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None
+                )
+                |> fst
+            | _ -> false
         let domain =
             if isNumericIndexType column.Type then
-                Some(Value.compare, isNumericIndexValue)
+                Some(Value.compare, isNumericIndexValue, isNumericIndexValue)
+            elif column.Type = TDate then
+                Some(Value.compare, (function VDate _ -> true | _ -> false), validDateBound)
             else
                 match equalityMembershipDomain store column with
                 | Some(TextMembership collation) ->
@@ -626,22 +639,24 @@ let private materializedRangeLookup
                         | VString left, VString right -> collation.ComparePrimary left right
                         | _ -> Value.compare left right
 
-                    Some(compare, (function VString _ -> true | _ -> false))
+                    let compatible = function VString _ -> true | _ -> false
+                    Some(compare, compatible, compatible)
                 | _ ->
                     match column.Type with
                     | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob ->
-                        Some(Value.compare, (function VBytes _ -> true | _ -> false))
+                        let compatible = function VBytes _ -> true | _ -> false
+                        Some(Value.compare, compatible, compatible)
                     | _ -> None
 
         domain
-        |> Option.bind (fun (compare, compatibleValue) ->
+        |> Option.bind (fun (compare, sourceCompatible, boundCompatible) ->
             let sourceRows = List.toArray rows
             let entries =
                 sourceRows
                 |> Array.mapi (fun index row -> row.[columnIndex], index)
                 |> Array.filter (fun (value, _) -> value <> VNull)
 
-            if entries |> Array.exists (fst >> compatibleValue >> not) then
+            if entries |> Array.exists (fst >> sourceCompatible >> not) then
                 None
             else
                 Array.sortInPlaceWith (fun (left, _) (right, _) -> compare left right) entries
@@ -664,7 +679,7 @@ let private materializedRangeLookup
                 let findRows lower upper =
                     let compatible bound =
                         bound
-                        |> Option.forall (fun (value, _) -> value = VNull || compatibleValue value)
+                        |> Option.forall (fun (value, _) -> value = VNull || boundCompatible value)
 
                     if not (compatible lower && compatible upper) then
                         None
