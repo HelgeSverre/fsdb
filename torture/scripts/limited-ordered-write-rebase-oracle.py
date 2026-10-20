@@ -167,7 +167,7 @@ def main():
                             finally:
                                 waiter.close()
 
-                for indexed, verb in product((False, True), ("UPDATE", "DELETE")):
+                for indexed, verb in itertools.product((False, True), ("UPDATE", "DELETE")):
                     second_owner = connect(socket)
                     waiter = connect(socket)
                     try:
@@ -279,6 +279,119 @@ def main():
                         )
                         assert actual == expected, (statement, inserted_id, actual)
                         filesort_cases += 1
+                    finally:
+                        waiter.close()
+
+                keyless_filesort_cases = 0
+                keyless_scenarios = (
+                    ("n>=0", 0, 0, "", True, (0, 1)),
+                    ("n>=0", 100, 100, "", True, (1, 2)),
+                    ("rank_value>0", 0, 0, "", False, (1, 2)),
+                    ("rank_value>0", 100, 100, "", True, (1, 2)),
+                    ("rank_value>=0", 0, 0, "", True, (0, 1)),
+                    ("rank_value<50", 100, 100, "", True, (1, 2)),
+                )
+                hinted_keyless_scenarios = (
+                    ("rank_value>0", 0, 0, " IGNORE INDEX(ix_rank)", True, (1, 2)),
+                    ("rank_value>0", 100, 100, " IGNORE INDEX(ix_rank)", True, (1, 2)),
+                    ("n>=0", 0, None, "", True, (0, 1)),
+                    ("rank_value>0", 0, None, "", False, (1, 2)),
+                    ("rank_value>=0", 0, None, "", False, (1, 2)),
+                    ("rank_value<50", 0, None, "", False, (1, 2)),
+                    ("rank_value>0", 0, None, " IGNORE INDEX(ix_rank)", True, (1, 2)),
+                )
+                for (
+                    predicate,
+                    pending_id,
+                    pending_rank,
+                    hint,
+                    should_wait,
+                    changed_ids,
+                ), verb in itertools.chain(
+                    itertools.product(keyless_scenarios, ("UPDATE", "DELETE")),
+                    itertools.product(hinted_keyless_scenarios, ("UPDATE",)),
+                ):
+                    waiter = connect(socket)
+                    try:
+                        with owner.cursor() as cursor:
+                            cursor.execute("DROP TABLE IF EXISTS target")
+                            cursor.execute(
+                                "CREATE TABLE target(id INT,rank_value INT,n INT,"
+                                "KEY ix_rank(rank_value))"
+                            )
+                            cursor.execute(
+                                "INSERT INTO target VALUES(1,1,0),(2,2,0),(3,3,0)"
+                            )
+                            cursor.execute("BEGIN")
+                            cursor.execute(
+                                f"INSERT INTO target VALUES({pending_id},{'NULL' if pending_rank is None else pending_rank},0)"
+                            )
+                        with waiter.cursor() as cursor:
+                            cursor.execute("USE probe")
+                            cursor.execute("BEGIN")
+                        action = (
+                            "UPDATE target" + hint + " SET n=n+1"
+                            if verb == "UPDATE"
+                            else "DELETE FROM target" + hint
+                        )
+                        statement = (
+                            action + f" WHERE {predicate} ORDER BY rank_value+0 LIMIT 2"
+                        )
+                        started = threading.Event()
+                        outcome = {}
+
+                        def keyless_filesort_write():
+                            try:
+                                with waiter.cursor() as cursor:
+                                    started.set()
+                                    cursor.execute(statement)
+                                    outcome["affected"] = cursor.rowcount
+                                    cursor.execute("COMMIT")
+                            except Exception as error:
+                                outcome["error"] = error
+
+                        thread = threading.Thread(
+                            target=keyless_filesort_write, daemon=True
+                        )
+                        thread.start()
+                        assert started.wait(2), statement
+                        thread.join(0.2)
+                        assert thread.is_alive() == should_wait, (
+                            statement,
+                            pending_rank,
+                            "wait",
+                        )
+                        with owner.cursor() as cursor:
+                            cursor.execute("COMMIT")
+                        thread.join(5)
+                        assert not thread.is_alive(), (
+                            statement,
+                            "writer did not finish",
+                        )
+                        assert outcome == {"affected": 2}, (statement, outcome)
+                        with owner.cursor() as cursor:
+                            cursor.execute(
+                                "SELECT id,rank_value,n FROM target ORDER BY rank_value,id"
+                            )
+                            actual = cursor.fetchall()
+                        expected = tuple(
+                            (
+                                id,
+                                rank,
+                                1 if verb == "UPDATE" and id in changed_ids else 0,
+                            )
+                            for id, rank in sorted(
+                                ((pending_id, pending_rank), (1, 1), (2, 2), (3, 3)),
+                                key=lambda row: (
+                                    row[1] is not None,
+                                    row[1] or 0,
+                                    row[0],
+                                ),
+                            )
+                            if verb == "UPDATE" or id not in changed_ids
+                        )
+                        assert actual == expected, (statement, pending_rank, actual)
+                        keyless_filesort_cases += 1
                     finally:
                         waiter.close()
 
@@ -802,7 +915,8 @@ def main():
                             waiter.close()
 
                 print(f"MySQL {version}: {cases} ordered LIMIT 1/2/3 writes reselected after updates/deletes; "
-                      f"{filesort_cases} filesort-expression pending-insert waits; "
+                      f"{filesort_cases} primary-key and {keyless_filesort_cases} keyless "
+                      "filesort-expression pending-insert cases; "
                       f"{len(insert_cases) * 4} integer, {len(date_cases) * 2} DATE, "
                       f"{len(composite_cases) * 2} composite, {text_case_count} text, "
                       f"{composite_text_count} composite text, and {len(secondary_cases) * 2} secondary-order "

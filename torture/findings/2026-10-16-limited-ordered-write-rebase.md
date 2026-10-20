@@ -286,4 +286,31 @@ Fsdb previously recognized only direct indexed ORDER BY columns and completed
 the key-zero case before the insert committed. Unsupported filesort expressions
 now conservatively wait for active primary-key insert claims before choosing
 limited rows. This reproduces the measured behavior for `id+0`; more complex
-expressions and non-primary insert claims still need separate audits.
+expressions and other non-primary insert shapes still need separate audits.
+
+## Keyless filesort writes
+
+The native MySQL 8.4.11 oracle also tests a table with no primary key and an
+ordinary `rank_value` index. A pending insert at rank 0 or 100 blocks an
+`UPDATE` or `DELETE` with `WHERE n>=0 ORDER BY rank_value+0 LIMIT 2`, even
+though rank 100 lies beyond the selected pair. After the wait, rank 0 enters
+the first pair and rank 100 does not. A strict indexed lower bound,
+`WHERE rank_value>0`, skips a pending rank 0 without waiting but still waits
+for rank 100. `rank_value>=0` waits for rank 0; `rank_value<50` also waits
+for rank 100 at the upper range's next-key boundary. On `UPDATE`,
+`IGNORE INDEX(ix_rank)` restores a scan, so even `rank_value>0` waits for
+pending rank 0.
+
+A pending `NULL` rank also blocks an unfiltered `UPDATE`. An indexed numeric
+range excludes that `NULL` key without waiting, while `IGNORE INDEX(ix_rank)`
+restores the wait. These nullable cases are covered by the native oracle and
+transaction regression for `UPDATE`.
+
+Fsdb now observes the pending ordered claim for a keyless filesort when its
+first indexed column appears in the ORDER BY expression. It rules out a
+pending key proven below an indexed lower bound only when that index is
+available to the read; it retains the upper-boundary and ignored-index waits.
+The transaction regression and oracle check wait behavior,
+affected counts, and final rows for both write verbs. Keyless tables without
+a usable ordered claim, wider index expressions, and other predicate shapes
+remain outside this audit.
