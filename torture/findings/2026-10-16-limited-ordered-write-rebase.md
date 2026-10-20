@@ -332,6 +332,16 @@ string. The claim comparison now accepts valid ISO DATE literals and leaves
 other date spellings conservative. The shared transaction regression checks
 the same waits, affected counts, and final rows for both write verbs.
 
+The same oracle now covers seventeen `TIME` cases on a keyless table ordered
+by `TIME_TO_SEC(rank_value)`, including negative values and values above 24
+hours. A pending `350:00:00` is skipped below a strict indexed lower bound,
+but blocks at an inclusive bound or when the index is ignored. A pending
+`800:00:00` beyond the visible pair and an unfiltered pending NULL also block. The scheduler
+decodes the stored TIME tick key and compares parseable TIME bounds before
+excluding a claim; unrecognized bounds remain conservative. The shared
+transaction regression checks waits, affected counts, and final rows for
+both UPDATE and DELETE.
+
 Fsdb now observes the pending ordered claim for a keyless filesort when its
 first indexed column appears in the ORDER BY expression. It rules out a
 pending key proven below an indexed lower bound only when that index is

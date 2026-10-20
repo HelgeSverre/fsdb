@@ -2362,6 +2362,17 @@ let tests =
                     "rank_value>'2026-01-01'", 0, None, "", false, [ 1; 2 ] ]
               let dateUpdateOnly =
                   [ "rank_value>'2026-01-01'", 0, Some "2026-01-01", " IGNORE INDEX(ix_rank)", true, [ 1; 2 ] ]
+              let times =
+                  [ "rank_value>'-12:00:00'", 0, Some "-12:00:00", "", false, [ 1; 2 ]
+                    "rank_value>='-12:00:00'", 0, Some "-12:00:00", "", true, [ 0; 1 ]
+                    "rank_value>'350:00:00'", 0, Some "350:00:00", "", false, [ 1; 2 ]
+                    "rank_value>='350:00:00'", 0, Some "350:00:00", "", true, [ 0; 1 ]
+                    "rank_value>'350:00:00'", 100, Some "800:00:00", "", true, [ 1; 2 ]
+                    "rank_value<'400:00:00'", 100, Some "800:00:00", "", true, [ 1; 2 ]
+                    "n>=0", 0, None, "", true, [ 0; 1 ]
+                    "rank_value>'350:00:00'", 0, None, "", false, [ 1; 2 ] ]
+              let timeUpdateOnly =
+                  [ "rank_value>'350:00:00'", 0, Some "350:00:00", " IGNORE INDEX(ix_rank)", true, [ 1; 2 ] ]
               let foldedBounds scenarios =
                   scenarios
                   |> List.map (fun ((predicate: string), pendingId, pendingRank, hint, shouldWait, changedIds) ->
@@ -2370,6 +2381,8 @@ let tests =
                   [ "INT", [ "1"; "2"; "3" ], "rank_value+0", numeric, numericUpdateOnly
                     "DATE", [ "2026-01-02"; "2026-01-03"; "2026-01-04" ],
                         "DAYOFYEAR(rank_value)", dates, dateUpdateOnly
+                    "TIME", [ "351:00:00"; "352:00:00"; "353:00:00" ],
+                        "TIME_TO_SEC(rank_value)", times, timeUpdateOnly
                     "VARCHAR(8) COLLATE utf8mb4_bin", [ "a001"; "a002"; "a003" ],
                         "CONCAT(rank_value,'')", text, textUpdateOnly
                     "VARCHAR(8) COLLATE utf8mb4_0900_ai_ci", [ "a001"; "a002"; "a003" ],

@@ -1,4 +1,4 @@
-"""Check keyless DATE-index filesort writes against native MySQL 8.4.11."""
+"""Check keyless DATE and TIME filesort writes against native MySQL 8.4.11."""
 
 import pathlib
 import runpy
@@ -9,43 +9,35 @@ oracle = runpy.run_path(
 )
 
 
-def verify(owner, waiter):
-    scenarios = (
-        ("rank_date>'2026-01-01'", 0, "2026-01-01", "", False, (1, 2)),
-        ("rank_date>='2026-01-01'", 0, "2026-01-01", "", True, (0, 1)),
-        ("rank_date>'2026-01-01'", 100, "2026-12-31", "", True, (1, 2)),
-        ("rank_date<'2026-02-01'", 100, "2026-12-31", "", True, (1, 2)),
-        ("n>=0", 0, None, "", True, (0, 1)),
-        ("rank_date>'2026-01-01'", 0, None, "", False, (1, 2)),
-    )
-    update_only = (
-        (
-            "rank_date>'2026-01-01'",
-            0,
-            "2026-01-01",
-            " IGNORE INDEX(ix_rank)",
-            True,
-            (1, 2),
-        ),
-    )
+def verify_cases(owner, waiter, column_type, base_ranks, order_expression, scenarios):
     cases = 0
     for verb in ("UPDATE", "DELETE"):
-        for predicate, pending_id, pending_date, hint, should_wait, changed_ids in (
-            scenarios + (update_only if verb == "UPDATE" else ())
-        ):
+        for (
+            predicate,
+            pending_id,
+            pending_rank,
+            hint,
+            should_wait,
+            changed_ids,
+        ) in scenarios:
+            if hint and verb != "UPDATE":
+                continue
             owner.query("DROP TABLE IF EXISTS probe.target")
             owner.query(
-                "CREATE TABLE probe.target(id INT,rank_date DATE,n INT,"
-                "KEY ix_rank(rank_date))"
+                f"CREATE TABLE probe.target(id INT,rank_value {column_type},n INT,"
+                "KEY ix_rank(rank_value))"
             )
             owner.query(
                 "INSERT INTO probe.target VALUES"
-                "(1,'2026-01-02',0),(2,'2026-01-03',0),(3,'2026-01-04',0)"
+                + ",".join(
+                    f"({index},'{rank}',0)"
+                    for index, rank in enumerate(base_ranks, start=1)
+                )
             )
             owner.query("BEGIN")
-            date_literal = "NULL" if pending_date is None else f"'{pending_date}'"
+            rank_literal = "NULL" if pending_rank is None else f"'{pending_rank}'"
             owner.query(
-                f"INSERT INTO probe.target VALUES({pending_id},{date_literal},0)"
+                f"INSERT INTO probe.target VALUES({pending_id},{rank_literal},0)"
             )
             waiter.query("USE probe;BEGIN")
             action = (
@@ -54,7 +46,7 @@ def verify(owner, waiter):
                 else "DELETE FROM probe.target"
             )
             statement = (
-                f"{action} WHERE {predicate} ORDER BY DAYOFYEAR(rank_date) LIMIT 2"
+                f"{action} WHERE {predicate} ORDER BY {order_expression} LIMIT 2"
             )
             started = threading.Event()
             outcome = {}
@@ -76,7 +68,7 @@ def verify(owner, waiter):
             assert thread.is_alive() == should_wait, (
                 verb,
                 predicate,
-                pending_date,
+                pending_rank,
                 "wait behavior",
             )
             owner.query("COMMIT")
@@ -85,23 +77,75 @@ def verify(owner, waiter):
             assert outcome == {"affected": 2}, (statement, outcome)
 
             rows = [
-                (pending_id, pending_date),
-                (1, "2026-01-02"),
-                (2, "2026-01-03"),
-                (3, "2026-01-04"),
+                (pending_id, pending_rank),
+                *enumerate(base_ranks, start=1),
             ]
             expected = "\n".join(
-                f"{row_id}\t{date if date is not None else 'NULL'}\t"
+                f"{row_id}\t{rank if rank is not None else 'NULL'}\t"
                 f"{int(row_id in changed_ids) if verb == 'UPDATE' else 0}"
-                for row_id, date in sorted(rows, key=lambda row: (row[1] or "", row[0]))
+                for row_id, rank in sorted(rows, key=lambda row: (row[1] or "", row[0]))
                 if verb == "UPDATE" or row_id not in changed_ids
             )
             actual = owner.query(
-                "SELECT id,rank_date,n FROM probe.target ORDER BY rank_date,id"
+                "SELECT id,rank_value,n FROM probe.target ORDER BY rank_value,id"
             )
-            assert actual == expected, (statement, pending_date, actual)
+            assert actual == expected, (statement, pending_rank, actual)
             cases += 1
-    print(f"MySQL 8.4.11: {cases} keyless DATE filesort cases passed")
+    print(f"MySQL 8.4.11: {cases} keyless {column_type} filesort cases passed")
+
+
+def verify(owner, waiter):
+    dates = (
+        ("rank_value>'2026-01-01'", 0, "2026-01-01", "", False, (1, 2)),
+        ("rank_value>='2026-01-01'", 0, "2026-01-01", "", True, (0, 1)),
+        ("rank_value>'2026-01-01'", 100, "2026-12-31", "", True, (1, 2)),
+        ("rank_value<'2026-02-01'", 100, "2026-12-31", "", True, (1, 2)),
+        ("n>=0", 0, None, "", True, (0, 1)),
+        ("rank_value>'2026-01-01'", 0, None, "", False, (1, 2)),
+        (
+            "rank_value>'2026-01-01'",
+            0,
+            "2026-01-01",
+            " IGNORE INDEX(ix_rank)",
+            True,
+            (1, 2),
+        ),
+    )
+    verify_cases(
+        owner,
+        waiter,
+        "DATE",
+        ("2026-01-02", "2026-01-03", "2026-01-04"),
+        "DAYOFYEAR(rank_value)",
+        dates,
+    )
+
+    times = (
+        ("rank_value>'-12:00:00'", 0, "-12:00:00", "", False, (1, 2)),
+        ("rank_value>='-12:00:00'", 0, "-12:00:00", "", True, (0, 1)),
+        ("rank_value>'350:00:00'", 0, "350:00:00", "", False, (1, 2)),
+        ("rank_value>='350:00:00'", 0, "350:00:00", "", True, (0, 1)),
+        ("rank_value>'350:00:00'", 100, "800:00:00", "", True, (1, 2)),
+        ("rank_value<'400:00:00'", 100, "800:00:00", "", True, (1, 2)),
+        ("n>=0", 0, None, "", True, (0, 1)),
+        ("rank_value>'350:00:00'", 0, None, "", False, (1, 2)),
+        (
+            "rank_value>'350:00:00'",
+            0,
+            "350:00:00",
+            " IGNORE INDEX(ix_rank)",
+            True,
+            (1, 2),
+        ),
+    )
+    verify_cases(
+        owner,
+        waiter,
+        "TIME",
+        ("351:00:00", "352:00:00", "353:00:00"),
+        "TIME_TO_SEC(rank_value)",
+        times,
+    )
 
 
 if __name__ == "__main__":

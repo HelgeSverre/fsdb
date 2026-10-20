@@ -31590,12 +31590,26 @@ let transactionWriteTargets
             let isDateColumn name =
                 table.Columns
                 |> List.exists (fun column -> equalsIgnoreCase column.Name name && column.Type = TDate)
+            let isTimeColumn name =
+                table.Columns
+                |> List.exists (fun column ->
+                    equalsIgnoreCase column.Name name
+                    && (match column.Type with TTime _ -> true | _ -> false))
+            let timeBound = function
+                | VTime value -> Some(decimal (timeTicks value))
+                | VString text ->
+                    Temporal.tryParseTimeValue text
+                    |> Option.map (timeTicks >> decimal)
+                | _ -> None
             let keyComparison name key bound =
                 match key, bound with
-                | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) when not (isDateColumn name) ->
+                | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _)
+                    when not (isDateColumn name || isTimeColumn name) ->
                     Some(Value.compare (VDecimal number) bound)
                 | OrderedNumber number, bound when isDateColumn name ->
                     dateBound bound |> Option.map (fun value -> Operators.compare number value)
+                | OrderedNumber number, bound when isTimeColumn name ->
+                    timeBound bound |> Option.map (fun value -> Operators.compare number value)
                 | OrderedText key, VString text ->
                     table.Columns
                     |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
@@ -31624,7 +31638,7 @@ let transactionWriteTargets
                     | _ -> false
 
                 let comparableLiteral = function
-                    | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VString _ as value) -> Some value
+                    | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VString _ | VTime _ as value) -> Some value
                     | _ -> None
                 let columnName = function
                     | Col name -> Some name
@@ -31723,10 +31737,12 @@ let transactionWriteTargets
                             let comparableLiteral = function
                                 | LiteralValue(VInt _ | VUInt _ | VDecimal _) -> true
                                 | LiteralValue(VDate _) when column.Type = TDate -> true
+                                | LiteralValue(VTime _) when (match column.Type with TTime _ -> true | _ -> false) -> true
                                 | LiteralValue(VString text) ->
                                     match column.Type with
                                     | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText -> true
                                     | TDate -> dateBound (VString text) |> Option.isSome
+                                    | TTime _ -> timeBound (VString text) |> Option.isSome
                                     | _ -> false
                                 | _ -> false
                             match key with
@@ -31797,6 +31813,7 @@ let transactionWriteTargets
                     | VUInt integer
                     | VBit(_, integer) -> Some(OrderedNumber(decimal integer))
                     | VDate date -> Some(OrderedNumber(decimal date.DayNumber))
+                    | VTime time -> Some(OrderedNumber(decimal (timeTicks time)))
                     | VString text when (match column.Type with TChar _ | TVarchar _ -> true | _ -> false) ->
                         Some(OrderedText((column.Collation |> Collation.findOrDefault).KeyOf text))
                     | VEncodedString(charset, bytes)
