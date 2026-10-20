@@ -749,6 +749,59 @@ let tests =
               | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
               Expect.equal (rows store "SELECT n FROM two_source_target") [ [ Some "11" ] ] "the rejected write is atomic"
 
+          testCase "grouped derived UPDATE source can precede two writable joined views"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE derived_update_a(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE derived_update_b(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE derived_update_link(id INT PRIMARY KEY)"
+                    "INSERT INTO derived_update_a VALUES(1,10),(2,20)"
+                    "INSERT INTO derived_update_b VALUES(1,30),(3,40)"
+                    "INSERT INTO derived_update_link VALUES(1),(2),(3)"
+                    "CREATE VIEW derived_update_va AS SELECT t.id,t.n,l.id AS link_id FROM derived_update_a t JOIN derived_update_link l ON t.id=l.id"
+                    "CREATE VIEW derived_update_vb AS SELECT t.id,t.n,l.id AS link_id FROM derived_update_b t JOIN derived_update_link l ON t.id=l.id" ] do
+                  expectOk (run store sql) sql
+
+              let source =
+                  "(SELECT id,COUNT(*) AS hits FROM derived_update_link GROUP BY id) g "
+                  + "JOIN derived_update_va va ON g.id=va.link_id "
+
+              let grouped =
+                  source + "JOIN LATERAL (SELECT l.id AS link_id,COUNT(*) AS hits "
+                  + "FROM derived_update_link l WHERE l.id=g.id AND l.id=va.link_id GROUP BY l.id) q ON TRUE "
+                  + "JOIN derived_update_vb vb ON vb.link_id=q.link_id "
+
+              Expect.equal
+                  (run store ("UPDATE " + grouped + "SET va.n=va.n+1,vb.n=vb.n+1 WHERE g.id=1"))
+                  (Affected 2UL)
+                  "both view targets are updated through a grouped first source"
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_update_a ORDER BY id")
+                  [ [ Some "1"; Some "11" ]; [ Some "2"; Some "20" ] ]
+                  "first physical target changes once"
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_update_b ORDER BY id")
+                  [ [ Some "1"; Some "31" ]; [ Some "3"; Some "40" ] ]
+                  "second physical target changes once"
+
+              let scalar =
+                  source + "JOIN LATERAL (SELECT MAX(l.id) AS link_id FROM derived_update_link l "
+                  + "WHERE l.id=g.id AND l.id=va.link_id) q ON TRUE "
+                  + "LEFT JOIN derived_update_vb vb ON vb.link_id=q.link_id "
+              Expect.equal
+                  (run store ("UPDATE " + scalar + "SET va.n=va.n+1,vb.n=vb.n+1 WHERE g.id=1"))
+                  (Affected 2UL)
+                  "the later outer join preserves both writable targets"
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_update_a ORDER BY id")
+                  [ [ Some "1"; Some "12" ]; [ Some "2"; Some "20" ] ]
+                  "first target changes again"
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_update_b ORDER BY id")
+                  [ [ Some "1"; Some "32" ]; [ Some "3"; Some "40" ] ]
+                  "second target changes again"
+
           testCase "an unchecked outer join enforces only the inner view check"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

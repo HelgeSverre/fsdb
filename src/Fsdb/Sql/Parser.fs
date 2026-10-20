@@ -4686,11 +4686,24 @@ let private singleTableOrderLimit (joins: Join list) : Parser<OrderKey list * Ex
     else
         preturn ([], None)
 
-/// `UPDATE t1 [[AS] a] [JOIN ...] SET assignments [WHERE ...] [ORDER BY ...]
+/// The mutation executor keeps a physical table or view in `UpdateStmt.From`.
+/// An independent derived source may lead a multi-table UPDATE when its first
+/// join is an inner join to a table/view: swap those two inner-join operands
+/// while leaving the predicate and all later (possibly LATERAL) joins in order.
+let private updateSources: Parser<TableRef * Join list, unit> =
+    fromItem .>>. many joinClause
+    >>= fun (source, joins) ->
+        match source, joins with
+        | FromTable table, _ -> preturn (table, joins)
+        | FromSubquery _, ({ Kind = InnerJoin; Table = FromTable table; Using = [] } as first) :: rest ->
+            preturn (table, { first with Table = source } :: rest)
+        | _ -> fail "UPDATE requires a table or an inner-joined table after a derived source"
+
+/// `UPDATE source [JOIN ...] SET assignments [WHERE ...] [ORDER BY ...]
 /// [LIMIT ...]`.
 let private updateStmt: Parser<Statement, unit> =
-    (keyword "UPDATE" >>. (opt (keyword "IGNORE") |>> Option.isSome) .>>. tableRef .>>. many joinClause .>> keyword "SET" .>>. sepBy1 assignment (sym ","))
-    >>= fun (((ignoreErrors, from), joins), assignments) ->
+    (keyword "UPDATE" >>. (opt (keyword "IGNORE") |>> Option.isSome) .>>. updateSources .>> keyword "SET" .>>. sepBy1 assignment (sym ","))
+    >>= fun ((ignoreErrors, (from, joins)), assignments) ->
         opt (keyword "WHERE" >>. expr) .>>. singleTableOrderLimit joins
         |>> fun (where, (orderBy, limit)) ->
             Update
