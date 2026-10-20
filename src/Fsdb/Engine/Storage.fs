@@ -2858,7 +2858,7 @@ let private insertOrderKeyGroups (table: Table) : IndexKeyGroup list =
     let supportedColumn index =
         match table.Columns.[index].Type with
         | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _
-        | TDate | TChar _ | TVarchar _ -> true
+        | TDate | TTime _ | TChar _ | TVarchar _ -> true
         | _ -> false
     orderedKeyGroups table
     |> visibleGroups
@@ -4357,7 +4357,7 @@ type OrderedIndexKeyPart =
     | OrderedNumber of decimal
     | OrderedText of string
 
-/// Active numeric, date, or text ordered index claims that another transaction holds.
+/// Active numeric, temporal, or text ordered index claims that another transaction holds.
 /// Ordered limited writes use these pending keys before their snapshot can see
 /// the inserted row; idle weak-cache entries never become candidate claims.
 let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (indexName: string) (keyTypes: ColumnType list) (primaryKeyTypes: ColumnType list) : (OrderedIndexKeyPart list * OrderedIndexKeyPart list option * string) list =
@@ -4371,6 +4371,7 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
             match keyType with
             | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ -> Some 'I'
             | TDate -> Some 'T'
+            | TTime _ -> Some 'H'
             | TChar _ | TVarchar _ -> Some 'S'
             | _ -> None
         match expectedTag with
