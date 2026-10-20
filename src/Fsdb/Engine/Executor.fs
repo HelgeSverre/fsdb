@@ -12050,14 +12050,85 @@ and private applyPreparedJoin
                 if rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows then Some classes else None
             | _ -> None
 
+        let decimalDoubleRangeJoinRows =
+            match join.Kind, join.Using, leftPhysicalTable, physicalTable, sourcesSoFar, rightSources with
+            | InnerJoin, [], Some leftTable, Some _, [ _ ], [ _ ]
+                when equiKeys.IsEmpty && combinedColumnsSoFar.Length = leftTable.Columns.Length ->
+                let innerColumnAndBound =
+                    match conjuncts effectiveOn with
+                    | [ BinOp((Gt | Gte | Lt | Lte as op), QualifiedCol(leftQualifier, leftName), QualifiedCol(rightQualifier, rightName)) ] ->
+                        match resolveQualified leftQualifier leftName, resolveQualified rightQualifier rightName with
+                        | Some(leftIndex, _), Some(rightIndex, _) ->
+                            let reversed = function
+                                | Gt -> Lt | Gte -> Lte | Lt -> Gt | Lte -> Gte | other -> other
+                            let leftLength = combinedColumnsSoFar.Length
+                            let pair =
+                                if leftIndex < leftLength && rightIndex >= leftLength then
+                                    Some(leftIndex, rightIndex - leftLength, op)
+                                elif rightIndex < leftLength && leftIndex >= leftLength then
+                                    Some(rightIndex, leftIndex - leftLength, reversed op)
+                                else None
+                            pair
+                            |> Option.filter (fun (innerIndex, boundIndex, _) ->
+                                match combinedColumnsSoFar.[innerIndex].Type, joinColumns.[boundIndex].Type with
+                                | TDecimal _, TDouble _ -> true
+                                | _ -> false)
+                        | _ -> None
+                    | _ -> None
+
+                innerColumnAndBound
+                |> Option.bind (fun (innerIndex, boundIndex, op) ->
+                    let allowed = indexAllowedForJoinSource leftOperand
+                    let columnName = combinedColumnsSoFar.[innerIndex].Name
+                    let range value =
+                        let lower, upper =
+                            match op with
+                            | Gt -> Some(value, false), None
+                            | Gte -> Some(value, true), None
+                            | Lt -> None, Some(value, false)
+                            | Lte -> None, Some(value, true)
+                            | _ -> None, None
+                        Storage.tryExactSecondaryRangeLookupInTableWith allowed store leftTable columnName lower upper
+
+                    if leftIndexed.Value.Length <> leftTable.RowsArray.Count
+                       || range (VDouble 0.0) |> Option.isNone then None
+                    else
+                        let rightRows = joinRows |> List.ofSeq
+                        if rightRows.Length > leftIndexed.Value.Length then None
+                        else
+                            Some(seq {
+                                let mutable inspected = 0
+                                for right in rightRows do
+                                    let candidates =
+                                        (match right.[boundIndex] with
+                                         | VDouble number when System.Double.IsFinite number ->
+                                             range (VDouble number)
+                                             |> Option.map (fun lookup ->
+                                                 lookup.RangeRows.Value |> Seq.map (snd >> readLeft))
+                                         | VNull -> Some Seq.empty
+                                         | _ -> None)
+                                        |> Option.defaultValue (leftIndexed.Value |> Seq.map snd)
+
+                                    for left in candidates do
+                                        Limits.checkQueryCancellation inspected
+                                        inspected <- inspected + 1
+                                        let combined = Array.append left right
+                                        match evalExpr { ctxFor combined with Clause = OnClause } effectiveOn with
+                                        | Ok value when truthy value = Some true -> yield combined
+                                        | Ok _ -> ()
+                                        | Error(code, message) -> raise (SqlError(code, message))
+                            }))
+            | _ -> None
+
         let isConstantTrue =
             function
             | LiteralValue value -> truthy value = Some true
             | BinOp(Eq, LiteralValue left, LiteralValue right) -> Value.equals left right = Some true
             | _ -> false
 
-        match preservedRightIndexProbe, indexedJoinProbe, streamingLeftHashClasses with
-        | Some probe, _, _ ->
+        match decimalDoubleRangeJoinRows, preservedRightIndexProbe, indexedJoinProbe, streamingLeftHashClasses with
+        | Some rows, _, _, _ -> Ok(newSources, rows, coalesceNames)
+        | None, Some probe, _, _ ->
             let leftRowsFor (right: Value[]) =
                 let indexedRows =
                     probe.ProbeIndices
@@ -12097,7 +12168,7 @@ and private applyPreparedJoin
                                 yield Array.append left right
                 }
             Ok(newSources, rows, coalesceNames)
-        | _, Some probe, _ ->
+        | None, _, Some probe, _ ->
             let exactKey =
                 probe.Index.UsesWholeStoredValues
                 && probe.ProbeIndices.Length = equiKeys.Length
@@ -12212,7 +12283,7 @@ and private applyPreparedJoin
                 |> Result.map (List.map (fun (leftIndex, rightIndex, (_, combined)) -> leftIndex, rightIndex, combined))
                 |> Result.map (buildCombinedRows rightIndexed >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
             | _ -> failwith "indexed join kind"
-        | _, None, Some classes ->
+        | None, _, None, Some classes ->
             let leftKeyPositions = equiKeys |> List.map fst
             let leftKeyIndices = leftKeyPositions |> Array.ofList
             let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
@@ -12259,7 +12330,7 @@ and private applyPreparedJoin
                 }
 
             Ok(newSources, rows, coalesceNames)
-        | _, None, _ when hashEligible.Value ->
+        | None, _, None, _ when hashEligible.Value ->
             let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
             let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
             let rightCount = joinRows |> Seq.length
@@ -12294,7 +12365,7 @@ and private applyPreparedJoin
                 candidates
                 |> keepMatches residualHolds id
                 |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
-        | _, None, _ ->
+        | None, _, None, _ ->
             let joinRows = cacheExaminedRows joinRows
             let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
 
