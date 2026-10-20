@@ -31623,15 +31623,16 @@ let transactionWriteTargets
                 | _ -> None
             let temporalBound columnType bound =
                 match columnType, bound with
-                | TTimestamp _, VTimestamp utc -> Some(decimal utc.Ticks)
+                | TTimestamp _, VTimestamp utc -> Some(decimal utc.Ticks, false)
                 | _ ->
                     dateTimeBound bound
                     |> Option.bind (fun value ->
                         match columnType with
-                        | TDateTime _ -> Some(decimal value.Ticks)
+                        | TDateTime _ -> Some(decimal value.Ticks, false)
                         | TTimestamp _ ->
                             try
-                                Some(decimal (sqlTimeZoneToUtc store.ExecutionSettings.TimeZone value).Ticks)
+                                let zone = store.ExecutionSettings.TimeZone
+                                Some(decimal (sqlTimeZoneToUtc zone value).Ticks, sqlTimeZoneSkipsLocalTime zone value)
                             with :? System.ArgumentException -> None
                         | _ -> None)
             let keyComparison name key bound =
@@ -31646,7 +31647,11 @@ let transactionWriteTargets
                 | OrderedNumber number, bound when (temporalColumnType name).IsSome ->
                     temporalColumnType name
                     |> Option.bind (fun columnType -> temporalBound columnType bound)
-                    |> Option.map (fun value -> Operators.compare number value)
+                    |> Option.bind (fun (value, skipped) ->
+                        let comparison = Operators.compare number value
+                        // MySQL waits at this gap boundary even when the eventual
+                        // predicate is false, so the claim cannot be excluded.
+                        if skipped && comparison = 0 then None else Some comparison)
                 | OrderedText key, VString text ->
                     table.Columns
                     |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
