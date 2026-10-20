@@ -626,6 +626,17 @@ let private materializedRangeLookup
                 )
                 |> fst
             | _ -> false
+        let validDateTimeBound = function
+            | VDate _ | VDateTime _ | VTimestamp _ -> true
+            | VString text ->
+                System.DateTime.TryParseExact(
+                    text,
+                    [| "yyyy-MM-dd"; "yyyy-MM-dd HH:mm:ss"; "yyyy-MM-dd HH:mm:ss.FFFFFFF" |],
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None
+                )
+                |> fst
+            | _ -> false
         let domain =
             if isNumericIndexType column.Type then
                 Some(Value.compare, isNumericIndexValue, isNumericIndexValue)
@@ -643,6 +654,9 @@ let private materializedRangeLookup
                     Some(compare, compatible, compatible)
                 | _ ->
                     match column.Type with
+                    | TDateTime _ | TTimestamp _ ->
+                        let sourceCompatible = function VDateTime _ | VTimestamp _ -> true | _ -> false
+                        Some(Value.compare, sourceCompatible, validDateTimeBound)
                     | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob ->
                         let compatible = function VBytes _ -> true | _ -> false
                         Some(Value.compare, compatible, compatible)
