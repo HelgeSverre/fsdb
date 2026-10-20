@@ -2389,26 +2389,40 @@ let tests =
                   [ "2026-01-02 12:34:56.123456"
                     "2026-01-03 12:34:56.123456"
                     "2026-01-04 12:34:56.123456" ]
+              let crossZoneTimes =
+                  [ sprintf "rank_value>'%s'" firstTimestamp, 0, Some firstTimestamp, "", false, [ 1; 2 ]
+                    sprintf "rank_value>'%s'" firstTimestamp, 0, Some "2026-01-01 14:34:56.123456", "", false, [ 1; 2 ]
+                    sprintf "rank_value>='%s'" firstTimestamp, 0, Some "2026-01-01 14:34:56.123456", "", true, [ 0; 1 ]
+                    sprintf "rank_value>'%s'" firstTimestamp, 100, Some "2026-12-31 14:34:56.123456", "", true, [ 1; 2 ] ]
+              let reverseCrossZoneTimes =
+                  [ sprintf "rank_value>'%s'" firstTimestamp, 0, Some "2026-01-01 09:34:56.123456", "", false, [ 1; 2 ]
+                    sprintf "rank_value>'%s'" firstTimestamp, 0, Some "2026-01-01 10:34:56.123456", "", false, [ 1; 2 ]
+                    sprintf "rank_value>='%s'" firstTimestamp, 0, Some "2026-01-01 10:34:56.123456", "", true, [ 0; 1 ]
+                    sprintf "rank_value>'%s'" firstTimestamp, 100, Some lastTimestamp, "", true, [ 1; 2 ] ]
               let foldedBounds scenarios =
                   scenarios
                   |> List.map (fun ((predicate: string), pendingId, pendingRank, hint, shouldWait, changedIds) ->
                       predicate.Replace("'a000'", "'A000'"), pendingId, pendingRank, hint, shouldWait, changedIds)
-              for rankType, baseRanks, orderExpression, common, updateOnly, timeZone in
-                  [ "INT", [ "1"; "2"; "3" ], "rank_value+0", numeric, numericUpdateOnly, "+00:00"
+              for rankType, baseRanks, orderExpression, common, updateOnly, ownerTimeZone, waiterTimeZone in
+                  [ "INT", [ "1"; "2"; "3" ], "rank_value+0", numeric, numericUpdateOnly, "+00:00", "+00:00"
                     "DATE", [ "2026-01-02"; "2026-01-03"; "2026-01-04" ],
-                        "DAYOFYEAR(rank_value)", dates, dateUpdateOnly, "+00:00"
+                        "DAYOFYEAR(rank_value)", dates, dateUpdateOnly, "+00:00", "+00:00"
                     "TIME", [ "351:00:00"; "352:00:00"; "353:00:00" ],
-                        "TIME_TO_SEC(rank_value)", times, timeUpdateOnly, "+00:00"
+                        "TIME_TO_SEC(rank_value)", times, timeUpdateOnly, "+00:00", "+00:00"
                     "DATETIME(6)", dateTimeBase,
-                        "DATE_ADD(rank_value, INTERVAL 0 SECOND)", dateTimes, dateTimeUpdateOnly, "+00:00"
+                        "DATE_ADD(rank_value, INTERVAL 0 SECOND)", dateTimes, dateTimeUpdateOnly, "+00:00", "+00:00"
                     "TIMESTAMP(6)", dateTimeBase,
-                        "DATE_ADD(rank_value, INTERVAL 0 SECOND)", dateTimes, dateTimeUpdateOnly, "+00:00"
+                        "DATE_ADD(rank_value, INTERVAL 0 SECOND)", dateTimes, dateTimeUpdateOnly, "+00:00", "+00:00"
                     "TIMESTAMP(6)", dateTimeBase,
-                        "DATE_ADD(rank_value, INTERVAL 0 SECOND)", dateTimes, dateTimeUpdateOnly, "+02:00"
+                        "DATE_ADD(rank_value, INTERVAL 0 SECOND)", dateTimes, dateTimeUpdateOnly, "+02:00", "+02:00"
+                    "TIMESTAMP(6)", dateTimeBase,
+                        "DATE_ADD(rank_value, INTERVAL 0 SECOND)", crossZoneTimes, [], "+02:00", "+00:00"
+                    "TIMESTAMP(6)", dateTimeBase,
+                        "DATE_ADD(rank_value, INTERVAL 0 SECOND)", reverseCrossZoneTimes, [], "+00:00", "+02:00"
                     "VARCHAR(8) COLLATE utf8mb4_bin", [ "a001"; "a002"; "a003" ],
-                        "CONCAT(rank_value,'')", text, textUpdateOnly, "+00:00"
+                        "CONCAT(rank_value,'')", text, textUpdateOnly, "+00:00", "+00:00"
                     "VARCHAR(8) COLLATE utf8mb4_0900_ai_ci", [ "a001"; "a002"; "a003" ],
-                        "CONCAT(rank_value,'')", foldedBounds text, foldedBounds textUpdateOnly, "+00:00" ] do
+                        "CONCAT(rank_value,'')", foldedBounds text, foldedBounds textUpdateOnly, "+00:00", "+00:00" ] do
                   let literal rank =
                       rank
                       |> Option.map (fun value -> if rankType = "INT" then value else "'" + value + "'")
@@ -2421,18 +2435,18 @@ let tests =
                       for predicate, pendingId, pendingRank, hint, shouldWait, changedIds in
                           common @ (if verb = "UPDATE" then updateOnly else []) do
                           let store = Fsdb.Storage.create ()
-                          let setup, _ = handle (create 1 store) ("SET time_zone='" + timeZone + "'")
+                          let setup, _ = handle (create 1 store) ("SET time_zone='" + ownerTimeZone + "'")
                           handle setup
                               (sprintf "CREATE TABLE tx_keyless_filesort(id INT,rank_value %s,n INT,KEY ix_rank(rank_value))" rankType)
                           |> ignore
                           handle setup ("INSERT INTO tx_keyless_filesort VALUES" + baseRows) |> ignore
-                          let owner, _ = handle (create 2 store) ("SET time_zone='" + timeZone + "'")
+                          let owner, _ = handle (create 2 store) ("SET time_zone='" + ownerTimeZone + "'")
                           let owner, _ = handle owner "BEGIN"
                           let owner, inserted =
                               handle owner
                                   (sprintf "INSERT INTO tx_keyless_filesort VALUES(%d,%s,0)" pendingId (literal pendingRank))
                           Expect.equal inserted (Affected 1UL) "owner inserts a pending secondary key"
-                          let waiter, _ = handle (create 3 store) ("SET time_zone='" + timeZone + "'")
+                          let waiter, _ = handle (create 3 store) ("SET time_zone='" + waiterTimeZone + "'")
                           let waiter, _ = handle waiter "BEGIN"
                           let action =
                               if verb = "UPDATE" then "UPDATE tx_keyless_filesort" + hint + " SET n=n+1"
@@ -2448,7 +2462,7 @@ let tests =
                           Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
                           Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "keyless writer resumes"
                           let waiter, result = waiting.Result
-                          let case = statement + " pending " + literal pendingRank + " at " + timeZone
+                          let case = statement + " pending " + literal pendingRank + " at " + ownerTimeZone + "/" + waiterTimeZone
                           Expect.equal blocked shouldWait (case + " wait behavior")
                           Expect.equal result (Affected 2UL) "keyless writer fills its limit"
                           Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "keyless writer commits"

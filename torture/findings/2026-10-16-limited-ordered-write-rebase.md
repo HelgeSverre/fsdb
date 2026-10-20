@@ -353,6 +353,13 @@ compare with stored UTC ticks. The shared transaction regression checks waits,
 affected counts, and final rows for both write verbs. Other temporal spellings
 and time-zone edge cases remain outside this audit.
 
+A follow-up runs eight `TIMESTAMP(6)` writes with an owner at `+02:00` and a
+waiter at UTC, and eight in the reverse direction. MySQL 8.4.11 and the fsdb
+transaction regression agree on whether a pending key falls strictly below,
+exactly on, or beyond the waiter's local bound, as well as affected counts and
+final rows. This checks the UTC claim conversion across two session time zones;
+named zones and daylight-saving transitions remain unaudited.
+
 Fsdb now observes the pending ordered claim for a keyless filesort when its
 first indexed column appears in the ORDER BY expression. It rules out a
 pending key proven below an indexed lower bound only when that index is
