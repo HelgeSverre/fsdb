@@ -2353,12 +2353,23 @@ let tests =
                     "rank_value>'a000'", 0, None, "", false, [ 1; 2 ] ]
               let textUpdateOnly =
                   [ "rank_value>'a000'", 0, Some "a000", " IGNORE INDEX(ix_rank)", true, [ 1; 2 ] ]
+              let dates =
+                  [ "rank_value>'2026-01-01'", 0, Some "2026-01-01", "", false, [ 1; 2 ]
+                    "rank_value>='2026-01-01'", 0, Some "2026-01-01", "", true, [ 0; 1 ]
+                    "rank_value>'2026-01-01'", 100, Some "2026-12-31", "", true, [ 1; 2 ]
+                    "rank_value<'2026-02-01'", 100, Some "2026-12-31", "", true, [ 1; 2 ]
+                    "n>=0", 0, None, "", true, [ 0; 1 ]
+                    "rank_value>'2026-01-01'", 0, None, "", false, [ 1; 2 ] ]
+              let dateUpdateOnly =
+                  [ "rank_value>'2026-01-01'", 0, Some "2026-01-01", " IGNORE INDEX(ix_rank)", true, [ 1; 2 ] ]
               let foldedBounds scenarios =
                   scenarios
                   |> List.map (fun ((predicate: string), pendingId, pendingRank, hint, shouldWait, changedIds) ->
                       predicate.Replace("'a000'", "'A000'"), pendingId, pendingRank, hint, shouldWait, changedIds)
               for rankType, baseRanks, orderExpression, common, updateOnly in
                   [ "INT", [ "1"; "2"; "3" ], "rank_value+0", numeric, numericUpdateOnly
+                    "DATE", [ "2026-01-02"; "2026-01-03"; "2026-01-04" ],
+                        "DAYOFYEAR(rank_value)", dates, dateUpdateOnly
                     "VARCHAR(8) COLLATE utf8mb4_bin", [ "a001"; "a002"; "a003" ],
                         "CONCAT(rank_value,'')", text, textUpdateOnly
                     "VARCHAR(8) COLLATE utf8mb4_0900_ai_ci", [ "a001"; "a002"; "a003" ],
