@@ -6222,6 +6222,10 @@ let private orderedSliceBounds
         let afterLast = lower |> Option.map afterBoundaryIndex |> Option.defaultWith (fun () -> if includeNulls then count else firstEqual VNull)
         first, afterLast
 
+type private DecimalDoubleRangeCut =
+    | ConservativeCut
+    | ExactCut
+
 let private trySecondaryOrderSliceInTable
     (store: Store)
     (table: Table)
@@ -6231,6 +6235,7 @@ let private trySecondaryOrderSliceInTable
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     (requireBound: bool)
+    (decimalDoubleCut: DecimalDoubleRangeCut)
     (allowed: string -> bool)
     : SecondaryOrderSlice option =
     let orderedIndex =
@@ -6274,12 +6279,10 @@ let private trySecondaryOrderSliceInTable
             | Some(VNull, _) -> None
             | Some(value, inclusive) ->
                 let value =
-                    match probeValues, requireBound, table.Columns.[index].Type, value with
-                    | StoredValues, true, TDecimal _, VDouble number when Double.IsFinite number ->
-                        // SQL can round a DECIMAL to the DOUBLE boundary even
-                        // when its exact value lies just across that boundary.
-                        // Include the adjacent binary interval and let the
-                        // predicate decide strictness and equality.
+                    match decimalDoubleCut, probeValues, requireBound, table.Columns.[index].Type, value with
+                    | ConservativeCut, StoredValues, true, TDecimal _, VDouble number when Double.IsFinite number ->
+                        // Residual SQL comparison can round a DECIMAL onto the
+                        // DOUBLE boundary, so ordinary candidate cuts widen.
                         let outside =
                             if isLower then Math.BitDecrement number
                             else Math.BitIncrement number
@@ -6393,7 +6396,11 @@ let internal trySecondaryRangeLookupInTableWith
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     : RangeLookup option =
-    trySecondaryOrderSliceInTable store table columnName None StoredValues lower upper true allowed
+    trySecondaryOrderSliceInTable store table columnName None StoredValues lower upper true ConservativeCut allowed
+    |> Option.bind (rangeLookup table)
+
+let internal tryExactSecondaryRangeLookupInTableWith allowed store table columnName lower upper =
+    trySecondaryOrderSliceInTable store table columnName None StoredValues lower upper true ExactCut allowed
     |> Option.bind (rangeLookup table)
 
 let internal trySecondaryRangeLookupInTable store table columnName lower upper =
@@ -6408,7 +6415,7 @@ let internal tryProjectedSecondaryRangeLookupInTableWith
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     : RangeLookup option =
-    trySecondaryOrderSliceInTable store table columnName (Some transform) ProjectedValues lower upper true allowed
+    trySecondaryOrderSliceInTable store table columnName (Some transform) ProjectedValues lower upper true ConservativeCut allowed
     |> Option.bind (rangeLookup table)
 
 let internal tryProjectedSecondaryRangeLookupInTable store table columnName transform lower upper =
@@ -6505,7 +6512,7 @@ let private tryOrderedLookup
     : (string * int * ColumnDef list * int * Value[] seq) option =
     tableAt store dbName tableName
     |> Option.bind (fun table ->
-        trySecondaryOrderSliceInTable store table columnName transform StoredValues lower upper false allowed
+        trySecondaryOrderSliceInTable store table columnName transform StoredValues lower upper false ConservativeCut allowed
         |> Option.bind (fun slice ->
             slice.ColumnIndices
             |> List.tryExactlyOne

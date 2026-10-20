@@ -110,6 +110,11 @@ The original predicate still decides membership. The [native oracle](../scripts/
 also exposes a separate high-precision compatibility gap: for five
 `DECIMAL(20,2)` values around `2^53` and a DOUBLE-column bound of `2^53`,
 MySQL's `>=` result is `(2,3,4,5)` with the index and `(1,2,3,4,5)` with
-`IGNORE INDEX`; its `<=` result is `(1,2)` versus `(1,2,3,4)`. FSDB keeps
-its indexed and scanned results consistent on that corpus, but does not yet
-reproduce MySQL's plan-dependent row membership. This edge remains open.
+`IGNORE INDEX`; its `<=` result is `(1,2)` versus `(1,2,3,4)`. The pinned
+MySQL 8.4.11 image reports `Range checked for each record` on the indexed
+DECIMAL side and a hash join with `IGNORE INDEX`. A focused FSDB regression
+now keeps those two plans distinct for an audited two-table inner join: each
+DOUBLE row probes the exact DECIMAL index range, while the ignored-index and
+primary-key-filtered forms evaluate the ordinary scan comparison. The test
+also covers reversed inequality syntax and two different DOUBLE bounds.
+Other join shapes still need their own plan and membership evidence.
