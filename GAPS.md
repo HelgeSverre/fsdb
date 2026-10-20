@@ -319,8 +319,8 @@ and the same DOUBLE literal retain their different results above `2^53`.
 use a conservative ordered candidate range on direct, pass-through, and
 materialized correlated sources. The audited two-table inner join with a
 selective DECIMAL index and a smaller DOUBLE-bound table uses MySQL's exact
-index cut, including the plan-dependent `DECIMAL(20,2)` comparisons near
-`2^53`; other join plans and shapes remain open.
+index cut in either written join order, including the plan-dependent
+`DECIMAL(20,2)` comparisons near `2^53`; other join plans and shapes remain open.
 Other approximate numeric combinations, text, and functional-expression
 bounds retain their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.

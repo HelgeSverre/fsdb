@@ -12052,34 +12052,55 @@ and private applyPreparedJoin
 
         let decimalDoubleRangeJoinRows =
             match join.Kind, join.Using, leftPhysicalTable, physicalTable, sourcesSoFar, rightSources with
-            | InnerJoin, [], Some leftTable, Some _, [ _ ], [ _ ]
-                when equiKeys.IsEmpty && combinedColumnsSoFar.Length = leftTable.Columns.Length ->
-                let innerColumnAndBound =
+            | InnerJoin, [], Some leftTable, Some rightTable, [ _ ], [ _ ]
+                when equiKeys.IsEmpty
+                     && combinedColumnsSoFar.Length = leftTable.Columns.Length
+                     && joinColumns.Length = rightTable.Columns.Length ->
+                let leftLength = combinedColumnsSoFar.Length
+                let columnAt index =
+                    if index < leftLength then combinedColumnsSoFar.[index]
+                    else joinColumns.[index - leftLength]
+                let reversed = function
+                    | Gt -> Lt | Gte -> Lte | Lt -> Gt | Lte -> Gte | other -> other
+                let decimalColumnAndBound =
                     match conjuncts effectiveOn with
                     | [ BinOp((Gt | Gte | Lt | Lte as op), QualifiedCol(leftQualifier, leftName), QualifiedCol(rightQualifier, rightName)) ] ->
                         match resolveQualified leftQualifier leftName, resolveQualified rightQualifier rightName with
                         | Some(leftIndex, _), Some(rightIndex, _) ->
-                            let reversed = function
-                                | Gt -> Lt | Gte -> Lte | Lt -> Gt | Lte -> Gte | other -> other
-                            let leftLength = combinedColumnsSoFar.Length
-                            let pair =
-                                if leftIndex < leftLength && rightIndex >= leftLength then
-                                    Some(leftIndex, rightIndex - leftLength, op)
-                                elif rightIndex < leftLength && leftIndex >= leftLength then
-                                    Some(rightIndex, leftIndex - leftLength, reversed op)
-                                else None
-                            pair
-                            |> Option.filter (fun (innerIndex, boundIndex, _) ->
-                                match combinedColumnsSoFar.[innerIndex].Type, joinColumns.[boundIndex].Type with
-                                | TDecimal _, TDouble _ -> true
-                                | _ -> false)
+                            match columnAt leftIndex, columnAt rightIndex with
+                            | { Type = TDecimal _ }, { Type = TDouble _ } ->
+                                Some(leftIndex, rightIndex, op)
+                            | { Type = TDouble _ }, { Type = TDecimal _ } ->
+                                Some(rightIndex, leftIndex, reversed op)
+                            | _ -> None
                         | _ -> None
                     | _ -> None
 
-                innerColumnAndBound
-                |> Option.bind (fun (innerIndex, boundIndex, op) ->
-                    let allowed = indexAllowedForJoinSource leftOperand
-                    let columnName = combinedColumnsSoFar.[innerIndex].Name
+                decimalColumnAndBound
+                |> Option.filter (fun (decimalIndex, doubleIndex, _) ->
+                    (decimalIndex < leftLength) <> (doubleIndex < leftLength))
+                |> Option.bind (fun (decimalIndex, doubleIndex, op) ->
+                    let indexedTable, indexSource, columnName, boundIndex, indexedRows, boundRows, readIndexed, combine =
+                        if decimalIndex < leftLength then
+                            leftTable,
+                            leftOperand,
+                            columnAt decimalIndex |> _.Name,
+                            doubleIndex - leftLength,
+                            rowsSoFar |> List.ofSeq,
+                            joinRows |> List.ofSeq,
+                            readLeft,
+                            (fun indexed bound -> Array.append indexed bound)
+                        else
+                            rightTable,
+                            Some join.Table,
+                            columnAt decimalIndex |> _.Name,
+                            doubleIndex,
+                            joinRows |> List.ofSeq,
+                            rowsSoFar |> List.ofSeq,
+                            readRight,
+                            (fun indexed bound -> Array.append bound indexed)
+
+                    let allowed = indexAllowedForJoinSource indexSource
                     let range value =
                         let lower, upper =
                             match op with
@@ -12088,31 +12109,30 @@ and private applyPreparedJoin
                             | Lt -> None, Some(value, false)
                             | Lte -> None, Some(value, true)
                             | _ -> None, None
-                        Storage.tryExactSecondaryRangeLookupInTableWith allowed store leftTable columnName lower upper
+                        Storage.tryExactSecondaryRangeLookupInTableWith allowed store indexedTable columnName lower upper
 
-                    if leftIndexed.Value.Length <> leftTable.RowsArray.Count
+                    if indexedRows.Length <> indexedTable.RowsArray.Count
                        || range (VDouble 0.0) |> Option.isNone then None
                     else
-                        let rightRows = joinRows |> List.ofSeq
-                        if rightRows.Length > leftIndexed.Value.Length then None
+                        if boundRows.Length > indexedRows.Length then None
                         else
                             Some(seq {
                                 let mutable inspected = 0
-                                for right in rightRows do
+                                for bound in boundRows do
                                     let candidates =
-                                        (match right.[boundIndex] with
+                                        (match bound.[boundIndex] with
                                          | VDouble number when System.Double.IsFinite number ->
                                              range (VDouble number)
                                              |> Option.map (fun lookup ->
-                                                 lookup.RangeRows.Value |> Seq.map (snd >> readLeft))
+                                                 lookup.RangeRows.Value |> Seq.map (snd >> readIndexed))
                                          | VNull -> Some Seq.empty
                                          | _ -> None)
-                                        |> Option.defaultValue (leftIndexed.Value |> Seq.map snd)
+                                        |> Option.defaultValue (indexedRows :> seq<Value[]>)
 
-                                    for left in candidates do
+                                    for indexed in candidates do
                                         Limits.checkQueryCancellation inspected
                                         inspected <- inspected + 1
-                                        let combined = Array.append left right
+                                        let combined = combine indexed bound
                                         match evalExpr { ctxFor combined with Clause = OnClause } effectiveOn with
                                         | Ok value when truthy value = Some true -> yield combined
                                         | Ok _ -> ()
