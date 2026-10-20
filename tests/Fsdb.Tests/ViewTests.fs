@@ -749,7 +749,7 @@ let tests =
               | other -> failtestf "expected outer CHECK OPTION rejection, got %A" other
               Expect.equal (rows store "SELECT n FROM two_source_target") [ [ Some "11" ] ] "the rejected write is atomic"
 
-          testCase "grouped derived UPDATE source can precede two writable joined views"
+          testCase "grouped derived UPDATE source can precede writable joined views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               for sql in
@@ -763,9 +763,8 @@ let tests =
                     "CREATE VIEW derived_update_vb AS SELECT t.id,t.n,l.id AS link_id FROM derived_update_b t JOIN derived_update_link l ON t.id=l.id" ] do
                   expectOk (run store sql) sql
 
-              let source =
-                  "(SELECT id,COUNT(*) AS hits FROM derived_update_link GROUP BY id) g "
-                  + "JOIN derived_update_va va ON g.id=va.link_id "
+              let derived = "(SELECT id,COUNT(*) AS hits FROM derived_update_link GROUP BY id) g "
+              let source = derived + "JOIN derived_update_va va ON g.id=va.link_id "
 
               let grouped =
                   source + "JOIN LATERAL (SELECT l.id AS link_id,COUNT(*) AS hits "
@@ -801,6 +800,41 @@ let tests =
                   (rows store "SELECT id,n FROM derived_update_b ORDER BY id")
                   [ [ Some "1"; Some "32" ]; [ Some "3"; Some "40" ] ]
                   "second target changes again"
+
+              let leftSource = derived + "LEFT JOIN derived_update_va va ON g.id=va.link_id "
+              let rightSource = derived + "RIGHT JOIN derived_update_va va ON g.id=va.link_id "
+              Expect.equal
+                  (run store ("UPDATE " + leftSource + "SET va.n=va.n+1 WHERE g.id=3"))
+                  (Affected 0UL)
+                  "a missing optional view row is not updated"
+              Expect.equal
+                  (run store ("UPDATE " + leftSource + "SET va.n=va.n+1 WHERE g.id=1"))
+                  (Affected 1UL)
+                  "a matched optional view row is updated"
+              Expect.equal
+                  (run store ("UPDATE " + rightSource + "SET va.n=va.n+1 WHERE va.id=2"))
+                  (Affected 1UL)
+                  "a right-joined view row remains writable"
+              Expect.equal
+                  (run store ("UPDATE " + leftSource
+                              + "LEFT JOIN derived_update_vb vb ON vb.link_id=g.id "
+                              + "SET va.n=va.n+1,vb.n=vb.n+1 WHERE g.id=1"))
+                  (Affected 2UL)
+                  "both optional views can be updated"
+              Expect.equal
+                  (run store ("UPDATE " + rightSource
+                              + "LEFT JOIN derived_update_vb vb ON vb.link_id=va.link_id "
+                              + "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1"))
+                  (Affected 2UL)
+                  "the later optional view stays dependent on the right-joined view"
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_update_a ORDER BY id")
+                  [ [ Some "1"; Some "15" ]; [ Some "2"; Some "21" ] ]
+                  "outer-joined writes reach only matching first-target rows"
+              Expect.equal
+                  (rows store "SELECT id,n FROM derived_update_b ORDER BY id")
+                  [ [ Some "1"; Some "34" ]; [ Some "3"; Some "40" ] ]
+                  "outer-joined writes reach only matching second-target rows"
 
           testCase "an unchecked outer join enforces only the inner view check"
           <| fun _ ->

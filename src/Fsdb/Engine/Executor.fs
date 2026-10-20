@@ -24141,6 +24141,13 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             | None -> update
         | ({ Kind = InnerJoin; Table = (FromSubquery _ | FromLateral _ | FromJsonTable _); Using = [] } as join) :: rest ->
             move (join :: prior) rest
+        | ({ Table = FromSubquery _; Using = [] } as join) :: rest
+            when join.Kind = LeftJoin || join.Kind = RightJoin ->
+            // A non-lateral derived source has no dependency on the view to
+            // its left. Keep it in the grouped prefix when moving a later
+            // assigned view, so that the first view can expand before the
+            // second one without losing the outer-join boundary.
+            move (join :: prior) rest
         | _ -> update
 
     // Move a later assigned view while CTE names are still available. The
