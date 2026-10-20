@@ -2281,6 +2281,45 @@ let tests =
                       "MySQL 8.4 range counts"
               | other -> failtestf "expected correlated range counts, got %A" other
 
+          testCase "materialized correlated DATE ranges bound residual work"
+          <| fun _ ->
+              let mutable touches = 0
+              let touch values =
+                  touches <- touches + 1
+                  List.head values
+              let registry = registerScalar "TOUCH" touch builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_date_bounds(id INT PRIMARY KEY,min_d DATE,max_d DATE)" |> ignore
+              runDefault store "CREATE TABLE inner_date_values(id INT PRIMARY KEY,d DATE,active INT)" |> ignore
+              runDefault store "INSERT INTO outer_date_bounds VALUES(1,'2026-12-20','2026-12-22'),(2,NULL,NULL)" |> ignore
+              let start = System.DateOnly(2026, 1, 1)
+              [ 0 .. 364 ]
+              |> List.map (fun day ->
+                  sprintf "(%d,'%s',1)" (day + 1) (start.AddDays(day).ToString("yyyy-MM-dd")))
+              |> String.concat ","
+              |> fun rows -> runDefault store ("INSERT INTO inner_date_values VALUES" + rows)
+              |> ignore
+
+              for predicate, firstCount, secondCount in
+                  [ "d.d>=o.min_d", "12", "0"
+                    "d.d>o.min_d", "11", "0"
+                    "d.d BETWEEN o.min_d AND o.max_d", "3", "0"
+                    "d.d BETWEEN o.min_d AND '2026-12-22'", "3", "0"
+                    "d.d>=o.min_d OR d.id=1", "13", "1" ] do
+                  touches <- 0
+                  let sql =
+                      "WITH grouped AS (SELECT id,d,MAX(active) AS active FROM inner_date_values GROUP BY id,d) "
+                      + "SELECT o.id,(SELECT COUNT(*) FROM grouped d "
+                      + "WHERE TOUCH(d.active)=1 AND (" + predicate + ")) "
+                      + "FROM outer_date_bounds o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows
+                          [ [ Some "1"; Some firstCount ]; [ Some "2"; Some secondCount ] ]
+                          ("MySQL DATE range counts for " + predicate)
+                  | other -> failtestf "expected correlated DATE range counts for %s, got %A" predicate other
+                  Expect.isLessThan touches 30 ("DATE range should narrow materialized candidates for " + predicate)
+
           testCase "materialized correlated probes choose the narrower access path"
           <| fun _ ->
               let mutable touches = 0
