@@ -721,7 +721,7 @@ Full scans conservatively claim the rows visible when the statement begins,
 then refresh and recheck selected row identities after a wait
 ([MySQL 8.4 oracle and regressions](torture/findings/2026-10-14-full-scan-write-scheduling.md)).
 Keyless limited filesort writes additionally observe pending ordered secondary
-inserts on [audited numeric, text, DATE, and TIME index shapes](torture/findings/2026-10-16-limited-ordered-write-rebase.md#keyless-filesort-writes).
+inserts on [audited numeric, text, DATE, TIME, DATETIME, and TIMESTAMP index shapes](torture/findings/2026-10-16-limited-ordered-write-rebase.md#keyless-filesort-writes).
 General full scans do not claim gaps or later inserted rows. A [focused unindexed-write load
 probe](benchmarks/results/92b019ff-full-scan-write-load.md) records the current
 worker-scaling slope. Unique-key claims, incremental index validation, and merged-result

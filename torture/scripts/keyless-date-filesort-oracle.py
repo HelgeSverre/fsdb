@@ -1,4 +1,4 @@
-"""Check keyless DATE and TIME filesort writes against native MySQL 8.4.11."""
+"""Check keyless temporal filesort writes against native MySQL 8.4.11."""
 
 import pathlib
 import runpy
@@ -9,7 +9,9 @@ oracle = runpy.run_path(
 )
 
 
-def verify_cases(owner, waiter, column_type, base_ranks, order_expression, scenarios):
+def verify_cases(
+    owner, waiter, column_type, base_ranks, order_expression, scenarios, label=None
+):
     cases = 0
     for verb in ("UPDATE", "DELETE"):
         for (
@@ -91,10 +93,12 @@ def verify_cases(owner, waiter, column_type, base_ranks, order_expression, scena
             )
             assert actual == expected, (statement, pending_rank, actual)
             cases += 1
-    print(f"MySQL 8.4.11: {cases} keyless {column_type} filesort cases passed")
+    print(f"MySQL 8.4.11: {cases} keyless {label or column_type} filesort cases passed")
 
 
 def verify(owner, waiter):
+    owner.query("SET time_zone='+00:00'")
+    waiter.query("SET time_zone='+00:00'")
     dates = (
         ("rank_value>'2026-01-01'", 0, "2026-01-01", "", False, (1, 2)),
         ("rank_value>='2026-01-01'", 0, "2026-01-01", "", True, (0, 1)),
@@ -145,6 +149,46 @@ def verify(owner, waiter):
         ("351:00:00", "352:00:00", "353:00:00"),
         "TIME_TO_SEC(rank_value)",
         times,
+    )
+
+    start = "2026-01-01 12:34:56.123456"
+    end = "2026-12-31 12:34:56.123456"
+    datetime_cases = (
+        (f"rank_value>'{start}'", 0, start, "", False, (1, 2)),
+        (f"rank_value>='{start}'", 0, start, "", True, (0, 1)),
+        (f"rank_value>'{start}'", 100, end, "", True, (1, 2)),
+        ("rank_value<'2026-02-01 00:00:00'", 100, end, "", True, (1, 2)),
+        ("n>=0", 0, None, "", True, (0, 1)),
+        (f"rank_value>'{start}'", 0, None, "", False, (1, 2)),
+        (f"rank_value>'{start}'", 0, start, " IGNORE INDEX(ix_rank)", True, (1, 2)),
+    )
+    for column_type in ("DATETIME(6)", "TIMESTAMP(6)"):
+        verify_cases(
+            owner,
+            waiter,
+            column_type,
+            (
+                "2026-01-02 12:34:56.123456",
+                "2026-01-03 12:34:56.123456",
+                "2026-01-04 12:34:56.123456",
+            ),
+            "DATE_ADD(rank_value, INTERVAL 0 SECOND)",
+            datetime_cases,
+        )
+    owner.query("SET time_zone='+02:00'")
+    waiter.query("SET time_zone='+02:00'")
+    verify_cases(
+        owner,
+        waiter,
+        "TIMESTAMP(6)",
+        (
+            "2026-01-02 12:34:56.123456",
+            "2026-01-03 12:34:56.123456",
+            "2026-01-04 12:34:56.123456",
+        ),
+        "DATE_ADD(rank_value, INTERVAL 0 SECOND)",
+        datetime_cases,
+        "TIMESTAMP(6) at +02:00",
     )
 
 
