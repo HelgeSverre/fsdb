@@ -1204,9 +1204,14 @@ at size 1. MeCab and other untested Unicode ranges remain open.
 The [Tangut ngram audit](torture/findings/2026-10-20-tangut-ngram-audit.md)
 finds no membership or relevance differences in 82,956 general-ci searches
 across the ideograph, Components, and sampled Supplement ranges at sizes 1–2;
-representative pages also match Unicode 5.2, Unicode 9.0, and Japanese 9.0
-collations. MeCab and the untested token-size, collation, and query-shape
-combinations remain open.
+representative pages also match legacy Unicode, Unicode 5.2, Unicode 9.0,
+and Japanese 9.0 collations. MeCab and the untested token-size, collation,
+and query-shape combinations remain open.
+The [Khitan Small Script ngram audit](torture/findings/2026-10-20-khitan-ngram-audit.md)
+finds no two-column membership or relevance differences across the printable
+U+18B00–U+18CFF scalars under general and legacy Unicode collations at token
+sizes 1–2. Representative first-page Unicode 5.2, Unicode 9.0, and Japanese
+9.0 searches also agree; MeCab and other combinations remain open.
 The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
 likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
 plus 1,464 legacy Unicode searches over its later part at size 1.
