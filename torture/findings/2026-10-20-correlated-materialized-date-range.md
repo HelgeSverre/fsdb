@@ -1,4 +1,4 @@
-# Correlated DATE ranges over stable materialized sources
+# Correlated temporal ranges over stable materialized sources
 
 A stable materialized source with a DATE column re-scanned its rows for a
 correlated range. On 365 distinct 2026 dates and two outer bounds,
@@ -21,6 +21,14 @@ counts, including NULL outer bounds, and fewer than 30 residual calls for
 each shape. Before this change, the inclusive range and ISO-literal BETWEEN
 each made 1,098 calls in that regression.
 
-This narrows the materialized DATE lookup gap for those shapes. DATETIME,
-TIMESTAMP, invalid DATE values, non-ISO string bounds, and other correlated
-temporal expressions remain outside this audit.
+The same grouped-source corpus now covers `DATETIME(6)` and `TIMESTAMP(6)`
+under MySQL 8.4.11 with six predicates each, including a date-only literal
+bound against timestamped rows. The statement-local lookup
+accepts temporal source rows and DATE, DATETIME, TIMESTAMP, or valid ISO
+date/time bounds; strings with other spellings retain the scan path. The
+focused regression checks both result counts and fewer than 30 residual
+calls per predicate. Its inclusive lower bound made 1,098 calls before
+the extension.
+
+Zero/invalid temporal source values, non-ISO string bounds, and other
+correlated temporal expressions remain outside this audit.

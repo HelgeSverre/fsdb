@@ -98,6 +98,61 @@ def main():
                     print(
                         f"MySQL {version}: {len(cases)} materialized DATE range cases passed"
                     )
+                    cursor.execute("SET time_zone='+00:00'")
+                    for temporal_type in ("DATETIME(6)", "TIMESTAMP(6)"):
+                        cursor.execute("DROP TABLE inner_rows")
+                        cursor.execute("DROP TABLE outer_bounds")
+                        cursor.execute(
+                            "CREATE TABLE outer_bounds(id INT PRIMARY KEY,"
+                            f"min_d {temporal_type},max_d {temporal_type})"
+                        )
+                        cursor.execute(
+                            "CREATE TABLE inner_rows(id INT PRIMARY KEY,"
+                            f"d {temporal_type},active INT)"
+                        )
+                        cursor.execute(
+                            "INSERT INTO outer_bounds VALUES"
+                            "(1,'2026-12-20 12:34:56.123456',"
+                            "'2026-12-22 12:34:56.123456'),(2,NULL,NULL)"
+                        )
+                        start_time = datetime.datetime(2026, 1, 1, 12, 34, 56, 123456)
+                        cursor.executemany(
+                            "INSERT INTO inner_rows VALUES(%s,%s,1)",
+                            [
+                                (day + 1, start_time + datetime.timedelta(days=day))
+                                for day in range(365)
+                            ],
+                        )
+                        temporal_cases = [
+                            ("d.d>=o.min_d", (12, 0)),
+                            ("d.d>o.min_d", (11, 0)),
+                            ("d.d BETWEEN o.min_d AND o.max_d", (3, 0)),
+                            (
+                                "d.d BETWEEN o.min_d AND '2026-12-22 12:34:56.123456'",
+                                (3, 0),
+                            ),
+                            ("d.d>='2026-12-30'", (2, 2)),
+                            ("d.d>=o.min_d OR d.id=1", (13, 1)),
+                        ]
+                        for predicate, expected in temporal_cases:
+                            cursor.execute(
+                                "WITH grouped AS (SELECT id,d,MAX(active) AS active "
+                                "FROM inner_rows GROUP BY id,d) "
+                                "SELECT o.id,(SELECT COUNT(*) FROM grouped d "
+                                f"WHERE d.active=1 AND ({predicate})) "
+                                "FROM outer_bounds o ORDER BY o.id"
+                            )
+                            actual = tuple(count for _, count in cursor.fetchall())
+                            assert actual == expected, (
+                                temporal_type,
+                                predicate,
+                                actual,
+                                expected,
+                            )
+                        print(
+                            f"MySQL {version}: {len(temporal_cases)} materialized "
+                            f"{temporal_type} range cases passed"
+                        )
             finally:
                 if connection:
                     connection.close()

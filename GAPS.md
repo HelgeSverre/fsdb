@@ -365,10 +365,11 @@ Stable materialized text expressions also use a [comparison-collation-aware
 correlated IN lookup](torture/findings/2026-10-18-correlated-materialized-text-expression-in.md)
 for audited string and NULL lists, including complete OR branches. The
 original predicate still decides row membership after candidate narrowing.
-[Stable materialized DATE ranges](torture/findings/2026-10-20-correlated-materialized-date-range.md)
-now use a statement-local ordered lookup for audited correlated DATE and
-valid ISO-literal bounds, including BETWEEN and complete OR branches. Other
-temporal types and invalid-date cases remain open.
+[Stable materialized temporal ranges](torture/findings/2026-10-20-correlated-materialized-date-range.md)
+now use a statement-local ordered lookup for audited correlated DATE,
+DATETIME(6), and TIMESTAMP(6) bounds, including valid ISO literals, BETWEEN,
+and complete OR branches. Zero/invalid temporal values, other bound spellings,
+and broader temporal expressions retain the scan fallback or remain open.
 
 [A compound `ON` equality](torture/findings/2026-10-07-fulltext-join-bounds.md#costed-source-choice-with-compound-on)
 now also participates in the audited costed mixed-type join source choice;
