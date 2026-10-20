@@ -190,6 +190,18 @@ def main():
                     "WHERE l.id=g.id AND l.id=va.link_id) q ON TRUE "
                     "LEFT JOIN vb ON vb.link_id=q.link_id "
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE g.id=1",
+                    "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
+                    "LEFT JOIN va ON g.id=va.link_id SET va.n=va.n+1 WHERE g.id=1",
+                    "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
+                    "LEFT JOIN va ON g.id=va.link_id SET va.n=va.n+1 WHERE g.id=3",
+                    "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
+                    "RIGHT JOIN va ON g.id=va.link_id SET va.n=va.n+1 WHERE va.id=2",
+                    "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
+                    "LEFT JOIN va ON g.id=va.link_id LEFT JOIN vb ON vb.link_id=g.id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE g.id=1",
+                    "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
+                    "RIGHT JOIN va ON g.id=va.link_id LEFT JOIN vb ON vb.link_id=va.link_id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)
@@ -262,6 +274,12 @@ def main():
                     ("b", 1, "UPDATE read_counts rc JOIN va ON rc.id=va.link_id "
                      "LEFT JOIN vb ON va.link_id=vb.link_id "
                      "SET vb.n=vb.n+1 WHERE rc.id=1"),
+                    ("b", 1, "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
+                     "LEFT JOIN va ON g.id=va.link_id LEFT JOIN vb ON vb.link_id=g.id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE g.id=1"),
+                    ("a", 1, "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
+                     "RIGHT JOIN va ON g.id=va.link_id LEFT JOIN vb ON vb.link_id=va.link_id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1"),
                 ]
                 for table, row_id, sql in contended:
                     expected = contended_update(mysql_connection, {"unix_socket": mysql_socket}, table, row_id, sql)

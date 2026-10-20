@@ -4688,16 +4688,20 @@ let private singleTableOrderLimit (joins: Join list) : Parser<OrderKey list * Ex
 
 /// The mutation executor keeps a physical table or view in `UpdateStmt.From`.
 /// An independent derived source may lead a multi-table UPDATE when its first
-/// join is an inner join to a table/view: swap those two inner-join operands
-/// while leaving the predicate and all later (possibly LATERAL) joins in order.
+/// join is to a table/view. Swap the operands, reversing LEFT/RIGHT direction
+/// when needed, while retaining the predicate and all later dependent joins.
 let private updateSources: Parser<TableRef * Join list, unit> =
     fromItem .>>. many joinClause
     >>= fun (source, joins) ->
         match source, joins with
         | FromTable table, _ -> preturn (table, joins)
-        | FromSubquery _, ({ Kind = InnerJoin; Table = FromTable table; Using = [] } as first) :: rest ->
-            preturn (table, { first with Table = source } :: rest)
-        | _ -> fail "UPDATE requires a table or an inner-joined table after a derived source"
+        | FromSubquery _, ({ Table = FromTable table; Using = [] } as first) :: rest ->
+            match first.Kind with
+            | InnerJoin -> preturn (table, { first with Table = source } :: rest)
+            | LeftJoin -> preturn (table, { first with Kind = RightJoin; Table = source } :: rest)
+            | RightJoin -> preturn (table, { first with Kind = LeftJoin; Table = source } :: rest)
+            | _ -> fail "UPDATE requires an inner or outer join after a derived source"
+        | _ -> fail "UPDATE requires a table or a joined table after a derived source"
 
 /// `UPDATE source [JOIN ...] SET assignments [WHERE ...] [ORDER BY ...]
 /// [LIMIT ...]`.

@@ -1059,9 +1059,9 @@ aliases, writable physical target aliases, or independent derived read-source
 aliases match; [dependent `LATERAL` and `JSON_TABLE` read aliases](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
 also remain scoped across both writable views in audited two-target UPDATEs.
 The [joined-view source oracle](torture/findings/2026-10-18-two-joined-view-outer-writes.md)
-now also matches MySQL for twenty-five UPDATE cases, including LEFT/RIGHT joins with matched or
+now also matches MySQL for thirty UPDATE cases, including LEFT/RIGHT joins with matched or
 missing view rows, shared internal aliases, grouped lateral read sources,
-atomic `CHECK OPTION` rejection, and fifteen contended rebases. Joined updates
+atomic `CHECK OPTION` rejection, and seventeen contended rebases. Joined updates
 now claim every assigned writable view's physical target before taking their
 transaction snapshot, including a right-only row that previously failed
 COMMIT with 1205 after the holder released its lock.
@@ -1083,8 +1083,11 @@ Grouped derived aliases and dependent `LATERAL` aliases now also stay scoped
 across both writable views, including an atomic CHECK OPTION rejection and a
 contended two-target rebase. A grouped derived table can also lead an UPDATE
 before an inner-joined writable view, followed by a grouped or scalar LATERAL
-source and a second writable view under INNER or LEFT JOIN. Broader grouped
-dependency trees remain unaudited.
+source and a second writable view under INNER or LEFT JOIN. The leading derived
+source also works under LEFT and RIGHT joins to the first view, including a
+missing optional row and a later second writable view under LEFT JOIN; two
+such two-target updates also match MySQL while waiting and rebasing. Broader
+grouped dependency trees remain unaudited.
 `LOAD DATA` into an inner-join view is also refused with MySQL error 1288
 before a local upload or server-side file read; ordinary inserts remain
 available through their supported forms.
