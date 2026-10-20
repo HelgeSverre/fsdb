@@ -99,14 +99,18 @@ def verify(client, _writer):
         "INSERT INTO text_exclusion_bounds VALUES(1,'a010','a020'),"
         "(2,'a020','a010'),(3,NULL,'a010');"
         "CREATE TABLE text_exclusion_rows(id INT PRIMARY KEY,"
-        "code VARCHAR(8) COLLATE utf8mb4_bin,KEY ix_code(code));"
+        "code VARCHAR(8) COLLATE utf8mb4_bin,KEY ix_code(code),"
+        "KEY ix_lower ((LOWER(code))));"
         f"INSERT INTO text_exclusion_rows VALUES{repeated};"
         "INSERT INTO text_exclusion_rows VALUES(1000,'a999')"
     )
     for source_name, source in [
         ("physical", "text_exclusion_rows d"),
         ("pass-through", "(SELECT id,code FROM text_exclusion_rows) d"),
-        ("materialized", "(SELECT id,CONCAT(code,'') AS code FROM text_exclusion_rows LIMIT 1001) d"),
+        (
+            "materialized",
+            "(SELECT id,CONCAT(code,'') AS code FROM text_exclusion_rows LIMIT 1001) d",
+        ),
     ]:
         for name, predicate, bound_id, expected in [
             ("one member", "d.code NOT IN(u.lo)", 1, "1"),
@@ -114,11 +118,69 @@ def verify(client, _writer):
             ("selective second", "d.code NOT IN(u.hi,u.lo)", 1, "1"),
             ("NULL member", "d.code NOT IN(u.lo,u.hi)", 3, "0"),
             ("complete OR", "d.code NOT IN(u.hi,u.lo) OR d.id=1", 1, "2"),
-            ("different comparison collation", "d.code NOT IN(u.lo COLLATE utf8mb4_0900_ai_ci)", 1, "1"),
+            (
+                "different comparison collation",
+                "d.code NOT IN(u.lo COLLATE utf8mb4_0900_ai_ci)",
+                1,
+                "1",
+            ),
         ]:
-            query = ("SELECT (SELECT COUNT(*) FROM " + source + " WHERE " + predicate
-                     + ") FROM text_exclusion_bounds u WHERE u.id=" + str(bound_id))
-            oracle["expect"](source_name + " text NOT IN " + name, client.query(query), expected)
+            query = (
+                "SELECT (SELECT COUNT(*) FROM "
+                + source
+                + " WHERE "
+                + predicate
+                + ") FROM text_exclusion_bounds u WHERE u.id="
+                + str(bound_id)
+            )
+            oracle["expect"](
+                source_name + " text NOT IN " + name, client.query(query), expected
+            )
+
+    for source_name, source in [
+        ("physical", "text_exclusion_rows d"),
+        ("pass-through", "(SELECT id,code FROM text_exclusion_rows) d"),
+        (
+            "materialized",
+            "(SELECT id,CONCAT(code,'') AS code FROM text_exclusion_rows LIMIT 1001) d",
+        ),
+    ]:
+        for name, predicate, bound_id, expected in [
+            ("one member", "LOWER(d.code) NOT IN(LOWER(u.lo))", 1, "1"),
+            ("two members", "LOWER(d.code) NOT IN(LOWER(u.lo),LOWER(u.hi))", 1, "1"),
+            (
+                "selective second",
+                "LOWER(d.code) NOT IN(LOWER(u.hi),LOWER(u.lo))",
+                1,
+                "1",
+            ),
+            ("NULL member", "LOWER(d.code) NOT IN(LOWER(u.lo),LOWER(u.hi))", 3, "0"),
+            (
+                "complete OR",
+                "LOWER(d.code) NOT IN(LOWER(u.hi),LOWER(u.lo)) OR d.id=1",
+                1,
+                "2",
+            ),
+            (
+                "different collation",
+                "LOWER(d.code) NOT IN(LOWER(u.lo) COLLATE utf8mb4_0900_ai_ci)",
+                1,
+                "1",
+            ),
+        ]:
+            query = (
+                "SELECT (SELECT COUNT(*) FROM "
+                + source
+                + " WHERE "
+                + predicate
+                + ") FROM text_exclusion_bounds u WHERE u.id="
+                + str(bound_id)
+            )
+            oracle["expect"](
+                source_name + " functional text NOT IN " + name,
+                client.query(query),
+                expected,
+            )
 
 
 if __name__ == "__main__":

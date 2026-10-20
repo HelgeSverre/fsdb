@@ -14606,7 +14606,7 @@ let tests =
                         "INSERT INTO text_exclusion_bounds VALUES(1,'a010','a020'),(2,'a020','a010'),(3,NULL,'a010')"
                     |> ignore
                     runDefault store
-                        "CREATE TABLE text_exclusion_rows(id INT PRIMARY KEY,code VARCHAR(8) COLLATE utf8mb4_bin,KEY ix_code(code))"
+                        "CREATE TABLE text_exclusion_rows(id INT PRIMARY KEY,code VARCHAR(8) COLLATE utf8mb4_bin,KEY ix_code(code),KEY ix_lower ((LOWER(code))))"
                     |> ignore
                     [ 0..999 ]
                     |> List.map (fun id -> sprintf "(%d,'a010')" id)
@@ -14662,6 +14662,57 @@ let tests =
                         | ResultSet(_, [ [ Some "1" ] ]) -> ()
                         | other -> failtestf "explicit comparison collation must retain its result, got %A" other
                         Expect.isGreaterThan calls 900 "a different comparison collation declines the stored-key range"
+
+                    for source in
+                        [ "text_exclusion_rows d"
+                          "(SELECT id,code FROM text_exclusion_rows) d"
+                          "(SELECT id,CONCAT(code,'') AS code FROM text_exclusion_rows LIMIT 1001) d" ] do
+                        for predicate in
+                            [ "LOWER(d.code) NOT IN(LOWER(u.lo))"
+                              "LOWER(d.code) NOT IN(LOWER(u.lo),LOWER(u.hi))"
+                              "LOWER(d.code) NOT IN(LOWER(u.hi),LOWER(u.lo))" ] do
+                            calls <- 0
+                            let sql =
+                                "SELECT (SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                                + "FROM text_exclusion_bounds u WHERE u.id=1"
+                            match run store registry sql with
+                            | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                            | other -> failtestf "expected functional text exclusion count, got %A" other
+                            Expect.isLessThan calls 80 (source + " narrows " + predicate)
+
+                        calls <- 0
+                        let nullSql =
+                            "SELECT (SELECT COUNT(*) FROM " + source
+                            + " WHERE TOUCH(d.id)=d.id AND LOWER(d.code) NOT IN(LOWER(u.lo),LOWER(u.hi))) "
+                            + "FROM text_exclusion_bounds u WHERE u.id=3"
+                        match run store registry nullSql with
+                        | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                        | other -> failtestf "expected NULL functional exclusion, got %A" other
+                        Expect.isLessThan calls 80 "NULL functional exclusion uses empty candidates"
+
+                        calls <- 0
+                        let orSql =
+                            "SELECT (SELECT COUNT(*) FROM " + source
+                            + " WHERE TOUCH(d.id)=d.id AND (LOWER(d.code) NOT IN(LOWER(u.hi),LOWER(u.lo)) OR d.id=1)) "
+                            + "FROM text_exclusion_bounds u WHERE u.id=1"
+                        match run store registry orSql with
+                        | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                        | other -> failtestf "expected functional exclusion OR, got %A" other
+                        Expect.isLessThan calls 80 "functional exclusion OR remains bounded"
+
+                        calls <- 0
+                        let mismatchSql =
+                            "SELECT (SELECT COUNT(*) FROM " + source
+                            + " WHERE TOUCH(d.id)=d.id AND LOWER(d.code) NOT IN(LOWER(u.lo) COLLATE utf8mb4_0900_ai_ci)) "
+                            + "FROM text_exclusion_bounds u WHERE u.id=1"
+                        match run store registry mismatchSql with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | other -> failtestf "expected mismatched functional exclusion, got %A" other
+                        if source = "text_exclusion_rows d" then
+                            Expect.isGreaterThan calls 900 "mismatched physical collation declines indexed exclusion"
+                        else
+                            Expect.isLessThan calls 80 "derived expression uses its comparison collation"
 
                 testCase "fully covered correlated counts use index cardinality"
                 <| fun _ ->
