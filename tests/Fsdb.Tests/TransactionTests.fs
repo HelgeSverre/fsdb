@@ -2479,6 +2479,60 @@ let tests =
                           | ResultSet(_, rows) -> Expect.equal rows expected case
                           | actual -> failtestf "expected keyless filesort rows after %s, got %A" case actual
 
+          testCase "keyless TIMESTAMP filesort write honors named-zone transition bounds"
+          <| fun _ ->
+              let scenarios =
+                  [ "fold earlier strict", "2024-11-03 05:30:00", "rank_value>'2024-11-03 01:30:00'", false, [ 1; 2 ], 2UL
+                    "fold earlier inclusive", "2024-11-03 05:30:00", "rank_value>='2024-11-03 01:30:00'", true, [ 0; 1 ], 2UL
+                    "fold later strict", "2024-11-03 06:30:00", "rank_value>'2024-11-03 01:30:00'", true, [ 1; 2 ], 2UL
+                    "fold later inclusive", "2024-11-03 06:30:00", "rank_value>='2024-11-03 01:30:00'", true, [ 0; 1 ], 2UL
+                    "gap before strict", "2024-03-10 06:59:59", "rank_value>'2024-03-10 02:30:00'", false, [ 1; 2 ], 2UL
+                    "gap after strict", "2024-03-10 07:00:00", "rank_value>'2024-03-10 02:30:00'", true, [ 0; 1 ], 2UL
+                    "gap after inclusive", "2024-03-10 07:00:00", "rank_value>='2024-03-10 02:30:00'", true, [ 0; 1 ], 2UL
+                    "gap after not equal", "2024-03-10 07:00:00", "rank_value!='2024-03-10 02:30:00'", true, [ 0; 1 ], 2UL
+                    "gap after equal", "2024-03-10 07:00:00", "rank_value='2024-03-10 02:30:00'", true, [], 0UL
+                    "gap after less", "2024-03-10 07:00:00", "rank_value<'2024-03-10 02:30:00'", true, [], 0UL ]
+              for verb in [ "UPDATE"; "DELETE" ] do
+                  for label, pendingRank, predicate, shouldWait, changedIds, expectedAffected in scenarios do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      [ "INSERT INTO mysql.time_zone (Time_zone_id,Use_leap_seconds) VALUES (900001,'N')"
+                        "INSERT INTO mysql.time_zone_name VALUES ('Fsdb/Test_Eastern',900001)"
+                        "INSERT INTO mysql.time_zone_transition_type (Time_zone_id,Transition_type_id,Offset,Is_DST,Abbreviation) VALUES (900001,0,-18000,0,'EST'),(900001,1,-14400,1,'EDT')"
+                        "INSERT INTO mysql.time_zone_transition VALUES (900001,1710054000,1),(900001,1730613600,0)"
+                        "CREATE TABLE tx_named_filesort(id INT,rank_value TIMESTAMP(6),n INT,KEY ix_rank(rank_value))"
+                        "INSERT INTO tx_named_filesort VALUES(1,'2024-12-01 12:00:00',0),(2,'2024-12-02 12:00:00',0),(3,'2024-12-03 12:00:00',0)" ]
+                      |> List.iter (fun sql -> handle setup sql |> ignore)
+                      let owner, _ = handle (create 2 store) "SET time_zone='+00:00'"
+                      let owner, _ = handle owner "BEGIN"
+                      let owner, inserted = handle owner (sprintf "INSERT INTO tx_named_filesort VALUES(0,'%s',0)" pendingRank)
+                      Expect.equal inserted (Affected 1UL) (label + " pending insert")
+                      let waiter, _ = handle (create 3 store) "SET time_zone='Fsdb/Test_Eastern'"
+                      let waiter, _ = handle waiter "BEGIN"
+                      let action =
+                          if verb = "UPDATE" then "UPDATE tx_named_filesort SET n=n+1"
+                          else "DELETE FROM tx_named_filesort"
+                      let statement = action + " WHERE " + predicate + " ORDER BY DATE_ADD(rank_value, INTERVAL 0 SECOND) LIMIT 2"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let waiting = Threading.Tasks.Task.Run(fun () -> started.Set(); handle waiter statement)
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) (label + " writer starts")
+                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) (label + " owner commits")
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) (label + " writer resumes")
+                      let waiter, result = waiting.Result
+                      Expect.equal blocked shouldWait (verb + " " + label + " wait behavior")
+                      Expect.equal result (Affected expectedAffected) (verb + " " + label + " affected rows")
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) (label + " writer commits")
+                      let expected =
+                          [ 0; 1; 2; 3 ]
+                          |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
+                          |> List.map (fun id ->
+                              [ Some(string id)
+                                Some(if verb = "UPDATE" && List.contains id changedIds then "1" else "0") ])
+                      match handle setup "SELECT id,n FROM tx_named_filesort ORDER BY id" |> snd with
+                      | ResultSet(_, rows) -> Expect.equal rows expected (verb + " " + label + " final rows")
+                      | actual -> failtestf "Expected %s %s rows, got %A" verb label actual
+
           testCase "limited ordered write respects DATE primary-key insert frontiers"
           <| fun _ ->
               for verb, direction, insertedId, shouldWait, changedId in

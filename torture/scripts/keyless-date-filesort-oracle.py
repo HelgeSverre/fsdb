@@ -10,7 +10,14 @@ oracle = runpy.run_path(
 
 
 def verify_cases(
-    owner, waiter, column_type, base_ranks, order_expression, scenarios, label=None
+    owner,
+    waiter,
+    column_type,
+    base_ranks,
+    order_expression,
+    scenarios,
+    label=None,
+    expected_affected=2,
 ):
     cases = 0
     for verb in ("UPDATE", "DELETE"):
@@ -76,7 +83,7 @@ def verify_cases(
             owner.query("COMMIT")
             thread.join(5)
             assert not thread.is_alive(), (statement, "writer did not finish")
-            assert outcome == {"affected": 2}, (statement, outcome)
+            assert outcome == {"affected": expected_affected}, (statement, outcome)
 
             rows = [
                 (pending_id, pending_rank),

@@ -357,8 +357,20 @@ A follow-up runs eight `TIMESTAMP(6)` writes with an owner at `+02:00` and a
 waiter at UTC, and eight in the reverse direction. MySQL 8.4.11 and the fsdb
 transaction regression agree on whether a pending key falls strictly below,
 exactly on, or beyond the waiter's local bound, as well as affected counts and
-final rows. This checks the UTC claim conversion across two session time zones;
-named zones and daylight-saving transitions remain unaudited.
+final rows. This checks the UTC claim conversion across two fixed-offset
+session time zones.
+
+The [named-zone oracle](../scripts/keyless-timestamp-named-zone-oracle.py)
+adds twenty `TIMESTAMP(6)` UPDATE/DELETE cases around the 2024 spring-forward
+gap and fall-back fold in an Eastern-style catalog zone. The fold's earlier
+and later UTC instants have different claim positions even when they display
+as the same local time. A skipped `02:30` bound maps to the `03:00` transition
+instant for index lookup, but MySQL waits for that pending key with strict and
+inclusive lower bounds, `!=`, and even `=` or `<` writes that eventually affect
+zero rows. Fsdb now retains the pending claim at that exact transition rather
+than treating its converted UTC tick as proof that the claim can be excluded.
+The oracle and transaction regression check waits, affected counts, and final
+rows; other named-zone rules and transition shapes remain open.
 
 Fsdb now observes the pending ordered claim for a keyless filesort when its
 first indexed column appears in the ORDER BY expression. It rules out a
