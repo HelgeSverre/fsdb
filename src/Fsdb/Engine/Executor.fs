@@ -31532,10 +31532,27 @@ let transactionWriteTargets
                     table.Columns
                     |> List.find (fun column -> equalsIgnoreCase column.Name name)
                     |> fun column -> column.Type)
+            let dateBound = function
+                | VDate date -> Some(decimal date.DayNumber)
+                | VString text ->
+                    match System.DateOnly.TryParseExact(
+                        text,
+                        "yyyy-MM-dd",
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None
+                    ) with
+                    | true, date -> Some(decimal date.DayNumber)
+                    | _ -> None
+                | _ -> None
+            let isDateColumn name =
+                table.Columns
+                |> List.exists (fun column -> equalsIgnoreCase column.Name name && column.Type = TDate)
             let keyComparison name key bound =
                 match key, bound with
-                | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) ->
+                | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) when not (isDateColumn name) ->
                     Some(Value.compare (VDecimal number) bound)
+                | OrderedNumber number, bound when isDateColumn name ->
+                    dateBound bound |> Option.map (fun value -> Operators.compare number value)
                 | OrderedText key, VString text ->
                     table.Columns
                     |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
@@ -31662,9 +31679,11 @@ let transactionWriteTargets
                                 | _ -> false
                             let comparableLiteral = function
                                 | LiteralValue(VInt _ | VUInt _ | VDecimal _) -> true
-                                | LiteralValue(VString _) ->
+                                | LiteralValue(VDate _) when column.Type = TDate -> true
+                                | LiteralValue(VString text) ->
                                     match column.Type with
                                     | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText -> true
+                                    | TDate -> dateBound (VString text) |> Option.isSome
                                     | _ -> false
                                 | _ -> false
                             match key with

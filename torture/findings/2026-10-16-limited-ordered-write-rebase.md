@@ -319,6 +319,19 @@ transaction regression checks the same waits, affected counts, and final
 rows. Fsdb compares text claims with the index column's collation key before
 excluding them from the indexed lower range.
 
+The [DATE-index oracle](../scripts/keyless-date-filesort-oracle.py) covers
+thirteen `UPDATE` and `DELETE` cases on a keyless table ordered by
+`DAYOFYEAR(rank_date)`. MySQL skips a pending `2026-01-01` below a strict
+indexed lower bound and a pending `NULL` under that bound. It waits for the
+same date at an inclusive lower bound, a pending `2026-12-31` beyond the
+visible pair or at an upper next-key boundary, and an unfiltered pending
+`NULL`. `IGNORE INDEX(ix_rank)` restores the wait for an excluded lower
+date. Fsdb previously waited even on the two excluded claims because its
+ordered DATE key was encoded as a day number while the SQL bound remained a
+string. The claim comparison now accepts valid ISO DATE literals and leaves
+other date spellings conservative. The shared transaction regression checks
+the same waits, affected counts, and final rows for both write verbs.
+
 Fsdb now observes the pending ordered claim for a keyless filesort when its
 first indexed column appears in the ORDER BY expression. It rules out a
 pending key proven below an indexed lower bound only when that index is
