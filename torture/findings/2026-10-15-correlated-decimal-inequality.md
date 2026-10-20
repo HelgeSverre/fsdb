@@ -113,8 +113,9 @@ MySQL's `>=` result is `(2,3,4,5)` with the index and `(1,2,3,4,5)` with
 `IGNORE INDEX`; its `<=` result is `(1,2)` versus `(1,2,3,4)`. The pinned
 MySQL 8.4.11 image reports `Range checked for each record` on the indexed
 DECIMAL side and a hash join with `IGNORE INDEX`. A focused FSDB regression
-now keeps those two plans distinct for an audited two-table inner join: each
-DOUBLE row probes the exact DECIMAL index range, while the ignored-index and
-primary-key-filtered forms evaluate the ordinary scan comparison. The test
-also covers reversed inequality syntax and two different DOUBLE bounds.
+now keeps those two plans distinct for an audited two-table inner join in
+either written source order: each DOUBLE row probes the exact DECIMAL index
+range, while the ignored-index and primary-key-filtered forms evaluate the
+ordinary scan comparison. The test also covers reversed inequality syntax
+and two different DOUBLE bounds.
 Other join shapes still need their own plan and membership evidence.

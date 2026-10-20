@@ -1706,6 +1706,11 @@ let tests =
                     "INSERT INTO precise_decimal_rows VALUES(1,9007199254740991.99),(2,9007199254740992.00),(3,9007199254740992.01),(4,9007199254740993.00),(5,9007199254740994.00)"
                     "INSERT INTO precise_double_bound VALUES(1,9007199254740992e0)" ] do
                   runDefault store sql |> ignore
+              let ids (rows: string option list list) =
+                  rows |> List.map (fun row -> row.[0] |> Option.defaultValue "")
+              let joinSources =
+                  [ "precise_decimal_rows d JOIN precise_double_bound o"
+                    "precise_double_bound o JOIN precise_decimal_rows d" ]
               for predicate, expectedIndexed, expectedScanned in
                   [ "d.k > o.k", [ "5" ], [ "5" ]
                     "d.k >= o.k", [ "2"; "3"; "4"; "5" ], [ "1"; "2"; "3"; "4"; "5" ]
@@ -1716,34 +1721,42 @@ let tests =
                       + " JOIN precise_double_bound o ON " + predicate + " ORDER BY d.id"
                   match run store registry (query ""), run store registry (query " IGNORE INDEX (ix_k)") with
                   | ResultSet(_, indexed), ResultSet(_, scanned) ->
-                      let ids (rows: string option list list) =
-                          rows |> List.map (fun row -> row.[0] |> Option.defaultValue "")
                       Expect.equal (ids indexed) expectedIndexed (sprintf "indexed precise DECIMAL/DOUBLE %s" predicate)
                       Expect.equal (ids scanned) expectedScanned (sprintf "scanned precise DECIMAL/DOUBLE %s" predicate)
                   | indexed, scanned ->
                       failtestf "expected precise DECIMAL/DOUBLE rows for %s, got %A and %A" predicate indexed scanned
 
+                  let reversedQuery hint =
+                      "SELECT d.id FROM precise_double_bound o JOIN precise_decimal_rows d" + hint
+                      + " ON " + predicate + " ORDER BY d.id"
+                  match run store registry (reversedQuery ""), run store registry (reversedQuery " IGNORE INDEX (ix_k)") with
+                  | ResultSet(_, indexed), ResultSet(_, scanned) ->
+                      Expect.equal (ids indexed) expectedIndexed (sprintf "right-indexed precise DECIMAL/DOUBLE %s" predicate)
+                      Expect.equal (ids scanned) expectedScanned (sprintf "right-scanned precise DECIMAL/DOUBLE %s" predicate)
+                  | indexed, scanned ->
+                      failtestf "expected right-side DECIMAL/DOUBLE rows for %s, got %A and %A" predicate indexed scanned
+
               for clause in
                   [ "ON d.k >= o.k AND d.id=1"
                     "ON d.k >= o.k WHERE d.id=1" ] do
-                  let sql =
-                      "SELECT d.id FROM precise_decimal_rows d JOIN precise_double_bound o "
-                      + clause
-                  match run store registry sql with
-                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
-                  | other -> failtestf "expected MySQL's primary-key filtered join for %s, got %A" clause other
+                  for sources in joinSources do
+                      let sql = "SELECT d.id FROM " + sources + " " + clause
+                      match run store registry sql with
+                      | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                      | other -> failtestf "expected MySQL's primary-key filtered join for %s, got %A" sql other
 
               runDefault store "INSERT INTO precise_double_bound VALUES(2,9007199254740994e0)" |> ignore
-              let twoBounds =
-                  "SELECT o.id,d.id FROM precise_decimal_rows d JOIN precise_double_bound o "
-                  + "ON o.k <= d.k ORDER BY o.id,d.id"
-              match run store registry twoBounds with
-              | ResultSet(_, rows) ->
-                  Expect.equal
-                      (rows |> List.map (List.map (Option.defaultValue "")))
-                      [ [ "1"; "2" ]; [ "1"; "3" ]; [ "1"; "4" ]; [ "1"; "5" ]; [ "2"; "5" ] ]
-                      "each DOUBLE bound probes the exact DECIMAL range"
-              | other -> failtestf "expected two-bound DECIMAL/DOUBLE join rows, got %A" other
+              for sources in joinSources do
+                  let sql =
+                      "SELECT o.id,d.id FROM " + sources
+                      + " ON o.k <= d.k ORDER BY o.id,d.id"
+                  match run store registry sql with
+                  | ResultSet(_, rows) ->
+                      Expect.equal
+                          (rows |> List.map (List.map (Option.defaultValue "")))
+                          [ [ "1"; "2" ]; [ "1"; "3" ]; [ "1"; "4" ]; [ "1"; "5" ]; [ "2"; "5" ] ]
+                          ("each DOUBLE bound probes the DECIMAL range in " + sources)
+                  | other -> failtestf "expected two-bound DECIMAL/DOUBLE join rows for %s, got %A" sources other
 
           testCase "correlated mixed numeric bounds use indexed ranges"
           <| fun _ ->
