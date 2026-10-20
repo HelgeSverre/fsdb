@@ -2361,6 +2361,43 @@ let tests =
                       | other -> failtestf "expected correlated %s range counts for %s, got %A" temporalType predicate other
                       Expect.isLessThan touches 30 (temporalType + " range should narrow materialized candidates for " + predicate)
 
+          testCase "materialized correlated TIME ranges bound residual work"
+          <| fun _ ->
+              let mutable touches = 0
+              let touch values =
+                  touches <- touches + 1
+                  List.head values
+              let registry = registerScalar "TOUCH" touch builtins
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_time_bounds(id INT PRIMARY KEY,min_d TIME(6),max_d TIME(6))" |> ignore
+              runDefault store "CREATE TABLE inner_time_values(id INT PRIMARY KEY,d TIME(6),active INT)" |> ignore
+              runDefault store "INSERT INTO outer_time_bounds VALUES(1,'350:12:34.123456','352:12:34.123456'),(2,NULL,NULL)" |> ignore
+              let values =
+                  [ "(1,'-12:12:34.123456',1)"
+                    yield! [ 0 .. 364 ] |> List.map (fun hour -> sprintf "(%d,'%d:12:34.123456',1)" (hour + 2) hour) ]
+                  |> String.concat ","
+              runDefault store ("INSERT INTO inner_time_values VALUES" + values) |> ignore
+
+              for predicate, firstCount, secondCount in
+                  [ "d.d>=o.min_d", "15", "0"
+                    "d.d>o.min_d", "14", "0"
+                    "d.d BETWEEN o.min_d AND o.max_d", "3", "0"
+                    "d.d BETWEEN o.min_d AND '352:12:34.123456'", "3", "0"
+                    "d.d>=o.min_d OR d.id=1", "16", "1" ] do
+                  touches <- 0
+                  let sql =
+                      "WITH grouped AS (SELECT id,d,MAX(active) AS active FROM inner_time_values GROUP BY id,d) "
+                      + "SELECT o.id,(SELECT COUNT(*) FROM grouped d "
+                      + "WHERE TOUCH(d.active)=1 AND (" + predicate + ")) "
+                      + "FROM outer_time_bounds o ORDER BY o.id"
+                  match run store registry sql with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows
+                          [ [ Some "1"; Some firstCount ]; [ Some "2"; Some secondCount ] ]
+                          ("MySQL TIME range counts for " + predicate)
+                  | other -> failtestf "expected correlated TIME range counts for %s, got %A" predicate other
+                  Expect.isLessThan touches 30 ("TIME range should narrow materialized candidates for " + predicate)
+
           testCase "materialized correlated probes choose the narrower access path"
           <| fun _ ->
               let mutable touches = 0

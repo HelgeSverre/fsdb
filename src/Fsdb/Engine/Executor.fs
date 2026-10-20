@@ -657,6 +657,13 @@ let private materializedRangeLookup
                     | TDateTime _ | TTimestamp _ ->
                         let sourceCompatible = function VDateTime _ | VTimestamp _ -> true | _ -> false
                         Some(Value.compare, sourceCompatible, validDateTimeBound)
+                    | TTime _ ->
+                        let sourceCompatible = function VTime _ -> true | _ -> false
+                        let boundCompatible = function
+                            | VTime _ -> true
+                            | VString text -> Temporal.tryParseTimeValue text |> Option.isSome
+                            | _ -> false
+                        Some(Value.compare, sourceCompatible, boundCompatible)
                     | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob ->
                         let compatible = function VBytes _ -> true | _ -> false
                         Some(Value.compare, compatible, compatible)

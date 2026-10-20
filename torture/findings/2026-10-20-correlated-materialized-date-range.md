@@ -32,3 +32,17 @@ the extension.
 
 Zero/invalid temporal source values, non-ISO string bounds, and other
 correlated temporal expressions remain outside this audit.
+
+## TIME range follow-up
+
+The same statement-local ordered lookup now accepts `TIME` source rows and
+correlated `TIME` bounds. It also accepts a string bound when the existing
+MySQL-compatible time parser recognizes it; otherwise it leaves the predicate
+on the scan path. The original predicate still filters the selected rows.
+
+The native MySQL 8.4.11 oracle now checks five `TIME(6)` predicates over a
+grouped source with a negative time and values from 0 through 364 hours.
+Inclusive and strict lower bounds, `BETWEEN` with a correlated or string upper
+bound, and a complete OR all match. The focused regression checks the same
+counts and fewer than 30 residual calls per shape over 366 source rows.
+Other time expressions and comparison domains remain outside this audit.

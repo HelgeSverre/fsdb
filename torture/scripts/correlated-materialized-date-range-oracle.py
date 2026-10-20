@@ -153,6 +153,45 @@ def main():
                             f"MySQL {version}: {len(temporal_cases)} materialized "
                             f"{temporal_type} range cases passed"
                         )
+                    cursor.execute("DROP TABLE inner_rows")
+                    cursor.execute("DROP TABLE outer_bounds")
+                    cursor.execute(
+                        "CREATE TABLE outer_bounds(id INT PRIMARY KEY,"
+                        "min_d TIME(6),max_d TIME(6))"
+                    )
+                    cursor.execute(
+                        "CREATE TABLE inner_rows(id INT PRIMARY KEY,d TIME(6),active INT)"
+                    )
+                    cursor.execute(
+                        "INSERT INTO outer_bounds VALUES"
+                        "(1,'350:12:34.123456','352:12:34.123456'),(2,NULL,NULL)"
+                    )
+                    cursor.executemany(
+                        "INSERT INTO inner_rows VALUES(%s,%s,1)",
+                        [(1, "-12:12:34.123456")]
+                        + [(hour + 2, f"{hour}:12:34.123456") for hour in range(365)],
+                    )
+                    time_cases = [
+                        ("d.d>=o.min_d", (15, 0)),
+                        ("d.d>o.min_d", (14, 0)),
+                        ("d.d BETWEEN o.min_d AND o.max_d", (3, 0)),
+                        ("d.d BETWEEN o.min_d AND '352:12:34.123456'", (3, 0)),
+                        ("d.d>=o.min_d OR d.id=1", (16, 1)),
+                    ]
+                    for predicate, expected in time_cases:
+                        cursor.execute(
+                            "WITH grouped AS (SELECT id,d,MAX(active) AS active "
+                            "FROM inner_rows GROUP BY id,d) "
+                            "SELECT o.id,(SELECT COUNT(*) FROM grouped d "
+                            f"WHERE d.active=1 AND ({predicate})) "
+                            "FROM outer_bounds o ORDER BY o.id"
+                        )
+                        actual = tuple(count for _, count in cursor.fetchall())
+                        assert actual == expected, (predicate, actual, expected)
+                    print(
+                        f"MySQL {version}: {len(time_cases)} materialized "
+                        "TIME(6) range cases passed"
+                    )
             finally:
                 if connection:
                     connection.close()
