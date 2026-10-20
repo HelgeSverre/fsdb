@@ -190,6 +190,87 @@ def verify(owner, waiter):
         datetime_cases,
         "TIMESTAMP(6) at +02:00",
     )
+    waiter.query("SET time_zone='+00:00'")
+    verify_cases(
+        owner,
+        waiter,
+        "TIMESTAMP(6)",
+        (
+            "2026-01-02 12:34:56.123456",
+            "2026-01-03 12:34:56.123456",
+            "2026-01-04 12:34:56.123456",
+        ),
+        "DATE_ADD(rank_value, INTERVAL 0 SECOND)",
+        (
+            (f"rank_value>'{start}'", 0, start, "", False, (1, 2)),
+            (
+                f"rank_value>'{start}'",
+                0,
+                "2026-01-01 14:34:56.123456",
+                "",
+                False,
+                (1, 2),
+            ),
+            (
+                f"rank_value>='{start}'",
+                0,
+                "2026-01-01 14:34:56.123456",
+                "",
+                True,
+                (0, 1),
+            ),
+            (
+                f"rank_value>'{start}'",
+                100,
+                "2026-12-31 14:34:56.123456",
+                "",
+                True,
+                (1, 2),
+            ),
+        ),
+        "TIMESTAMP(6) owner +02:00 / waiter UTC",
+    )
+    owner.query("SET time_zone='+00:00'")
+    waiter.query("SET time_zone='+02:00'")
+    verify_cases(
+        owner,
+        waiter,
+        "TIMESTAMP(6)",
+        (
+            "2026-01-02 12:34:56.123456",
+            "2026-01-03 12:34:56.123456",
+            "2026-01-04 12:34:56.123456",
+        ),
+        "DATE_ADD(rank_value, INTERVAL 0 SECOND)",
+        (
+            (
+                f"rank_value>'{start}'",
+                0,
+                "2026-01-01 09:34:56.123456",
+                "",
+                False,
+                (1, 2),
+            ),
+            (
+                f"rank_value>'{start}'",
+                0,
+                "2026-01-01 10:34:56.123456",
+                "",
+                False,
+                (1, 2),
+            ),
+            (
+                f"rank_value>='{start}'",
+                0,
+                "2026-01-01 10:34:56.123456",
+                "",
+                True,
+                (0, 1),
+            ),
+            (f"rank_value>'{start}'", 100, end, "", True, (1, 2)),
+        ),
+        "TIMESTAMP(6) owner UTC / waiter +02:00",
+    )
 
 
 if __name__ == "__main__":
