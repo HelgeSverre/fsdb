@@ -2327,66 +2327,95 @@ let tests =
 
           testCase "keyless filesort write waits for pending secondary-key inserts"
           <| fun _ ->
-              for verb in [ "UPDATE"; "DELETE" ] do
-                  let scenarios =
-                      [ "n>=0", 0, Some 0, "", true, [ 0; 1 ]
-                        "n>=0", 100, Some 100, "", true, [ 1; 2 ]
-                        "rank_value>0", 0, Some 0, "", false, [ 1; 2 ]
-                        "rank_value>0", 100, Some 100, "", true, [ 1; 2 ]
-                        "rank_value>=0", 0, Some 0, "", true, [ 0; 1 ]
-                        "rank_value<50", 100, Some 100, "", true, [ 1; 2 ] ]
-                      @ (if verb = "UPDATE" then
-                             [ "rank_value>0", 0, Some 0, " IGNORE INDEX(ix_rank)", true, [ 1; 2 ]
-                               "rank_value>0", 100, Some 100, " IGNORE INDEX(ix_rank)", true, [ 1; 2 ]
-                               "n>=0", 0, None, "", true, [ 0; 1 ]
-                               "rank_value>0", 0, None, "", false, [ 1; 2 ]
-                               "rank_value>=0", 0, None, "", false, [ 1; 2 ]
-                               "rank_value<50", 0, None, "", false, [ 1; 2 ]
-                               "rank_value>0", 0, None, " IGNORE INDEX(ix_rank)", true, [ 1; 2 ] ]
-                         else [])
-                  for predicate, pendingId, pendingRank, hint, shouldWait, changedIds in
-                      scenarios do
-                      let store = Fsdb.Storage.create ()
-                      let setup = create 1 store
-                      handle setup
-                          "CREATE TABLE tx_keyless_filesort(id INT,rank_value INT,n INT,KEY ix_rank(rank_value))"
-                      |> ignore
-                      handle setup "INSERT INTO tx_keyless_filesort VALUES(1,1,0),(2,2,0),(3,3,0)" |> ignore
-                      let owner, _ = handle (create 2 store) "BEGIN"
-                      let owner, inserted =
-                          handle owner
-                              (sprintf "INSERT INTO tx_keyless_filesort VALUES(%d,%s,0)" pendingId
-                                  (pendingRank |> Option.map string |> Option.defaultValue "NULL"))
-                      Expect.equal inserted (Affected 1UL) "owner inserts a pending secondary key"
-                      let waiter, _ = handle (create 3 store) "BEGIN"
-                      let action =
-                          if verb = "UPDATE" then "UPDATE tx_keyless_filesort" + hint + " SET n=n+1"
-                          else "DELETE FROM tx_keyless_filesort" + hint
-                      let statement = action + " WHERE " + predicate + " ORDER BY rank_value+0 LIMIT 2"
-                      use started = new Threading.ManualResetEventSlim(false)
-                      let waiting =
-                          Threading.Tasks.Task.Run(fun () ->
-                              started.Set()
-                              handle waiter statement)
-                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "keyless writer starts"
-                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
-                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
-                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "keyless writer resumes"
-                      let waiter, result = waiting.Result
-                      Expect.equal blocked shouldWait (statement + " wait behavior")
-                      Expect.equal result (Affected 2UL) "keyless writer fills its limit"
-                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "keyless writer commits"
-                      let expected =
-                          [ pendingId, pendingRank; 1, Some 1; 2, Some 2; 3, Some 3 ]
-                          |> List.sortBy (fun (id, rank) -> rank, id)
-                          |> List.filter (fun (id, _) ->
-                              verb = "UPDATE" || not (List.contains id changedIds))
-                          |> List.map (fun (id, rank) ->
-                              let changed = List.contains id changedIds
-                              [ Some(string id); rank |> Option.map string; Some(if changed then "1" else "0") ])
-                      match handle setup "SELECT id,rank_value,n FROM tx_keyless_filesort ORDER BY rank_value,id" |> snd with
-                      | ResultSet(_, rows) -> Expect.equal rows expected statement
-                      | actual -> failtestf "expected keyless filesort rows after %s, got %A" statement actual
+              let numeric =
+                  [ "n>=0", 0, Some "0", "", true, [ 0; 1 ]
+                    "n>=0", 100, Some "100", "", true, [ 1; 2 ]
+                    "rank_value>0", 0, Some "0", "", false, [ 1; 2 ]
+                    "rank_value>0", 100, Some "100", "", true, [ 1; 2 ]
+                    "rank_value>=0", 0, Some "0", "", true, [ 0; 1 ]
+                    "rank_value<50", 100, Some "100", "", true, [ 1; 2 ] ]
+              let numericUpdateOnly =
+                  [ "rank_value>0", 0, Some "0", " IGNORE INDEX(ix_rank)", true, [ 1; 2 ]
+                    "rank_value>0", 100, Some "100", " IGNORE INDEX(ix_rank)", true, [ 1; 2 ]
+                    "n>=0", 0, None, "", true, [ 0; 1 ]
+                    "rank_value>0", 0, None, "", false, [ 1; 2 ]
+                    "rank_value>=0", 0, None, "", false, [ 1; 2 ]
+                    "rank_value<50", 0, None, "", false, [ 1; 2 ]
+                    "rank_value>0", 0, None, " IGNORE INDEX(ix_rank)", true, [ 1; 2 ] ]
+              let text =
+                  [ "n>=0", 0, Some "a000", "", true, [ 0; 1 ]
+                    "n>=0", 100, Some "z999", "", true, [ 1; 2 ]
+                    "rank_value>'a000'", 0, Some "a000", "", false, [ 1; 2 ]
+                    "rank_value>'a000'", 100, Some "z999", "", true, [ 1; 2 ]
+                    "rank_value>='a000'", 0, Some "a000", "", true, [ 0; 1 ]
+                    "rank_value<'z000'", 100, Some "z999", "", true, [ 1; 2 ]
+                    "n>=0", 0, None, "", true, [ 0; 1 ]
+                    "rank_value>'a000'", 0, None, "", false, [ 1; 2 ] ]
+              let textUpdateOnly =
+                  [ "rank_value>'a000'", 0, Some "a000", " IGNORE INDEX(ix_rank)", true, [ 1; 2 ] ]
+              let foldedBounds scenarios =
+                  scenarios
+                  |> List.map (fun ((predicate: string), pendingId, pendingRank, hint, shouldWait, changedIds) ->
+                      predicate.Replace("'a000'", "'A000'"), pendingId, pendingRank, hint, shouldWait, changedIds)
+              for rankType, baseRanks, orderExpression, common, updateOnly in
+                  [ "INT", [ "1"; "2"; "3" ], "rank_value+0", numeric, numericUpdateOnly
+                    "VARCHAR(8) COLLATE utf8mb4_bin", [ "a001"; "a002"; "a003" ],
+                        "CONCAT(rank_value,'')", text, textUpdateOnly
+                    "VARCHAR(8) COLLATE utf8mb4_0900_ai_ci", [ "a001"; "a002"; "a003" ],
+                        "CONCAT(rank_value,'')", foldedBounds text, foldedBounds textUpdateOnly ] do
+                  let literal rank =
+                      rank
+                      |> Option.map (fun value -> if rankType = "INT" then value else "'" + value + "'")
+                      |> Option.defaultValue "NULL"
+                  let baseRows =
+                      baseRanks
+                      |> List.mapi (fun index rank -> sprintf "(%d,%s,0)" (index + 1) (literal (Some rank)))
+                      |> String.concat ","
+                  for verb in [ "UPDATE"; "DELETE" ] do
+                      for predicate, pendingId, pendingRank, hint, shouldWait, changedIds in
+                          common @ (if verb = "UPDATE" then updateOnly else []) do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          handle setup
+                              (sprintf "CREATE TABLE tx_keyless_filesort(id INT,rank_value %s,n INT,KEY ix_rank(rank_value))" rankType)
+                          |> ignore
+                          handle setup ("INSERT INTO tx_keyless_filesort VALUES" + baseRows) |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let owner, inserted =
+                              handle owner
+                                  (sprintf "INSERT INTO tx_keyless_filesort VALUES(%d,%s,0)" pendingId (literal pendingRank))
+                          Expect.equal inserted (Affected 1UL) "owner inserts a pending secondary key"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          let action =
+                              if verb = "UPDATE" then "UPDATE tx_keyless_filesort" + hint + " SET n=n+1"
+                              else "DELETE FROM tx_keyless_filesort" + hint
+                          let statement = action + " WHERE " + predicate + " ORDER BY " + orderExpression + " LIMIT 2"
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "keyless writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "keyless writer resumes"
+                          let waiter, result = waiting.Result
+                          let case = statement + " pending " + literal pendingRank
+                          Expect.equal blocked shouldWait (case + " wait behavior")
+                          Expect.equal result (Affected 2UL) "keyless writer fills its limit"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "keyless writer commits"
+                          let expected =
+                              (pendingId, pendingRank) ::
+                              (baseRanks |> List.mapi (fun index rank -> index + 1, Some rank))
+                              |> List.sortBy fst
+                              |> List.filter (fun (id, _) ->
+                                  verb = "UPDATE" || not (List.contains id changedIds))
+                              |> List.map (fun (id, rank) ->
+                                  let changed = List.contains id changedIds
+                                  [ Some(string id); rank; Some(if changed then "1" else "0") ])
+                          match handle setup "SELECT id,rank_value,n FROM tx_keyless_filesort ORDER BY rank_value,id" |> snd with
+                          | ResultSet(_, rows) -> Expect.equal rows expected case
+                          | actual -> failtestf "expected keyless filesort rows after %s, got %A" case actual
 
           testCase "limited ordered write respects DATE primary-key insert frontiers"
           <| fun _ ->

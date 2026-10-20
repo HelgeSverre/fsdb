@@ -306,11 +306,24 @@ range excludes that `NULL` key without waiting, while `IGNORE INDEX(ix_rank)`
 restores the wait. These nullable cases are covered by the native oracle and
 transaction regression for `UPDATE`.
 
+The [text-index oracle](../scripts/keyless-text-filesort-oracle.py) adds 34
+`UPDATE` and `DELETE` cases with `ORDER BY CONCAT(rank_value,'')` and an
+ordinary `VARCHAR` index under both `utf8mb4_bin` and
+`utf8mb4_0900_ai_ci`. MySQL skips a pending `a000` below the strict
+`rank_value>'a000'` bound, including the folded-equal `>'A000'` comparison;
+it still waits for a pending `z999` beyond the visible pair, for an inclusive
+lower bound, and at an upper next-key boundary. Pending `NULL` is excluded
+by the indexed text range but blocks the unfiltered filesort. An `UPDATE`
+with `IGNORE INDEX(ix_rank)` waits for the lower pending key. The shared
+transaction regression checks the same waits, affected counts, and final
+rows. Fsdb compares text claims with the index column's collation key before
+excluding them from the indexed lower range.
+
 Fsdb now observes the pending ordered claim for a keyless filesort when its
 first indexed column appears in the ORDER BY expression. It rules out a
 pending key proven below an indexed lower bound only when that index is
 available to the read; it retains the upper-boundary and ignored-index waits.
-The transaction regression and oracle check wait behavior,
+The transaction regressions and oracles check wait behavior,
 affected counts, and final rows for both write verbs. Keyless tables without
 a usable ordered claim, wider index expressions, and other predicate shapes
 remain outside this audit.

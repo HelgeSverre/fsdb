@@ -31532,6 +31532,17 @@ let transactionWriteTargets
                     table.Columns
                     |> List.find (fun column -> equalsIgnoreCase column.Name name)
                     |> fun column -> column.Type)
+            let keyComparison name key bound =
+                match key, bound with
+                | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) ->
+                    Some(Value.compare (VDecimal number) bound)
+                | OrderedText key, VString text ->
+                    table.Columns
+                    |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+                    |> Option.map (fun column ->
+                        let other = (column.Collation |> Collation.findOrDefault).KeyOf text
+                        System.String.CompareOrdinal(key, other))
+                | _ -> None
             let excludesPending keyColumns ordered primary =
                 let keyFor name =
                     let lookup names keys =
@@ -31541,18 +31552,6 @@ let transactionWriteTargets
                     lookup keyColumns ordered
                     |> Option.orElseWith (fun () ->
                         primary |> Option.bind (lookup primaryColumns))
-
-                let keyComparison name key bound =
-                    match key, bound with
-                    | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) ->
-                        Some(Value.compare (VDecimal number) bound)
-                    | OrderedText key, VString text ->
-                        table.Columns
-                        |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
-                        |> Option.map (fun column ->
-                            let other = (column.Collation |> Collation.findOrDefault).KeyOf text
-                            System.String.CompareOrdinal(key, other))
-                    | _ -> None
 
                 let comparisonIsFalse operation comparison =
                     match operation with
@@ -31651,19 +31650,22 @@ let transactionWriteTargets
                                 |> fun column -> column.Type)
                         let excludesFromIndexedRange ordered =
                             let columnName = List.head columns
+                            let column =
+                                table.Columns
+                                |> List.find (fun candidate -> equalsIgnoreCase candidate.Name columnName)
                             let key = List.head ordered
-                            let comparison bound =
-                                match key, bound with
-                                | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _) ->
-                                    Some(Value.compare (VDecimal number) bound)
-                                | _ -> None
+                            let comparison bound = keyComparison columnName key bound
                             let matchesColumn = function
                                 | Col name -> equalsIgnoreCase name columnName
                                 | QualifiedCol(owner, name) ->
                                     equalsIgnoreCase owner qualifier && equalsIgnoreCase name columnName
                                 | _ -> false
-                            let numericLiteral = function
+                            let comparableLiteral = function
                                 | LiteralValue(VInt _ | VUInt _ | VDecimal _) -> true
+                                | LiteralValue(VString _) ->
+                                    match column.Type with
+                                    | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText -> true
+                                    | _ -> false
                                 | _ -> false
                             match key with
                             | OrderedNull ->
@@ -31671,9 +31673,9 @@ let transactionWriteTargets
                                 |> optionalConjuncts
                                 |> List.exists (function
                                     | BinOp((Lt | Lte | Gt | Gte), column, literal)
-                                        when matchesColumn column && numericLiteral literal -> true
+                                        when matchesColumn column && comparableLiteral literal -> true
                                     | BinOp((Lt | Lte | Gt | Gte), literal, column)
-                                        when matchesColumn column && numericLiteral literal -> true
+                                        when matchesColumn column && comparableLiteral literal -> true
                                     | _ -> false)
                             | _ ->
                                 where
