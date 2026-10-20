@@ -301,9 +301,10 @@ pass-through physical sources and stable materialized sources, including
 NULL lists and complete OR branches;
 the original predicate remains the membership filter. [Audited `LOWER` functional
 text keys](torture/findings/2026-10-18-correlated-text-not-in.md#functional-text-key-follow-up)
-now use the same strict-range union on physical and pass-through sources;
-mismatched comparison collations retain their scan path, and other functional
-expression shapes remain unaudited.
+now use the same strict-range union on physical, pass-through, and stable
+materialized expression sources. A mismatched collation declines the physical
+key, while derived sources can build a statement-local range in the comparison
+collation. Other functional expression shapes remain unaudited.
 [Correlated integer inequality predicates](torture/findings/2026-10-15-correlated-integer-inequality.md)
 likewise union strict ranges for a stable integer bound, including complete OR
 branches. [Exact DECIMAL inequalities](torture/findings/2026-10-15-correlated-decimal-inequality.md)

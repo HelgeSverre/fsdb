@@ -17421,6 +17421,19 @@ and private tryMaterializedCorrelatedLookup
                         | candidates -> intersectSharedRows candidates
 
             let unionCandidates () =
+                let canSplitTextExpression left right =
+                    let compatible indexed bound =
+                        rowLocalExpression indexed
+                        && Option.isNone (tryCorrelatedInnerColumn probeSource indexed)
+                        && (match tryCorrelatedProbeValue probeSource context bound with
+                            | Some(VString _ | VNull) ->
+                                resolveOperandCollation "<"
+                                    (collationOperand (rowContext [||]) indexed None)
+                                    (collationOperand context bound (tryColumnDefForExpr context bound))
+                                |> Result.isOk
+                            | _ -> false)
+                    compatible left right || compatible right left
+
                 let branchCandidates branch =
                     [ equalityCandidates (Some branch)
                       integerExpressionCandidates (Some branch)
@@ -17445,7 +17458,9 @@ and private tryMaterializedCorrelatedLookup
 
                 tryCompleteOrCandidates
                     whereExpr
-                    (canSplitCorrelatedInequality store probeSource columns (Some context))
+                    (fun left right ->
+                        canSplitCorrelatedInequality store probeSource columns (Some context) left right
+                        || canSplitTextExpression left right)
                     branchCandidates
                     merge
                     List.length

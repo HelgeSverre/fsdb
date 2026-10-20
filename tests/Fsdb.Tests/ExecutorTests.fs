@@ -14665,7 +14665,8 @@ let tests =
 
                     for source in
                         [ "text_exclusion_rows d"
-                          "(SELECT id,code FROM text_exclusion_rows) d" ] do
+                          "(SELECT id,code FROM text_exclusion_rows) d"
+                          "(SELECT id,CONCAT(code,'') AS code FROM text_exclusion_rows LIMIT 1001) d" ] do
                         for predicate in
                             [ "LOWER(d.code) NOT IN(LOWER(u.lo))"
                               "LOWER(d.code) NOT IN(LOWER(u.lo),LOWER(u.hi))"
@@ -14708,7 +14709,10 @@ let tests =
                         match run store registry mismatchSql with
                         | ResultSet(_, [ [ Some "1" ] ]) -> ()
                         | other -> failtestf "expected mismatched functional exclusion, got %A" other
-                        Expect.isGreaterThan calls 900 "mismatched functional collation declines indexed exclusion"
+                        if source = "text_exclusion_rows d" then
+                            Expect.isGreaterThan calls 900 "mismatched physical collation declines indexed exclusion"
+                        else
+                            Expect.isLessThan calls 80 "derived expression uses its comparison collation"
 
                 testCase "fully covered correlated counts use index cardinality"
                 <| fun _ ->

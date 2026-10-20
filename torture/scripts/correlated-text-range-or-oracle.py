@@ -140,6 +140,10 @@ def verify(client, _writer):
     for source_name, source in [
         ("physical", "text_exclusion_rows d"),
         ("pass-through", "(SELECT id,code FROM text_exclusion_rows) d"),
+        (
+            "materialized",
+            "(SELECT id,CONCAT(code,'') AS code FROM text_exclusion_rows LIMIT 1001) d",
+        ),
     ]:
         for name, predicate, bound_id, expected in [
             ("one member", "LOWER(d.code) NOT IN(LOWER(u.lo))", 1, "1"),
