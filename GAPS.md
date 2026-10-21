@@ -1203,8 +1203,11 @@ The [remaining supplementary compatibility-ideograph block](torture/findings/202
 also matches 1,716 native-MySQL ngram searches at each of startup sizes 1–10.
 An [Extension A U+3500–U+35FF audit](torture/findings/2026-10-21-extension-a-ngram-audit.md)
 matches 15,360 two-column searches across five collations at ngram sizes 1
-and 2, including membership and relevance; the rest of Extension A and exact
-legacy weight bytes remain unaudited.
+and 2, including membership and relevance. The [next U+3600–U+36FF block](torture/findings/2026-10-21-extension-a-3600-ngram-audit.md)
+matches 39,936 searches across those collations and audited token sizes; a
+combined U+3400–U+36FF corpus adds 18,432 matching searches at sizes 1 and 2
+under `utf8mb4_general_ci` and `utf8mb4_unicode_ci`. Other Extension A blocks
+and exact legacy weight bytes remain unaudited.
 A [legacy-collation selector and CJK punctuation audit](torture/findings/2026-10-18-legacy-cjk-selector-audit.md)
 found no membership or relevance differences across 4,800 additional
 two-column ngram queries at token sizes 1–10. This narrows the sampled
