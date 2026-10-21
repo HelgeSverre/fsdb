@@ -1901,6 +1901,11 @@ The [October 14 repeat check](benchmarks/results/2026-10-14-correlated-quick-che
 finds the bounded derived and CTE equality queries around four times MySQL's
 whole-query latency in its stable quick-run pair; a point-lookup control also
 lags, so that ratio is not an isolated correlated-planner cost.
+The [October 21 current-head check](benchmarks/results/2026-10-21-correlated-planner-current-check.md)
+repeats those queries and the point control across three ShortRuns. Derived
+equality stays near 1 ms on fsdb, while noisy MySQL and point controls still
+do not isolate a correlated-planner regression or justify changing access-path
+heuristics.
 
 The [correlated functional-key profile](benchmarks/results/2bb13632-quick.md)
 extends that coverage to compatible unary and composed expression indexes.
