@@ -15353,26 +15353,51 @@ and private correlatedSignedIntegerBounds (columns: ColumnDef list) name =
         | _ -> None
     | Error _ -> None
 
+and private correlatedSignedIntegerLiteral = function
+    | LiteralValue(VInt value) when value >= -2147483647L && value <= 2147483647L ->
+        Some value
+    | Neg(LiteralValue(VInt value)) when value >= 0L && value <= 2147483647L ->
+        Some(-value)
+    | _ -> None
+
 and private correlatedAbsoluteEqualityProbes source (columns: ColumnDef list) context (whereExpr: Expr option) =
     let inverse indexed bound =
-        match indexed with
-        | FuncCall(name, [ column ]) when equalsIgnoreCase name "ABS" ->
+        let absoluteColumn = function
+            | FuncCall(name, [ column ]) when equalsIgnoreCase name "ABS" -> Some column
+            | _ -> None
+        let scaled column factor =
+            Option.map2 (fun column factor -> column, factor)
+                (absoluteColumn column)
+                (correlatedSignedIntegerLiteral factor |> Option.filter ((<>) 0L))
+        let form =
+            match indexed with
+            | FuncCall(name, [ column ]) when equalsIgnoreCase name "ABS" -> Some(column, 1L)
+            | BinOp(Mul, left, right) ->
+                scaled left right |> Option.orElseWith (fun () -> scaled right left)
+            | _ -> None
+        form
+        |> Option.bind (fun (column, factor) ->
             tryCorrelatedSignedIntegerColumn source columns column
             |> Option.bind (fun columnName ->
                 tryCorrelatedProbeValue source context bound
                 |> Option.bind (function
                     | VNull -> Some(columnName, [])
-                    | VInt value when value < 0L -> Some(columnName, [])
                     | VInt value ->
-                        correlatedSignedIntegerBounds columns columnName
-                        |> Option.map (fun (minimum, maximum) ->
-                            columnName,
-                            [ value; -value ]
-                            |> List.distinct
-                            |> List.filter (fun key -> key >= minimum && key <= maximum)
-                            |> List.map VInt)
-                    | _ -> None))
-        | _ -> None
+                        let magnitude = decimal value / decimal factor
+                        if magnitude <> System.Decimal.Truncate magnitude
+                           || magnitude < 0m
+                           || magnitude > 2147483648m then
+                            Some(columnName, [])
+                        else
+                            correlatedSignedIntegerBounds columns columnName
+                            |> Option.map (fun (minimum, maximum) ->
+                                let magnitude = int64 magnitude
+                                columnName,
+                                [ magnitude; -magnitude ]
+                                |> List.distinct
+                                |> List.filter (fun key -> key >= minimum && key <= maximum)
+                                |> List.map VInt)
+                    | _ -> None)))
 
     whereExpr
     |> optionalConjuncts
@@ -15382,15 +15407,8 @@ and private correlatedAbsoluteEqualityProbes source (columns: ColumnDef list) co
         | _ -> None)
 
 and private correlatedAffineEqualityProbes source (columns: ColumnDef list) context (whereExpr: Expr option) =
-    let literalOffset = function
-        | LiteralValue(VInt value) when value >= -2147483647L && value <= 2147483647L ->
-            Some value
-        | Neg(LiteralValue(VInt value)) when value >= 0L && value <= 2147483647L ->
-            Some(-value)
-        | _ -> None
-
     let literalFactor expression =
-        literalOffset expression |> Option.filter ((<>) 0L)
+        correlatedSignedIntegerLiteral expression |> Option.filter ((<>) 0L)
 
     let inverse indexed bound =
         let inverseForm literal column offset transform =
@@ -15400,13 +15418,13 @@ and private correlatedAffineEqualityProbes source (columns: ColumnDef list) cont
         let form =
             match indexed with
             | BinOp(Add, column, offset) ->
-                inverseForm literalOffset column offset (fun value bound -> bound - value)
+                inverseForm correlatedSignedIntegerLiteral column offset (fun value bound -> bound - value)
                 |> Option.orElseWith (fun () ->
-                    inverseForm literalOffset offset column (fun value bound -> bound - value))
+                    inverseForm correlatedSignedIntegerLiteral offset column (fun value bound -> bound - value))
             | BinOp(Sub, column, offset) ->
-                inverseForm literalOffset column offset (fun value bound -> bound + value)
+                inverseForm correlatedSignedIntegerLiteral column offset (fun value bound -> bound + value)
                 |> Option.orElseWith (fun () ->
-                    inverseForm literalOffset offset column (fun value bound -> value - bound))
+                    inverseForm correlatedSignedIntegerLiteral offset column (fun value bound -> value - bound))
             | BinOp(Mul, column, factor) ->
                 inverseForm literalFactor column factor (fun value bound -> bound / value)
                 |> Option.orElseWith (fun () ->

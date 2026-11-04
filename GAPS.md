@@ -220,7 +220,9 @@ OR branches and exact `INT` minimum magnitude, while other operand types retain
 residual evaluation.
 [Indexed physical and pass-through sources](torture/findings/2026-10-15-correlated-physical-abs.md)
 now probe the same signed keys through maintained equality indexes, including
-complete OR branches and declared-type boundaries.
+complete OR branches and declared-type boundaries. [Scaled `ABS` equalities](torture/findings/2026-11-04-correlated-scaled-abs.md)
+also invert a bounded nonzero integer factor across physical, pass-through,
+and stable materialized sources, including complete OR branches.
 [Correlated affine equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-affine.md)
 uses one inverse equality key for bounded signed integer additions and
 subtractions in either operand order, including complete OR branches; other

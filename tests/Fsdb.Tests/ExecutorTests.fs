@@ -14253,6 +14253,50 @@ let tests =
                         | other -> failtestf "expected %s ABS boundary matches, got %A" columnType other
                         Expect.isLessThan calls 8 (columnType + " out-of-range ABS keys must not scan")
 
+                testCase "scaled correlated ABS equality uses signed inverse probes"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE scaled_abs_bounds(id INT PRIMARY KEY,x BIGINT)" |> ignore
+                    runDefault store "CREATE TABLE scaled_abs_rows(id INT PRIMARY KEY,k INT,KEY ix_k(k))" |> ignore
+                    runDefault store
+                        "INSERT INTO scaled_abs_bounds VALUES(1,20),(2,1998),(3,NULL),(4,-20),(5,4294967296),(6,21),(7,-4294967296),(8,-9223372036854775808)"
+                    |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (id - 500))
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO scaled_abs_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO scaled_abs_rows VALUES(1000,-2147483648)" |> ignore
+
+                    for prefix, source in
+                        [ "", "scaled_abs_rows d"
+                          "", "(SELECT id,k FROM scaled_abs_rows) d"
+                          "WITH passthrough AS (SELECT id,k FROM scaled_abs_rows) ", "passthrough d"
+                          "", "(SELECT DISTINCT id,k FROM scaled_abs_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM scaled_abs_rows) ", "materialized d" ] do
+                        for predicate, expected in
+                            [ "ABS(d.k)*2=o.x", [ 2; 0; 0; 0; 1; 0; 0; 0 ]
+                              "2*ABS(d.k)=o.x", [ 2; 0; 0; 0; 1; 0; 0; 0 ]
+                              "ABS(d.k)*-2=o.x", [ 0; 0; 0; 2; 0; 0; 1; 0 ]
+                              "ABS(d.k)*2=o.x OR d.id=0", [ 3; 1; 1; 1; 2; 1; 1; 1 ] ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND (" + predicate + ")) "
+                                + "FROM scaled_abs_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, rows) ->
+                                let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                                Expect.equal actual (expected |> List.map Some) (source + " " + predicate)
+                            | other -> failtestf "expected scaled ABS matches, got %A" other
+                            Expect.isLessThan calls 80 (source + " " + predicate + " must bound residual work")
+
                 testCase "materialized correlated affine equality probes inverse signed keys"
                 <| fun _ ->
                     let mutable calls = 0

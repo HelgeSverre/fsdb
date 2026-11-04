@@ -48,6 +48,9 @@ def main():
                         "CREATE TABLE abs_bounds(id INT PRIMARY KEY,x BIGINT)",
                         "CREATE TABLE abs_rows(id INT PRIMARY KEY,k INT,KEY ix_k(k))",
                         "INSERT INTO abs_bounds VALUES(1,10),(2,999),(3,NULL),(4,-10),(5,2147483648)",
+                        "CREATE TABLE abs_scaled_bounds(id INT PRIMARY KEY,x BIGINT)",
+                        "INSERT INTO abs_scaled_bounds VALUES(1,20),(2,1998),(3,NULL),(4,-20),"
+                        "(5,4294967296),(6,21),(7,-4294967296),(8,-9223372036854775808)",
                     ]:
                         cursor.execute(sql)
                     cursor.executemany(
@@ -95,6 +98,18 @@ def main():
                             )
                             actual = cursor.fetchall()
                             assert actual == expected, (predicate, actual, expected)
+                        for predicate, expected in [
+                            ("ABS(d.k)*2=o.x", (2, 0, 0, 0, 1, 0, 0, 0)),
+                            ("2*ABS(d.k)=o.x", (2, 0, 0, 0, 1, 0, 0, 0)),
+                            ("ABS(d.k)*-2=o.x", (0, 0, 0, 2, 0, 0, 1, 0)),
+                            ("ABS(d.k)*2=o.x OR d.id=0", (3, 1, 1, 1, 2, 1, 1, 1)),
+                        ]:
+                            cursor.execute(
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE " + predicate + ") FROM abs_scaled_bounds o ORDER BY o.id"
+                            )
+                            actual = tuple(count for _, count in cursor.fetchall())
+                            assert actual == expected, (source, predicate, actual, expected)
 
                     cursor.execute("CREATE TABLE bit_bounds(id INT PRIMARY KEY,x BIGINT)")
                     cursor.execute("INSERT INTO bit_bounds VALUES(1,1),(2,2),(3,63),(4,64),(5,NULL)")
