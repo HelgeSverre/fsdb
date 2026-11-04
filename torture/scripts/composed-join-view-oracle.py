@@ -263,6 +263,36 @@ def main():
                 assert run(connection, "SELECT n FROM a WHERE id=1") == ((8,),)
                 run(connection, "UPDATE a SET n=7 WHERE id=1")
 
+                for order in ("1", "2", "3"):
+                    run(
+                        connection,
+                        "CREATE VIEW union_three_output_probe AS WITH u(id,flag,priority) AS "
+                        "(SELECT id AS x,flag AS x,100 AS y FROM b UNION ALL "
+                        f"SELECT id,aux,200 FROM c ORDER BY {order} DESC LIMIT 2) "
+                        "SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
+                    )
+                    assert run(
+                        connection,
+                        "SELECT is_updatable FROM information_schema.views WHERE table_name='union_three_output_probe'",
+                    ) == (("YES",),)
+                    if order == "3":
+                        assert (
+                            run(
+                                connection,
+                                "UPDATE union_three_output_probe SET n=n+1 WHERE id=1",
+                            )
+                            == 1
+                        )
+                    else:
+                        assert_error(
+                            connection,
+                            "UPDATE union_three_output_probe SET n=n+1 WHERE id=1",
+                            1052,
+                        )
+                    run(connection, "DROP VIEW union_three_output_probe")
+                assert run(connection, "SELECT n FROM a WHERE id=1") == ((8,),)
+                run(connection, "UPDATE a SET n=7 WHERE id=1")
+
                 run(connection, "CREATE TABLE insert_target(id INT PRIMARY KEY,n INT)")
                 run(
                     connection,

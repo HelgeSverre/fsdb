@@ -24110,19 +24110,24 @@ let private orderedUnionCteAmbiguity (store: Store) (dbName: string) (viewName: 
             select.Ctes
             |> List.tryPick (fun cte ->
                 match cte.Body with
-                | UnionSelect(first, _, orderBy, _, _)
-                    when referenced cte.CteName
-                         && (orderBy
-                             |> List.exists (fun (expression, _) ->
-                                 match expression with
-                                 | Lit(VInt position) -> position >= 1L && position <= int64 first.Projections.Length
-                                 | Lit(VUInt position) -> position >= 1UL && position <= uint64 first.Projections.Length
-                                 | _ -> false)) ->
-                    first.Projections
-                    |> List.choose (fun projection -> projection.Alias |> Option.orElse projection.SourceName)
-                    |> List.groupBy (fun name -> name.ToLowerInvariant())
-                    |> List.tryPick (function
-                        | _, first :: _ :: _ -> Some first
+                | UnionSelect(first, _, orderBy, _, _) when referenced cte.CteName ->
+                    let names =
+                        first.Projections
+                        |> List.map (fun projection -> projection.Alias |> Option.orElse projection.SourceName)
+                        |> List.toArray
+                    let duplicateAt position =
+                        if position < 1UL || position > uint64 names.Length then None
+                        else
+                            names.[int position - 1]
+                            |> Option.filter (fun name ->
+                                (names
+                                 |> Array.sumBy (fun candidate ->
+                                     if candidate |> Option.exists (equalsIgnoreCase name) then 1 else 0)) > 1)
+                    orderBy
+                    |> List.tryPick (fun (expression, _) ->
+                        match expression with
+                        | Lit(VInt position) when position > 0L -> duplicateAt (uint64 position)
+                        | Lit(VUInt position) -> duplicateAt position
                         | _ -> None)
                 | _ -> None)
         | _ -> None)

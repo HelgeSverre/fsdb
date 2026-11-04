@@ -1148,7 +1148,8 @@ Ordered and limited UNION bodies, including OFFSET and explicit output-column
 renaming, are covered. Duplicate first-branch names with an explicit CTE
 column list work without internal ORDER BY; with positional internal ORDER BY,
 writable metadata and UPDATE error 1052 match MySQL. Expression ordering such
-as `ORDER BY 1+0` remains writable. Other CTE compositions remain open.
+as `ORDER BY 1+0`, and a positional order on a distinct third output, remain
+writable. Other CTE compositions remain open.
 
 ## 10. Stored routines, events, schedulers
 

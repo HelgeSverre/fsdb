@@ -226,6 +226,24 @@ let tests =
                   [ [ Some "9" ] ]
                   "expression-ordered UPDATE reaches the physical target"
 
+              for order in [ 1; 2; 3 ] do
+                  let view = $"union_cte_three_output_order_{order}"
+                  expectOk
+                      (run store ($"CREATE VIEW {view} AS WITH u(id,flag,priority) AS (SELECT id AS x,flag AS x,100 AS y FROM union_view_left UNION ALL SELECT id,aux,200 FROM union_view_right ORDER BY {order} DESC LIMIT 2) SELECT t.id,t.n,u.flag FROM u JOIN union_view_target t ON t.id=u.id"))
+                      "create three-output UNION CTE view"
+                  Expect.equal
+                      (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{view}'"))
+                      [ [ Some "YES" ] ]
+                      "all three output orderings retain writable metadata"
+                  match run store ($"UPDATE {view} SET n=n+1 WHERE id=1") with
+                  | Affected 1UL when order = 3 -> ()
+                  | Err(1052, "Column 'x' in order clause is ambiguous") when order < 3 -> ()
+                  | other -> failtestf "unexpected three-output order %d update: %A" order other
+              Expect.equal
+                  (rows store "SELECT n FROM union_view_target WHERE id=1")
+                  [ [ Some "10" ] ]
+                  "only the unique-output ordering updates the target"
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()

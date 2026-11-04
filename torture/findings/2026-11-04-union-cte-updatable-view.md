@@ -29,6 +29,10 @@ the target. Both direct and joined UPDATE forms return 1052 for positional
 ordering in the native oracle and focused regression; the target row remains
 unchanged. The adjacent `ORDER BY 1+0` expression updates successfully on
 both engines, so the ambiguity check applies only to ordinal order keys.
+With three UNION outputs and duplicate names only in positions 1 and 2,
+MySQL rejects updates ordered by either duplicate position but accepts an
+update ordered by unique position 3. Fsdb now checks the name at the actual
+ordinal instead of rejecting every positional ORDER BY on that CTE.
 Dependent branches, nested CTEs, and broader security contexts remain to
 audit.
 
