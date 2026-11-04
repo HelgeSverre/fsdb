@@ -332,7 +332,10 @@ index cut in either written join order, including the plan-dependent
 `DECIMAL(20,2)` comparisons near `2^53`; other join plans and shapes remain open.
 Signed `BIGINT` multiplication retains the correlated scan path so overflow
 on nonmatching rows remains observable; [the native overflow probe](torture/findings/2026-11-04-correlated-signed-multiplication.md#bigint-overflow-boundary)
-now matches error 1690 in literal, scan, and correlated evaluation. Other
+now matches error 1690 in literal, scan, and correlated evaluation. Bounded
+exact decimal factors over signed TINYINT through INT keys now use
+inverse lookups for multiplication and scaled ABS, including decimal outer
+bounds ([oracle and residual probe](torture/findings/2026-11-04-correlated-signed-multiplication.md#exact-decimal-factors)). Other
 approximate numeric combinations, text, and functional-expression bounds
 retain their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.

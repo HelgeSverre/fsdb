@@ -16,5 +16,8 @@ regression checks those counts and candidate narrowing. Before the change,
 the first physical query made 8,016 residual calls; after the change, every
 audited query stays below 80.
 
-Zero and non-integer factors, other inner column types, and broader nested
+Zero and approximate DOUBLE factors, other inner column types, and broader nested
 arithmetic forms retain their existing paths.
+Exact decimal factors in the bounded range now use the same signed inverse
+probes, including decimal outer bounds and both operand orders; see the
+[decimal-factor oracle and residual probe](2026-11-04-correlated-signed-multiplication.md#exact-decimal-factors).

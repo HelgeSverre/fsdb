@@ -16,8 +16,20 @@ the first physical query evaluated 9,027 residual rows; after the change,
 every audited query stays below 100 residual calls while returning the
 MySQL-matched counts.
 
-Factors of zero, non-integer factors, unsigned or BIGINT inner columns, and
+Factors of zero, approximate DOUBLE factors, unsigned or BIGINT inner columns, and
 broader arithmetic forms retain their scan path.
+
+## Exact decimal factors
+
+Finite decimal literals between `0.0000001` and `2147483647` in magnitude
+now use the same inverse lookup for signed TINYINT through INT keys. Decimal
+outer bounds are handled exactly, including fractional values that cannot
+equal any product. A decimal factor also works with `ABS(d.k)` by probing
+both signed keys. Both operand orders and negative factors are covered.
+The MySQL 8.4.11 oracle checks physical, pass-through, and materialized
+sources; the fsdb regression checks the same counts with fewer than 100
+residual calls per query against a source with more than 1,000 rows. Zero,
+approximate DOUBLE factors, and wider factor magnitudes still scan.
 
 ## BIGINT overflow boundary
 

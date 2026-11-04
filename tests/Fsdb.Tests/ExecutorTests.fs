@@ -14357,6 +14357,53 @@ let tests =
                             | other -> failtestf "expected scaled ABS matches, got %A" other
                             Expect.isLessThan calls 80 (source + " " + predicate + " must bound residual work")
 
+                testCase "correlated decimal multiplication probes inverse signed keys"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE decimal_factor_bounds(id INT PRIMARY KEY,x DECIMAL(20,2))" |> ignore
+                    runDefault store "CREATE TABLE decimal_factor_rows(id INT PRIMARY KEY,k INT,KEY ix_k(k))" |> ignore
+                    runDefault store
+                        "INSERT INTO decimal_factor_bounds VALUES(1,4.50),(2,5.50),(3,-4.50),(4,4.60),(5,NULL),(6,1073741823.50),(7,1073741824.00)"
+                    |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" (id + 100) (id + 1000))
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO decimal_factor_rows VALUES" + values)
+                    |> ignore
+                    runDefault store
+                        "INSERT INTO decimal_factor_rows VALUES(1,9),(2,11),(3,-11),(4,-9),(5,-2147483648),(6,2147483647),(7,-2147483647),(8,8),(9,-12)"
+                    |> ignore
+
+                    for prefix, source in
+                        [ "", "decimal_factor_rows d"
+                          "", "(SELECT id,k FROM decimal_factor_rows) d"
+                          "WITH passthrough AS (SELECT id,k FROM decimal_factor_rows) ", "passthrough d"
+                          "", "(SELECT DISTINCT id,k FROM decimal_factor_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM decimal_factor_rows) ", "materialized d" ] do
+                        for predicate, expected in
+                            [ "d.k*0.5=o.x", [ 1; 1; 1; 0; 0; 1; 0 ]
+                              "0.5*d.k=o.x", [ 1; 1; 1; 0; 0; 1; 0 ]
+                              "d.k*-0.5=o.x", [ 1; 1; 1; 0; 0; 1; 1 ]
+                              "ABS(d.k)*0.5=o.x", [ 2; 2; 0; 0; 0; 2; 1 ]
+                              "0.5*ABS(d.k)=o.x", [ 2; 2; 0; 0; 0; 2; 1 ] ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                                + "FROM decimal_factor_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, rows) ->
+                                let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                                Expect.equal actual (expected |> List.map Some) (source + " " + predicate)
+                            | other -> failtestf "expected decimal factor matches, got %A" other
+                            Expect.isLessThan calls 100 (source + " " + predicate + " must bound residual work")
+
                 testCase "materialized correlated affine equality probes inverse signed keys"
                 <| fun _ ->
                     let mutable calls = 0
