@@ -2325,7 +2325,7 @@ let tests =
                       | ResultSet(_, rows) -> Expect.equal rows expected statement
                       | actual -> failtestf "expected ordered rows after %s, got %A" statement actual
 
-          testCase "keyless filesort write waits for pending secondary-key inserts"
+          TestSupport.processGlobalCase "keyless filesort write waits for pending secondary-key inserts"
           <| fun _ ->
               let numeric =
                   [ "n>=0", 0, Some "0", "", true, [ 0; 1 ]

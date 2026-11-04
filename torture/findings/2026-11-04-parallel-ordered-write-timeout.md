@@ -25,3 +25,19 @@ pending value, and time zones on failure. `just check` uses the same
 sequenced mode as CI so the documented release gate remains reproducible.
 A controlled parallel-load reproduction and managed stack capture would be
 needed before changing production lock behavior.
+
+## Test-runner follow-up
+
+A dedicated thread for the blocking waiter made one full parallel run pass,
+but the next run failed before that thread reached the start barrier within
+one second. The failure therefore moved from post-commit resumption to
+thread startup under the same heavily loaded suite. This is direct evidence
+that the timing assertions are sensitive to parallel runner scheduling;
+it does not by itself prove that every earlier timeout had that cause.
+
+The matrix is now an Expecto sequenced case, as are other tests with
+process-sensitive timing. Two full parallel-suite runs passed 3,870/3,870
+with the dedicated waiter after this change. The extra dedicated thread was
+then removed, and a third full parallel-suite run passed 3,870/3,870 with
+the original task-based waiter. Production locking was not changed. The
+separate write-scheduling gaps in `GAPS.md` remain open.
