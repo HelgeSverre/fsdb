@@ -246,7 +246,7 @@ let tests =
 
           testCase "UNION DISTINCT read sources keep a joined physical target writable"
           <| fun _ ->
-              for source in [ "derived"; "cte" ] do
+              for source, limited in [ "derived", false; "cte", false; "derived", true; "cte", true ] do
                   let store = Fsdb.Storage.create ()
                   for sql in
                       [ "CREATE TABLE distinct_target(id INT PRIMARY KEY,n INT)"
@@ -256,7 +256,9 @@ let tests =
                         "INSERT INTO distinct_left VALUES(1,7),(1,7),(1,8)"
                         "INSERT INTO distinct_right VALUES(1,9)" ] do
                       expectOk (run store sql) sql
-                  let union = "SELECT id,flag FROM distinct_left UNION DISTINCT SELECT id,flag FROM distinct_right"
+                  let union =
+                      "SELECT id,flag FROM distinct_left UNION DISTINCT SELECT id,flag FROM distinct_right"
+                      + if limited then " ORDER BY flag DESC LIMIT 2" else ""
                   let definition =
                       if source = "derived" then
                           $"SELECT t.id,t.n,u.flag FROM ({union}) u JOIN distinct_target t ON t.id=u.id"
@@ -270,10 +272,11 @@ let tests =
                       (source + " writable metadata")
                   Expect.equal
                       (rows store "SELECT flag FROM distinct_joined ORDER BY flag")
-                      [ [ Some "7" ]; [ Some "8" ]; [ Some "9" ] ]
+                      (if limited then [ [ Some "8" ]; [ Some "9" ] ] else [ [ Some "7" ]; [ Some "8" ]; [ Some "9" ] ])
                       (source + " distinct read rows")
                   Expect.equal (run store "UPDATE distinct_joined SET n=n+1 WHERE id=1") (Affected 1UL) (source + " physical write")
-                  match run store "UPDATE distinct_joined SET n=7 WHERE id=1" with
+                  let rejectedValue = if limited then 8 else 7
+                  match run store ($"UPDATE distinct_joined SET n={rejectedValue} WHERE id=1") with
                   | Err(1369, _) -> ()
                   | other -> failtestf "expected %s CHECK OPTION rejection, got %A" source other
                   Expect.equal (rows store "SELECT n FROM distinct_target") [ [ Some "1" ] ] (source + " atomic rejection")

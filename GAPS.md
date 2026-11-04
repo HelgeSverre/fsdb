@@ -882,7 +882,8 @@ now follow MySQL's permissive outer-view `IS_UPDATABLE` metadata, including a
 recursive-only view that reports `YES` but still rejects UPDATE with 1288.
 [Audited `UNION DISTINCT` derived and CTE read sources](torture/findings/2026-11-04-union-distinct-updatable-view.md)
 also precede a writable physical target in an inner joined view, including
-duplicate elimination, one target write, and cascaded CHECK OPTION rejection.
+duplicate elimination, ordered limited sources, one target write, and cascaded
+CHECK OPTION rejection.
 
 Direct physical inner-join views can update one component table per statement
 and insert through explicit target columns into one insertable component.
