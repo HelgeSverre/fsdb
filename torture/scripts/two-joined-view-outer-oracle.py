@@ -202,6 +202,18 @@ def main():
                     "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
                     "RIGHT JOIN va ON g.id=va.link_id LEFT JOIN vb ON vb.link_id=va.link_id "
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
+                    ("UPDATE link l0 LEFT JOIN va ON va.link_id=l0.id "
+                     "LEFT JOIN link l1 ON l1.id=l0.id LEFT JOIN vb ON vb.link_id=l1.id "
+                     "LEFT JOIN link l2 ON l2.id=l1.id LEFT JOIN link l3 ON l3.id=l2.id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE l0.id=1"),
+                    ("UPDATE link l0 LEFT JOIN va ON va.link_id=l0.id "
+                     "LEFT JOIN link l1 ON l1.id=l0.id LEFT JOIN vb ON vb.link_id=l1.id "
+                     "LEFT JOIN link l2 ON l2.id=l1.id LEFT JOIN link l3 ON l3.id=l2.id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE l0.id=2"),
+                    ("UPDATE link l0 LEFT JOIN va ON va.link_id=l0.id "
+                     "LEFT JOIN link l1 ON l1.id=l0.id LEFT JOIN vb ON vb.link_id=l1.id "
+                     "LEFT JOIN link l2 ON l2.id=l1.id LEFT JOIN link l3 ON l3.id=l2.id "
+                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE l0.id=3"),
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)

@@ -1,13 +1,13 @@
 # Two writable joined views under outer UPDATE joins
 
 The [native MySQL 8.4.11 differential oracle](../scripts/two-joined-view-outer-oracle.py)
-compares thirty UPDATE statements against fsdb. Two independently
+compares thirty-three UPDATE statements against fsdb. Two independently
 writable inner-join views share their internal physical/read aliases. The
 matrix uses both LEFT and RIGHT outer joins, with a fully matched row and
 rows missing from either view. A second pair of views joins grouped read
 sources and dependent `LATERAL` projections before the outer UPDATE join.
 
-All thirty statements match MySQL's affected-row count and the resulting rows
+All thirty-three statements match MySQL's affected-row count and the resulting rows
 in both physical target tables. A `CASCADED CHECK OPTION` on the grouped
 lateral view also rejects an invalid two-target update with error 1369 and
 leaves both tables unchanged. This extends the existing inner two-view and
@@ -102,6 +102,14 @@ fsdb agree on row counts and both base tables after each statement. Two
 additional cases hold either physical target while a two-view update waits;
 both rebase and commit with MySQL's result, bringing the contention matrix
 to seventeen cases.
+
+Three further UPDATEs use a six-source LEFT JOIN chain with two writable
+joined views and four physical read aliases. The chain preserves a matched
+row, a row with only the first view present, and a row with only the second
+view present. MySQL and fsdb agree on affected rows and both physical target
+tables after each statement. These extend the audited outer-join width from
+five to six sources for this shape; other join trees and contention involving
+multiple simultaneously held targets remain open.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:
