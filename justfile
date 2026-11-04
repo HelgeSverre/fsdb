@@ -66,7 +66,8 @@ prepared-type-oracle:
 
 # Build + tests
 [group('qa')]
-check: build test
+check: build
+    dotnet run --project tests/Fsdb.Tests -- --sequenced --no-spinner
 
 # Run tests with timings
 [group('qa')]

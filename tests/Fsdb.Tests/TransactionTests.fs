@@ -2452,17 +2452,17 @@ let tests =
                               if verb = "UPDATE" then "UPDATE tx_keyless_filesort" + hint + " SET n=n+1"
                               else "DELETE FROM tx_keyless_filesort" + hint
                           let statement = action + " WHERE " + predicate + " ORDER BY " + orderExpression + " LIMIT 2"
+                          let case = statement + " pending " + literal pendingRank + " at " + ownerTimeZone + "/" + waiterTimeZone
                           use started = new Threading.ManualResetEventSlim(false)
                           let waiting =
                               Threading.Tasks.Task.Run(fun () ->
                                   started.Set()
                                   handle waiter statement)
-                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "keyless writer starts"
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) (case + " keyless writer starts")
                           let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
                           Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
-                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "keyless writer resumes"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) (case + " keyless writer resumes")
                           let waiter, result = waiting.Result
-                          let case = statement + " pending " + literal pendingRank + " at " + ownerTimeZone + "/" + waiterTimeZone
                           Expect.equal blocked shouldWait (case + " wait behavior")
                           Expect.equal result (Affected 2UL) "keyless writer fills its limit"
                           Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "keyless writer commits"
