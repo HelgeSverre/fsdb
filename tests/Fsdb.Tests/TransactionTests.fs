@@ -2802,6 +2802,46 @@ let tests =
                       Expect.equal rows expected "secondary-order write reselects after the insert"
                   | other -> failtestf "expected secondary-order rows, got %A" other
 
+          testCase "limited YEAR ordered write waits for pending indexed inserts"
+          <| fun _ ->
+              for verb in [ "UPDATE"; "DELETE" ] do
+                  for direction, pending in [ "ASC", 2020; "DESC", 2024 ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      handle setup "CREATE TABLE tx_year_order(rank_year YEAR,n INT,KEY ix_year(rank_year))" |> ignore
+                      handle setup "INSERT INTO tx_year_order VALUES(2021,0),(2022,0),(2023,0)" |> ignore
+                      let owner, _ = handle (create 2 store) "BEGIN"
+                      let owner, inserted =
+                          handle owner (sprintf "INSERT INTO tx_year_order VALUES(%d,0)" pending)
+                      Expect.equal inserted (Affected 1UL) "owner inserts the pending year"
+                      let waiter, _ = handle (create 3 store) "BEGIN"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let statement =
+                          (if verb = "UPDATE" then "UPDATE tx_year_order SET n=1" else "DELETE FROM tx_year_order")
+                          + sprintf " ORDER BY rank_year %s LIMIT 1" direction
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              handle waiter statement)
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "YEAR writer starts"
+                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits the year"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "YEAR writer resumes"
+                      let waiter, result = waiting.Result
+                      Expect.isTrue blocked (statement + " waits for the pending year")
+                      Expect.equal result (Affected 1UL) "one YEAR-ordered row changes"
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                      let expected =
+                          [ 2021; 2022; 2023; pending ]
+                          |> List.sort
+                          |> List.filter (fun year -> verb = "UPDATE" || year <> pending)
+                          |> List.map (fun year ->
+                              [ Some(string year)
+                                Some(if verb = "UPDATE" && year = pending then "1" else "0") ])
+                      match handle setup "SELECT rank_year,n FROM tx_year_order ORDER BY rank_year" |> snd with
+                      | ResultSet(_, rows) -> Expect.equal rows expected statement
+                      | other -> failtestf "expected YEAR-ordered rows, got %A" other
+
           testCase "limited ordered write reselects secondary-index inserts at LIMIT two"
           <| fun _ ->
               let cases =

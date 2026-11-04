@@ -2857,7 +2857,7 @@ let private orderedKeyGroups (table: Table) : IndexKeyGroup list =
 let private insertOrderKeyGroups (table: Table) : IndexKeyGroup list =
     let supportedColumn index =
         match table.Columns.[index].Type with
-        | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _
+        | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ | TYear
         | TDecimal _ | TFloat _ | TDouble _ | TDate | TTime _ | TDateTime _ | TTimestamp _
         | TChar _ | TVarchar _ -> true
         | _ -> false
@@ -4371,7 +4371,7 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
     let orderedValue keyType (value: string) =
         let expectedTag =
             match keyType with
-            | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ -> Some 'I'
+            | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ | TYear -> Some 'I'
             | TDecimal _ -> Some 'M'
             | TFloat _ | TDouble _ -> Some 'D'
             | TDate -> Some 'T'
