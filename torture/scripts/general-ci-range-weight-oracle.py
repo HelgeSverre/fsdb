@@ -2,17 +2,21 @@
 
 import argparse
 import pathlib
+import socket
 import subprocess
 import tempfile
 import time
 
 import pymysql
 
+REPO = pathlib.Path(__file__).resolve().parents[2]
+FSDB = REPO / "src/Fsdb.Cli/bin/Release/net10.0/Fsdb.Cli.dll"
 
-def connect(socket):
+
+def connect(**options):
     for _ in range(100):
         try:
-            return pymysql.connect(unix_socket=socket, user="root", autocommit=True)
+            return pymysql.connect(user="root", autocommit=True, **options)
         except pymysql.MySQLError:
             time.sleep(0.1)
     raise RuntimeError("MySQL did not become ready")
@@ -22,41 +26,97 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("start", type=lambda value: int(value, 16))
     parser.add_argument("stop", type=lambda value: int(value, 16))
-    parser.add_argument("--collation", choices=("utf8mb4_general_ci", "utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci"),
-                        default="utf8mb4_general_ci")
+    parser.add_argument(
+        "--collation",
+        choices=("utf8mb4_general_ci", "utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci"),
+        default="utf8mb4_general_ci",
+    )
+    parser.add_argument(
+        "--compare-fsdb",
+        action="store_true",
+        help="compare exact WEIGHT_STRING bytes with Release fsdb",
+    )
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="fsdb-general-weight-") as directory:
         root = pathlib.Path(directory)
         data = root / "data"
         data.mkdir()
-        socket = str(root / "mysql.sock")
-        server = connection = None
+        mysql_socket = str(root / "mysql.sock")
+        server = connection = fsdb_server = fsdb_connection = None
         with (root / "mysql.log").open("w") as log:
             try:
                 subprocess.run(
-                    ["mysqld", "--no-defaults", "--initialize-insecure", f"--datadir={data}",
-                     "--innodb-redo-log-capacity=64M"],
-                    check=True, stdout=log, stderr=subprocess.STDOUT,
+                    [
+                        "mysqld",
+                        "--no-defaults",
+                        "--initialize-insecure",
+                        f"--datadir={data}",
+                        "--innodb-redo-log-capacity=64M",
+                    ],
+                    check=True,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
                 )
                 server = subprocess.Popen(
-                    ["mysqld", "--no-defaults", f"--datadir={data}", "--skip-networking",
-                     f"--socket={socket}", f"--pid-file={root / 'mysql.pid'}", "--mysqlx=0",
-                     "--innodb-buffer-pool-size=64M", "--innodb-redo-log-capacity=64M"],
-                    stdout=log, stderr=subprocess.STDOUT,
+                    [
+                        "mysqld",
+                        "--no-defaults",
+                        f"--datadir={data}",
+                        "--skip-networking",
+                        f"--socket={mysql_socket}",
+                        f"--pid-file={root / 'mysql.pid'}",
+                        "--mysqlx=0",
+                        "--innodb-buffer-pool-size=64M",
+                        "--innodb-redo-log-capacity=64M",
+                    ],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
                 )
-                connection = connect(socket)
+                connection = connect(unix_socket=mysql_socket)
+                if args.compare_fsdb:
+                    if not FSDB.is_file():
+                        raise RuntimeError(f"Build the Release fsdb CLI first: {FSDB}")
+                    with socket.socket() as reservation:
+                        reservation.bind(("127.0.0.1", 0))
+                        port = reservation.getsockname()[1]
+                    fsdb_server = subprocess.Popen(
+                        [
+                            "dotnet",
+                            str(FSDB),
+                            "--data-dir",
+                            str(root / "fsdb-data"),
+                            "--port",
+                            str(port),
+                        ],
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                    )
+                    fsdb_connection = connect(host="127.0.0.1", port=port)
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT VERSION()")
                     version = cursor.fetchone()[0]
                     assert version.startswith("8.4.11"), version
                     weights = {}
+                    mismatches = []
                     for codepoint in range(args.start, args.stop):
                         encoded = chr(codepoint).encode("utf-8").hex()
-                        cursor.execute(
+                        query = (
                             "SELECT HEX(WEIGHT_STRING(_utf8mb4 0x"
-                            + encoded + " COLLATE " + args.collation + "))"
+                            + encoded
+                            + " COLLATE "
+                            + args.collation
+                            + "))"
                         )
+                        cursor.execute(query)
                         weights[codepoint] = cursor.fetchone()[0]
+                        if fsdb_connection is not None:
+                            with fsdb_connection.cursor() as fsdb_cursor:
+                                fsdb_cursor.execute(query)
+                                actual = fsdb_cursor.fetchone()[0]
+                            if actual != weights[codepoint]:
+                                mismatches.append(
+                                    (f"U+{codepoint:04X}", weights[codepoint], actual)
+                                )
                     nonliteral = [
                         (f"U+{point:04X}", weight)
                         for point, weight in weights.items()
@@ -67,19 +127,38 @@ def main():
                         groups.setdefault(weight, []).append(point)
                     duplicate_groups = [
                         [f"U+{point:04X}" for point in points]
-                        for points in groups.values() if len(points) > 1
+                        for points in groups.values()
+                        if len(points) > 1
                     ]
-                    print(f"MySQL {version}: {len(weights)} weights, "
-                          f"{len(nonliteral)} nonliteral, {len(duplicate_groups)} duplicate groups")
+                    print(
+                        f"MySQL {version}: {len(weights)} weights, "
+                        f"{len(nonliteral)} nonliteral, {len(duplicate_groups)} duplicate groups"
+                    )
                     print("nonliteral", nonliteral)
                     print("duplicate groups", duplicate_groups)
+                    if fsdb_connection is not None:
+                        print(f"fsdb exact-weight mismatches: {len(mismatches)}")
+                        print("first mismatches", mismatches[:20])
             finally:
+                if fsdb_connection:
+                    fsdb_connection.close()
+                if fsdb_server and fsdb_server.poll() is None:
+                    fsdb_server.terminate()
+                    fsdb_server.wait(timeout=20)
                 if connection:
                     connection.close()
                 if server and server.poll() is None:
                     subprocess.run(
-                        ["mysqladmin", "--no-defaults", f"--socket={socket}", "-uroot", "shutdown"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        [
+                            "mysqladmin",
+                            "--no-defaults",
+                            f"--socket={mysql_socket}",
+                            "-uroot",
+                            "shutdown",
+                        ],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                     )
                     server.wait(timeout=20)
 
