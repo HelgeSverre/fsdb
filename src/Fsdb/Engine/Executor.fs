@@ -7400,7 +7400,11 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | Affected _ -> Ok VNull
             | MultipleResults _ -> Error nestedSubqueryResultsError
     | Subquery select ->
-        match tryCorrelatedCount ctx select |> Option.orElseWith (fun () -> tryDecorrelatedCount ctx select) with
+        match
+            tryCorrelatedCount ctx select
+            |> Option.orElseWith (fun () -> tryDecorrelatedCount ctx select)
+            |> Option.orElseWith (fun () -> trySourceFreeScalarSubquery ctx select)
+        with
         | Some result -> result
         | None ->
             // Reads the subquery's own typed `Value`, not a `VString` re-wrap
@@ -7448,6 +7452,34 @@ and private coerceScalarSubqueryResult ctx expression metadata value =
                     VString text
             | None -> VString text
     | _ -> value
+
+and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
+    let plainShape =
+        select.From.IsNone
+        && select.Joins.IsEmpty
+        && select.Ctes.IsEmpty
+        && select.Where.IsNone
+        && select.GroupBy.IsEmpty
+        && select.Having.IsNone
+        && select.OrderBy.IsEmpty
+        && select.Limit.IsNone
+        && select.Offset.IsNone
+        && select.Windows.IsEmpty
+        && select.Locking.IsEmpty
+        && not select.Distinct
+        && not select.Rollup
+        && not select.CalculateFoundRows
+        && not (SelectStmt.hasDestination select)
+        && not (isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope select)
+
+    if not plainShape then None
+    else
+        tryReducedScalarProjection ctx select
+        |> Option.bind (fun projection ->
+            metadataOfExpr ctx projection
+            |> Option.map (fun metadata ->
+                evalExpr ctx projection
+                |> Result.map (coerceScalarSubqueryResult ctx (Subquery select) [ metadata ])))
 
 and private validateExpressionInContext ctx expression =
     validateExpressionBindings

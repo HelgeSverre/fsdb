@@ -1972,8 +1972,13 @@ controls showed lower correlated increments for both direct and derived
 An [indexed correlated `EXISTS` control](benchmarks/results/2026-11-04-correlated-exists-fast-path.md)
 found that plain `EXISTS(SELECT 1 ...)` grouped the whole inner table before
 probing outer rows. It now tries the complete stored equality key first;
-the matched 100-row ShortRun fell from 8.93 to 0.60 ms. Source-free scalar
-subquery dispatch still adds substantial row work and remains open.
+the matched 100-row ShortRun fell from 8.93 to 0.60 ms. The same control
+identified source-free scalar subquery dispatch as another row-scaling cost.
+The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
+evaluates a simple correlated `SELECT expression` in its outer row context
+when metadata is inferable. On the matched 100-row control, latency fell
+from 1.27 to 0.58 ms; general scalar subquery dispatch and fixed query
+handling still remain open.
 The [computed-derived control](benchmarks/results/2026-11-04-projection-miss-cache.md)
 now memoizes unsuccessful physical-projection discovery within a statement;
 the matched ShortRun fell from 4.68 to 3.71 ms for 100 outer rows. This is a

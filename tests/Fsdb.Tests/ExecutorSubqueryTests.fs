@@ -432,6 +432,26 @@ let tests =
                   (ResultSet([ "id" ], [ [ Some "50" ] ]))
                   "aggregate EXISTS remains true even when its source has no matching rows"
 
+          testCase "source-free correlated scalar projection keeps SELECT boundaries"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE scalar_outer (id INT PRIMARY KEY, label VARCHAR(10) NULL)" |> ignore
+              runDefault store "INSERT INTO scalar_outer VALUES (1,'one'),(2,NULL)" |> ignore
+              Expect.equal
+                  (runDefault store "SELECT o.id,(SELECT o.id+0) AS numeric_value,(SELECT o.label) AS text_value,(SELECT o.id LIMIT 0) AS limited,(SELECT o.id WHERE 0) AS filtered FROM scalar_outer o ORDER BY o.id")
+                  (ResultSet(
+                      [ "id"; "numeric_value"; "text_value"; "limited"; "filtered" ],
+                      [ [ Some "1"; Some "1"; Some "one"; Some "1"; None ]
+                        [ Some "2"; Some "2"; None; Some "2"; None ] ]))
+                  "direct evaluation preserves per-row values and MySQL's reduced LIMIT boundary"
+              Expect.equal
+                  (runDefault store "SELECT (SELECT COUNT(*)) AS total")
+                  (ResultSet([ "total" ], [ [ Some "1" ] ]))
+                  "source-free aggregate still materializes"
+              match runDefault store "SELECT (SELECT o.missing) FROM scalar_outer o" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected unknown source-free scalar column, got %A" other
+
           testCase "IN and NOT IN over BIGINT UNSIGNED candidates match across signedness"
           <| fun _ ->
               let store = newStore ()
