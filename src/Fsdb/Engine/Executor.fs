@@ -15531,6 +15531,11 @@ and private correlatedSignedDecimalFactor = function
     | Neg(LiteralValue(VDecimal value)) when abs value <= 2147483647m && abs value >= 0.0000001m -> Some(-value)
     | _ -> None
 
+and private correlatedZeroFactor = function
+    | LiteralValue(VInt 0L | VDecimal 0m)
+    | Neg(LiteralValue(VInt 0L | VDecimal 0m)) -> true
+    | _ -> false
+
 and private correlatedExactNumericBound = function
     | VInt value -> Some(decimal value)
     | VDecimal value -> Some value
@@ -15544,7 +15549,8 @@ and private correlatedAbsoluteEqualityProbes source (columns: ColumnDef list) co
         let scaled column factor =
             Option.map2 (fun column factor -> column, factor)
                 (absoluteColumn column)
-                (correlatedSignedDecimalFactor factor |> Option.filter ((<>) 0m))
+                (if correlatedZeroFactor factor then Some 0m
+                 else correlatedSignedDecimalFactor factor |> Option.filter ((<>) 0m))
         let form =
             match indexed with
             | FuncCall(name, [ column ]) when equalsIgnoreCase name "ABS" -> Some(column, 1m)
@@ -15561,22 +15567,25 @@ and private correlatedAbsoluteEqualityProbes source (columns: ColumnDef list) co
                     | value ->
                         correlatedExactNumericBound value
                         |> Option.bind (fun bound ->
-                            try Some(bound / factor) with :? System.OverflowException -> None)
-                        |> Option.map (fun magnitude ->
-                            if magnitude <> System.Decimal.Truncate magnitude
-                               || magnitude < 0m
-                               || magnitude > 2147483648m then
-                                columnName, []
+                            if factor = 0m then
+                                if bound = 0m then None else Some(columnName, [])
                             else
-                                correlatedSignedIntegerBounds columns columnName
-                                |> Option.map (fun (minimum, maximum) ->
-                                    let magnitude = int64 magnitude
-                                    columnName,
-                                    [ magnitude; -magnitude ]
-                                    |> List.distinct
-                                    |> List.filter (fun key -> key >= minimum && key <= maximum)
-                                    |> List.map VInt)
-                                |> Option.defaultValue (columnName, [])))))
+                                (try Some(bound / factor) with :? System.OverflowException -> None)
+                                |> Option.map (fun magnitude ->
+                                    if magnitude <> System.Decimal.Truncate magnitude
+                                       || magnitude < 0m
+                                       || magnitude > 2147483648m then
+                                        columnName, []
+                                    else
+                                        correlatedSignedIntegerBounds columns columnName
+                                        |> Option.map (fun (minimum, maximum) ->
+                                            let magnitude = int64 magnitude
+                                            columnName,
+                                            [ magnitude; -magnitude ]
+                                            |> List.distinct
+                                            |> List.filter (fun key -> key >= minimum && key <= maximum)
+                                            |> List.map VInt)
+                                        |> Option.defaultValue (columnName, []))))))
 
     whereExpr
     |> optionalConjuncts
@@ -15591,6 +15600,14 @@ and private correlatedAffineEqualityProbes source (columns: ColumnDef list) cont
     let literalOffset = correlatedSignedIntegerLiteral >> Option.map decimal
 
     let inverse indexed bound =
+        let zeroColumn column factor =
+            if correlatedZeroFactor factor then tryCorrelatedSignedIntegerColumn source columns column
+            else None
+        let zero =
+            match indexed with
+            | BinOp(Mul, left, right) ->
+                zeroColumn left right |> Option.orElseWith (fun () -> zeroColumn right left)
+            | _ -> None
         let inverseForm literal column offset transform =
             Option.map2 (fun name value -> name, transform value)
                 (tryCorrelatedSignedIntegerColumn source columns column) (literal offset)
@@ -15611,22 +15628,35 @@ and private correlatedAffineEqualityProbes source (columns: ColumnDef list) cont
                     inverseForm literalFactor factor column (fun value bound -> bound / value))
             | _ -> None
 
-        form
-        |> Option.bind (fun (name, transform) ->
-            tryCorrelatedProbeValue source context bound
-            |> Option.bind (function
-                | VNull -> Some(name, None)
-                | value ->
-                    correlatedExactNumericBound value
-                    |> Option.bind (fun bound ->
-                        try Some(transform bound) with :? System.OverflowException -> None)
-                    |> Option.bind (fun key ->
-                        correlatedSignedIntegerBounds columns name
-                        |> Option.map (fun (minimum, maximum) ->
-                            if key <> System.Decimal.Truncate key || key < decimal minimum || key > decimal maximum then
-                                name, None
-                            else
-                                name, Some(VInt(int64 key))))))
+        let zeroProbe =
+            zero
+            |> Option.bind (fun name ->
+                tryCorrelatedProbeValue source context bound
+                |> Option.bind (function
+                    | VNull -> Some(name, None)
+                    | value ->
+                        correlatedExactNumericBound value
+                        |> Option.bind (fun bound ->
+                            if bound = 0m then None else Some(name, None))))
+
+        zeroProbe
+        |> Option.orElseWith (fun () ->
+            form
+            |> Option.bind (fun (name, transform) ->
+                tryCorrelatedProbeValue source context bound
+                |> Option.bind (function
+                    | VNull -> Some(name, None)
+                    | value ->
+                        correlatedExactNumericBound value
+                        |> Option.bind (fun bound ->
+                            try Some(transform bound) with :? System.OverflowException -> None)
+                        |> Option.bind (fun key ->
+                            correlatedSignedIntegerBounds columns name
+                            |> Option.map (fun (minimum, maximum) ->
+                                if key <> System.Decimal.Truncate key || key < decimal minimum || key > decimal maximum then
+                                    name, None
+                                else
+                                    name, Some(VInt(int64 key)))))))
 
     whereExpr
     |> optionalConjuncts

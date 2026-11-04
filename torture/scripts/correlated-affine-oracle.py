@@ -89,6 +89,8 @@ def main():
                             "(3,-0.0000009),(4,0.0000008),(5,NULL),"
                             "(6,214.7483647),(7,-214.7483648)"
                         ),
+                        "CREATE TABLE zero_bound(id INT PRIMARY KEY,x DECIMAL(20,2))",
+                        "INSERT INTO zero_bound VALUES(1,0),(2,1),(3,-1),(4,NULL)",
                     ]:
                         cursor.execute(sql)
 
@@ -149,6 +151,17 @@ def main():
                                 actual,
                                 expected,
                             )
+                        for expression in ("d.k*0", "0*d.k", "d.k*0.0", "ABS(d.k)*0"):
+                            cursor.execute(
+                                prefix
+                                + "SELECT o.id,(SELECT COUNT(*) FROM "
+                                + source
+                                + " WHERE "
+                                + expression
+                                + "=o.x) FROM zero_bound o ORDER BY o.id"
+                            )
+                            actual = tuple(count for _, count in cursor.fetchall())
+                            assert actual == (9, 0, 0, 0), (source, expression, actual)
                         for expression, expected in [
                             ("d.k*2", (1, 1, 1, 1, 0, 0, 1, 1)),
                             ("2*d.k", (1, 1, 1, 1, 0, 0, 1, 1)),
