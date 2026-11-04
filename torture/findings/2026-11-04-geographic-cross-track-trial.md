@@ -50,3 +50,18 @@ locally more accurate metric is not a general compatibility fix.
 The focused spatial suite passed all 46 tests, and the full suite passed all
 3,875 tests after this change. The added point-to-line regression pins the
 resolved MySQL case.
+
+## Endpoint ordering follow-up
+
+The [Boost 1.84 cross-track implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/strategies/geographic/distance_cross_track.hpp)
+orders the segment endpoints by longitude before its inverse azimuths,
+endpoint checks, and Newton seed. Fsdb previously kept WKT order. Applying
+that general rule resolved all 44 differences in the 100 seeded point-to-line
+distance cases, at the same 0.01 m tolerance. It changed the near-hole
+point-to-polygon distance count from 22 to 23 mismatches across 189 points;
+the added mismatch is `POINT(86 2.99999)` at a near-polar hole corner.
+The 412 line relation and 189 point relation corpora retained 13 and three
+mismatches respectively. This is a substantial broader-distance gain, but
+the high-latitude corner behavior still needs the remaining Boost strategy
+details. Two formerly mismatching seeded line cases are pinned in the focused
+regression. All 31 geographic tests and the full 3,875-test suite passed.
