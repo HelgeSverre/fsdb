@@ -406,6 +406,32 @@ let tests =
               | ResultSet([ "name" ], [ [ Some "bob" ] ]) -> ()
               | other -> failtestf "expected only bob (who has no post), got %A" other
 
+          testCase "correlated EXISTS uses a complete inner equality key"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE exists_outer (id INT PRIMARY KEY)" |> ignore
+              runDefault store "CREATE TABLE exists_inner (id INT PRIMARY KEY, outer_id INT, KEY ix_outer_id (outer_id))" |> ignore
+              runDefault store ("INSERT INTO exists_outer VALUES " + ([ 1..50 ] |> List.map (sprintf "(%d)") |> String.concat ",")) |> ignore
+              runDefault store ("INSERT INTO exists_inner VALUES " + ([ 1..500 ] |> List.map (fun id -> sprintf "(%d,%d)" id (((id - 1) % 25) + 1)) |> String.concat ",")) |> ignore
+
+              let result, examined =
+                  withExaminedRows (fun () ->
+                      runDefault store "SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o ORDER BY o.id")
+              match result with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows.Length 50 "every outer row is returned"
+                  Expect.isTrue (rows |> List.mapi (fun index row -> row.[1] = Some(if index < 25 then "1" else "0")) |> List.forall id) "only the first 25 keys have matches"
+              | other -> failtestf "expected correlated EXISTS rows, got %A" other
+              Expect.isLessThan examined 200L "the indexed EXISTS path does not group or scan all inner rows"
+              Expect.equal
+                  (runDefault store "SELECT o.id FROM exists_outer o WHERE EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id LIMIT 0)")
+                  (ResultSet([ "id" ], []))
+                  "LIMIT 0 still uses ordinary EXISTS semantics"
+              Expect.equal
+                  (runDefault store "SELECT o.id FROM exists_outer o WHERE o.id=50 AND EXISTS(SELECT COUNT(*) FROM exists_inner i WHERE i.outer_id=o.id)")
+                  (ResultSet([ "id" ], [ [ Some "50" ] ]))
+                  "aggregate EXISTS remains true even when its source has no matching rows"
+
           testCase "IN and NOT IN over BIGINT UNSIGNED candidates match across signedness"
           <| fun _ ->
               let store = newStore ()

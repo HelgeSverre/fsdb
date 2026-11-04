@@ -1969,6 +1969,11 @@ Statement-local [equality index-match caching](benchmarks/results/2026-11-04-cor
 now avoids rediscovering the same index for every bound outer row. Matched
 controls showed lower correlated increments for both direct and derived
 `COUNT(*)` shapes; fixed query handling and other row work remain open.
+An [indexed correlated `EXISTS` control](benchmarks/results/2026-11-04-correlated-exists-fast-path.md)
+found that plain `EXISTS(SELECT 1 ...)` grouped the whole inner table before
+probing outer rows. It now tries the complete stored equality key first;
+the matched 100-row ShortRun fell from 8.93 to 0.60 ms. Source-free scalar
+subquery dispatch still adds substantial row work and remains open.
 The [computed-derived control](benchmarks/results/2026-11-04-projection-miss-cache.md)
 now memoizes unsuccessful physical-projection discovery within a statement;
 the matched ShortRun fell from 4.68 to 3.71 ms for 100 outer rows. This is a

@@ -7388,7 +7388,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 coerce castMode v
                 |> Result.mapError Storage.toMySqlError)
     | Exists select ->
-        match tryDecorrelatedExists ctx select with
+        match tryCorrelatedExists ctx select |> Option.orElseWith (fun () -> tryDecorrelatedExists ctx select) with
         | Some result -> result
         | None ->
             match (runExpressionSubquery ctx select (existsEarlyExitSelect select)).Result with
@@ -9089,6 +9089,34 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
                     |> Result.map VInt))
     | _ -> None
 
+and private plainExistsProjection (projection: Projection) =
+    match projection.Expression with
+    | Star None | Lit _ -> true
+    | _ -> false
+
+and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
+    let plainShape =
+        select.Projections |> List.forall plainExistsProjection
+        && select.Joins.IsEmpty
+        && select.GroupBy.IsEmpty
+        && select.Having.IsNone
+        && select.OrderBy.IsEmpty
+        && select.Limit.IsNone
+        && select.Offset.IsNone
+        && select.Windows.IsEmpty
+        && select.Ctes.IsEmpty
+        && select.Locking.IsEmpty
+        && not (SelectStmt.hasDestination select)
+        && not select.Distinct
+        && not select.CalculateFoundRows
+        && not select.Rollup
+
+    match select.From with
+    | Some(FromItem.Qualified _ as source) when plainShape ->
+        tryCorrelatedEqualityCount outer source select.Where
+        |> Option.map (fun count -> Ok(boolToValue (count > 0)))
+    | _ -> None
+
 /// Integer keys compare exactly under SQL `=`, so they can index a
 /// dictionary without consulting collations or numeric coercion.
 and private exactIntegerKey (value: Value) : decimal option =
@@ -9227,12 +9255,7 @@ and private tryDecorrelatedCount (outer: EvalContext) (select: SelectStmt) : Res
         None
 
 and private tryDecorrelatedExists (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
-    let plainProjection (projection: Projection) =
-        match projection.Expression with
-        | Star None | Lit _ -> true
-        | _ -> false
-
-    if select.Projections |> List.forall plainProjection then
+    if select.Projections |> List.forall plainExistsProjection then
         tryDecorrelatedMatchCount outer select |> Option.map (Result.map (fun count -> boolToValue (count > 0L)))
     else
         None
