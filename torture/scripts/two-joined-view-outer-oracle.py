@@ -91,7 +91,7 @@ def independently_held_update(first_owner, connection_options, sql):
 
         thread, outcome = start_waiting_update(waiter, sql)
         thread.join(0.2)
-        assert thread.is_alive(), "joined UPDATE did not wait for the first holder"
+        assert thread.is_alive(), ("joined UPDATE did not wait for the first holder", sql, outcome)
         assert execute(first_owner, "COMMIT") == 0
         thread.join(0.2)
         assert thread.is_alive(), "joined UPDATE completed while the second holder was active"
@@ -342,17 +342,23 @@ def main():
                         query = f"SELECT id,n FROM {target} ORDER BY id"
                         expected_rows, actual_rows = (execute(connection, query) for connection in connections)
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
-                sql = six_source_update(1)
-                expected = independently_held_update(mysql_connection, {"unix_socket": mysql_socket}, sql)
-                actual = independently_held_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, sql)
-                assert actual == expected == 2, (sql, expected, actual)
-                for target in ("a", "b"):
-                    query = f"SELECT id,n FROM {target} ORDER BY id"
-                    expected_rows, actual_rows = (execute(connection, query) for connection in connections)
-                    assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
+                independently_held_cases = [
+                    six_source_update(1),
+                    "UPDATE (link l0 LEFT JOIN va ON va.link_id=l0.id) "
+                    "RIGHT JOIN vb ON vb.link_id=l0.id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.id=1",
+                ]
+                for sql in independently_held_cases:
+                    expected = independently_held_update(mysql_connection, {"unix_socket": mysql_socket}, sql)
+                    actual = independently_held_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, sql)
+                    assert actual == expected == 2, (sql, expected, actual)
+                    for target in ("a", "b"):
+                        query = f"SELECT id,n FROM {target} ORDER BY id"
+                        expected_rows, actual_rows = (execute(connection, query) for connection in connections)
+                        assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
                 print(
                     f"MySQL 8.4.11: {len(cases)} two-view outer UPDATE cases, atomic CHECK OPTION, "
-                    f"and {len(held_cases) + 1} contended rebases matched"
+                    f"and {len(held_cases) + len(independently_held_cases)} contended rebases matched"
                 )
             finally:
                 if fsdb_connection:
