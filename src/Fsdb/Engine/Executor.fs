@@ -31908,6 +31908,12 @@ let transactionWriteTargets
                     | VDate date -> Some(OrderedNumber(decimal date.DayNumber))
                     | VTime time -> Some(OrderedNumber(decimal (timeTicks time)))
                     | VDateTime value | VTimestamp value -> Some(OrderedNumber(decimal value.Ticks))
+                    | VString label when (match column.Type with TEnum _ -> true | _ -> false) ->
+                        match column.Type with
+                        | TEnum members -> Some(OrderedNumber(decimal (Storage.enumOrdinal members label)))
+                        | _ -> None
+                    | VEnumOrdinal ordinal when (match column.Type with TEnum _ -> true | _ -> false) ->
+                        Some(OrderedNumber(decimal ordinal))
                     | VString text when (match column.Type with TChar _ | TVarchar _ -> true | _ -> false) ->
                         Some(OrderedText((column.Collation |> Collation.findOrDefault).KeyOf text))
                     | VEncodedString(charset, bytes)

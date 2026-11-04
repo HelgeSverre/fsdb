@@ -2859,7 +2859,7 @@ let private insertOrderKeyGroups (table: Table) : IndexKeyGroup list =
         match table.Columns.[index].Type with
         | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ | TYear
         | TDecimal _ | TFloat _ | TDouble _ | TDate | TTime _ | TDateTime _ | TTimestamp _
-        | TChar _ | TVarchar _ -> true
+        | TChar _ | TVarchar _ | TEnum _ -> true
         | _ -> false
     orderedKeyGroups table
     |> visibleGroups
@@ -2929,6 +2929,12 @@ let private spatialBoundsAt columnIndex (row: Value[]) =
 let private fullTextFields (indices: int list) (row: Value[]) =
     indices
     |> List.map (fun index -> Value.toText row.[index] |> Option.defaultValue "")
+
+let internal enumOrdinal members label =
+    members
+    |> List.tryFindIndex (fun memberName -> String.Equals(memberName, label, StringComparison.OrdinalIgnoreCase))
+    |> Option.map (fun index -> uint64 (index + 1))
+    |> Option.defaultValue 0UL
 
 /// Stable equality key for values already coerced into a table column's
 /// declared type. Strings use the same case-insensitive, PAD SPACE semantics
@@ -3215,7 +3221,14 @@ let tryInsertLockTargets
                                     let resolved = values |> List.choose id
                                     if resolved.Length <> values.Length then None
                                     else
-                                        let encoded = encodeEqualityValues table.Columns group.Indices resolved
+                                        let orderedValues =
+                                            List.zip group.Indices resolved
+                                            |> List.map (fun (index, value) ->
+                                                match table.Columns.[index].Type, value with
+                                                | TEnum members, VString label ->
+                                                    VEnumOrdinal(enumOrdinal members label)
+                                                | _ -> value)
+                                        let encoded = encodeEqualityValues table.Columns group.Indices orderedValues
                                         // Each pending insertion needs its own observation claim.
                                         // Equal non-unique index values must not serialize writers.
                                         let primarySuffix =
@@ -3678,11 +3691,7 @@ let private foreignKeyStorageValue (column: ColumnDef) value =
     | TYear, VInt 0L -> VInt 0L
     | TYear, VInt year when year >= 1901L && year <= 2155L -> VInt(year - 1900L)
     | TEnum members, VString label ->
-        members
-        |> List.tryFindIndex (fun memberName -> String.Equals(memberName, label, StringComparison.OrdinalIgnoreCase))
-        |> Option.map (fun index -> uint64 (index + 1))
-        |> Option.defaultValue 0UL
-        |> VUInt
+        VUInt(enumOrdinal members label)
     | TEnum _, VEnumOrdinal ordinal -> VUInt ordinal
     | TSet members, VString labels ->
         let selected = labels.Split(',') |> Set.ofArray
@@ -4379,6 +4388,7 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
             | TDateTime _ -> Some 'V'
             | TTimestamp _ -> Some 'P'
             | TChar _ | TVarchar _ -> Some 'S'
+            | TEnum _ -> Some 'R'
             | _ -> None
         match expectedTag with
         | _ when value = "N" -> Some OrderedNull
