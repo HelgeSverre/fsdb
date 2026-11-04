@@ -678,6 +678,13 @@ let tests =
                           compatibilityBmp, "utf8mb4_unicode_520_ci", "FB40CE3D"
                           compatibilitySupplementary, "utf8mb4_unicode_520_ci", "FB848122"
                           compatibilityUnassigned, "utf8mb4_unicode_520_ci", "FBC5FA1E"
+                          "\uF900", "utf8mb4_general_ci", "F900"
+                          "\uF900", "utf8mb4_unicode_ci", "FB418C48"
+                          "\uFA0E", "utf8mb3_unicode_ci", "FB41FA0E"
+                          "\uFA2E", "utf8mb4_unicode_520_ci", "FBC1FA2E"
+                          "\uFA6C", "utf8mb4_unicode_520_ci", "FB84C2EE"
+                          "\uFA70", "utf8mb4_unicode_ci", "FBC1FA70"
+                          "\uFA70", "utf8mb4_unicode_520_ci", "FB40CE26"
                           "\u3B00\u4E00", "utf8mb4_unicode_520_ci", "FB80BB00FB40CE00" ]
                     for sample, collation, expected in cases do
                         let sql = sprintf "SELECT HEX(WEIGHT_STRING('%s' COLLATE %s))" sample collation

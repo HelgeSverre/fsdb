@@ -1243,7 +1243,7 @@ of their posting and matched rows.
 | Transaction relevance | MySQL uses an approximate global table-row estimate for ranking | visibility cases agree; fsdb uses the committed corpus count rather than estimates that remain changed after rollback until ANALYZE ([controlled oracle](torture/findings/2026-10-07-fulltext-transaction-visibility.md#relevance-and-implementation-boundary)); follows the deliberate statistics policy in section 16 | high (relevance correctness) | deliberate divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | ngram DDL, search modes, stopword and phrase boundaries, mutation, startup token sizes, and preserved postings across WAL/snapshot recovery are implemented; common metadata-only MODIFY/CHANGE column definitions also preserve historical postings ([recovery oracle](torture/findings/2026-10-07-ngram-startup-sizing.md)); [multi-column searches and relevance at startup sizes 1–10](torture/findings/2026-10-07-ngram-fulltext.md) match the audited default-collation MySQL corpus, including Unicode formatting and zero-width controls, combining-mark boundaries, decomposed and voiced kana, width and script variants, compatibility ideographs, ideographic variation selectors, CJK punctuation presentation forms, and numeric symbols, within score tolerance; [legacy `utf8mb4_unicode_ci` punctuation](torture/findings/2026-10-15-legacy-ngram-punctuation.md), [enclosed CJK forms](torture/findings/2026-10-17-enclosed-cjk-legacy-ngram.md), and [U+2100–U+21FF letterlike symbols](torture/findings/2026-10-17-letterlike-legacy-ngram.md), and [U+3000–U+31FF kana and Bopomofo forms](torture/findings/2026-10-17-kana-extension-legacy-ngram.md) match their audited MySQL ngram and equality cases; [later compatibility ideographs and sampled supplementary scalars](torture/findings/2026-10-17-compatibility-ideograph-audit.md) now match their audited native-MySQL cases; the pinned MySQL 8.4.11 build has no MeCab plugin and rejects `WITH PARSER mecab` with error 1128, which fsdb matches; exact legacy weight bytes, broader legacy-collation behavior, and MeCab on plugin-enabled servers remain open | medium (for CJK) | partial |
 
-[Exact legacy `WEIGHT_STRING` bytes for BMP ideograph-only strings](torture/findings/2026-11-04-extension-a-exact-weights.md#implicit-ideograph-encoder-follow-up)
+[Exact legacy `WEIGHT_STRING` bytes](torture/findings/2026-11-04-extension-a-exact-weights.md#implicit-ideograph-encoder-follow-up)
 now match all 137,910 adjacent-pair oracle cases across Extension A and the
 unified-ideograph range under five `utf8mb3`/`utf8mb4` collations. Printable
 ASCII alone and mixed with a BMP ideograph also matches all 95
@@ -1254,8 +1254,9 @@ weights](torture/findings/2026-11-04-extension-a-exact-weights.md#supplementary-
 now match the three `utf8mb4` legacy collations: UCA 4.0 and general use
 replacement weights, while UCA 5.2 uses implicit weights. [All 544
 supplementary compatibility ideographs](torture/findings/2026-11-04-extension-a-exact-weights.md#supplementary-compatibility-ideographs)
-also match under those collations. Other mixed text and exact legacy weights
-remain open.
+also match under those collations. [All 512 BMP compatibility ideographs](torture/findings/2026-11-04-extension-a-exact-weights.md#bmp-compatibility-ideographs)
+now match under all five audited collations. Other mixed text and exact legacy
+weights remain open.
 
 The [remaining supplementary compatibility-ideograph block](torture/findings/2026-10-17-compatibility-ideograph-audit.md)
 also matches 1,716 native-MySQL ngram searches at each of startup sizes 1–10.

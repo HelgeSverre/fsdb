@@ -112,3 +112,20 @@ and compared all 55,164 adjacent pairs across the two ranges and both
 `utf8mb3` collations, again with zero mismatches. A cross-range pair also
 matched under both. Across all five collations, the audited adjacent-pair
 total is 137,910 with zero exact-byte differences.
+
+## BMP compatibility ideographs
+
+MySQL 8.4.11 weights U+F900–U+FAFF literally under the two `*_general_ci`
+collations. The legacy Unicode collations use NFKC ideograph mappings for
+their assigned ranges. UCA 4.0 maps U+F900–U+FA2D and U+FA30–U+FA6A;
+UCA 5.2 also maps later characters except U+FA2E and U+FA2F. The twelve
+non-decomposing assigned characters before U+FA2E retain the assigned
+ideograph lead. Later unassigned characters use the unassigned lead. Mapped
+supplementary targets in UCA 5.2 use the assigned supplementary lead.
+
+The oracle compared all 512 singleton weights, all 511 adjacent pairs wholly
+inside the block, and all 512 ASCII-suffix pairs under each of the five
+`utf8mb3`/`utf8mb4` collations: 7,675 exact-byte comparisons with zero
+mismatches. The regression pins the assigned, unmapped, later-mapped, and
+supplementary-target boundaries. A pair ending at U+FB00 remains outside this
+encoder because that character is a Latin ligature.

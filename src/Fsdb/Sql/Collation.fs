@@ -843,6 +843,16 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         if not isLegacy || s.Length = 0 then None
         else
             let bytes = ResizeArray<byte>()
+            let addWeight weight =
+                bytes.Add(byte (weight >>> 8))
+                bytes.Add(byte weight)
+            let addImplicit lead codepoint =
+                addWeight (lead + (codepoint >>> 15))
+                addWeight (0x8000 ||| (codepoint &&& 0x7FFF))
+            let compatibilityTarget (rune: Rune) =
+                rune.ToString().Normalize(NormalizationForm.FormKC).EnumerateRunes()
+                |> Seq.head
+                |> fun value -> value.Value
             let mutable supported = true
             for rune in s.EnumerateRunes() do
                 let codepoint = rune.Value
@@ -850,6 +860,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     (codepoint >= 0x20000 && codepoint <= 0x2EBEF)
                     || (codepoint >= 0x30000 && codepoint <= 0x323AF)
                 let supplementaryCompatibility = codepoint >= 0x2F800 && codepoint <= 0x2FA1F
+                let bmpCompatibility = codepoint >= 0xF900 && codepoint <= 0xFAFF
                 // UCA 4.0/5.2 assigns ideographs through these boundaries;
                 // later scalars in the same BMP blocks use the unassigned lead.
                 let lead =
@@ -860,13 +871,30 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     else
                         None
                 match lead with
+                | None when bmpCompatibility ->
+                    if general then
+                        addWeight codepoint
+                    else
+                        let mapped = compatibilityTarget rune
+                        let useMapping =
+                            mapped <> codepoint
+                            && (if name = "utf8mb4_unicode_520_ci" then
+                                    codepoint <> 0xFA2E && codepoint <> 0xFA2F
+                                else
+                                    codepoint < 0xFA2E || (codepoint >= 0xFA30 && codepoint <= 0xFA6A))
+                        let target = if useMapping then mapped else codepoint
+                        let implicitLead =
+                            if useMapping then
+                                if target >= 0x10000 || target <= 0x4DB5 then 0xFB80
+                                elif target <= 0x9FA5 then 0xFB40
+                                else 0xFBC0
+                            elif codepoint < 0xFA2E then 0xFB40
+                            else 0xFBC0
+                        addImplicit implicitLead target
                 | None when supplementaryCompatibility && name.StartsWith("utf8mb4_") ->
                     let weights =
                         if name = "utf8mb4_unicode_520_ci" then
-                            let mapped =
-                                rune.ToString().Normalize(NormalizationForm.FormKC).EnumerateRunes()
-                                |> Seq.head
-                                |> fun value -> value.Value
+                            let mapped = compatibilityTarget rune
                             let implicitLead =
                                 if mapped = codepoint then 0xFBC0
                                 elif mapped >= 0x10000 then 0xFB80
@@ -875,17 +903,13 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                                 else 0xFBC0
                             [ implicitLead + (mapped >>> 15); 0x8000 ||| (mapped &&& 0x7FFF) ]
                         else [ 0xFFFD ]
-                    for weight in weights do
-                        bytes.Add(byte (weight >>> 8))
-                        bytes.Add(byte weight)
+                    for weight in weights do addWeight weight
                 | None when supplementaryIdeograph && name.StartsWith("utf8mb4_") ->
                     let weights =
                         if name = "utf8mb4_unicode_520_ci" then
                             [ 0xFBC0 + (codepoint >>> 15); 0x8000 ||| (codepoint &&& 0x7FFF) ]
                         else [ 0xFFFD ]
-                    for weight in weights do
-                        bytes.Add(byte (weight >>> 8))
-                        bytes.Add(byte weight)
+                    for weight in weights do addWeight weight
                 | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =
                         let uppercase =
@@ -894,19 +918,12 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                         if general then uppercase
                         elif uppercase <= 0x60 then asciiWeights[uppercase - 0x20]
                         else asciiWeights[uppercase - 0x7B + 65]
-                    bytes.Add(byte (weight >>> 8))
-                    bytes.Add(byte weight)
+                    addWeight weight
                 | None -> supported <- false
                 | Some _ when general ->
-                    bytes.Add(byte (codepoint >>> 8))
-                    bytes.Add(byte codepoint)
+                    addWeight codepoint
                 | Some lead ->
-                    let first = lead + (codepoint >>> 15)
-                    let second = 0x8000 ||| (codepoint &&& 0x7FFF)
-                    bytes.Add(byte (first >>> 8))
-                    bytes.Add(byte first)
-                    bytes.Add(byte (second >>> 8))
-                    bytes.Add(byte second)
+                    addImplicit lead codepoint
             if supported then Some(bytes.ToArray()) else None
 
     let compareFull (a: string) (b: string) : int =
