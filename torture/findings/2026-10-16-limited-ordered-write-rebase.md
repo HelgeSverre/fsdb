@@ -266,6 +266,17 @@ the ORDER BY columns cover a complete secondary index or a prefix of the
 primary index. An incomplete secondary-index prefix conservatively waits on
 equal keys because another index column may decide their order.
 
+One MySQL 8.4.11 `DELETE ... ORDER BY rank_value ASC LIMIT 1` case with
+visible ranks 1 and 2 and a pending rank-3 insert has a variable wait outcome.
+It completed without waiting in 12 isolated repetitions, but the full oracle
+repeatedly observed a genuine InnoDB `PRIMARY` record wait on the pending row
+under an `ix_rank` index-scan plan. Both paths delete rank 1 and leave the
+same final rows. The oracle now checks `performance_schema.data_lock_waits`
+instead of treating an unfinished worker thread as proof of a lock wait, and
+accepts either wait outcome for this one case while continuing to require the
+same affected count and final state. The full 84-case re-selection and
+pending-insert matrix passed after this adjustment.
+
 An in-memory A/B/A check with 1,000 sequential inserts into a table with one
 secondary index measured warm trials around 186–205 ms on the previous and
 current revisions. The spread does not establish a precise cost difference;

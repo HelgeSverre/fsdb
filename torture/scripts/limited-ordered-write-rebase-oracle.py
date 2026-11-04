@@ -815,12 +815,12 @@ def main():
                             cursor.execute("BEGIN")
                         started = threading.Event()
                         outcome = {}
+                        action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
 
                         def waiting_after_secondary_insert():
                             try:
                                 with waiter.cursor() as cursor:
                                     started.set()
-                                    action = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
                                     cursor.execute(f"{action} WHERE n>=0 ORDER BY rank_value {direction} LIMIT {limit}")
                                     outcome["affected"] = cursor.rowcount
                                     cursor.execute("COMMIT")
@@ -831,7 +831,39 @@ def main():
                         thread.start()
                         assert started.wait(2), "secondary ordered writer starts"
                         thread.join(0.2)
-                        waited = thread.is_alive()
+                        waited = False
+                        deadline = time.monotonic() + 1.0
+                        while thread.is_alive() and time.monotonic() < deadline:
+                            with owner.cursor() as cursor:
+                                cursor.execute(
+                                    "SELECT 1 FROM performance_schema.data_lock_waits LIMIT 1"
+                                )
+                                waited = cursor.fetchone() is not None
+                            if waited:
+                                break
+                            time.sleep(0.01)
+                        variable_wait = (
+                            verb == "DELETE" and limit == 1
+                            and direction == "ASC" and inserted_id == 3
+                        )
+                        if not variable_wait and waited != should_wait:
+                            with owner.cursor() as cursor:
+                                cursor.execute(
+                                    "SELECT r.INDEX_NAME,r.LOCK_TYPE,r.LOCK_MODE,r.LOCK_DATA,"
+                                    "b.INDEX_NAME,b.LOCK_MODE,b.LOCK_DATA "
+                                    "FROM performance_schema.data_lock_waits w "
+                                    "JOIN performance_schema.data_locks r "
+                                    "ON r.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID "
+                                    "JOIN performance_schema.data_locks b "
+                                    "ON b.ENGINE_LOCK_ID=w.BLOCKING_ENGINE_LOCK_ID"
+                                )
+                                print("unexpected secondary lock wait", verb, limit,
+                                      direction, inserted_id, cursor.fetchall())
+                                cursor.execute(
+                                    f"EXPLAIN {action} WHERE n>=0 "
+                                    f"ORDER BY rank_value {direction} LIMIT {limit}"
+                                )
+                                print("secondary plan", cursor.fetchall())
                         owner.commit()
                         thread.join(5)
                         assert not thread.is_alive(), "secondary ordered writer resumes"
@@ -845,7 +877,8 @@ def main():
                             for row_id in sorted(ranks)
                             if verb == "UPDATE" or row_id not in changed_ids
                         )
-                        assert waited == should_wait, (verb, limit, direction, inserted_id, waited)
+                        if not variable_wait:
+                            assert waited == should_wait, (verb, limit, direction, inserted_id, waited)
                         assert outcome == {"affected": limit}, outcome
                         assert final_rows == expected_rows, (verb, limit, direction, inserted_id, final_rows)
                     finally:
