@@ -812,7 +812,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         if not isLegacy || s.Length = 0 then None
         else
             let bytes = ResizeArray<byte>()
-            let mutable allIdeographs = true
+            let mutable supported = true
+            let mutable hasIdeograph = false
             for rune in s.EnumerateRunes() do
                 let codepoint = rune.Value
                 // UCA 4.0/5.2 assigns ideographs through these boundaries;
@@ -825,18 +826,26 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     else
                         None
                 match lead with
-                | None -> allIdeographs <- false
+                | None when general && codepoint >= 0x20 && codepoint <= 0x7E ->
+                    let weight =
+                        if codepoint >= int 'a' && codepoint <= int 'z' then codepoint - 0x20
+                        else codepoint
+                    bytes.Add(byte (weight >>> 8))
+                    bytes.Add(byte weight)
+                | None -> supported <- false
                 | Some _ when general ->
+                    hasIdeograph <- true
                     bytes.Add(byte (codepoint >>> 8))
                     bytes.Add(byte codepoint)
                 | Some lead ->
+                    hasIdeograph <- true
                     let first = lead + (codepoint >>> 15)
                     let second = 0x8000 ||| (codepoint &&& 0x7FFF)
                     bytes.Add(byte (first >>> 8))
                     bytes.Add(byte first)
                     bytes.Add(byte (second >>> 8))
                     bytes.Add(byte second)
-            if allIdeographs then Some(bytes.ToArray()) else None
+            if supported && hasIdeograph then Some(bytes.ToArray()) else None
 
     let compareFull (a: string) (b: string) : int =
         if String.Equals(a, b, StringComparison.Ordinal) then

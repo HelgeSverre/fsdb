@@ -657,6 +657,8 @@ let tests =
                           "\u7FFF\u8000", "utf8mb4_unicode_ci", "FB40FFFFFB418000"
                           "\u9FA5\u9FA6", "utf8mb4_unicode_ci", "FB419FA5FBC19FA6"
                           "\u3B00\u4E00", "utf8mb4_general_ci", "3B004E00"
+                          "a9!\u3B00", "utf8mb4_general_ci", "0041003900213B00"
+                          "a9!\u3B00", "utf8mb3_general_ci", "0041003900213B00"
                           "\u3B00\u4E00", "utf8mb4_unicode_520_ci", "FB80BB00FB40CE00" ]
                     for sample, collation, expected in cases do
                         let sql = sprintf "SELECT HEX(WEIGHT_STRING('%s' COLLATE %s))" sample collation

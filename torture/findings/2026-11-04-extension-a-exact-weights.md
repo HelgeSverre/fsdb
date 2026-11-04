@@ -59,9 +59,12 @@ confirmed `U+3B00 U+4E00` against MySQL under all three collations with zero
 mismatches. This changes `WEIGHT_STRING` output; ngram
 membership and relevance continue to use the existing collation keys.
 
-Other characters in a string still use the ICU-based fallback, including
-mixed Latin/CJK text and `AS CHAR` padding. Supplementary ideographs and
-other legacy-collation weight families remain open.
+The `*_general_ci` encoder also handles printable ASCII mixed with a BMP
+ideograph. MySQL's weight for printable ASCII is its uppercase code point;
+all 95 ASCII-plus-U+3B00 pairs match exact bytes under both `utf8mb4` and
+`utf8mb3`. Other mixed text and the legacy Unicode-collation ASCII weights
+still use the ICU-based fallback. Supplementary ideographs and other
+legacy-collation weight families remain open.
 
 The equivalent `utf8mb3_general_ci` and `utf8mb3_unicode_ci` collations use
 the same BMP weights. The oracle now selects the matching charset introducer

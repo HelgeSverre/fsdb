@@ -42,6 +42,11 @@ def main():
         action="store_true",
         help="compare exact WEIGHT_STRING bytes with Release fsdb",
     )
+    parser.add_argument(
+        "--show-weights",
+        action="store_true",
+        help="print every MySQL weight instead of only mismatch summaries",
+    )
     pairing = parser.add_mutually_exclusive_group()
     pairing.add_argument(
         "--pair-next",
@@ -170,6 +175,14 @@ def main():
                         description += f", {len(nonliteral)} nonliteral"
                     description += f", {len(duplicate_groups)} duplicate groups"
                     print(description)
+                    if args.show_weights:
+                        print(
+                            "weights",
+                            [
+                                (f"U+{point:04X}", weight)
+                                for point, weight in weights.items()
+                            ],
+                        )
                     if not args.pair_next and args.pair_with is None:
                         print("nonliteral", nonliteral)
                     print("duplicate groups", duplicate_groups)

@@ -1245,8 +1245,10 @@ of their posting and matched rows.
 
 [Exact legacy `WEIGHT_STRING` bytes for BMP ideograph-only strings](torture/findings/2026-11-04-extension-a-exact-weights.md#implicit-ideograph-encoder-follow-up)
 now match all 137,910 adjacent-pair oracle cases across Extension A and the
-unified-ideograph range under five `utf8mb3`/`utf8mb4` collations. Mixed
-text, supplementary ideographs, and other exact legacy weights remain open.
+unified-ideograph range under five `utf8mb3`/`utf8mb4` collations. Printable
+ASCII followed by a BMP ideograph also matches all 95 oracle cases in each
+`*_general_ci` collation. Other mixed text, supplementary ideographs, and
+other exact legacy weights remain open.
 
 The [remaining supplementary compatibility-ideograph block](torture/findings/2026-10-17-compatibility-ideograph-audit.md)
 also matches 1,716 native-MySQL ngram searches at each of startup sizes 1–10.
