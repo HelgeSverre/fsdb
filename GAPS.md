@@ -1093,7 +1093,8 @@ multi-target shapes, and broader security-layer combinations remain open.
 now reaches two writable joined views with MySQL-matched affected rows on
 matched and one-sided rows.
 [Audited grouped right operands containing the second writable view](torture/findings/2026-10-18-two-joined-view-outer-writes.md#grouped-right-operand-with-a-writable-view)
-now preserve the outer-join association and update both physical targets;
+now preserve the outer-join association and update both physical targets,
+including a group with an independent derived read source;
 `USING` joins and broader nested trees remain open.
 [Two writable joined views](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
 now update both physical targets even when their read-side internal table
@@ -1101,7 +1102,7 @@ aliases, writable physical target aliases, or independent derived read-source
 aliases match; [dependent `LATERAL` and `JSON_TABLE` read aliases](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
 also remain scoped across both writable views in audited two-target UPDATEs.
 The [joined-view source oracle](torture/findings/2026-10-18-two-joined-view-outer-writes.md)
-now also matches MySQL for forty UPDATE cases, including LEFT/RIGHT joins with matched or
+now also matches MySQL for forty-one UPDATE cases, including LEFT/RIGHT joins with matched or
 missing view rows, shared internal aliases, grouped lateral read sources,
 atomic `CHECK OPTION` rejection, and twenty-six contended rebases. Joined updates
 now claim every assigned writable view's physical target before taking their

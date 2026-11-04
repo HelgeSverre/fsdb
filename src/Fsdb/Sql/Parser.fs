@@ -4694,16 +4694,19 @@ let private singleTableOrderLimit (joins: Join list) : Parser<OrderKey list * Ex
 let private updateSources: Parser<TableRef * Join list, unit> =
     fromItem .>>. many joinClause
     >>= fun (source, joins) ->
-        // Reorient a first outer join with an independent table-only group
-        // on the right. Dependent LATERAL/JSON_TABLE operands need the
-        // original left source in scope and must keep their association.
+        // Reorient a first outer join with an independent group on the right.
+        // Non-lateral derived sources are independent; LATERAL/JSON_TABLE
+        // operands may need the original left source in scope.
         let source, joins =
             match source, joins with
             | FromTable table, ({ Kind = (LeftJoin | RightJoin) as kind
                                   Table = FromJoinGroup(FromTable groupedFirst, groupedJoins)
                                   Using = [] } as join) :: rest
                 when groupedJoins
-                     |> List.forall (fun inner -> match inner.Table with FromTable _ -> true | _ -> false) ->
+                     |> List.forall (fun inner ->
+                         match inner.Table with
+                         | FromTable _ | FromSubquery _ -> true
+                         | _ -> false) ->
                 let reversed = if kind = LeftJoin then RightJoin else LeftJoin
                 let outer = { join with Kind = reversed; Table = FromTable table }
                 FromTable groupedFirst, groupedJoins @ (outer :: rest)

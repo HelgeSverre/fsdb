@@ -173,6 +173,13 @@ until both owners commit, then rebase and change both rows. The oracle's 26
 contended rebases match. A focused F# regression checks matched and one-sided
 affected counts and final physical rows.
 
+An independent `(SELECT id FROM link)` source inserted between `link` and
+`vb` in the right-hand group exposed the same former 1146 error. Allowing
+non-lateral derived operands through the reorientation closes that case too:
+the oracle now matches 41 UPDATE cases and still matches all 26 contention
+rebases. A focused regression checks both physical target rows. The guard
+continues to exclude dependent `LATERAL` and `JSON_TABLE` operands.
+
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:
 

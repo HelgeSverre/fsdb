@@ -1097,6 +1097,19 @@ let tests =
                   [ [ Some "1"; Some "33" ]; [ Some "3"; Some "42" ] ]
                   "only the second view's unmatched row changes"
 
+              Expect.equal
+                  (run store "UPDATE grouped_va va LEFT JOIN (grouped_link l JOIN (SELECT id FROM grouped_link) d ON d.id=l.id JOIN grouped_vb vb ON vb.link_id=d.id) ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1")
+                  (Affected 2UL)
+                  "an independent derived source inside the grouped right operand keeps both views writable"
+              Expect.equal
+                  (rows store "SELECT n FROM grouped_a WHERE id=1")
+                  [ [ Some "14" ] ]
+                  "the first view changes through the derived group"
+              Expect.equal
+                  (rows store "SELECT n FROM grouped_b WHERE id=1")
+                  [ [ Some "34" ] ]
+                  "the second view changes through the derived group"
+
           testCase "an unchecked outer join enforces only the inner view check"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
