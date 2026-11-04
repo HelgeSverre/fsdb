@@ -117,3 +117,10 @@ trace which Boost branch handles each residual point and compare the first
 Newton position and distance when both engines reach the loop. The current
 oracle already reports individual hole-segment distances, allowing that
 comparison without changing polygon aggregation.
+
+A controlled Release trial removed fsdb's tiny-meridian point-distance
+fallback only for the distance computed at each cross-track Newton position.
+The full edge oracle still reported exactly ten near-hole point-distance
+mismatches and zero of 100 seeded point-to-line mismatches. The trial was
+reverted. This rules out that fallback as the explanation on the current
+corpus; it does not rule out other inverse or direct-position differences.
