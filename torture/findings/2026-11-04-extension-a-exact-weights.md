@@ -68,6 +68,12 @@ with a trailing ASCII `A` also match under `utf8mb4_unicode_520_ci`. Other
 mixed text, supplementary ideographs, and other legacy-collation weight
 families remain open.
 
+The same ASCII weights now apply to printable ASCII-only strings. Across all
+five collations, 95 singleton weights, 95 ASCII-plus-`A` pairs, and 95
+`AS CHAR(1)` truncations of ASCII-plus-U+3B00 match MySQL exactly. Another
+475 `AS CHAR(4)` padded ASCII-plus-U+3B00 cases match. These probes cover
+space padding without using ICU weights; other mixed text remains open.
+
 The equivalent `utf8mb3_general_ci` and `utf8mb3_unicode_ci` collations use
 the same BMP weights. The oracle now selects the matching charset introducer
 and compared all 55,164 adjacent pairs across the two ranges and both

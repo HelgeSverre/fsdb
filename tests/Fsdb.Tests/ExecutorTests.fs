@@ -645,7 +645,7 @@ let tests =
                         Expect.equal paddedCollationWeight "000061000020000020" "CHAR pads text before binary collation weights"
                     | other -> failtestf "expected one WEIGHT_STRING row, got %A" other
 
-                testCase "legacy ideograph WEIGHT_STRING follows MySQL implicit weights"
+                testCase "legacy BMP WEIGHT_STRING follows MySQL primary weights"
                 <| fun _ ->
                     let store = newStore ()
                     let cases =
@@ -663,6 +663,8 @@ let tests =
                           "a9!\u3B00", "utf8mb3_unicode_ci", "0E330E320251FB80BB00"
                           "a9!\u3B00", "utf8mb4_unicode_520_ci", "120F120E026EFB80BB00"
                           "\u3B00a", "utf8mb4_unicode_520_ci", "FB80BB00120F"
+                          "a9!", "utf8mb4_unicode_ci", "0E330E320251"
+                          "a9!", "utf8mb4_unicode_520_ci", "120F120E026E"
                           "\u3B00\u4E00", "utf8mb4_unicode_520_ci", "FB80BB00FB40CE00" ]
                     for sample, collation, expected in cases do
                         let sql = sprintf "SELECT HEX(WEIGHT_STRING('%s' COLLATE %s))" sample collation
@@ -670,6 +672,12 @@ let tests =
                         | ResultSet(_, [ [ Some actual ] ]) ->
                             Expect.equal actual expected (sprintf "legacy weight for %s under %s" sample collation)
                         | other -> failtestf "expected legacy ideograph weight for %s, got %A" sample other
+
+                    match runDefault store "SELECT HEX(WEIGHT_STRING('a\u3B00' COLLATE utf8mb4_unicode_ci AS CHAR(1))), HEX(WEIGHT_STRING('a\u3B00' COLLATE utf8mb4_unicode_ci AS CHAR(4)))" with
+                    | ResultSet(_, [ [ Some truncated; Some padded ] ]) ->
+                        Expect.equal truncated "0E33" "CHAR truncation uses exact ASCII weight"
+                        Expect.equal padded "0E33FB80BB0002090209" "CHAR padding uses exact space weight"
+                    | other -> failtestf "expected legacy CHAR weights, got %A" other
 
                 testCase "WEIGHT_STRING keeps BIT column bytes"
                 <| fun _ ->

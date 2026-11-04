@@ -47,6 +47,11 @@ def main():
         action="store_true",
         help="print every MySQL weight instead of only mismatch summaries",
     )
+    parser.add_argument(
+        "--char-width",
+        type=int,
+        help="compare WEIGHT_STRING(... AS CHAR(n)), including space padding",
+    )
     pairing = parser.add_mutually_exclusive_group()
     pairing.add_argument(
         "--pair-next",
@@ -65,6 +70,8 @@ def main():
         parser.error("--pair-next requires a successor for every code point")
     if args.pair_with is not None and not 0 <= args.pair_with <= 0x10FFFF:
         parser.error("--pair-with requires a Unicode code point")
+    if args.char_width is not None and args.char_width < 0:
+        parser.error("--char-width must be nonnegative")
     with tempfile.TemporaryDirectory(prefix="fsdb-general-weight-") as directory:
         root = pathlib.Path(directory)
         data = root / "data"
@@ -141,6 +148,11 @@ def main():
                             + encoded
                             + " COLLATE "
                             + args.collation
+                            + (
+                                f" AS CHAR({args.char_width})"
+                                if args.char_width is not None
+                                else ""
+                            )
                             + "))"
                         )
                         cursor.execute(query)
