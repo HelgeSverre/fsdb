@@ -133,6 +133,35 @@ focused regression pins all three affected counts and the final base rows.
 Other grouped join trees still need their own association and write-scope
 audits.
 
+## Grouped right operand with a writable view
+
+A follow-up added three passing grouped-first-source forms to the maintained
+oracle, including an explicitly parenthesized whole join tree. MySQL 8.4.11
+and fsdb match affected counts and both base tables after each statement.
+
+A grouped **right** operand remains a distinct gap. On the same fixture,
+MySQL updates both base rows (affected count 2) for either form:
+
+```sql
+UPDATE va LEFT JOIN (link l JOIN vb ON vb.link_id=l.id)
+ON va.link_id=l.id
+SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1;
+
+UPDATE va RIGHT JOIN (link l LEFT JOIN vb ON vb.link_id=l.id)
+ON va.link_id=l.id
+SET va.n=va.n+1,vb.n=vb.n+1 WHERE l.id=1;
+```
+
+Fsdb returns 1146, `Table 'probe.vb' doesn't exist`, before changing either
+base table. The first joined view expands, but the second writable view is
+inside a `FromJoinGroup` on the right. The joined-view rewrite recognizes
+top-level `FromTable` join operands; the mutation join resolver leaves the
+grouped `vb` as a view row source with a physical target named `vb`. The
+subsequent write attempts to use that name as a base table. A fix must expand
+the nested writable view while preserving the right group's outer-join
+association and assignment expressions. Flattening the group would change
+which rows survive when the right side has no match.
+
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:
 
@@ -141,5 +170,4 @@ dotnet build src/Fsdb.Cli -c Release
 uv run --with pymysql python torture/scripts/two-joined-view-outer-oracle.py
 ```
 
-Wider outer-join trees, nested security layers, and contention involving two
-simultaneously held targets remain untested here.
+Wider outer-join trees and nested security layers remain untested here.
