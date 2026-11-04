@@ -2858,7 +2858,7 @@ let private insertOrderKeyGroups (table: Table) : IndexKeyGroup list =
     let supportedColumn index =
         match table.Columns.[index].Type with
         | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _
-        | TDate | TTime _ | TDateTime _ | TTimestamp _ | TChar _ | TVarchar _ -> true
+        | TDecimal _ | TDate | TTime _ | TDateTime _ | TTimestamp _ | TChar _ | TVarchar _ -> true
         | _ -> false
     orderedKeyGroups table
     |> visibleGroups
@@ -4370,6 +4370,7 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
         let expectedTag =
             match keyType with
             | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ -> Some 'I'
+            | TDecimal _ -> Some 'M'
             | TDate -> Some 'T'
             | TTime _ -> Some 'H'
             | TDateTime _ -> Some 'V'
@@ -4381,7 +4382,8 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
         | Some 'S' when value.Length > 1 && value.[0] = 'S' ->
             Some(OrderedText(value.Substring(1)))
         | Some tag when value.Length > 1 && value.[0] = tag ->
-            match Decimal.TryParse(value.Substring(1), NumberStyles.Integer, CultureInfo.InvariantCulture) with
+            let style = if tag = 'M' then NumberStyles.Float else NumberStyles.Integer
+            match Decimal.TryParse(value.Substring(1), style, CultureInfo.InvariantCulture) with
             | true, ordered -> Some(OrderedNumber ordered)
             | _ -> None
         | _ -> None

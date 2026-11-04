@@ -31858,6 +31858,7 @@ let transactionWriteTargets
                     | VInt integer -> Some(OrderedNumber(decimal integer))
                     | VUInt integer
                     | VBit(_, integer) -> Some(OrderedNumber(decimal integer))
+                    | VDecimal number -> Some(OrderedNumber number)
                     | VDate date -> Some(OrderedNumber(decimal date.DayNumber))
                     | VTime time -> Some(OrderedNumber(decimal (timeTicks time)))
                     | VDateTime value | VTimestamp value -> Some(OrderedNumber(decimal value.Ticks))

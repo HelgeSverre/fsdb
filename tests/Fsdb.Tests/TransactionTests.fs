@@ -2848,6 +2848,97 @@ let tests =
                       Expect.equal rows expected "secondary LIMIT two write reselects after insert"
                   | other -> failtestf "expected secondary LIMIT two rows, got %A" other
 
+          testCase "limited ordered write reselects pending DECIMAL secondary keys"
+          <| fun _ ->
+              let cases =
+                  [ "ASC", "0.50", [ 4; 1 ]
+                    "ASC", "4.00", [ 1; 2 ]
+                    "DESC", "4.00", [ 4; 3 ]
+                    "DESC", "0.50", [ 3; 2 ] ]
+              for verb in [ "UPDATE"; "DELETE" ] do
+                  for direction, pendingRank, changedIds in cases do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      handle setup "CREATE TABLE tx_decimal_order(id INT,rank_value DECIMAL(10,2),n INT,KEY ix_rank(rank_value))" |> ignore
+                      handle setup "INSERT INTO tx_decimal_order VALUES(1,1,0),(2,2,0),(3,3,0)" |> ignore
+                      let owner, _ = handle (create 2 store) "BEGIN"
+                      let owner, inserted =
+                          handle owner (sprintf "INSERT INTO tx_decimal_order VALUES(4,%s,0)" pendingRank)
+                      Expect.equal inserted (Affected 1UL) "owner inserts a decimal secondary key"
+                      let waiter, _ = handle (create 3 store) "BEGIN"
+                      let statement =
+                          (if verb = "UPDATE" then "UPDATE tx_decimal_order SET n=n+1"
+                           else "DELETE FROM tx_decimal_order")
+                          + " WHERE n>=0 ORDER BY rank_value " + direction + " LIMIT 2"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              handle waiter statement)
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "decimal ordered writer starts"
+                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "decimal ordered writer resumes"
+                      let waiter, result = waiting.Result
+                      let case = verb + " " + direction + " pending " + pendingRank
+                      Expect.equal blocked true (case + " waits for the pending key")
+                      Expect.equal result (Affected 2UL) (case + " fills the limit")
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                      let expected =
+                          [ 1; 2; 3; 4 ]
+                          |> List.filter (fun id -> verb = "UPDATE" || not (List.contains id changedIds))
+                          |> List.map (fun id ->
+                              [ Some(string id)
+                                Some(if verb = "UPDATE" && List.contains id changedIds then "1" else "0") ])
+                      match handle setup "SELECT id,n FROM tx_decimal_order ORDER BY id" |> snd with
+                      | ResultSet(_, rows) -> Expect.equal rows expected (case + " final rows")
+                      | other -> failtestf "expected decimal-ordered rows, got %A" other
+
+          testCase "indexed DECIMAL range skips irrelevant pending insert"
+          <| fun _ ->
+              for verb in [ "UPDATE"; "DELETE" ] do
+                  for direction, pendingRank, predicate, changedId in
+                      [ "ASC", "0.50", "rank_value>2", 3
+                        "DESC", "0.50", "rank_value>2", 3
+                        "ASC", "4.00", "rank_value<2", 1
+                        "DESC", "4.00", "rank_value<2", 1 ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      handle setup "CREATE TABLE tx_decimal_range(id INT,rank_value DECIMAL(10,2),n INT,KEY ix_rank(rank_value))" |> ignore
+                      handle setup "INSERT INTO tx_decimal_range VALUES(1,1,0),(2,2,0),(3,3,0)" |> ignore
+                      let owner, _ = handle (create 2 store) "BEGIN"
+                      let owner, inserted =
+                          handle owner (sprintf "INSERT INTO tx_decimal_range VALUES(4,%s,0)" pendingRank)
+                      Expect.equal inserted (Affected 1UL) "owner inserts an excluded decimal key"
+                      let waiter, _ = handle (create 3 store) "BEGIN"
+                      let statement =
+                          (if verb = "UPDATE" then "UPDATE tx_decimal_range SET n=n+1"
+                           else "DELETE FROM tx_decimal_range")
+                          + " WHERE " + predicate + " ORDER BY rank_value " + direction + " LIMIT 2"
+                      use started = new Threading.ManualResetEventSlim(false)
+                      let waiting =
+                          Threading.Tasks.Task.Run(fun () ->
+                              started.Set()
+                              handle waiter statement)
+                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "decimal range writer starts"
+                      let completed = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
+                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "decimal range writer finishes"
+                      let waiter, result = waiting.Result
+                      let case = verb + " " + direction + " " + predicate + " pending " + pendingRank
+                      Expect.isTrue completed (case + " does not wait for an excluded key")
+                      Expect.equal result (Affected 1UL) (case + " changes its one matching row")
+                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                      let expected =
+                          [ 1; 2; 3; 4 ]
+                          |> List.filter (fun id -> verb = "UPDATE" || id <> changedId)
+                          |> List.map (fun id ->
+                              [ Some(string id)
+                                Some(if verb = "UPDATE" && id = changedId then "1" else "0") ])
+                      match handle setup "SELECT id,n FROM tx_decimal_range ORDER BY id" |> snd with
+                      | ResultSet(_, rows) -> Expect.equal rows expected (case + " final rows")
+                      | other -> failtestf "expected decimal-range rows, got %A" other
+
           testCase "impossible NULL comparison skips pending ordered insert"
           <| fun _ ->
               for verb in [ "UPDATE"; "DELETE" ] do
