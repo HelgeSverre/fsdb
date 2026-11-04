@@ -36,7 +36,16 @@ def main():
         action="store_true",
         help="compare exact WEIGHT_STRING bytes with Release fsdb",
     )
+    parser.add_argument(
+        "--pair-next",
+        action="store_true",
+        help="probe each character followed by the next code point",
+    )
     args = parser.parse_args()
+    if args.start < 0 or args.stop > 0x110000 or args.start >= args.stop:
+        parser.error("expected a nonempty Unicode code-point range")
+    if args.pair_next and args.stop > 0x10FFFF:
+        parser.error("--pair-next requires a successor for every code point")
     with tempfile.TemporaryDirectory(prefix="fsdb-general-weight-") as directory:
         root = pathlib.Path(directory)
         data = root / "data"
@@ -99,7 +108,10 @@ def main():
                     weights = {}
                     mismatches = []
                     for codepoint in range(args.start, args.stop):
-                        encoded = chr(codepoint).encode("utf-8").hex()
+                        sample = chr(codepoint)
+                        if args.pair_next:
+                            sample += chr(codepoint + 1)
+                        encoded = sample.encode("utf-8").hex()
                         query = (
                             "SELECT HEX(WEIGHT_STRING(_utf8mb4 0x"
                             + encoded
@@ -117,11 +129,15 @@ def main():
                                 mismatches.append(
                                     (f"U+{codepoint:04X}", weights[codepoint], actual)
                                 )
-                    nonliteral = [
-                        (f"U+{point:04X}", weight)
-                        for point, weight in weights.items()
-                        if weight != f"{point:04X}"
-                    ]
+                    nonliteral = (
+                        [
+                            (f"U+{point:04X}", weight)
+                            for point, weight in weights.items()
+                            if weight != f"{point:04X}"
+                        ]
+                        if not args.pair_next
+                        else []
+                    )
                     groups = {}
                     for point, weight in weights.items():
                         groups.setdefault(weight, []).append(point)
@@ -130,11 +146,13 @@ def main():
                         for points in groups.values()
                         if len(points) > 1
                     ]
-                    print(
-                        f"MySQL {version}: {len(weights)} weights, "
-                        f"{len(nonliteral)} nonliteral, {len(duplicate_groups)} duplicate groups"
-                    )
-                    print("nonliteral", nonliteral)
+                    description = f"MySQL {version}: {len(weights)} weights"
+                    if not args.pair_next:
+                        description += f", {len(nonliteral)} nonliteral"
+                    description += f", {len(duplicate_groups)} duplicate groups"
+                    print(description)
+                    if not args.pair_next:
+                        print("nonliteral", nonliteral)
                     print("duplicate groups", duplicate_groups)
                     if fsdb_connection is not None:
                         print(f"fsdb exact-weight mismatches: {len(mismatches)}")
