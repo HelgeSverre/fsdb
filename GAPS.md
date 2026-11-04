@@ -874,6 +874,9 @@ inside view predicates lower with the base-table write.
 [Read-only derived and CTE sources](torture/findings/2026-10-17-derived-source-view-metadata.md)
 now follow MySQL's permissive outer-view `IS_UPDATABLE` metadata, including a
 recursive-only view that reports `YES` but still rejects UPDATE with 1288.
+[Audited `UNION DISTINCT` derived and CTE read sources](torture/findings/2026-11-04-union-distinct-updatable-view.md)
+also precede a writable physical target in an inner joined view, including
+duplicate elimination, one target write, and cascaded CHECK OPTION rejection.
 
 Direct physical inner-join views can update one component table per statement
 and insert through explicit target columns into one insertable component.
@@ -892,7 +895,9 @@ matched join partners; finding a different partner after a key change does not
 satisfy the check. [Multiple derived-source partners](torture/findings/2026-10-15-duplicate-derived-join-view-check.md)
 must each remain joined and satisfy `CHECK OPTION`, even though an ordinary
 joined UPDATE writes the physical target once. Explicit-column INSERT checks
-every resulting join row, while `ON`-excluded rows do not participate. Outer
+the audited resulting join rows, while `ON`-excluded rows do not participate;
+an [isolated keyless-source order case](torture/findings/2026-11-04-joined-view-insert-check-order.md)
+exposes a remaining MySQL-dependent INSERT decision. Outer
 view layers inherit the restriction.
 Mergeable component views and simple outer layers preserve the same behavior,
 including inherited CHECK OPTION predicates, when the nested security identity

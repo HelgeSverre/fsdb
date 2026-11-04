@@ -10,7 +10,9 @@ import pymysql
 SHAPES = {
     "duplicate derived rows": "SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id",
     "union-all derived rows": "SELECT a.id,a.n,u.flag FROM (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) u JOIN a ON a.id=u.id",
+    "union-distinct derived rows": "SELECT a.id,a.n,u.flag FROM (SELECT id,flag FROM b UNION DISTINCT SELECT id,aux AS flag FROM c) u JOIN a ON a.id=u.id",
     "union-all CTE rows": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
+    "union-distinct CTE rows": "WITH u AS (SELECT id,flag FROM b UNION DISTINCT SELECT id,aux AS flag FROM c) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
     "union-all CTE ordered": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c ORDER BY flag DESC) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
     "union-all CTE limited": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c LIMIT 3) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
     "union-all CTE ordered limited": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c ORDER BY flag DESC LIMIT 2) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
@@ -152,6 +154,8 @@ def main():
                         "duplicate derived rows",
                         "union-all derived rows",
                         "union-all CTE rows",
+                        "union-distinct derived rows",
+                        "union-distinct CTE rows",
                     ):
                         for first, second in [(7, 8), (8, 7)]:
                             run(connection, "DELETE FROM b")
@@ -159,7 +163,7 @@ def main():
                                 connection,
                                 f"INSERT INTO b VALUES(1,{first}),(1,{second})",
                             )
-                            source_alias = "u" if "union-all" in name else "d1"
+                            source_alias = "u" if "union-" in name else "d1"
                             run(
                                 connection,
                                 "CREATE VIEW vcp AS "
@@ -186,6 +190,24 @@ def main():
                                 ) == ((1, 0), (2, 0))
                                 run(connection, "DROP VIEW vcj")
 
+                for source in ("derived", "cte"):
+                    run(connection, "UPDATE a SET n=0")
+                    run(connection, "DELETE FROM b")
+                    run(connection, "INSERT INTO b VALUES(1,7),(1,7),(1,8)")
+                    union = "SELECT id,flag FROM b UNION DISTINCT SELECT id,aux AS flag FROM c"
+                    definition = (
+                        f"SELECT a.id,a.n,u.flag FROM ({union}) u JOIN a ON a.id=u.id"
+                        if source == "derived"
+                        else f"WITH u AS ({union}) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id"
+                    )
+                    run(connection, f"CREATE VIEW distinct_checked AS {definition} WHERE u.flag>a.n WITH CASCADED CHECK OPTION")
+                    assert run(connection, "SELECT flag FROM distinct_checked ORDER BY flag") == ((7,), (8,), (9,)), source
+                    assert run(connection, "UPDATE distinct_checked SET n=n+1 WHERE id=1") == 1, source
+                    assert_error(connection, "UPDATE distinct_checked SET n=7 WHERE id=1", 1369)
+                    assert run(connection, "SELECT n FROM a WHERE id=1") == ((1,),), source
+                    run(connection, "DROP VIEW distinct_checked")
+                run(connection, "DELETE FROM b")
+                run(connection, "INSERT INTO b VALUES(1,8),(1,7)")
                 run(connection, "UPDATE a SET n=6")
                 run(
                     connection,
@@ -318,6 +340,20 @@ def main():
                 assert run(
                     connection, "SELECT id,n FROM insert_target ORDER BY id"
                 ) == ((1, 6), (2, 7))
+
+                run(connection, "CREATE TABLE insert_order_target(id INT PRIMARY KEY,n INT)")
+                run(connection, "CREATE TABLE insert_order_source(id INT,flag INT)")
+                run(connection, "CREATE VIEW insert_order_checked AS SELECT t.id,t.n,s.flag FROM insert_order_target t JOIN insert_order_source s ON s.id=t.id WHERE s.flag>t.n WITH CASCADED CHECK OPTION")
+                for first, second, accepted in ((7, 8, True), (8, 7, False)):
+                    run(connection, "DELETE FROM insert_order_target")
+                    run(connection, "DELETE FROM insert_order_source")
+                    run(connection, f"INSERT INTO insert_order_source VALUES(1,{first}),(1,{second})")
+                    if accepted:
+                        assert run(connection, "INSERT INTO insert_order_checked(id,n) VALUES(1,7)") == 1
+                        assert run(connection, "SELECT id,n FROM insert_order_target") == ((1, 7),)
+                    else:
+                        assert_error(connection, "INSERT INTO insert_order_checked(id,n) VALUES(1,7)", 1369)
+                        assert run(connection, "SELECT id,n FROM insert_order_target") == ()
 
                 for sql in [
                     "CREATE TABLE alias_target(id INT PRIMARY KEY,n INT)",
