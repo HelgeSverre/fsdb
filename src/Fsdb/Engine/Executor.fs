@@ -24405,7 +24405,8 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                 else update
             | None when isPhysical source -> move (join :: prior) rest
             | None -> update
-        | ({ Kind = InnerJoin; Table = FromTable source; Using = [] } as join) :: rest ->
+        | ({ Table = FromTable source; Using = [] } as join) :: rest
+            when join.Kind = InnerJoin || join.Kind = CrossJoin ->
             let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->

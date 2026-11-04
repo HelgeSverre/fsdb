@@ -130,6 +130,20 @@ def main():
                     "WITH c AS (SELECT id FROM link) UPDATE c JOIN v ON c.id=v.link_id SET v.n=v.n+1 WHERE c.id=1",
                     ((1, 8),),
                 )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c CROSS JOIN v SET v.n=v.n+1 WHERE c.id=v.link_id AND c.id=1",
+                    ((1, 10),),
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c CROSS JOIN link l CROSS JOIN v SET v.n=v.n+1 WHERE c.id=l.id AND l.id=v.link_id AND c.id=1",
+                    ((1, 12),),
+                )
                 try:
                     execute(
                         owner,
@@ -149,7 +163,7 @@ def main():
                 else:
                     raise AssertionError("ambiguous derived assignment was accepted")
                 print(
-                    "MySQL 8.4.11: CTE, derived, and joined-view writes waited and committed"
+                    "MySQL 8.4.11: CTE, derived, and joined-view writes (including CROSS JOIN) waited and committed"
                 )
             except Exception:
                 print((root / "mysql.log").read_text())
