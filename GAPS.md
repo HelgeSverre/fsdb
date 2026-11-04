@@ -2061,6 +2061,9 @@ evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell
 from 1.27 to 0.58 ms; general scalar subquery dispatch and fixed query
 handling still remain open.
+An [A/B/A/B eligibility-cache trial](benchmarks/results/2026-11-04-source-free-shape-cache-trial.md)
+did not separate a source-free scalar gain from ShortRun variation and was
+reverted; the next profile should isolate eligibility and metadata work.
 The [filtered source-free check](benchmarks/results/2026-11-04-filtered-source-free-check.md)
 measured a direct outer-column predicate shortcut at 2.05 ms versus 1.56 ms
 for the existing path, and it was reverted. Runtime-only predicates also
