@@ -4687,12 +4687,18 @@ let private singleTableOrderLimit (joins: Join list) : Parser<OrderKey list * Ex
         preturn ([], None)
 
 /// The mutation executor keeps a physical table or view in `UpdateStmt.From`.
-/// An independent derived source may lead a multi-table UPDATE when its first
-/// join is to a table/view. Swap the operands, reversing LEFT/RIGHT direction
-/// when needed, while retaining the predicate and all later dependent joins.
+/// A grouped first operand is the same left-deep join chain when its joins
+/// precede the following joins. An independent derived source may then lead
+/// a multi-table UPDATE when its first join is to a table/view. Swap those
+/// operands, reversing LEFT/RIGHT direction when needed.
 let private updateSources: Parser<TableRef * Join list, unit> =
     fromItem .>>. many joinClause
     >>= fun (source, joins) ->
+        let rec ungroupFirst source joins =
+            match source with
+            | FromJoinGroup(first, groupedJoins) -> ungroupFirst first (groupedJoins @ joins)
+            | _ -> source, joins
+        let source, joins = ungroupFirst source joins
         match source, joins with
         | FromTable table, _ -> preturn (table, joins)
         | FromSubquery _, ({ Table = FromTable table; Using = [] } as first) :: rest ->

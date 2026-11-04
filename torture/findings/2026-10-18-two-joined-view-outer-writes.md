@@ -120,6 +120,19 @@ holder commits, resume after the second commits, and produce the same
 affected count and physical rows. The contention matrix now has twenty-three
 cases. Other join trees and lock-order combinations remain open.
 
+## Parenthesized outer-join source
+
+MySQL 8.4.11 accepts a parenthesized first operand in a multi-table UPDATE:
+`(link LEFT JOIN va) RIGHT JOIN vb` updates both writable joined views on a
+matched row, only `vb` when `va` is absent, and `(va RIGHT JOIN link) LEFT
+JOIN vb` updates only `va` when `vb` is absent. The affected counts are 2,
+1, and 1, respectively. Fsdb previously returned syntax error 1064 for all
+three. The UPDATE parser now flattens a grouped first operand into the same
+left-deep join sequence before selecting its physical write anchor. The
+focused regression pins all three affected counts and the final base rows.
+Other grouped join trees still need their own association and write-scope
+audits.
+
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:
 

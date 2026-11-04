@@ -1089,6 +1089,9 @@ view supplies a writable row and covers held-row waits and rebases on either
 physical view target, both held by one transaction, or each held by a
 different transaction. Other wider outer-join trees,
 multi-target shapes, and broader security-layer combinations remain open.
+[A parenthesized first outer-join operand](torture/findings/2026-10-18-two-joined-view-outer-writes.md#parenthesized-outer-join-source)
+now reaches two writable joined views with MySQL-matched affected rows on
+matched and one-sided rows.
 [Two writable joined views](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
 now update both physical targets even when their read-side internal table
 aliases, writable physical target aliases, or independent derived read-source
