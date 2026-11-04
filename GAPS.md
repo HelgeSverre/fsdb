@@ -897,7 +897,9 @@ must each remain joined and satisfy `CHECK OPTION`, even though an ordinary
 joined UPDATE writes the physical target once. Explicit-column INSERT checks
 the audited resulting join rows, while `ON`-excluded rows do not participate;
 an [isolated keyless-source order case](torture/findings/2026-11-04-joined-view-insert-check-order.md)
-exposes a remaining MySQL-dependent INSERT decision. Outer
+exposes an order-dependent MySQL INSERT decision without handler reads during
+the INSERT, consistent with retained source record-buffer state. Fsdb retains
+all-partner validation for this case. Outer
 view layers inherit the restriction.
 Mergeable component views and simple outer layers preserve the same behavior,
 including inherited CHECK OPTION predicates, when the nested security identity
@@ -2168,6 +2170,8 @@ Documented decisions that differ from MySQL intentionally:
   ranking from the committed corpus rather than rollback-stale InnoDB row
   estimates ([evidence](torture/findings/2026-10-07-fulltext-transaction-visibility.md#relevance-and-implementation-boundary));
 - ICU CLDR collation tailoring;
+- all-partner CHECK OPTION validation on a [joined-view INSERT with an
+  order-dependent MySQL result and no source handler reads](torture/findings/2026-11-04-joined-view-insert-check-order.md#source-buffer-follow-up);
 - `SUPER` for a foreign `KILL`;
 - honest limit advertising, leaving fsdb-only WAL rotation knobs unreported;
 - a trusted data directory whose CRCs detect corruption but do not authenticate

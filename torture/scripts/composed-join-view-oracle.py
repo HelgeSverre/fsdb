@@ -200,11 +200,23 @@ def main():
                         if source == "derived"
                         else f"WITH u AS ({union}) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id"
                     )
-                    run(connection, f"CREATE VIEW distinct_checked AS {definition} WHERE u.flag>a.n WITH CASCADED CHECK OPTION")
-                    assert run(connection, "SELECT flag FROM distinct_checked ORDER BY flag") == ((7,), (8,), (9,)), source
-                    assert run(connection, "UPDATE distinct_checked SET n=n+1 WHERE id=1") == 1, source
-                    assert_error(connection, "UPDATE distinct_checked SET n=7 WHERE id=1", 1369)
-                    assert run(connection, "SELECT n FROM a WHERE id=1") == ((1,),), source
+                    run(
+                        connection,
+                        f"CREATE VIEW distinct_checked AS {definition} WHERE u.flag>a.n WITH CASCADED CHECK OPTION",
+                    )
+                    assert run(
+                        connection, "SELECT flag FROM distinct_checked ORDER BY flag"
+                    ) == ((7,), (8,), (9,)), source
+                    assert (
+                        run(connection, "UPDATE distinct_checked SET n=n+1 WHERE id=1")
+                        == 1
+                    ), source
+                    assert_error(
+                        connection, "UPDATE distinct_checked SET n=7 WHERE id=1", 1369
+                    )
+                    assert run(connection, "SELECT n FROM a WHERE id=1") == ((1,),), (
+                        source
+                    )
                     run(connection, "DROP VIEW distinct_checked")
                 run(connection, "DELETE FROM b")
                 run(connection, "INSERT INTO b VALUES(1,8),(1,7)")
@@ -341,19 +353,150 @@ def main():
                     connection, "SELECT id,n FROM insert_target ORDER BY id"
                 ) == ((1, 6), (2, 7))
 
-                run(connection, "CREATE TABLE insert_order_target(id INT PRIMARY KEY,n INT)")
+                run(
+                    connection,
+                    "CREATE TABLE insert_order_target(id INT PRIMARY KEY,n INT)",
+                )
                 run(connection, "CREATE TABLE insert_order_source(id INT,flag INT)")
-                run(connection, "CREATE VIEW insert_order_checked AS SELECT t.id,t.n,s.flag FROM insert_order_target t JOIN insert_order_source s ON s.id=t.id WHERE s.flag>t.n WITH CASCADED CHECK OPTION")
+                run(
+                    connection,
+                    "CREATE VIEW insert_order_checked AS SELECT t.id,t.n,s.flag FROM insert_order_target t JOIN insert_order_source s ON s.id=t.id WHERE s.flag>t.n WITH CASCADED CHECK OPTION",
+                )
                 for first, second, accepted in ((7, 8, True), (8, 7, False)):
                     run(connection, "DELETE FROM insert_order_target")
                     run(connection, "DELETE FROM insert_order_source")
-                    run(connection, f"INSERT INTO insert_order_source VALUES(1,{first}),(1,{second})")
+                    run(
+                        connection,
+                        f"INSERT INTO insert_order_source VALUES(1,{first}),(1,{second})",
+                    )
                     if accepted:
-                        assert run(connection, "INSERT INTO insert_order_checked(id,n) VALUES(1,7)") == 1
-                        assert run(connection, "SELECT id,n FROM insert_order_target") == ((1, 7),)
+                        assert (
+                            run(
+                                connection,
+                                "INSERT INTO insert_order_checked(id,n) VALUES(1,7)",
+                            )
+                            == 1
+                        )
+                        assert run(
+                            connection, "SELECT id,n FROM insert_order_target"
+                        ) == ((1, 7),)
                     else:
-                        assert_error(connection, "INSERT INTO insert_order_checked(id,n) VALUES(1,7)", 1369)
-                        assert run(connection, "SELECT id,n FROM insert_order_target") == ()
+                        assert_error(
+                            connection,
+                            "INSERT INTO insert_order_checked(id,n) VALUES(1,7)",
+                            1369,
+                        )
+                        assert (
+                            run(connection, "SELECT id,n FROM insert_order_target")
+                            == ()
+                        )
+
+                for index_layout in ("heap", "id_flag"):
+                    if index_layout == "id_flag":
+                        run(
+                            connection,
+                            "CREATE INDEX ix_insert_order_id_flag ON insert_order_source(id,flag)",
+                        )
+                        run(
+                            connection,
+                            "CREATE VIEW insert_order_forced AS SELECT t.id,t.n,s.flag FROM insert_order_target t JOIN insert_order_source s FORCE INDEX(ix_insert_order_id_flag) ON s.id=t.id WHERE s.flag>t.n WITH CASCADED CHECK OPTION",
+                        )
+                    for flags in (
+                        (6, 8),
+                        (8, 6),
+                        (7, 7, 8),
+                        (8, 7, 7),
+                        (7, 8, 7),
+                        (8, 8, 7),
+                        (8, 7, 8),
+                    ):
+                        run(connection, "DELETE FROM insert_order_target")
+                        run(connection, "DELETE FROM insert_order_source")
+                        values = ",".join(f"(1,{flag})" for flag in flags)
+                        run(
+                            connection,
+                            f"INSERT INTO insert_order_source VALUES{values}",
+                        )
+                        view = (
+                            "insert_order_forced"
+                            if index_layout == "id_flag"
+                            else "insert_order_checked"
+                        )
+                        try:
+                            run(connection, f"INSERT INTO {view}(id,n) VALUES(1,7)")
+                            outcome = "accepted"
+                        except pymysql.MySQLError as error:
+                            assert error.args[0] == 1369, error
+                            outcome = "rejected"
+                        assert outcome == (
+                            "accepted" if flags[-1] == 8 else "rejected"
+                        ), (index_layout, flags, outcome)
+                        print(
+                            "joined-view insert source order",
+                            index_layout,
+                            flags,
+                            outcome,
+                        )
+
+                for read_flag in (7, 8):
+                    run(connection, "DELETE FROM insert_order_target")
+                    run(connection, "DELETE FROM insert_order_source")
+                    run(connection, "INSERT INTO insert_order_source VALUES(1,7),(1,8)")
+                    assert run(
+                        connection,
+                        f"SELECT flag FROM insert_order_source WHERE flag={read_flag}",
+                    ) == ((read_flag,),)
+                    try:
+                        run(
+                            connection,
+                            "INSERT INTO insert_order_checked(id,n) VALUES(1,7)",
+                        )
+                        outcome = "accepted"
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                        outcome = "rejected"
+                    assert outcome == "accepted", (read_flag, outcome)
+                    print("joined-view insert after source read", read_flag, outcome)
+
+                for updated_flag in (7, 8):
+                    run(connection, "DELETE FROM insert_order_target")
+                    run(connection, "DELETE FROM insert_order_source")
+                    run(connection, "INSERT INTO insert_order_source VALUES(1,7),(1,8)")
+                    run(
+                        connection,
+                        f"UPDATE insert_order_source SET flag=flag WHERE flag={updated_flag}",
+                    )
+                    try:
+                        run(
+                            connection,
+                            "INSERT INTO insert_order_checked(id,n) VALUES(1,7)",
+                        )
+                        outcome = "accepted"
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1369, error
+                        outcome = "rejected"
+                    assert outcome == "accepted", (updated_flag, outcome)
+                    print(
+                        "joined-view insert after source update", updated_flag, outcome
+                    )
+
+                run(connection, "DELETE FROM insert_order_target")
+                run(connection, "DELETE FROM insert_order_source")
+                run(connection, "INSERT INTO insert_order_source VALUES(1,7),(1,8)")
+                before_reads = dict(
+                    run(connection, "SHOW SESSION STATUS LIKE 'Handler_read%'")
+                )
+                run(connection, "INSERT INTO insert_order_checked(id,n) VALUES(1,7)")
+                after_reads = dict(
+                    run(connection, "SHOW SESSION STATUS LIKE 'Handler_read%'")
+                )
+                read_deltas = {
+                    name: int(after_reads[name]) - int(before_reads[name])
+                    for name in before_reads
+                    if int(after_reads[name]) != int(before_reads[name])
+                }
+                assert read_deltas == {}, read_deltas
+                print("joined-view insert handler reads", read_deltas)
 
                 for sql in [
                     "CREATE TABLE alias_target(id INT PRIMARY KEY,n INT)",
