@@ -165,9 +165,13 @@ sources can depend on the original left table, so moving those groups first
 would lose their scope. `USING` joins, later grouped operands, and broader
 nested trees remain to audit.
 
-The maintained native oracle matches MySQL 8.4.11 in all 38 two-view UPDATE
-cases, including these two, and its 24 contention rebases. A focused F#
-regression checks both affected counts and the final physical rows.
+The maintained native oracle now matches MySQL 8.4.11 in 40 two-view UPDATE
+cases, including matched and one-sided rows for both grouped-right forms.
+Two additional cases hold the `a` and `b` physical rows in separate
+transactions; fsdb and MySQL both keep the grouped-right UPDATE waiting
+until both owners commit, then rebase and change both rows. The oracle's 26
+contended rebases match. A focused F# regression checks matched and one-sided
+affected counts and final physical rows.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:

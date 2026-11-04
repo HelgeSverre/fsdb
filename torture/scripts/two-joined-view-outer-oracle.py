@@ -262,6 +262,10 @@ def main():
                     "ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
                     "UPDATE va RIGHT JOIN (link l LEFT JOIN vb ON vb.link_id=l.id) "
                     "ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE l.id=1",
+                    "UPDATE va LEFT JOIN (link l JOIN vb ON vb.link_id=l.id) "
+                    "ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=2",
+                    "UPDATE va RIGHT JOIN (link l LEFT JOIN vb ON vb.link_id=l.id) "
+                    "ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE l.id=3",
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)
@@ -360,6 +364,10 @@ def main():
                     "UPDATE (link l0 LEFT JOIN va ON va.link_id=l0.id) "
                     "RIGHT JOIN vb ON vb.link_id=l0.id "
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.id=1",
+                    "UPDATE va LEFT JOIN (link l JOIN vb ON vb.link_id=l.id) "
+                    "ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
+                    "UPDATE va RIGHT JOIN (link l LEFT JOIN vb ON vb.link_id=l.id) "
+                    "ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE l.id=1",
                 ]
                 for sql in independently_held_cases:
                     expected = independently_held_update(mysql_connection, {"unix_socket": mysql_socket}, sql)

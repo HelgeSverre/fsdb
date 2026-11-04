@@ -1080,6 +1080,23 @@ let tests =
                   [ [ Some "1"; Some "33" ]; [ Some "3"; Some "41" ] ]
                   "the grouped right operand updates the second view's physical target"
 
+              Expect.equal
+                  (run store "UPDATE grouped_va va LEFT JOIN (grouped_link l JOIN grouped_vb vb ON vb.link_id=l.id) ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=2")
+                  (Affected 1UL)
+                  "the left view survives a missing grouped-right match"
+              Expect.equal
+                  (run store "UPDATE grouped_va va RIGHT JOIN (grouped_link l LEFT JOIN grouped_vb vb ON vb.link_id=l.id) ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE l.id=3")
+                  (Affected 1UL)
+                  "the grouped-right view survives a missing left match"
+              Expect.equal
+                  (rows store "SELECT id,n FROM grouped_a ORDER BY id")
+                  [ [ Some "1"; Some "13" ]; [ Some "2"; Some "22" ] ]
+                  "only the first view's unmatched row changes"
+              Expect.equal
+                  (rows store "SELECT id,n FROM grouped_b ORDER BY id")
+                  [ [ Some "1"; Some "33" ]; [ Some "3"; Some "42" ] ]
+                  "only the second view's unmatched row changes"
+
           testCase "an unchecked outer join enforces only the inner view check"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
