@@ -114,6 +114,25 @@ let tests =
                   [ [ Some "1" ] ]
                   "one passing joined row cannot conceal a failing row"
 
+              expectOk
+                  (run store "CREATE VIEW union_cte_joined_view AS WITH u AS (SELECT id,flag FROM union_view_left UNION ALL SELECT id,aux AS flag FROM union_view_right) SELECT t.id,t.n,u.flag FROM u JOIN union_view_target t ON t.id=u.id WHERE u.flag>t.n WITH CASCADED CHECK OPTION")
+                  "create writable view after UNION ALL CTE"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='union_cte_joined_view'")
+                  [ [ Some "YES" ] ]
+                  "UNION ALL CTE keeps physical target writable"
+              Expect.equal
+                  (run store "UPDATE union_cte_joined_view SET n=n+1 WHERE id=1")
+                  (Affected 1UL)
+                  "duplicate CTE rows update the target once"
+              match run store "UPDATE union_cte_joined_view SET n=7 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected UNION CTE CHECK OPTION rejection, got %A" other
+              Expect.equal
+                  (rows store "SELECT n FROM union_view_target WHERE id=1")
+                  [ [ Some "2" ] ]
+                  "the rejected CTE write leaves the target unchanged"
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()
@@ -2962,6 +2981,7 @@ let tests =
               for name, columns, body in
                   [ "simple", "k,f", "SELECT x.id,x.flag FROM (SELECT id,flag FROM derived_cte_source) x"
                     "aggregate", "k,f", "SELECT x.id,SUM(x.flag) AS flag FROM (SELECT id,flag FROM derived_cte_source) x GROUP BY x.id"
+                    "union_all", "k,f", "SELECT id,flag FROM derived_cte_source UNION ALL SELECT id,flag FROM derived_cte_source"
                     "nested", "k,f", "SELECT x.id,x.flag FROM (SELECT y.id,y.flag FROM (SELECT id,flag FROM derived_cte_source) y) x"
                     "star", "k,f", "SELECT * FROM derived_cte_source"
                     "qualified_star", "k,f", "SELECT s.* FROM derived_cte_source s"
@@ -2991,7 +3011,7 @@ let tests =
 
               Expect.equal
                   (rows store "SELECT id,n FROM derived_cte_target ORDER BY id")
-                  [ [ Some "1"; Some "23" ]; [ Some "2"; Some "20" ] ]
+                  [ [ Some "1"; Some "24" ]; [ Some "2"; Some "20" ] ]
                   "duplicate CTE rows update the target once per statement"
 
           testCase "joined views update a target after two references to one read-only CTE"

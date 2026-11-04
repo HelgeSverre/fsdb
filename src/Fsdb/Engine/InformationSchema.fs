@@ -1779,17 +1779,27 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                 && (body.Joins |> List.forall (_.Table >> independent))
             | _ -> false
 
-        match cte.Body with
-        | PlainSelect body
-            when not cte.Recursive
-                 && referencesCte cte.CteName
-                 && body.Ctes.IsEmpty
-                 && (body.From |> Option.exists independent)
-                 && (body.Joins |> List.forall (_.Table >> independent)) ->
+        let independentSelect (body: SelectStmt) =
+            body.Ctes.IsEmpty
+            && (body.From |> Option.exists independent)
+            && (body.Joins |> List.forall (_.Table >> independent))
+
+        let independentBody =
+            match cte.Body with
+            | PlainSelect body -> independentSelect body
+            | UnionSelect(first, rest, orderBy, limit, offset) ->
+                orderBy.IsEmpty && limit.IsNone && offset.IsNone
+                && independentSelect first && (rest |> List.forall (snd >> independentSelect))
+
+        if cte.Recursive || not (referencesCte cte.CteName) || not independentBody then None
+        else
             if cte.CteColumns.IsEmpty then
-                Some(PlainSelect body)
+                Some cte.Body
             else
-                expandedProjections Map.empty body
+                let first =
+                    match cte.Body with
+                    | PlainSelect body | UnionSelect(body, _, _, _, _) -> body
+                expandedProjections Map.empty first
                 |> Option.bind (fun expanded ->
                     if cte.CteColumns.Length <> expanded.Length
                        || (cte.CteColumns |> List.map _.ToLowerInvariant() |> Set.ofList).Count <> cte.CteColumns.Length then
@@ -1798,8 +1808,10 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                         let projections =
                             (cte.CteColumns, expanded)
                             ||> List.map2 (fun name projection -> { projection with Alias = Some name })
-                        Some(PlainSelect { body with Projections = projections }))
-        | _ -> None
+                        match cte.Body with
+                        | PlainSelect body -> Some(PlainSelect { body with Projections = projections })
+                        | UnionSelect(_, rest, orderBy, limit, offset) ->
+                            Some(UnionSelect({ first with Projections = projections }, rest, orderBy, limit, offset)))
 
     let inlineBodies =
         select.Ctes

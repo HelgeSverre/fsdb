@@ -7,10 +7,10 @@ import time
 
 import pymysql
 
-
 SHAPES = {
     "duplicate derived rows": "SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id",
     "union-all derived rows": "SELECT a.id,a.n,u.flag FROM (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) u JOIN a ON a.id=u.id",
+    "union-all CTE rows": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
     "middle aggregates": "SELECT a.id,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=a.id",
     "middle JSON_TABLE": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id",
     "derived JSON_TABLE target": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN JSON_TABLE(JSON_ARRAY(d1.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d1.id JOIN a ON a.id=j.x",
@@ -67,21 +67,38 @@ def main():
         with (root / "mysql.log").open("w") as log:
             try:
                 subprocess.run(
-                    ["mysqld", "--no-defaults", "--initialize-insecure", f"--datadir={data}",
-                     "--innodb-redo-log-capacity=64M"],
-                    check=True, stdout=log, stderr=subprocess.STDOUT,
+                    [
+                        "mysqld",
+                        "--no-defaults",
+                        "--initialize-insecure",
+                        f"--datadir={data}",
+                        "--innodb-redo-log-capacity=64M",
+                    ],
+                    check=True,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
                 )
                 server = subprocess.Popen(
-                    ["mysqld", "--no-defaults", f"--datadir={data}", "--skip-networking",
-                     f"--socket={socket}", f"--pid-file={root / 'mysql.pid'}", "--mysqlx=0",
-                     "--innodb-buffer-pool-size=64M", "--innodb-redo-log-capacity=64M"],
-                    stdout=log, stderr=subprocess.STDOUT,
+                    [
+                        "mysqld",
+                        "--no-defaults",
+                        f"--datadir={data}",
+                        "--skip-networking",
+                        f"--socket={socket}",
+                        f"--pid-file={root / 'mysql.pid'}",
+                        "--mysqlx=0",
+                        "--innodb-buffer-pool-size=64M",
+                        "--innodb-redo-log-capacity=64M",
+                    ],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
                 )
                 connection = connect(socket)
                 version = run(connection, "SELECT VERSION()")[0][0]
                 assert version.startswith("8.4.11"), version
                 for sql in [
-                    "CREATE DATABASE probe", "USE probe",
+                    "CREATE DATABASE probe",
+                    "USE probe",
                     "CREATE TABLE a(id INT PRIMARY KEY,n INT)",
                     "CREATE TABLE b(id INT,flag INT)",
                     "CREATE TABLE c(id INT PRIMARY KEY,aux INT)",
@@ -94,45 +111,100 @@ def main():
                 for name, definition in SHAPES.items():
                     run(connection, "UPDATE a SET n=0")
                     run(connection, "CREATE VIEW v AS " + definition)
-                    assert run(connection, "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='v'") == (("YES",),), name
+                    assert run(
+                        connection,
+                        "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='v'",
+                    ) == (("YES",),), name
                     assert run(connection, "UPDATE v SET n=n+1 WHERE id=1") == 1, name
-                    assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 1), (2, 0)), name
+                    assert run(connection, "SELECT id,n FROM a ORDER BY id") == (
+                        (1, 1),
+                        (2, 0),
+                    ), name
                     assert_error(connection, "INSERT INTO v(id,n) VALUES(3,0)", 1471)
                     assert_error(connection, "DELETE FROM v WHERE id=1", 1395)
                     run(connection, "DROP VIEW v")
 
                     run(connection, "UPDATE a SET n=0")
-                    run(connection, "CREATE VIEW vc AS " + definition + " WHERE a.n >= 0 WITH CASCADED CHECK OPTION")
-                    assert run(connection, "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='vc'") == (("YES",),), name
+                    run(
+                        connection,
+                        "CREATE VIEW vc AS "
+                        + definition
+                        + " WHERE a.n >= 0 WITH CASCADED CHECK OPTION",
+                    )
+                    assert run(
+                        connection,
+                        "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='vc'",
+                    ) == (("YES",),), name
                     assert_error(connection, "UPDATE vc SET n=-1 WHERE id=1", 1369)
-                    assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 0)), name
+                    assert run(connection, "SELECT id,n FROM a ORDER BY id") == (
+                        (1, 0),
+                        (2, 0),
+                    ), name
                     run(connection, "DROP VIEW vc")
 
-                    if name in ("duplicate derived rows", "union-all derived rows"):
+                    if name in (
+                        "duplicate derived rows",
+                        "union-all derived rows",
+                        "union-all CTE rows",
+                    ):
                         for first, second in [(7, 8), (8, 7)]:
                             run(connection, "DELETE FROM b")
-                            run(connection, f"INSERT INTO b VALUES(1,{first}),(1,{second})")
-                            source_alias = "u" if name == "union-all derived rows" else "d1"
-                            run(connection, "CREATE VIEW vcp AS " + definition + f" WHERE {source_alias}.flag > a.n WITH CASCADED CHECK OPTION")
-                            assert_error(connection, "UPDATE vcp SET n=7 WHERE id=1", 1369)
-                            assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 0))
+                            run(
+                                connection,
+                                f"INSERT INTO b VALUES(1,{first}),(1,{second})",
+                            )
+                            source_alias = "u" if "union-all" in name else "d1"
+                            run(
+                                connection,
+                                "CREATE VIEW vcp AS "
+                                + definition
+                                + f" WHERE {source_alias}.flag > a.n WITH CASCADED CHECK OPTION",
+                            )
+                            assert_error(
+                                connection, "UPDATE vcp SET n=7 WHERE id=1", 1369
+                            )
+                            assert run(
+                                connection, "SELECT id,n FROM a ORDER BY id"
+                            ) == ((1, 0), (2, 0))
                             run(connection, "DROP VIEW vcp")
                             if name == "duplicate derived rows":
-                                run(connection, "CREATE VIEW vcj AS SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id AND d1.flag>a.n WITH CASCADED CHECK OPTION")
-                                assert_error(connection, "UPDATE vcj SET n=7 WHERE id=1", 1369)
-                                assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 0))
+                                run(
+                                    connection,
+                                    "CREATE VIEW vcj AS SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id AND d1.flag>a.n WITH CASCADED CHECK OPTION",
+                                )
+                                assert_error(
+                                    connection, "UPDATE vcj SET n=7 WHERE id=1", 1369
+                                )
+                                assert run(
+                                    connection, "SELECT id,n FROM a ORDER BY id"
+                                ) == ((1, 0), (2, 0))
                                 run(connection, "DROP VIEW vcj")
 
                 run(connection, "CREATE TABLE insert_target(id INT PRIMARY KEY,n INT)")
-                run(connection, "CREATE VIEW insert_checked AS SELECT z.id,z.n,b.flag FROM insert_target z JOIN b ON b.id=z.id WHERE b.flag>z.n WITH CASCADED CHECK OPTION")
-                assert_error(connection, "INSERT INTO insert_checked(id,n) VALUES(1,7)", 1369)
+                run(
+                    connection,
+                    "CREATE VIEW insert_checked AS SELECT z.id,z.n,b.flag FROM insert_target z JOIN b ON b.id=z.id WHERE b.flag>z.n WITH CASCADED CHECK OPTION",
+                )
+                assert_error(
+                    connection, "INSERT INTO insert_checked(id,n) VALUES(1,7)", 1369
+                )
                 assert run(connection, "SELECT id,n FROM insert_target") == ()
-                assert run(connection, "INSERT INTO insert_checked(id,n) VALUES(1,6)") == 1
+                assert (
+                    run(connection, "INSERT INTO insert_checked(id,n) VALUES(1,6)") == 1
+                )
                 assert run(connection, "SELECT id,n FROM insert_target") == ((1, 6),)
                 run(connection, "INSERT INTO b VALUES(2,7),(2,8)")
-                run(connection, "CREATE VIEW insert_on_checked AS SELECT z.id,z.n,b.flag FROM insert_target z JOIN b ON b.id=z.id AND b.flag>z.n WITH CASCADED CHECK OPTION")
-                assert run(connection, "INSERT INTO insert_on_checked(id,n) VALUES(2,7)") == 1
-                assert run(connection, "SELECT id,n FROM insert_target ORDER BY id") == ((1, 6), (2, 7))
+                run(
+                    connection,
+                    "CREATE VIEW insert_on_checked AS SELECT z.id,z.n,b.flag FROM insert_target z JOIN b ON b.id=z.id AND b.flag>z.n WITH CASCADED CHECK OPTION",
+                )
+                assert (
+                    run(connection, "INSERT INTO insert_on_checked(id,n) VALUES(2,7)")
+                    == 1
+                )
+                assert run(
+                    connection, "SELECT id,n FROM insert_target ORDER BY id"
+                ) == ((1, 6), (2, 7))
 
                 for sql in [
                     "CREATE TABLE alias_target(id INT PRIMARY KEY,n INT)",
@@ -145,7 +217,10 @@ def main():
                     "CREATE VIEW alias_outer AS SELECT iv.id,iv.n,iv.v FROM alias_inner iv JOIN alias_extra a ON a.id=iv.id",
                 ]:
                     run(connection, sql)
-                assert run(connection, "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='alias_outer'") == (("YES",),)
+                assert run(
+                    connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='alias_outer'",
+                ) == (("YES",),)
                 assert run(connection, "UPDATE alias_outer SET n=11 WHERE id=1") == 1
                 assert run(connection, "UPDATE alias_outer SET v=2 WHERE id=1") == 1
                 assert_error(connection, "UPDATE alias_outer SET v=12 WHERE id=1", 1369)
@@ -161,36 +236,70 @@ def main():
                     "CREATE VIEW two_source_outer AS SELECT iv.id,iv.n,x.k AS xk,y.k AS yk FROM (SELECT 1 AS k) x JOIN (SELECT 1 AS k) y ON y.k=x.k JOIN two_source_inner iv ON iv.id=x.k AND iv.id=y.k WITH CASCADED CHECK OPTION",
                 ]:
                     run(connection, sql)
-                assert run(connection, "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='two_source_outer'") == (("YES",),)
-                assert run(connection, "UPDATE two_source_outer SET n=11 WHERE id=1") == 1
-                assert_error(connection, "UPDATE two_source_outer SET n=0 WHERE id=1", 1369)
+                assert run(
+                    connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='two_source_outer'",
+                ) == (("YES",),)
+                assert (
+                    run(connection, "UPDATE two_source_outer SET n=11 WHERE id=1") == 1
+                )
+                assert_error(
+                    connection, "UPDATE two_source_outer SET n=0 WHERE id=1", 1369
+                )
                 assert run(connection, "SELECT n FROM two_source_target") == ((11,),)
 
                 for sql in [
-                    "CREATE VIEW lateral_checked_inner AS SELECT a.id AS target_id,a.n AS metric,d.flag,e.x "
-                    "FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d "
-                    "JOIN LATERAL (SELECT d.id x) e ON TRUE JOIN a ON a.id=e.x "
-                    "WHERE a.n>=0 WITH CASCADED CHECK OPTION",
-                    "CREATE VIEW lateral_checked_outer AS SELECT iv.target_id AS id,iv.metric AS n,s.aux "
-                    "FROM lateral_checked_inner iv JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) s "
-                    "ON s.id=iv.target_id WHERE iv.metric<s.aux WITH CASCADED CHECK OPTION",
+                    (
+                        "CREATE VIEW lateral_checked_inner AS SELECT a.id AS target_id,a.n AS metric,d.flag,e.x "
+                        "FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d "
+                        "JOIN LATERAL (SELECT d.id x) e ON TRUE JOIN a ON a.id=e.x "
+                        "WHERE a.n>=0 WITH CASCADED CHECK OPTION"
+                    ),
+                    (
+                        "CREATE VIEW lateral_checked_outer AS SELECT iv.target_id AS id,iv.metric AS n,s.aux "
+                        "FROM lateral_checked_inner iv JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) s "
+                        "ON s.id=iv.target_id WHERE iv.metric<s.aux WITH CASCADED CHECK OPTION"
+                    ),
                 ]:
                     run(connection, sql)
-                assert run(connection, "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_checked_outer'") == (("YES",),)
+                assert run(
+                    connection,
+                    "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='lateral_checked_outer'",
+                ) == (("YES",),)
                 run(connection, "UPDATE a SET n=0")
-                assert run(connection, "UPDATE lateral_checked_outer SET n=1 WHERE id=1") == 1
-                assert_error(connection, "UPDATE lateral_checked_outer SET n=-1 WHERE id=1", 1369)
-                assert_error(connection, "UPDATE lateral_checked_outer SET n=10 WHERE id=1", 1369)
-                assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 1), (2, 0))
+                assert (
+                    run(connection, "UPDATE lateral_checked_outer SET n=1 WHERE id=1")
+                    == 1
+                )
+                assert_error(
+                    connection, "UPDATE lateral_checked_outer SET n=-1 WHERE id=1", 1369
+                )
+                assert_error(
+                    connection, "UPDATE lateral_checked_outer SET n=10 WHERE id=1", 1369
+                )
+                assert run(connection, "SELECT id,n FROM a ORDER BY id") == (
+                    (1, 1),
+                    (2, 0),
+                )
 
-                print(f"MySQL {version}: {len(SHAPES)} composed join-view shapes, private aliases, and two leading sources matched the expected write contract")
+                print(
+                    f"MySQL {version}: {len(SHAPES)} composed join-view shapes, private aliases, and two leading sources matched the expected write contract"
+                )
             finally:
                 if connection:
                     connection.close()
                 if server and server.poll() is None:
                     subprocess.run(
-                        ["mysqladmin", "--no-defaults", f"--socket={socket}", "-uroot", "shutdown"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        [
+                            "mysqladmin",
+                            "--no-defaults",
+                            f"--socket={socket}",
+                            "-uroot",
+                            "shutdown",
+                        ],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                     )
                     server.wait(timeout=20)
 

@@ -14,5 +14,6 @@ derived rows. The corresponding fsdb regression in
 metadata, single physical update, and atomic CHECK OPTION rejection.
 
 The native oracle and focused fsdb test passed. This closes the audited
-`UNION ALL` derived-source order, not arbitrary UNION/CTE compositions or
-security contexts.
+`UNION ALL` derived-source order. The [UNION CTE follow-up](2026-11-04-union-cte-updatable-view.md)
+covers an independent CTE body; other compositions and security contexts
+remain open.
