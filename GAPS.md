@@ -1979,6 +1979,11 @@ evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell
 from 1.27 to 0.58 ms; general scalar subquery dispatch and fixed query
 handling still remain open.
+The [filtered source-free check](benchmarks/results/2026-11-04-filtered-source-free-check.md)
+measured a direct outer-column predicate shortcut at 2.05 ms versus 1.56 ms
+for the existing path, and it was reverted. Runtime-only predicates also
+require MySQL's conditional materialization and coercion, so a broader
+shortcut cannot simply evaluate the predicate before the projection.
 The [computed-derived control](benchmarks/results/2026-11-04-projection-miss-cache.md)
 now memoizes unsuccessful physical-projection discovery within a statement;
 the matched ShortRun fell from 4.68 to 3.71 ms for 100 outer rows. This is a
