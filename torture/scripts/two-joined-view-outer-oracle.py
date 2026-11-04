@@ -43,9 +43,21 @@ def six_source_update(row_id):
     )
 
 
+def start_waiting_update(waiter, sql):
+    outcome = {}
+
+    def run_waiter():
+        outcome["affected"] = execute(waiter, sql)
+        if not isinstance(outcome["affected"], tuple):
+            outcome["commit"] = execute(waiter, "COMMIT")
+
+    thread = threading.Thread(target=run_waiter, daemon=True)
+    thread.start()
+    return thread, outcome
+
+
 def contended_update(owner, waiter_options, held_rows, sql):
     waiter = connect(**waiter_options)
-    outcome = {}
     try:
         assert execute(waiter, "USE probe") == 0
         assert execute(owner, "BEGIN") == 0
@@ -53,13 +65,7 @@ def contended_update(owner, waiter_options, held_rows, sql):
             assert execute(owner, f"UPDATE {table} SET n=n+10 WHERE id={row_id}") == 1
         assert execute(waiter, "BEGIN") == 0
 
-        def run_waiter():
-            outcome["affected"] = execute(waiter, sql)
-            if not isinstance(outcome["affected"], tuple):
-                outcome["commit"] = execute(waiter, "COMMIT")
-
-        thread = threading.Thread(target=run_waiter, daemon=True)
-        thread.start()
+        thread, outcome = start_waiting_update(waiter, sql)
         thread.join(0.2)
         waited = thread.is_alive()
         assert execute(owner, "COMMIT") == 0
@@ -68,6 +74,34 @@ def contended_update(owner, waiter_options, held_rows, sql):
         assert outcome["affected"] in (1, 2) and outcome["commit"] == 0, (sql, outcome)
         return waited, outcome["affected"]
     finally:
+        waiter.close()
+
+
+def independently_held_update(first_owner, connection_options, sql):
+    second_owner = connect(**connection_options)
+    waiter = connect(**connection_options)
+    try:
+        assert execute(second_owner, "USE probe") == 0
+        assert execute(waiter, "USE probe") == 0
+        assert execute(first_owner, "BEGIN") == 0
+        assert execute(first_owner, "UPDATE a SET n=n+10 WHERE id=1") == 1
+        assert execute(second_owner, "BEGIN") == 0
+        assert execute(second_owner, "UPDATE b SET n=n+10 WHERE id=1") == 1
+        assert execute(waiter, "BEGIN") == 0
+
+        thread, outcome = start_waiting_update(waiter, sql)
+        thread.join(0.2)
+        assert thread.is_alive(), "joined UPDATE did not wait for the first holder"
+        assert execute(first_owner, "COMMIT") == 0
+        thread.join(0.2)
+        assert thread.is_alive(), "joined UPDATE completed while the second holder was active"
+        assert execute(second_owner, "COMMIT") == 0
+        thread.join(5)
+        assert not thread.is_alive(), (sql, outcome)
+        assert outcome == {"affected": 2, "commit": 0}, (sql, outcome)
+        return outcome["affected"]
+    finally:
+        second_owner.close()
         waiter.close()
 
 
@@ -308,9 +342,17 @@ def main():
                         query = f"SELECT id,n FROM {target} ORDER BY id"
                         expected_rows, actual_rows = (execute(connection, query) for connection in connections)
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
+                sql = six_source_update(1)
+                expected = independently_held_update(mysql_connection, {"unix_socket": mysql_socket}, sql)
+                actual = independently_held_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, sql)
+                assert actual == expected == 2, (sql, expected, actual)
+                for target in ("a", "b"):
+                    query = f"SELECT id,n FROM {target} ORDER BY id"
+                    expected_rows, actual_rows = (execute(connection, query) for connection in connections)
+                    assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
                 print(
                     f"MySQL 8.4.11: {len(cases)} two-view outer UPDATE cases, atomic CHECK OPTION, "
-                    f"and {len(held_cases)} contended rebases matched"
+                    f"and {len(held_cases) + 1} contended rebases matched"
                 )
             finally:
                 if fsdb_connection:

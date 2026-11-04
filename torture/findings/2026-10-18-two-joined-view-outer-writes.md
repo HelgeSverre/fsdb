@@ -113,9 +113,12 @@ physical target on the matched row, the first target on its one-sided row,
 or the second target on its one-sided row. Both engines wait, rebase, and
 commit the same row values. A further case holds both physical targets in
 one transaction before the six-source UPDATE starts. It also waits for the
-holder and rebases both assignments to MySQL's result, bringing the
-contention matrix to twenty-two cases. Other join trees and independently
-held targets remain open.
+holder and rebases both assignments to MySQL's result. A separate-owner
+case then holds the first and second physical targets in distinct
+transactions. Both engines keep the joined UPDATE blocked after the first
+holder commits, resume after the second commits, and produce the same
+affected count and physical rows. The contention matrix now has twenty-three
+cases. Other join trees and lock-order combinations remain open.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:
