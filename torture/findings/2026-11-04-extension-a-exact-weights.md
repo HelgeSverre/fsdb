@@ -74,6 +74,21 @@ five collations, 95 singleton weights, 95 ASCII-plus-`A` pairs, and 95
 475 `AS CHAR(4)` padded ASCII-plus-U+3B00 cases match. These probes cover
 space padding without using ICU weights; other mixed text remains open.
 
+## Supplementary unified ideographs
+
+MySQL 8.4.11 gives U+20000–U+2EBEF and U+30000–U+323AF replacement
+weight `FFFD` under `utf8mb4_general_ci` and `utf8mb4_unicode_ci`. Under
+`utf8mb4_unicode_520_ci`, each scalar uses two implicit 16-bit weights:
+`0xFBC0 + (codepoint >> 15)` and `0x8000 | (codepoint & 0x7FFF)`.
+Fsdb now applies those rules within these unified ideograph ranges.
+
+Five sampled ranges near the start and boundaries of those blocks produced
+1,152 singleton comparisons with zero mismatches across the three collations.
+An additional 384 adjacent-pair and 96 ASCII-suffix comparisons also matched.
+The UCA 5.2 formula was checked against sampled emoji, musical, Deseret, and
+compatibility-ideograph blocks before limiting it to unified ideographs;
+those other blocks do not all follow this formula and remain open.
+
 The equivalent `utf8mb3_general_ci` and `utf8mb3_unicode_ci` collations use
 the same BMP weights. The oracle now selects the matching charset introducer
 and compared all 55,164 adjacent pairs across the two ranges and both

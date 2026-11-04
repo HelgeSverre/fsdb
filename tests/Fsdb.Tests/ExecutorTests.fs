@@ -645,9 +645,11 @@ let tests =
                         Expect.equal paddedCollationWeight "000061000020000020" "CHAR pads text before binary collation weights"
                     | other -> failtestf "expected one WEIGHT_STRING row, got %A" other
 
-                testCase "legacy BMP WEIGHT_STRING follows MySQL primary weights"
+                testCase "legacy WEIGHT_STRING follows MySQL primary weights"
                 <| fun _ ->
                     let store = newStore ()
+                    let extensionB = System.Char.ConvertFromUtf32 0x20000
+                    let extensionG = System.Char.ConvertFromUtf32 0x30000
                     let cases =
                         [ "\u3B00\u3B01", "utf8mb4_general_ci", "3B003B01"
                           "\u3B00\u3B01", "utf8mb4_unicode_ci", "FB80BB00FB80BB01"
@@ -665,13 +667,17 @@ let tests =
                           "\u3B00a", "utf8mb4_unicode_520_ci", "FB80BB00120F"
                           "a9!", "utf8mb4_unicode_ci", "0E330E320251"
                           "a9!", "utf8mb4_unicode_520_ci", "120F120E026E"
+                          extensionB + extensionB, "utf8mb4_general_ci", "FFFDFFFD"
+                          extensionB + extensionB, "utf8mb4_unicode_ci", "FFFDFFFD"
+                          extensionB + extensionB, "utf8mb4_unicode_520_ci", "FBC48000FBC48000"
+                          extensionG + "a", "utf8mb4_unicode_520_ci", "FBC68000120F"
                           "\u3B00\u4E00", "utf8mb4_unicode_520_ci", "FB80BB00FB40CE00" ]
                     for sample, collation, expected in cases do
                         let sql = sprintf "SELECT HEX(WEIGHT_STRING('%s' COLLATE %s))" sample collation
                         match runDefault store sql with
                         | ResultSet(_, [ [ Some actual ] ]) ->
                             Expect.equal actual expected (sprintf "legacy weight for %s under %s" sample collation)
-                        | other -> failtestf "expected legacy ideograph weight for %s, got %A" sample other
+                        | other -> failtestf "expected legacy weight for %s, got %A" sample other
 
                     match runDefault store "SELECT HEX(WEIGHT_STRING('a\u3B00' COLLATE utf8mb4_unicode_ci AS CHAR(1))), HEX(WEIGHT_STRING('a\u3B00' COLLATE utf8mb4_unicode_ci AS CHAR(4)))" with
                     | ResultSet(_, [ [ Some truncated; Some padded ] ]) ->

@@ -1249,8 +1249,11 @@ unified-ideograph range under five `utf8mb3`/`utf8mb4` collations. Printable
 Printable ASCII alone and mixed with a BMP ideograph also matches all 95
 oracle cases in each of those five collations, including tested ASCII pairing,
 `AS CHAR` truncation, and padding. The Unicode collations use MySQL's UCA 4.0
-and 5.2 ASCII primary weights. Other mixed text, supplementary ideographs,
-and other exact legacy weights remain open.
+and 5.2 ASCII primary weights. [Audited supplementary unified ideograph
+weights](torture/findings/2026-11-04-extension-a-exact-weights.md#supplementary-unified-ideographs)
+now match the three `utf8mb4` legacy collations: UCA 4.0 and general use
+replacement weights, while UCA 5.2 uses implicit weights. Other mixed text,
+compatibility ideographs, and other exact legacy weights remain open.
 
 The [remaining supplementary compatibility-ideograph block](torture/findings/2026-10-17-compatibility-ideograph-audit.md)
 also matches 1,716 native-MySQL ngram searches at each of startup sizes 1–10.

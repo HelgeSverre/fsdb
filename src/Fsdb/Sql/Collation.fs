@@ -831,7 +831,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         else
             Charset.tryEncodeStrict charset s |> Option.defaultWith (fun () -> binaryBytesWithoutPadding s)
 
-    let legacyBmpWeight (s: string) =
+    let legacyWeight (s: string) =
         let general = name = "utf8mb4_general_ci" || name = "utf8mb3_general_ci"
         let asciiWeights =
             if name = "utf8mb4_unicode_520_ci" then unicode52AsciiWeights
@@ -846,6 +846,9 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             let mutable supported = true
             for rune in s.EnumerateRunes() do
                 let codepoint = rune.Value
+                let supplementaryIdeograph =
+                    (codepoint >= 0x20000 && codepoint <= 0x2EBEF)
+                    || (codepoint >= 0x30000 && codepoint <= 0x323AF)
                 // UCA 4.0/5.2 assigns ideographs through these boundaries;
                 // later scalars in the same BMP blocks use the unassigned lead.
                 let lead =
@@ -856,6 +859,14 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     else
                         None
                 match lead with
+                | None when supplementaryIdeograph && name.StartsWith("utf8mb4_") ->
+                    let weights =
+                        if name = "utf8mb4_unicode_520_ci" then
+                            [ 0xFBC0 + (codepoint >>> 15); 0x8000 ||| (codepoint &&& 0x7FFF) ]
+                        else [ 0xFFFD ]
+                    for weight in weights do
+                        bytes.Add(byte (weight >>> 8))
+                        bytes.Add(byte weight)
                 | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =
                         let uppercase =
@@ -925,7 +936,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             if spec.ByteOrder then
                 binaryWeight s
             else
-                legacyBmpWeight s
+                legacyWeight s
                 |> Option.defaultWith (fun () -> ci.GetSortKey(foldText s, spec.Fold).KeyData)
       HashOf =
         fun s ->
