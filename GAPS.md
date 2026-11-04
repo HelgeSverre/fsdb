@@ -1984,6 +1984,10 @@ found that plain `EXISTS(SELECT 1 ...)` grouped the whole inner table before
 probing outer rows. It now tries the complete stored equality key first;
 the matched 100-row ShortRun fell from 8.93 to 0.60 ms. The same control
 identified source-free scalar subquery dispatch as another row-scaling cost.
+The [qualified-column `EXISTS` follow-up](benchmarks/results/2026-11-04-correlated-exists-column-fast-path.md)
+extends that indexed path to a validated inner-source column projection;
+its matched 100-row ShortRun fell from 4.00 to 0.72 ms while preserving
+MySQL's unknown-column error. Other projection and source shapes remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

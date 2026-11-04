@@ -9128,8 +9128,7 @@ and private plainExistsProjection (projection: Projection) =
 
 and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
     let plainShape =
-        select.Projections |> List.forall plainExistsProjection
-        && select.Joins.IsEmpty
+        select.Joins.IsEmpty
         && select.GroupBy.IsEmpty
         && select.Having.IsNone
         && select.OrderBy.IsEmpty
@@ -9145,8 +9144,19 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
 
     match select.From with
     | Some(FromItem.Qualified _ as source) when plainShape ->
-        tryCorrelatedEqualityCount outer source select.Where
-        |> Option.map (fun count -> Ok(boolToValue (count > 0)))
+        let sourceColumns = lazy (selectSourceColumns outer.Store outer.DbName source |> List.choose id)
+        let projectionIsSafe projection =
+            if plainExistsProjection projection then true
+            else
+                match projection.Expression, FromItem.tryQualifier source with
+                | QualifiedCol(qualifier, column), Some sourceQualifier
+                    when equalsIgnoreCase qualifier sourceQualifier ->
+                    sourceColumns.Value |> List.exists (fun candidate -> equalsIgnoreCase candidate.Name column)
+                | _ -> false
+        if not (select.Projections |> List.forall projectionIsSafe) then None
+        else
+            tryCorrelatedEqualityCount outer source select.Where
+            |> Option.map (fun count -> Ok(boolToValue (count > 0)))
     | _ -> None
 
 /// Integer keys compare exactly under SQL `=`, so they can index a
