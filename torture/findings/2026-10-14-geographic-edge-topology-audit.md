@@ -402,3 +402,21 @@ is already present in their geographic point-to-segment distance strategies.
 Polygon containment or nearest-ring selection alone cannot resolve these 34
 distance cases. The three point-relation mismatches and 13 line-relation
 mismatches remain separate topology work.
+
+## Segment-level distance strategy (2026-11-04)
+
+MySQL 8.4.11's [distance functor](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/distance_functor.cc)
+uses Boost 1.84's geographic cross-track strategy with Andoyer for
+non-point geometry. Its [point-to-segment implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/strategies/geographic/distance_cross_track.hpp)
+starts from a spherical along-track estimate and refines the nearest point
+with a Newton iteration. Fsdb currently minimizes Andoyer point-to-point
+distance along its computed geodesic instead. The algorithms can choose
+different minima near a hole corner.
+
+The oracle now measures all four hole edges separately for each of the 34
+distance mismatches. The engines choose the same nearest edge in 24 cases
+and different edges in 10. For `POINT(42.99999 1.00001)`, MySQL's nearest
+edge is the second hole segment at 1.1182363933 m, while fsdb's nearest is
+the first at 0.8133025344 m; fsdb measures the second at 1.1222724212 m.
+The next correction needs the cross-track strategy, including its endpoint
+and near-corner behavior, rather than a polygon-only change or fixed offset.

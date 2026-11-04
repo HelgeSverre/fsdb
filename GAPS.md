@@ -2325,6 +2325,9 @@ implementation effort:
    shows that all 34 sampled polygon-distance mismatches are already present
    against the standalone hole line, narrowing that part of the gap to
    geographic point-to-segment distance.
+   A segment-level probe finds different nearest hole edges in 10 of those 34
+   cases; MySQL's Boost geographic cross-track strategy is the concrete
+   algorithmic target.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
 

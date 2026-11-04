@@ -4,6 +4,7 @@ Build Fsdb.Cli in Release first. Requires native mysqld/mysqladmin and PyMySQL.
 The servers and data directories are disposable; only mismatches are printed.
 """
 
+import itertools
 import pathlib
 import shutil
 import socket
@@ -63,6 +64,19 @@ def hole_line_distance(connection, coordinates, polygon):
     with connection.cursor() as cursor:
         cursor.execute(f"SELECT ST_Distance({point},{line})")
         return cursor.fetchone()[0]
+
+
+def hole_segment_distances(connection, coordinates, polygon):
+    hole = polygon.split("),(", 1)[1].removesuffix("))")
+    vertices = hole.split(",")
+    point = f"ST_GeomFromText('POINT({coordinates})',4326)"
+    expressions = [
+        f"ST_Distance({point},ST_GeomFromText('LINESTRING({start},{end})',4326))"
+        for start, end in itertools.pairwise(vertices)
+    ]
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT " + ",".join(expressions))
+        return cursor.fetchone()
 
 
 def cases():
@@ -273,6 +287,7 @@ def main():
             f"{point_count} near-hole point distances; {len(point_distance_mismatches)} mismatches"
         )
         matching_hole_distances = 0
+        matching_nearest_segments = 0
         for mismatch in point_distance_mismatches:
             print("point distance", mismatch)
             coordinates, polygon, expected, actual = mismatch
@@ -293,8 +308,23 @@ def main():
                 mysql_hole_distance,
                 fsdb_hole_distance,
             )
+            mysql_segments = hole_segment_distances(
+                mysql_connection, coordinates, polygon
+            )
+            fsdb_segments = hole_segment_distances(
+                fsdb_connection, coordinates, polygon
+            )
+            mysql_nearest = mysql_segments.index(min(mysql_segments))
+            fsdb_nearest = fsdb_segments.index(min(fsdb_segments))
+            matching_nearest_segments += mysql_nearest == fsdb_nearest
+            print("nearest hole segment", coordinates, mysql_nearest, fsdb_nearest)
+            if mysql_nearest != fsdb_nearest:
+                print("segment distances", mysql_segments, fsdb_segments)
         print(
             f"{matching_hole_distances}/{len(point_distance_mismatches)} polygon distances equal hole-line distances in both engines"
+        )
+        print(
+            f"{matching_nearest_segments}/{len(point_distance_mismatches)} nearest hole segments agree"
         )
         for mismatch in point_mismatches:
             print("point", mismatch)
