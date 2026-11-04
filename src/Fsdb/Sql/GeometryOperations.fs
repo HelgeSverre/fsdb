@@ -238,40 +238,104 @@ let internal geographicPointAlong referenceSystem first second distance =
         latitude * 180.0 / Math.PI, longitude * 180.0 / Math.PI
     | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
 
-let private minimumOnSegment iterations length distanceAt =
-    let ratio = (sqrt 5.0 - 1.0) / 2.0
-    let mutable lower, upper = 0.0, length
-    let mutable left = upper - ratio * (upper - lower)
-    let mutable right = lower + ratio * (upper - lower)
-    let mutable leftDistance = distanceAt left
-    let mutable rightDistance = distanceAt right
-
-    for _ in 1 .. iterations do
-        if leftDistance <= rightDistance then
-            upper <- right
-            right <- left
-            rightDistance <- leftDistance
-            left <- upper - ratio * (upper - lower)
-            leftDistance <- distanceAt left
-        else
-            lower <- left
-            left <- right
-            leftDistance <- rightDistance
-            right <- lower + ratio * (upper - lower)
-            rightDistance <- distanceAt right
-
-    min leftDistance rightDistance
-
 let private geographicPointsAwayFrom flattening origin toward query =
     let segmentAzimuth = geographicSegmentAzimuth flattening origin toward
     let queryAzimuth = geographicSegmentAzimuth flattening origin query
     cos (queryAzimuth - segmentAzimuth) < 0.0
 
-let private geographicPointOnSegment referenceSystem flattening start endpoint position =
-    let point = geographicPointAlong referenceSystem start endpoint position
-    if geographicPointsAwayFrom flattening start endpoint point then start
-    elif geographicPointsAwayFrom flattening endpoint start point then endpoint
-    else point
+// MySQL uses Boost's geographic cross-track strategy for point-to-segment
+// distance. Start with a spherical projection, then refine the along-track
+// position using Andoyer inverse quantities and Thomas direct points.
+let private geographicCrossTrackDistance referenceSystem point start endpoint =
+    let major = referenceSystem.SemiMajorAxis.Value
+    let flattening = 1.0 / referenceSystem.InverseFlattening.Value
+    let minor = major * (1.0 - flattening)
+    let radius = (2.0 * major + minor) / 3.0
+    let lat1, lon1 = start
+    let lat2, lon2 = endpoint
+    let lat3, lon3 = point
+    let la1, lo1 = radians lat1, radians lon1
+    let la2, lo2 = radians lat2, radians lon2
+    let la3, lo3 = radians lat3, radians lon3
+    let sphericalDistance firstLat firstLon secondLat secondLon =
+        let h = sin ((secondLat - firstLat) / 2.0) ** 2.0
+                + cos firstLat * cos secondLat * sin ((secondLon - firstLon) / 2.0) ** 2.0
+        2.0 * radius * asin (sqrt (min 1.0 h))
+    let sphericalAzimuth firstLat firstLon secondLat secondLon =
+        let delta = secondLon - firstLon
+        atan2 (sin delta * cos secondLat)
+            (cos firstLat * sin secondLat - sin firstLat * cos secondLat * cos delta)
+    let a12Spherical = sphericalAzimuth la1 lo1 la2 lo2
+    let a13Spherical = sphericalAzimuth la1 lo1 la3 lo3
+    let s13 = sphericalDistance la1 lo1 la3 lo3
+    let s34 = radius * asin (max -1.0 (min 1.0 (sin (s13 / radius) * sin (a13Spherical - a12Spherical))))
+    let fraction = max -1.0 (min 1.0 (cos (s13 / radius) / cos (s34 / radius)))
+    let along = radius * acos fraction
+    let angular = along / radius
+    let projectedLatitude = asin (sin la1 * cos angular + cos la1 * sin angular * cos a12Spherical)
+    let projectedLongitude =
+        lo1 + atan2 (sin a12Spherical * sin angular * cos la1)
+                        (cos angular - sin la1 * sin projectedLatitude)
+    let projected = projectedLatitude * 180.0 / Math.PI, projectedLongitude * 180.0 / Math.PI
+    let mutable position = geographicPointDistance referenceSystem start projected
+    let mutable best = Double.PositiveInfinity
+    let mutable previous = -1.0
+    let mutable iteration = 0
+    let mutable keepGoing = true
+    while keepGoing && iteration < 100 do
+        let onSegment = geographicPointAlong referenceSystem start endpoint position
+        let distance = geographicPointDistance referenceSystem onSegment point
+        let forward, reverse = geographicSegmentAzimuths flattening onSegment point
+        let towardEnd = geographicSegmentAzimuth flattening onSegment endpoint
+        let angle = forward - towardEnd
+        let firstLatitude, _ = onSegment
+        let sinLat1, cosLat1 = sin (radians firstLatitude), cos (radians firstLatitude)
+        let sinLat2, cosLat2 = sin la3, cos la3
+        let oneMinus = 1.0 - flattening
+        let sinBet1, unnormalizedCosBet1 = oneMinus * sinLat1, cosLat1
+        let sinBet2, unnormalizedCosBet2 = oneMinus * sinLat2, cosLat2
+        let normalize x y =
+            let norm = sqrt (x * x + y * y)
+            x / norm, y / norm
+        let sinBet1, cosBet1 = normalize sinBet1 unnormalizedCosBet1
+        let sinBet2, cosBet2 = normalize sinBet2 unnormalizedCosBet2
+        let sinSig1, cosSig1 = normalize sinBet1 (cos forward * cosBet1)
+        let sinSig2, cosSig2 = normalize sinBet2 (cos reverse * cosBet2)
+        let sinAlp0 = sin forward * cosBet1
+        let cosAlp0Squared = 1.0 - sinAlp0 * sinAlp0
+        let sigma = atan2 (cosSig1 * sinSig2 - sinSig1 * cosSig2)
+                          (cosSig1 * cosSig2 + sinSig1 * sinSig2)
+        let j12 = cosAlp0Squared * flattening
+                  * (sigma - ((2.0 * cosSig2 * sinSig2) - (2.0 * cosSig1 * sinSig1)) / 2.0)
+        let eccentricity = flattening * (2.0 - flattening)
+        let ep2 = eccentricity / (oneMinus * oneMinus)
+        let dn1 = sqrt (1.0 + ep2 * sinBet1 * sinBet1)
+        let dn2 = sqrt (1.0 + ep2 * sinBet2 * sinBet2)
+        let reduced =
+            (dn2 * cosSig1 * sinSig2 - dn1 * sinSig1 * cosSig2 - cosSig1 * cosSig2 * j12) * minor
+        let scale =
+            let cosSigma = cosSig1 * cosSig2 + sinSig1 * sinSig2
+            let t = ep2 * (cosBet1 - cosBet2) * (cosBet1 + cosBet2) / (dn1 + dn2)
+            cosSigma + (t * sinSig2 - cosSig2 * j12) * sinSig1 / dn1
+        let mutable derivative = if reduced = 0.0 then 0.0 else scale / reduced * sin angle
+        let mutable normalized = angle
+        if normalized < -1.25 * Math.PI then normalized <- normalized + 1.5 * Math.PI
+        elif normalized > 1.25 * Math.PI then
+            derivative <- -derivative
+            normalized <- -normalized + 1.5 * Math.PI
+        elif normalized < 0.0 && normalized > -0.75 * Math.PI then
+            derivative <- -derivative
+            normalized <- -normalized - Math.PI / 2.0
+        else normalized <- normalized - Math.PI / 2.0
+        if distance < best then best <- distance
+        keepGoing <- previous < 0.0 || (distance < previous && normalized <> 0.0 && derivative <> 0.0)
+        if keepGoing && derivative <> 0.0 then position <- position - normalized / derivative
+        previous <- distance
+        iteration <- iteration + 1
+    let endpointDistance =
+        min (geographicPointDistance referenceSystem point start)
+            (geographicPointDistance referenceSystem point endpoint)
+    if Double.IsFinite best then min best endpointDistance else endpointDistance
 
 let private geographicPointSegmentDistance referenceSystem point start endpoint =
     let pointDistance = geographicPointDistance referenceSystem
@@ -286,20 +350,13 @@ let private geographicPointSegmentDistance referenceSystem point start endpoint 
         if geographicPointsAwayFrom flattening start endpoint point then startDistance
         elif geographicPointsAwayFrom flattening endpoint start point then endDistance
         else
-            let pointLatitude, pointLongitude = point
-            let startLatitude, startLongitude = start
-            let endLatitude, endLongitude = endpoint
+            let _, pointLongitude = point
+            let startLatitude, _ = start
+            let endLatitude, _ = endpoint
             if startLatitude = 0.0 && endLatitude = 0.0 then
                 pointDistance point (0.0, pointLongitude)
-            elif startLongitude = endLongitude then
-                pointDistance point (pointLatitude, startLongitude)
             else
-                let distanceAt position =
-                    geographicPointOnSegment referenceSystem flattening start endpoint position
-                    |> pointDistance point
-
-                // A half-earth segment shrinks below 2 mm after 48 golden-section steps.
-                min endpointDistance (minimumOnSegment 48 length distanceAt)
+                geographicCrossTrackDistance referenceSystem point start endpoint
 
 let internal geographicPointLineDistance referenceSystem point lines =
     lines

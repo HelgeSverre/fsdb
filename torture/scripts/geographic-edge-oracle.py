@@ -6,6 +6,7 @@ The servers and data directories are disposable; only mismatches are printed.
 
 import itertools
 import pathlib
+import random
 import shutil
 import socket
 import subprocess
@@ -77,6 +78,14 @@ def hole_segment_distances(connection, coordinates, polygon):
     with connection.cursor() as cursor:
         cursor.execute("SELECT " + ",".join(expressions))
         return cursor.fetchone()
+
+
+def point_line_distance(connection, coordinates, line):
+    point = f"ST_GeomFromText('POINT({coordinates})',4326)"
+    line = f"ST_GeomFromText('{line}',4326)"
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT ST_Distance({point},{line})")
+        return cursor.fetchone()[0]
 
 
 def cases():
@@ -539,6 +548,29 @@ def main():
         )
         for mismatch in edge_mismatches:
             print("exterior point", mismatch)
+        rng = random.Random(42)
+        segment_mismatches = []
+        for _ in range(100):
+            first_latitude = rng.uniform(-75, 75)
+            first_longitude = rng.uniform(-160, 160)
+            last_latitude = first_latitude + rng.uniform(-10, 10)
+            last_longitude = first_longitude + rng.uniform(-10, 10)
+            point_latitude = (first_latitude + last_latitude) / 2 + rng.uniform(-1, 1)
+            point_longitude = (first_longitude + last_longitude) / 2 + rng.uniform(
+                -1, 1
+            )
+            coordinates = f"{point_latitude:.9f} {point_longitude:.9f}"
+            line = (
+                f"LINESTRING({first_latitude:.9f} {first_longitude:.9f},"
+                f"{last_latitude:.9f} {last_longitude:.9f})"
+            )
+            expected = point_line_distance(mysql_connection, coordinates, line)
+            actual = point_line_distance(fsdb_connection, coordinates, line)
+            if abs(expected - actual) >= 0.01:
+                segment_mismatches.append((coordinates, line, expected, actual))
+        print(f"100 seeded point-line distances; {len(segment_mismatches)} mismatches")
+        for mismatch in segment_mismatches[:10]:
+            print("sampled point-line distance", mismatch)
     finally:
         if fsdb_connection:
             fsdb_connection.close()

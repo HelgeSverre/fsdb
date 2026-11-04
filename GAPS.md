@@ -2328,6 +2328,10 @@ implementation effort:
    A segment-level probe finds different nearest hole edges in 10 of those 34
    cases; MySQL's Boost geographic cross-track strategy is the concrete
    algorithmic target.
+   A [cross-track refinement](torture/findings/2026-11-04-geographic-cross-track-trial.md)
+   reduces the near-hole distance differences from 34 to 22 of 189 while
+   preserving the audited relation counts. A 100-case point-to-line sample
+   retains 44 mismatches; the remaining numerical and topology gaps stay open.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
 

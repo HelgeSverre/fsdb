@@ -19059,6 +19059,7 @@ let tests =
                           "ST_Distance(ST_GeomFromText('POINT(80 15)',4326),ST_GeomFromText('LINESTRING(78 0,78 30)',4326))", 178899.1317582399, 0.01
                           "ST_Distance(ST_GeomFromText('POINT(10 180)',4326),ST_GeomFromText('LINESTRING(10 170,10 -170)',4326))", 16821.245675958886, 0.01
                           "ST_Distance(ST_GeomFromText('POINT(-20 100)',4326),ST_GeomFromText('LINESTRING(-10 90,-30 110)',4326))", 71223.12145876266, 0.01
+                          "ST_Distance(ST_GeomFromText('POINT(2.5 1.00001)',4326),ST_GeomFromText('LINESTRING(1 1,3 1)',4326))", 2.168963456525661, 0.01
                           "ST_Distance(ST_GeomFromText('POINT(0 150)',4326),ST_GeomFromText('LINESTRING(10 20,10 150)',4326))", 1105843.247087976, 0.01 ]
                     for expression, expected, tolerance in cases do
                         let sql = sprintf "SELECT ABS(%s-%.14f)<%g" expression expected tolerance
