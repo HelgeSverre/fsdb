@@ -124,6 +124,17 @@ point containment. In case 76 MySQL returns invalid and fsdb valid; in case
 
 These remain open geographic validity findings; the 1,000-case validation
 sample described in the adjacent validity report did not include them.
+The [self-contained current-head oracle](../scripts/geographic-validity-oracle.py)
+now starts disposable MySQL 8.4.11 and fsdb servers and reruns the same
+300-ring seed-9173 corpus. It confirms 223 MySQL-valid rings and exactly
+the same two disagreements, cases 76 and 92. The script pins this known
+baseline so a future intersection change must remove both disagreements
+without introducing another one in the corpus.
+
+```sh
+dotnet build src/Fsdb.Cli -c Release --nologo
+uv run --with pymysql python torture/scripts/geographic-validity-oracle.py
+```
 
 ## Validity strategy follow-up
 
