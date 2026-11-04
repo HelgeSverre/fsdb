@@ -210,6 +210,22 @@ let tests =
                   [ [ Some "8" ] ]
                   "ambiguous UPDATE does not change the physical target"
 
+              expectOk
+                  (run store "CREATE VIEW union_cte_duplicate_expression_order AS WITH u(id,flag) AS (SELECT id AS x,flag AS x FROM union_view_left UNION ALL SELECT id,aux FROM union_view_right ORDER BY 1+0 DESC LIMIT 2) SELECT t.id,t.n,u.flag FROM u JOIN union_view_target t ON t.id=u.id")
+                  "create ordered UNION CTE with an expression instead of an ordinal"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='union_cte_duplicate_expression_order'")
+                  [ [ Some "YES" ] ]
+                  "expression ordering keeps writable metadata"
+              Expect.equal
+                  (run store "UPDATE union_cte_duplicate_expression_order SET n=n+1 WHERE id=1")
+                  (Affected 1UL)
+                  "MySQL accepts the expression-ordered duplicate-name UNION CTE"
+              Expect.equal
+                  (rows store "SELECT n FROM union_view_target WHERE id=1")
+                  [ [ Some "9" ] ]
+                  "expression-ordered UPDATE reaches the physical target"
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()

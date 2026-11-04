@@ -25,8 +25,10 @@ then rejects UPDATE with ambiguous-column error 1052; the native oracle pins
 that boundary and verifies the physical row remains unchanged. Fsdb now
 preserves the explicit CTE output names while resolving writable metadata,
 then diagnoses the duplicate original name at UPDATE time before modifying
-the target. Both direct and joined UPDATE forms return 1052 in the native
-oracle and focused regression; the target row remains unchanged.
+the target. Both direct and joined UPDATE forms return 1052 for positional
+ordering in the native oracle and focused regression; the target row remains
+unchanged. The adjacent `ORDER BY 1+0` expression updates successfully on
+both engines, so the ambiguity check applies only to ordinal order keys.
 Dependent branches, nested CTEs, and broader security contexts remain to
 audit.
 

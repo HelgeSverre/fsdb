@@ -24110,7 +24110,14 @@ let private orderedUnionCteAmbiguity (store: Store) (dbName: string) (viewName: 
             select.Ctes
             |> List.tryPick (fun cte ->
                 match cte.Body with
-                | UnionSelect(first, _, orderBy, _, _) when not orderBy.IsEmpty && referenced cte.CteName ->
+                | UnionSelect(first, _, orderBy, _, _)
+                    when referenced cte.CteName
+                         && (orderBy
+                             |> List.exists (fun (expression, _) ->
+                                 match expression with
+                                 | Lit(VInt position) -> position >= 1L && position <= int64 first.Projections.Length
+                                 | Lit(VUInt position) -> position >= 1UL && position <= uint64 first.Projections.Length
+                                 | _ -> false)) ->
                     first.Projections
                     |> List.choose (fun projection -> projection.Alias |> Option.orElse projection.SourceName)
                     |> List.groupBy (fun name -> name.ToLowerInvariant())

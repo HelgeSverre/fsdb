@@ -233,6 +233,36 @@ def main():
                 assert run(connection, "SELECT n FROM a WHERE id=1") == ((7,),)
                 run(connection, "DROP VIEW union_duplicate_ordered")
 
+                for order in ("1", "1+0"):
+                    run(
+                        connection,
+                        "CREATE VIEW union_duplicate_probe AS WITH u(id,flag) AS "
+                        "(SELECT id AS x,flag AS x FROM b UNION ALL SELECT id,aux FROM c "
+                        f"ORDER BY {order} DESC LIMIT 2) SELECT a.id,a.n,u.flag "
+                        "FROM u JOIN a ON a.id=u.id",
+                    )
+                    assert run(
+                        connection,
+                        "SELECT is_updatable FROM information_schema.views WHERE table_name='union_duplicate_probe'",
+                    ) == (("YES",),)
+                    if order == "1":
+                        assert_error(
+                            connection,
+                            "UPDATE union_duplicate_probe SET n=n+1 WHERE id=1",
+                            1052,
+                        )
+                    else:
+                        assert (
+                            run(
+                                connection,
+                                "UPDATE union_duplicate_probe SET n=n+1 WHERE id=1",
+                            )
+                            == 1
+                        )
+                    run(connection, "DROP VIEW union_duplicate_probe")
+                assert run(connection, "SELECT n FROM a WHERE id=1") == ((8,),)
+                run(connection, "UPDATE a SET n=7 WHERE id=1")
+
                 run(connection, "CREATE TABLE insert_target(id INT PRIMARY KEY,n INT)")
                 run(
                     connection,
