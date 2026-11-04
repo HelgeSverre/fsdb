@@ -13,7 +13,6 @@ import time
 
 import pymysql
 
-
 REPO = pathlib.Path(__file__).resolve().parents[2]
 FSDB = REPO / "src/Fsdb.Cli/bin/Release/net10.0/Fsdb.Cli.dll"
 
@@ -57,6 +56,15 @@ def point_distance(connection, coordinates, polygon):
         return cursor.fetchone()[0]
 
 
+def hole_line_distance(connection, coordinates, polygon):
+    hole = polygon.split("),(", 1)[1].removesuffix("))")
+    point = f"ST_GeomFromText('POINT({coordinates})',4326)"
+    line = f"ST_GeomFromText('LINESTRING({hole})',4326)"
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT ST_Distance({point},{line})")
+        return cursor.fetchone()[0]
+
+
 def cases():
     polygons = [
         "POLYGON((0 0,0 4,4 4,4 0,0 0))",
@@ -81,17 +89,33 @@ def cases():
         yield f"LINESTRING(1 {longitude},3 {longitude})", reverse_hole
 
     for latitude_shift in (-40, -20, 0, 20, 40, 60, 70, 80, 85):
-        exterior = [(latitude_shift, 0), (latitude_shift, 4),
-                    (latitude_shift + 4, 4), (latitude_shift + 4, 0),
-                    (latitude_shift, 0)]
-        hole = [(latitude_shift + 1, 1), (latitude_shift + 3, 1),
-                (latitude_shift + 3, 3), (latitude_shift + 1, 3),
-                (latitude_shift + 1, 1)]
+        exterior = [
+            (latitude_shift, 0),
+            (latitude_shift, 4),
+            (latitude_shift + 4, 4),
+            (latitude_shift + 4, 0),
+            (latitude_shift, 0),
+        ]
+        hole = [
+            (latitude_shift + 1, 1),
+            (latitude_shift + 3, 1),
+            (latitude_shift + 3, 3),
+            (latitude_shift + 1, 3),
+            (latitude_shift + 1, 1),
+        ]
         rings = []
         for ring in (exterior, hole):
-            rings.append("(" + ",".join(f"{latitude} {longitude}" for latitude, longitude in ring) + ")")
+            rings.append(
+                "("
+                + ",".join(f"{latitude} {longitude}" for latitude, longitude in ring)
+                + ")"
+            )
         shifted_polygon = "POLYGON(" + ",".join(rings) + ")"
-        longitudes = (2.5, 2.9, 2.99) if latitude_shift == 0 else (1.00001, 1.001, 1.1, 2.5, 2.9, 2.99, 2.999, 2.99999)
+        longitudes = (
+            (2.5, 2.9, 2.99)
+            if latitude_shift == 0
+            else (1.00001, 1.001, 1.1, 2.5, 2.9, 2.99, 2.999, 2.99999)
+        )
         for longitude in longitudes:
             line = f"LINESTRING({latitude_shift + 1} {longitude},{latitude_shift + 3} {longitude})"
             yield line, shifted_polygon
@@ -108,16 +132,31 @@ def main():
     try:
         with (root / "mysql.log").open("w") as log:
             subprocess.run(
-                ["mysqld", "--no-defaults", "--initialize-insecure", f"--datadir={data}",
-                 "--innodb-redo-log-capacity=64M"],
-                check=True, stdout=log, stderr=subprocess.STDOUT,
+                [
+                    "mysqld",
+                    "--no-defaults",
+                    "--initialize-insecure",
+                    f"--datadir={data}",
+                    "--innodb-redo-log-capacity=64M",
+                ],
+                check=True,
+                stdout=log,
+                stderr=subprocess.STDOUT,
             )
             mysql = subprocess.Popen(
-                ["mysqld", "--no-defaults", f"--datadir={data}", "--skip-networking",
-                 f"--socket={mysql_socket}", f"--pid-file={root / 'mysql.pid'}",
-                 "--mysqlx=0", "--innodb-buffer-pool-size=64M",
-                 "--innodb-redo-log-capacity=64M"],
-                stdout=log, stderr=subprocess.STDOUT,
+                [
+                    "mysqld",
+                    "--no-defaults",
+                    f"--datadir={data}",
+                    "--skip-networking",
+                    f"--socket={mysql_socket}",
+                    f"--pid-file={root / 'mysql.pid'}",
+                    "--mysqlx=0",
+                    "--innodb-buffer-pool-size=64M",
+                    "--innodb-redo-log-capacity=64M",
+                ],
+                stdout=log,
+                stderr=subprocess.STDOUT,
             )
             mysql_connection = connect(unix_socket=mysql_socket)
         with mysql_connection.cursor() as cursor:
@@ -131,9 +170,16 @@ def main():
             port = reservation.getsockname()[1]
         with (root / "fsdb.log").open("w") as log:
             fsdb = subprocess.Popen(
-                ["dotnet", str(FSDB), "--data-dir", str(root / "fsdb-data"),
-                 "--port", str(port)],
-                stdout=log, stderr=subprocess.STDOUT,
+                [
+                    "dotnet",
+                    str(FSDB),
+                    "--data-dir",
+                    str(root / "fsdb-data"),
+                    "--port",
+                    str(port),
+                ],
+                stdout=log,
+                stderr=subprocess.STDOUT,
             )
             fsdb_connection = connect(host="127.0.0.1", port=port)
 
@@ -166,13 +212,31 @@ def main():
         point_count = 0
         point_mismatches = []
         point_distance_mismatches = []
+
         def check_point_distance(coordinates, polygon):
             expected = point_distance(mysql_connection, coordinates, polygon)
             actual = point_distance(fsdb_connection, coordinates, polygon)
             if abs(expected - actual) >= 0.01:
-                point_distance_mismatches.append((coordinates, polygon, expected, actual))
+                point_distance_mismatches.append(
+                    (coordinates, polygon, expected, actual)
+                )
+
         for longitude in [1.00001, 1.001, 2.999]:
-            for latitude in [1, 1.00001, 1.001, 1.01, 1.1, 1.5, 2, 2.5, 2.9, 2.999, 2.99999, 3, 3.00001]:
+            for latitude in [
+                1,
+                1.00001,
+                1.001,
+                1.01,
+                1.1,
+                1.5,
+                2,
+                2.5,
+                2.9,
+                2.999,
+                2.99999,
+                3,
+                3.00001,
+            ]:
                 point_count += 1
                 coordinates = f"{latitude} {longitude}"
                 expected = point_result(mysql_connection, coordinates, hole)
@@ -187,9 +251,13 @@ def main():
                 f"({latitude_shift + 1} 1,{latitude_shift + 3} 1,"
                 f"{latitude_shift + 3} 3,{latitude_shift + 1} 3,{latitude_shift + 1} 1))"
             )
-            for latitude in (latitude_shift + 1, latitude_shift + 1.00001,
-                             latitude_shift + 2, latitude_shift + 2.99999,
-                             latitude_shift + 3):
+            for latitude in (
+                latitude_shift + 1,
+                latitude_shift + 1.00001,
+                latitude_shift + 2,
+                latitude_shift + 2.99999,
+                latitude_shift + 3,
+            ):
                 for longitude in (0.99999, 1, 1.00001, 2.99999, 3, 3.00001):
                     point_count += 1
                     coordinates = f"{latitude} {longitude}"
@@ -198,21 +266,55 @@ def main():
                     if actual != expected:
                         point_mismatches.append((latitude, longitude, expected, actual))
                     check_point_distance(coordinates, polygon)
-        print(f"{point_count} near-hole points; {len(point_mismatches)} point mismatches")
-        print(f"{point_count} near-hole point distances; {len(point_distance_mismatches)} mismatches")
+        print(
+            f"{point_count} near-hole points; {len(point_mismatches)} point mismatches"
+        )
+        print(
+            f"{point_count} near-hole point distances; {len(point_distance_mismatches)} mismatches"
+        )
+        matching_hole_distances = 0
         for mismatch in point_distance_mismatches:
             print("point distance", mismatch)
+            coordinates, polygon, expected, actual = mismatch
+            mysql_hole_distance = hole_line_distance(
+                mysql_connection, coordinates, polygon
+            )
+            fsdb_hole_distance = hole_line_distance(
+                fsdb_connection, coordinates, polygon
+            )
+            if (
+                abs(expected - mysql_hole_distance) < 1e-9
+                and abs(actual - fsdb_hole_distance) < 1e-9
+            ):
+                matching_hole_distances += 1
+            print(
+                "hole line distance",
+                coordinates,
+                mysql_hole_distance,
+                fsdb_hole_distance,
+            )
+        print(
+            f"{matching_hole_distances}/{len(point_distance_mismatches)} polygon distances equal hole-line distances in both engines"
+        )
         for mismatch in point_mismatches:
             print("point", mismatch)
         polar_exterior = "POLYGON((85 0,85 4,89 4,89 0,85 0))"
         polar_hole = "POLYGON((86 1,88 1,88 3,86 3,86 1))"
         polar_hole_reversed = "POLYGON((86 1,86 3,88 3,88 1,86 1))"
-        polar_combined = "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))"
-        polar_combined_reversed = "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,86 3,88 3,88 1,86 1))"
+        polar_combined = (
+            "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))"
+        )
+        polar_combined_reversed = (
+            "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,86 3,88 3,88 1,86 1))"
+        )
         with mysql_connection.cursor() as cursor:
-            for label, ring in (("exterior", polar_exterior), ("hole", polar_hole),
-                                ("hole reversed", polar_hole_reversed),
-                                ("combined", polar_combined), ("combined reversed", polar_combined_reversed)):
+            for label, ring in (
+                ("exterior", polar_exterior),
+                ("hole", polar_hole),
+                ("hole reversed", polar_hole_reversed),
+                ("combined", polar_combined),
+                ("combined reversed", polar_combined_reversed),
+            ):
                 cursor.execute(f"SELECT ST_IsValid(ST_GeomFromText('{ring}',4326))")
                 validity = cursor.fetchone()
                 assert validity == (1,), (label, validity)
@@ -230,16 +332,25 @@ def main():
             ("86 2.99999", "combined reversed"): (1, 0, 1),
         }
         for coordinates in ("86 1.00001", "86 2.99999"):
-            for label, ring in (("exterior", polar_exterior), ("hole", polar_hole),
-                                ("hole reversed", polar_hole_reversed),
-                                ("combined", polar_combined),
-                                ("combined reversed", polar_combined_reversed)):
+            for label, ring in (
+                ("exterior", polar_exterior),
+                ("hole", polar_hole),
+                ("hole reversed", polar_hole_reversed),
+                ("combined", polar_combined),
+                ("combined reversed", polar_combined_reversed),
+            ):
                 expected = point_result(mysql_connection, coordinates, ring)
-                assert expected == polar_expected[(coordinates, label)], (coordinates, label, expected)
+                assert expected == polar_expected[(coordinates, label)], (
+                    coordinates,
+                    label,
+                    expected,
+                )
                 mysql_distance = point_distance(mysql_connection, coordinates, ring)
                 assert mysql_distance == 0.0, (coordinates, label, mysql_distance)
                 print(
-                    "polar ring", coordinates, label,
+                    "polar ring",
+                    coordinates,
+                    label,
                     expected,
                     point_result(fsdb_connection, coordinates, ring),
                     "distance",
@@ -250,28 +361,61 @@ def main():
         for latitude in (85.99999, 86, 86.00001, 87, 87.99999, 88, 88.00001):
             for longitude in (0.99999, 1, 1.00001, 2, 2.99999, 3, 3.00001):
                 coordinates = f"{latitude} {longitude}"
-                mysql_position = point_result(mysql_connection, coordinates, polar_combined)
-                fsdb_position = point_result(fsdb_connection, coordinates, polar_combined)
+                mysql_position = point_result(
+                    mysql_connection, coordinates, polar_combined
+                )
+                fsdb_position = point_result(
+                    fsdb_connection, coordinates, polar_combined
+                )
                 if mysql_position != fsdb_position:
-                    polar_grid_differences.append((coordinates, mysql_position, fsdb_position))
-        print("polar combined-grid differences", len(polar_grid_differences), polar_grid_differences)
+                    polar_grid_differences.append(
+                        (coordinates, mysql_position, fsdb_position)
+                    )
+        print(
+            "polar combined-grid differences",
+            len(polar_grid_differences),
+            polar_grid_differences,
+        )
         polar_corner_differences = []
         for latitude in (85.9999, 85.99999, 86, 86.00001, 86.0001):
-            for offset in (0.000001, 0.000002, 0.000005, 0.00001, 0.00002, 0.00005, 0.0001):
+            for offset in (
+                0.000001,
+                0.000002,
+                0.000005,
+                0.00001,
+                0.00002,
+                0.00005,
+                0.0001,
+            ):
                 coordinates = f"{latitude} {1 + offset}"
-                mysql_position = point_result(mysql_connection, coordinates, polar_combined)
-                fsdb_position = point_result(fsdb_connection, coordinates, polar_combined)
+                mysql_position = point_result(
+                    mysql_connection, coordinates, polar_combined
+                )
+                fsdb_position = point_result(
+                    fsdb_connection, coordinates, polar_combined
+                )
                 if mysql_position != fsdb_position:
-                    polar_corner_differences.append((coordinates, mysql_position, fsdb_position))
-        print("polar corner differences", len(polar_corner_differences), polar_corner_differences)
+                    polar_corner_differences.append(
+                        (coordinates, mysql_position, fsdb_position)
+                    )
+        print(
+            "polar corner differences",
+            len(polar_corner_differences),
+            polar_corner_differences,
+        )
         # Resolve the near-polar corner more finely before changing the
         # geographic winding rule. The broad point corpus samples only one
         # offset on each side of this boundary.
-        polar_polygon = (
-            "POLYGON((85 0,85 4,89 4,89 0,85 0),"
-            "(86 1,88 1,88 3,86 3,86 1))"
+        polar_polygon = "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))"
+        polar_latitudes = (
+            85.99999,
+            86,
+            86.0000001,
+            86.000001,
+            86.00001,
+            86.0001,
+            86.001,
         )
-        polar_latitudes = (85.99999, 86, 86.0000001, 86.000001, 86.00001, 86.0001, 86.001)
         polar_longitudes = (0.99999, 1, 1.0000001, 1.000001, 1.00001, 1.0001, 1.001)
         polar_mismatches = []
         for latitude in polar_latitudes:
@@ -281,8 +425,10 @@ def main():
                 actual = point_result(fsdb_connection, coordinates, polar_polygon)
                 if actual != expected:
                     polar_mismatches.append((coordinates, expected, actual))
-        print(f"{len(polar_latitudes) * len(polar_longitudes)} polar-corner points; "
-              f"{len(polar_mismatches)} point mismatches")
+        print(
+            f"{len(polar_latitudes) * len(polar_longitudes)} polar-corner points; "
+            f"{len(polar_mismatches)} point mismatches"
+        )
         for mismatch in polar_mismatches:
             print("polar corner", mismatch)
         # The near-polar mismatch is not explained by classifying each ring as
@@ -309,7 +455,11 @@ def main():
         inner = [(86, 1), (88, 1), (88, 3), (86, 3), (86, 1)]
 
         def polar_ring(points):
-            return "(" + ",".join(f"{latitude} {longitude}" for latitude, longitude in points) + ")"
+            return (
+                "("
+                + ",".join(f"{latitude} {longitude}" for latitude, longitude in points)
+                + ")"
+            )
 
         for reverse_outer in (False, True):
             for reverse_inner in (False, True):
@@ -330,8 +480,17 @@ def main():
                 with mysql_connection.cursor() as cursor:
                     cursor.execute(f"SELECT ST_IsValid({area})")
                     valid = cursor.fetchone()[0]
-                print("polar orientation", reverse_outer, reverse_inner, "MySQL valid", valid,
-                      "MySQL", values[0], "fsdb", values[1])
+                print(
+                    "polar orientation",
+                    reverse_outer,
+                    reverse_inner,
+                    "MySQL valid",
+                    valid,
+                    "MySQL",
+                    values[0],
+                    "fsdb",
+                    values[1],
+                )
         exterior = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
         edge_probes = [
             ("0 -0.00000000001", "near west edge"),
@@ -345,7 +504,9 @@ def main():
             actual = point_result(fsdb_connection, coordinates, exterior)
             if actual != expected:
                 edge_mismatches.append((label, coordinates, expected, actual))
-        print(f"{len(edge_probes)} near-exterior points; {len(edge_mismatches)} point mismatches")
+        print(
+            f"{len(edge_probes)} near-exterior points; {len(edge_mismatches)} point mismatches"
+        )
         for mismatch in edge_mismatches:
             print("exterior point", mismatch)
     finally:
@@ -358,9 +519,16 @@ def main():
             fsdb.wait(timeout=20)
         if mysql and mysql.poll() is None:
             subprocess.run(
-                ["mysqladmin", "--no-defaults", f"--socket={mysql_socket}",
-                 "-uroot", "shutdown"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                [
+                    "mysqladmin",
+                    "--no-defaults",
+                    f"--socket={mysql_socket}",
+                    "-uroot",
+                    "shutdown",
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             mysql.wait(timeout=20)
         shutil.rmtree(root)

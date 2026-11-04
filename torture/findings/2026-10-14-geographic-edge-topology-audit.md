@@ -388,3 +388,17 @@ maintained oracle account for why the current 189-point total exceeds the
 older one-mismatch summary; this replay does not identify a new code
 regression. The line cases remain concentrated near hole edges, including
 the near-polar MySQL relation/intersection inconsistency described above.
+
+## Point-distance decomposition (2026-11-04)
+
+The maintained oracle now also measures each mismatching point's distance to
+the hole ring as a standalone geographic `LINESTRING`. For all 34 of the
+point-to-polygon distance mismatches, each engine returns the same number
+for the corresponding point-to-hole-line distance (within `1e-9` m).
+For example, `POINT(2.5 1.00001)` against the original polygon and its hole
+line returns 2.1689634565 m in MySQL and 1.1083736203 m in fsdb. Both
+engines select the hole boundary as the nearest component; the discrepancy
+is already present in their geographic point-to-segment distance strategies.
+Polygon containment or nearest-ring selection alone cannot resolve these 34
+distance cases. The three point-relation mismatches and 13 line-relation
+mismatches remain separate topology work.

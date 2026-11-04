@@ -2321,6 +2321,10 @@ implementation effort:
    [machine-precision offsets](torture/findings/2026-10-14-geographic-edge-topology-audit.md#near-machine-precision-hole-edge-offsets)
    no longer allow crossing without an intersection, but MySQL's
    intersection and distance thresholds still differ from fsdb's.
+   A [point-distance decomposition](torture/findings/2026-10-14-geographic-edge-topology-audit.md#point-distance-decomposition-2026-11-04)
+   shows that all 34 sampled polygon-distance mismatches are already present
+   against the standalone hole line, narrowing that part of the gap to
+   geographic point-to-segment distance.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
 
