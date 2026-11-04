@@ -1939,6 +1939,10 @@ separates roughly 189 µs of fsdb query handling with no correlated probes
 from another 788 µs at 100 outer rows. Both fixed setup and row scaling need
 attention; the latter should be profiled through projection, subquery dispatch,
 candidate lookup, and residual evaluation.
+Statement-local [equality index-match caching](benchmarks/results/2026-11-04-correlated-index-match-cache.md)
+now avoids rediscovering the same index for every bound outer row. Matched
+controls showed lower correlated increments for both direct and derived
+`COUNT(*)` shapes; fixed query handling and other row work remain open.
 
 The [correlated functional-key profile](benchmarks/results/2bb13632-quick.md)
 extends that coverage to compatible unary and composed expression indexes.

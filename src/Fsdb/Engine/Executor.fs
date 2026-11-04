@@ -782,6 +782,7 @@ type private StatementMemo =
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
+      EqualityIndexMatches: Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
@@ -821,6 +822,7 @@ let private freshStatementMemo () =
       MaterializedCorrelatedNullBuckets =
         Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>(HashIdentity.Reference)
       PhysicalProjections = Dictionary<FromItem, PhysicalProjection>(HashIdentity.Reference)
+      EqualityIndexMatches = Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>(HashIdentity.Reference)
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
@@ -14926,8 +14928,12 @@ and private tryStoredEqualityMatchLookupWhere
     (equalities: (string * Value) list)
     : (Storage.EqualityIndexMatch * Storage.EqualityIndexMatchLookup) option =
     let columnNames, values = List.unzip equalities
+    let memo = (currentStatementMemo ()).EqualityIndexMatches
+    // Index definitions and visibility belong to the immutable table snapshot;
+    // only the value-dependent key checks below need repeating for each outer row.
+    let matchesByColumns = getMemoized memo table (fun () -> Dictionary<string list, Storage.EqualityIndexMatch list>())
     let matches =
-        Storage.equalityIndexMatchesCoveredByColumns table columnNames
+        getMemoized matchesByColumns columnNames (fun () -> Storage.equalityIndexMatchesCoveredByColumns table columnNames)
         |> List.filter (fun matched -> allowed matched.Index.Name)
 
     let pinsOneOrderedKey (matched: Storage.EqualityIndexMatch) =
