@@ -76,3 +76,31 @@ line relations and 189 point relations remain at 13 and three mismatches.
 The newly resolved high-latitude `POINT(41.00001 2.99999)` case is pinned in
 the point-to-polygon regression. The ten remaining distance cases include
 near-corner segment selection and numerical zero-distance disagreements.
+
+## Current-head residual classification
+
+A Release replay of `geographic-edge-oracle.py` after the meridian ordering
+change retained exactly ten near-hole distance mismatches. Coordinates below
+use MySQL's latitude-first WKT axis order; distances are metres. The nearest
+segment indices are the oracle's zero-based hole-edge indices.
+
+| Point | Hole latitude band | MySQL | Fsdb | Nearest edge (MySQL/Fsdb) |
+|---|---:|---:|---:|---:|
+| `3 1.00001` | 0–4° | 0 | 0.09504 | 1/1 |
+| `43 2.99999` | 40–44° | 0.16487 | 0.13462 | 1/1 |
+| `71.00001 1.00001` | 70–74° | 0.36920 | 0.35668 | 0/0 |
+| `71.00001 2.99999` | 70–74° | 0.36920 | 0.35668 | 2/2 |
+| `72 1.00001` | 70–74° | 0.33023 | 0.34372 | 0/0 |
+| `73 2.99999` | 70–74° | 0.31618 | 0.33024 | 2/1 |
+| `83 2.99999` | 80–84° | 0.13485 | 0.16516 | 2/1 |
+| `86 2.99999` | 85–89° | 0 | 0.09536 | 2/2 |
+| `88 1.00001` | 85–89° | 0.09536 | 0 | 0/0 |
+| `88 2.99999` | 85–89° | 0.09536 | 0 | 2/1 |
+
+Seven cases select the same edge, so the next distance correction should be
+checked first against the point-to-segment cross-track calculation. The three
+edge-selection differences may resolve as a consequence of corrected segment
+distances; no polygon aggregation difference was observed. The replay also
+retained 13/412 line relations, 3/189 near-hole point relations, and 0/100
+seeded point-to-line distance mismatches. These counts are a regression
+baseline, not evidence of general geographic parity.
