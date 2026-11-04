@@ -3212,7 +3212,12 @@ let tryInsertLockTargets
                                 |> List.tryPick (fun (name, key, _) ->
                                     if name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase) then Some key else None)
                             insertOrderKeyGroups table
-                            |> List.filter (fun group -> not (group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
+                            |> List.filter (fun group ->
+                                not (group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
+                                || group.Indices |> List.exists (fun index ->
+                                    match table.Columns.[index].Type with
+                                    | TEnum _ -> true
+                                    | _ -> false))
                             |> List.choose (fun group ->
                                 group.Indices
                                 |> traverse keyValue
@@ -3229,12 +3234,15 @@ let tryInsertLockTargets
                                                     VEnumOrdinal(enumOrdinal members label)
                                                 | _ -> value)
                                         let encoded = encodeEqualityValues table.Columns group.Indices orderedValues
-                                        // Each pending insertion needs its own observation claim.
-                                        // Equal non-unique index values must not serialize writers.
-                                        let primarySuffix =
-                                            primaryKey |> Option.map (fun key -> "\u0000" + key) |> Option.defaultValue ""
-                                        Some("ORDERED\u0000" + group.Name + "\u0000" + encoded
-                                             + primarySuffix + "\u0000" + Guid.NewGuid().ToString("N"))))
+                                        if group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase) then
+                                            Some("ORDERED\u0000PRIMARY\u0000" + encoded)
+                                        else
+                                            // Each pending insertion needs its own observation claim.
+                                            // Equal non-unique index values must not serialize writers.
+                                            let primarySuffix =
+                                                primaryKey |> Option.map (fun key -> "\u0000" + key) |> Option.defaultValue ""
+                                            Some("ORDERED\u0000" + group.Name + "\u0000" + encoded
+                                                 + primarySuffix + "\u0000" + Guid.NewGuid().ToString("N"))))
                         List.choose id uniqueKeys, orderedKeys))
                 |> Result.toOption
                 |> Option.map (fun encodedRows ->
@@ -4374,7 +4382,9 @@ type OrderedIndexKeyPart =
 let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (indexName: string) (keyTypes: ColumnType list) (primaryKeyTypes: ColumnType list) : (OrderedIndexKeyPart list * OrderedIndexKeyPart list option * string) list =
     let tableKey = lockNamespaceKey dbName tableName
     let primary = indexName.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
-    let prefix = if primary then "PRIMARY\u0000" else "ORDERED\u0000" + indexName + "\u0000"
+    let prefixes =
+        if primary then [ "PRIMARY\u0000"; "ORDERED\u0000PRIMARY\u0000" ]
+        else [ "ORDERED\u0000" + indexName + "\u0000" ]
     let ownOwner = store.TransactionLocks |> Option.map _.Owner
 
     let orderedValue keyType (value: string) =
@@ -4406,34 +4416,36 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
         | _ -> None
 
     let tryOrderedKey (key: string) =
-        if not (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) then None
-        else
-            let encoded = key.Substring(prefix.Length)
-            let rec read (offset: int) remaining acc =
-                match remaining with
-                | [] -> Some(List.rev acc, offset)
-                | keyType :: rest ->
-                    let separator = encoded.IndexOf(':', offset)
-                    if separator <= offset then None
-                    else
-                        match Int32.TryParse(encoded.Substring(offset, separator - offset)) with
-                        | true, length when length >= 1 && length <= encoded.Length - separator - 1 ->
-                            let value = encoded.Substring(separator + 1, length)
-                            orderedValue keyType value
-                            |> Option.bind (fun ordered -> read (separator + 1 + length) rest (ordered :: acc))
-                        | _ -> None
-            read 0 keyTypes []
-            |> Option.bind (fun (ordered, offset) ->
-                if primary then
-                    if offset = encoded.Length then Some(ordered, Some ordered) else None
-                elif offset < encoded.Length && encoded.[offset] = '\u0000' then
-                    let primaryKey =
-                        read (offset + 1) primaryKeyTypes []
-                        |> Option.bind (fun (values, endOffset) ->
-                            if endOffset < encoded.Length && encoded.[endOffset] = '\u0000' then Some values
-                            else None)
-                    Some(ordered, primaryKey)
-                else None)
+        prefixes
+        |> List.tryPick (fun prefix ->
+            if not (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) then None
+            else
+                let encoded = key.Substring(prefix.Length)
+                let rec read (offset: int) remaining acc =
+                    match remaining with
+                    | [] -> Some(List.rev acc, offset)
+                    | keyType :: rest ->
+                        let separator = encoded.IndexOf(':', offset)
+                        if separator <= offset then None
+                        else
+                            match Int32.TryParse(encoded.Substring(offset, separator - offset)) with
+                            | true, length when length >= 1 && length <= encoded.Length - separator - 1 ->
+                                let value = encoded.Substring(separator + 1, length)
+                                orderedValue keyType value
+                                |> Option.bind (fun ordered -> read (separator + 1 + length) rest (ordered :: acc))
+                            | _ -> None
+                read 0 keyTypes []
+                |> Option.bind (fun (ordered, offset) ->
+                    if primary then
+                        if offset = encoded.Length then Some(ordered, Some ordered) else None
+                    elif offset < encoded.Length && encoded.[offset] = '\u0000' then
+                        let primaryKey =
+                            read (offset + 1) primaryKeyTypes []
+                            |> Option.bind (fun (values, endOffset) ->
+                                if endOffset < encoded.Length && encoded.[endOffset] = '\u0000' then Some values
+                                else None)
+                        Some(ordered, primaryKey)
+                    else None))
 
     match store.KeyLocks.TryGetValue tableKey with
     | false, _ -> []

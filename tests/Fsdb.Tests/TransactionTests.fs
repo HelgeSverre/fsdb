@@ -2842,44 +2842,45 @@ let tests =
                       | ResultSet(_, rows) -> Expect.equal rows expected statement
                       | other -> failtestf "expected YEAR-ordered rows, got %A" other
 
-          testCase "limited ENUM ordered write waits for pending indexed insert"
+          testCase "limited ENUM ordered write waits for pending indexed or primary-key insert"
           <| fun _ ->
-              for verb in [ "UPDATE"; "DELETE" ] do
-                  for direction, pending, visible in
-                      [ "ASC", "z", [ "a"; "m" ]; "DESC", "m", [ "z"; "a" ] ] do
-                      let store = Fsdb.Storage.create ()
-                      let setup = create 1 store
-                      handle setup "CREATE TABLE tx_enum_order(rank_value ENUM('z','a','m'),n INT,KEY ix_rank(rank_value))" |> ignore
-                      let visibleRows = visible |> List.map (fun label -> sprintf "('%s',0)" label) |> String.concat ","
-                      handle setup ("INSERT INTO tx_enum_order VALUES" + visibleRows) |> ignore
-                      let owner, _ = handle (create 2 store) "BEGIN"
-                      let owner, inserted = handle owner (sprintf "INSERT INTO tx_enum_order VALUES('%s',0)" pending)
-                      Expect.equal inserted (Affected 1UL) "owner inserts pending enum"
-                      let waiter, _ = handle (create 3 store) "BEGIN"
-                      use started = new Threading.ManualResetEventSlim(false)
-                      let statement =
-                          (if verb = "UPDATE" then "UPDATE tx_enum_order SET n=1" else "DELETE FROM tx_enum_order")
-                          + sprintf " ORDER BY rank_value %s LIMIT 1" direction
-                      let waiting =
-                          Threading.Tasks.Task.Run(fun () ->
-                              started.Set()
-                              handle waiter statement)
-                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "ENUM writer starts"
-                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
-                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits enum"
-                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "ENUM writer resumes"
-                      let waiter, result = waiting.Result
-                      Expect.isTrue blocked (statement + " waits for pending ordinal")
-                      Expect.equal result (Affected 1UL) "one ENUM-ordered row changes"
-                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
-                      let expected =
-                          [ "z"; "a"; "m" ]
-                          |> List.filter (fun label -> verb = "UPDATE" || label <> pending)
-                          |> List.map (fun label ->
-                              [ Some label; Some(if verb = "UPDATE" && label = pending then "1" else "0") ])
-                      match handle setup "SELECT rank_value,n FROM tx_enum_order ORDER BY rank_value" |> snd with
-                      | ResultSet(_, rows) -> Expect.equal rows expected statement
-                      | other -> failtestf "expected ENUM-ordered rows, got %A" other
+              for keyDefinition in [ "KEY ix_rank(rank_value)"; "PRIMARY KEY(rank_value)" ] do
+                  for verb in [ "UPDATE"; "DELETE" ] do
+                      for direction, pending, visible in
+                          [ "ASC", "z", [ "a"; "m" ]; "DESC", "m", [ "z"; "a" ] ] do
+                          let store = Fsdb.Storage.create ()
+                          let setup = create 1 store
+                          handle setup (sprintf "CREATE TABLE tx_enum_order(rank_value ENUM('z','a','m'),n INT,%s)" keyDefinition) |> ignore
+                          let visibleRows = visible |> List.map (fun label -> sprintf "('%s',0)" label) |> String.concat ","
+                          handle setup ("INSERT INTO tx_enum_order VALUES" + visibleRows) |> ignore
+                          let owner, _ = handle (create 2 store) "BEGIN"
+                          let owner, inserted = handle owner (sprintf "INSERT INTO tx_enum_order VALUES('%s',0)" pending)
+                          Expect.equal inserted (Affected 1UL) "owner inserts pending enum"
+                          let waiter, _ = handle (create 3 store) "BEGIN"
+                          use started = new Threading.ManualResetEventSlim(false)
+                          let statement =
+                              (if verb = "UPDATE" then "UPDATE tx_enum_order SET n=1" else "DELETE FROM tx_enum_order")
+                              + sprintf " ORDER BY rank_value %s LIMIT 1" direction
+                          let waiting =
+                              Threading.Tasks.Task.Run(fun () ->
+                                  started.Set()
+                                  handle waiter statement)
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "ENUM writer starts"
+                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits enum"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "ENUM writer resumes"
+                          let waiter, result = waiting.Result
+                          Expect.isTrue blocked (statement + " waits for pending ordinal")
+                          Expect.equal result (Affected 1UL) "one ENUM-ordered row changes"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                          let expected =
+                              [ "z"; "a"; "m" ]
+                              |> List.filter (fun label -> verb = "UPDATE" || label <> pending)
+                              |> List.map (fun label ->
+                                  [ Some label; Some(if verb = "UPDATE" && label = pending then "1" else "0") ])
+                          match handle setup "SELECT rank_value,n FROM tx_enum_order ORDER BY rank_value" |> snd with
+                          | ResultSet(_, rows) -> Expect.equal rows expected statement
+                          | other -> failtestf "expected ENUM-ordered rows, got %A" other
 
           testCase "limited ordered write reselects secondary-index inserts at LIMIT two"
           <| fun _ ->
