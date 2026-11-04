@@ -381,3 +381,15 @@ The transaction regressions and oracles check wait behavior,
 affected counts, and final rows for both write verbs. Keyless tables without
 a usable ordered claim, wider index expressions, and other predicate shapes
 remain outside this audit.
+
+## Descending sort-key re-selection
+
+The focused `--descending-only` mode of the maintained MySQL 8.4.11 oracle
+checks 20 `ORDER BY n DESC,id LIMIT 1/2/3/4/8` UPDATE and DELETE writes,
+with and without `KEY(n)`. An owner moves the initial first row behind the
+limit before committing. MySQL waits, then fills the limit from the other
+rows. The matching fsdb transaction regression passed with the same final
+rows and affected counts. This extends the ordered re-selection audit to a
+descending secondary sort key. The full oracle run later encountered a
+separate timing-sensitive pending-insert assertion, so this result is based
+on the focused mode and regression.

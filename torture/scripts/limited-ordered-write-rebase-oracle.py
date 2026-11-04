@@ -1,5 +1,6 @@
 """Check ordered LIMIT write rebasing against a disposable MySQL 8.4 server."""
 
+import argparse
 import itertools
 import pathlib
 import subprocess
@@ -20,6 +21,9 @@ def connect(socket):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--descending-only", action="store_true")
+    args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="fsdb-limited-write-") as directory:
         root = pathlib.Path(directory)
         data = root / "data"
@@ -51,7 +55,12 @@ def main():
                 cases = 0
                 for limit in (1, 2, 3, 4, 8):
                     for indexed in (False, True):
-                        for scenario in ("predicate", "sort_key"):
+                        scenarios = (
+                            ("descending_sort_key",)
+                            if args.descending_only
+                            else ("predicate", "sort_key", "descending_sort_key")
+                        )
+                        for scenario in scenarios:
                             for verb in ("UPDATE", "DELETE"):
                                 waiter = connect(socket)
                                 try:
@@ -59,19 +68,30 @@ def main():
                                         cursor.execute("DROP TABLE IF EXISTS target")
                                         index = ", KEY ix_n(n)" if indexed else ""
                                         cursor.execute(f"CREATE TABLE target(id INT PRIMARY KEY,n INT{index})")
+                                        def initial_n(row_id, current_scenario=scenario, current_limit=limit):
+                                            if current_scenario == "predicate":
+                                                return 0
+                                            if current_scenario == "descending_sort_key":
+                                                return current_limit + 2 - row_id
+                                            return row_id - 1
+
                                         rows = ",".join(
-                                            f"({id},{0 if scenario == 'predicate' else id - 1})"
-                                            for id in range(1, limit + 2)
+                                            f"({row_id},{initial_n(row_id)})"
+                                            for row_id in range(1, limit + 2)
                                         )
                                         cursor.execute(f"INSERT INTO target VALUES{rows}")
                                         cursor.execute("BEGIN")
-                                        owner_value = -1 if scenario == "predicate" else limit + 1
+                                        owner_value = -1 if scenario in ("predicate", "descending_sort_key") else limit + 1
                                         cursor.execute(f"UPDATE target SET n={owner_value} WHERE id=1")
                                     with waiter.cursor() as cursor:
                                         cursor.execute("USE probe")
                                         cursor.execute("BEGIN")
 
-                                    ordering = "id" if scenario == "predicate" else "n,id"
+                                    ordering = (
+                                        "id" if scenario == "predicate"
+                                        else "n DESC,id" if scenario == "descending_sort_key"
+                                        else "n,id"
+                                    )
                                     action = (
                                         "UPDATE target SET n=n+1" if scenario == "predicate" else
                                         "UPDATE target SET n=n+10"
@@ -108,6 +128,10 @@ def main():
                                         expected = ((1, -1),)
                                         if verb == "UPDATE":
                                             expected += tuple((id, 1) for id in range(2, limit + 2))
+                                    elif scenario == "descending_sort_key":
+                                        expected = ((1, -1),)
+                                        if verb == "UPDATE":
+                                            expected += tuple((id, limit + 12 - id) for id in range(2, limit + 2))
                                     else:
                                         expected = ((1, owner_value),)
                                         if verb == "UPDATE":
@@ -116,6 +140,10 @@ def main():
                                     cases += 1
                                 finally:
                                     waiter.close()
+
+                if args.descending_only:
+                    print(f"MySQL {version}: {cases} descending ordered writes reselected after contention")
+                    return
 
                 for limit in (1, 2, 3, 4, 8):
                     for indexed in (False, True):
