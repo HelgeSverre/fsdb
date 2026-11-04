@@ -315,15 +315,19 @@ let tests =
               for sql in
                   [ "CREATE TABLE secured_union_target(id INT PRIMARY KEY,n INT)"
                     "CREATE TABLE secured_union_source(id INT,flag INT)"
+                    "CREATE TABLE secured_second_source(id INT,flag INT)"
                     "INSERT INTO secured_union_target VALUES(1,0)"
                     "INSERT INTO secured_union_source VALUES(1,7),(1,8)"
+                    "INSERT INTO secured_second_source VALUES(1,9)"
                     "CREATE USER union_inner_owner"
                     "CREATE USER union_outer_owner"
                     "GRANT SELECT,UPDATE ON fsdb.secured_union_target TO union_inner_owner"
                     "GRANT SELECT ON fsdb.secured_union_source TO union_inner_owner"
+                    "GRANT SELECT ON fsdb.secured_second_source TO union_inner_owner"
                     "GRANT CREATE VIEW ON fsdb.* TO union_inner_owner,union_outer_owner"
                     "CREATE DEFINER='union_inner_owner'@'%' SQL SECURITY DEFINER VIEW secured_target_first AS SELECT t.id,t.n,src.flag FROM secured_union_target t JOIN secured_union_source src ON src.id=t.id"
                     "CREATE DEFINER='union_inner_owner'@'%' SQL SECURITY DEFINER VIEW secured_source_first AS SELECT t.id,t.n,src.flag FROM secured_union_source src JOIN secured_union_target t ON t.id=src.id"
+                    "CREATE DEFINER='union_inner_owner'@'%' SQL SECURITY DEFINER VIEW secured_three_source AS SELECT t.id,t.n,src.flag,other.flag AS other_flag FROM secured_union_source src JOIN secured_second_source other ON other.id=src.id JOIN secured_union_target t ON t.id=other.id"
                     "CREATE DEFINER='union_inner_owner'@'%' SQL SECURITY DEFINER VIEW secured_union_inner AS SELECT t.id,t.n,u.flag FROM secured_union_source src JOIN LATERAL (SELECT src.id AS id,src.flag AS flag UNION DISTINCT SELECT src.id,src.flag+1) u ON TRUE JOIN secured_union_target t ON t.id=u.id"
                     "GRANT SELECT,UPDATE ON fsdb.secured_union_inner TO union_outer_owner"
                     "CREATE DEFINER='union_outer_owner'@'%' SQL SECURITY DEFINER VIEW secured_union_outer AS SELECT id,n AS metric,flag FROM secured_union_inner" ] do
@@ -332,6 +336,14 @@ let tests =
               match run store "UPDATE secured_source_first SET n=n WHERE id=1" with
               | Err(1356, _) -> ()
               | other -> failtestf "expected source-first view to require its leading source UPDATE grant, got %A" other
+              match run store "UPDATE secured_three_source SET n=n WHERE id=1" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected three-source view to require its leading source UPDATE grant, got %A" other
+              expectOk (run store "GRANT UPDATE(id) ON fsdb.secured_second_source TO union_inner_owner") "grant later-source column"
+              match run store "UPDATE secured_three_source SET n=n WHERE id=1" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected later-source UPDATE to leave the leading grant missing, got %A" other
+              expectOk (run store "REVOKE UPDATE(id) ON fsdb.secured_second_source FROM union_inner_owner") "revoke later-source column"
               expectOk (run store "GRANT UPDATE(id) ON fsdb.secured_union_source TO union_inner_owner") "grant one leading-source column"
               Expect.equal (run store "UPDATE secured_source_first SET n=n WHERE id=1") (Affected 0UL) "one column UPDATE grant permits the source-first view"
               expectOk (run store "REVOKE UPDATE(id) ON fsdb.secured_union_source FROM union_inner_owner") "revoke leading-source column"
@@ -340,6 +352,7 @@ let tests =
               | Err(1356, _) -> ()
               | other -> failtestf "expected missing lateral-source UPDATE grant to invalidate the view, got %A" other
               expectOk (run store "GRANT UPDATE ON fsdb.secured_union_source TO union_inner_owner") "grant lateral-source update"
+              Expect.equal (run store "UPDATE secured_three_source SET n=n WHERE id=1") (Affected 0UL) "later read source needs no UPDATE grant"
               Expect.equal (update ()) (Affected 1UL) "complete definer grants allow one physical update"
               expectOk (run store "REVOKE SELECT ON fsdb.secured_union_source FROM union_inner_owner") "revoke source read"
               match update () with

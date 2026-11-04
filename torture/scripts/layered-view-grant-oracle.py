@@ -254,8 +254,12 @@ def main():
                     "CREATE TABLE lateral_source(id INT,flag INT)",
                     "INSERT INTO lateral_source VALUES(1,7),(1,8)",
                     "GRANT SELECT ON probe.lateral_source TO inner_owner",
+                    "CREATE TABLE second_source(id INT,flag INT)",
+                    "INSERT INTO second_source VALUES(1,9)",
+                    "GRANT SELECT ON probe.second_source TO inner_owner",
                     "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW target_first_control AS SELECT t.id,t.n,src.flag FROM target t JOIN lateral_source src ON src.id=t.id",
                     "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW source_first_control AS SELECT t.id,t.n,src.flag FROM lateral_source src JOIN target t ON t.id=src.id",
+                    "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW three_source_control AS SELECT t.id,t.n,src.flag,other.flag AS other_flag FROM lateral_source src JOIN second_source other ON other.id=src.id JOIN target t ON t.id=other.id",
                     "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_union_inner AS SELECT t.id,t.n,u.flag FROM lateral_source src JOIN LATERAL (SELECT src.id AS id,src.flag AS flag UNION DISTINCT SELECT src.id,src.flag+1) u ON TRUE JOIN target t ON t.id=u.id",
                     "GRANT SELECT,UPDATE ON probe.lateral_union_inner TO outer_owner",
                     "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_union_outer AS SELECT id,n AS metric,flag FROM lateral_union_inner",
@@ -271,6 +275,19 @@ def main():
                 assert_error(
                     connection, "UPDATE lateral_union_inner SET n=n WHERE id=1", 1356
                 )
+                assert_error(
+                    connection, "UPDATE three_source_control SET n=n WHERE id=1", 1356
+                )
+                run(
+                    connection, "GRANT UPDATE(id) ON probe.second_source TO inner_owner"
+                )
+                assert_error(
+                    connection, "UPDATE three_source_control SET n=n WHERE id=1", 1356
+                )
+                run(
+                    connection,
+                    "REVOKE UPDATE(id) ON probe.second_source FROM inner_owner",
+                )
                 run(
                     connection,
                     "GRANT UPDATE(id) ON probe.lateral_source TO inner_owner",
@@ -284,6 +301,10 @@ def main():
                     "REVOKE UPDATE(id) ON probe.lateral_source FROM inner_owner",
                 )
                 run(connection, "GRANT UPDATE ON probe.lateral_source TO inner_owner")
+                assert (
+                    run(connection, "UPDATE three_source_control SET n=n WHERE id=1")
+                    == 0
+                )
                 assert (
                     run(
                         connection,

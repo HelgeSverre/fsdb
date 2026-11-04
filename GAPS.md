@@ -935,6 +935,9 @@ for direct and layered views; the target-first control needs only SELECT on
 its joined read source. A grant on any one leading-source column suffices.
 The MySQL 8.4.11 oracle and regression cover a
 source-first join and a dependent LATERAL UNION read source.
+The three-source control also confirms that UPDATE on a second read source
+does not replace the leading-source grant, and that SELECT alone suffices
+for that later source once the leading grant is present.
 [Aggregate-derived read sources in a layered writable join](torture/findings/2026-10-15-layered-derived-view-grants.md)
 now report 1356 for revoked source grants before a physical target join-key
 denial; a revoked target read alone still reports 1143. An audited
