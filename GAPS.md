@@ -1934,6 +1934,11 @@ again measures roughly 1 ms for the derived and CTE equality shapes, versus
 about 0.24 ms on MySQL; the point-key control has a larger relative latency
 gap. This points the next investigation at statement setup and projection
 costs before changing candidate selection.
+The [zero/one/100-row control](benchmarks/results/2026-11-04-correlated-row-scaling.md)
+separates roughly 189 µs of fsdb query handling with no correlated probes
+from another 788 µs at 100 outer rows. Both fixed setup and row scaling need
+attention; the latter should be profiled through projection, subquery dispatch,
+candidate lookup, and residual evaluation.
 
 The [correlated functional-key profile](benchmarks/results/2bb13632-quick.md)
 extends that coverage to compatible unary and composed expression indexes.

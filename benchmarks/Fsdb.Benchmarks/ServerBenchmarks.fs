@@ -592,6 +592,22 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedDerivedEqualityOneRow() =
+        this.Query(
+            "SELECT u.id, (SELECT COUNT(*) FROM (SELECT id, user_id FROM orders) c WHERE c.user_id = u.id) "
+            + "FROM users u WHERE u.id = 1"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedDerivedEqualityNoRows() =
+        this.Query(
+            "SELECT u.id, (SELECT COUNT(*) FROM (SELECT id, user_id FROM orders) c WHERE c.user_id = u.id) "
+            + "FROM users u WHERE u.id = -1"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedDerivedCompositeEquality() =
         this.Query(
             "SELECT o.id, (SELECT COUNT(*) FROM (SELECT id, user_id, status FROM orders) c "
