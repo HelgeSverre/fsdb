@@ -29,7 +29,9 @@ def verify_wait(owner, waiter, owner_sql, waiter_sql, expected_rows):
     assert execute(owner, owner_sql) == 1
     execute(waiter, "BEGIN")
     result = []
-    waiting = threading.Thread(target=lambda: result.append(execute(waiter, waiter_sql)))
+    waiting = threading.Thread(
+        target=lambda: result.append(execute(waiter, waiter_sql))
+    )
     waiting.start()
     time.sleep(0.2)
     assert waiting.is_alive(), "joined writer did not wait for the target row"
@@ -51,16 +53,31 @@ def main():
         with (root / "mysql.log").open("w") as log:
             try:
                 subprocess.run(
-                    ["mysqld", "--no-defaults", "--initialize-insecure",
-                     f"--datadir={data}", "--innodb-redo-log-capacity=64M"],
-                    check=True, stdout=log, stderr=subprocess.STDOUT,
+                    [
+                        "mysqld",
+                        "--no-defaults",
+                        "--initialize-insecure",
+                        f"--datadir={data}",
+                        "--innodb-redo-log-capacity=64M",
+                    ],
+                    check=True,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
                 )
                 server = subprocess.Popen(
-                    ["mysqld", "--no-defaults", f"--datadir={data}",
-                     "--skip-networking", f"--socket={socket}",
-                     f"--pid-file={root / 'mysql.pid'}", "--mysqlx=0",
-                     "--innodb-buffer-pool-size=64M", "--innodb-redo-log-capacity=64M"],
-                    stdout=log, stderr=subprocess.STDOUT,
+                    [
+                        "mysqld",
+                        "--no-defaults",
+                        f"--datadir={data}",
+                        "--skip-networking",
+                        f"--socket={socket}",
+                        f"--pid-file={root / 'mysql.pid'}",
+                        "--mysqlx=0",
+                        "--innodb-buffer-pool-size=64M",
+                        "--innodb-redo-log-capacity=64M",
+                    ],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
                 )
                 owner = connect(socket)
                 waiter = connect(socket)
@@ -73,42 +90,67 @@ def main():
                 execute(waiter, "USE probe")
 
                 verify_wait(
-                    owner, waiter,
+                    owner,
+                    waiter,
                     "UPDATE a SET n=n+1 WHERE id=1",
                     "WITH c AS (SELECT 1 AS id) UPDATE a JOIN c ON c.id=a.id SET a.n=a.n+1 WHERE a.id=1",
                     ((1, 2), (2, 0)),
                 )
                 verify_wait(
-                    owner, waiter,
+                    owner,
+                    waiter,
                     "UPDATE a SET n=n+1 WHERE id=1",
                     "WITH c AS (SELECT 1 AS id) UPDATE a JOIN c ON c.id=a.id SET n=n+1 WHERE a.id=1",
                     ((1, 4), (2, 0)),
                 )
                 verify_wait(
-                    owner, waiter,
+                    owner,
+                    waiter,
                     "UPDATE a SET n=n+1 WHERE id=2",
                     "WITH c AS (SELECT 2 AS id) DELETE a FROM a JOIN c ON c.id=a.id WHERE a.id=2",
                     ((1, 4),),
                 )
                 verify_wait(
-                    owner, waiter,
+                    owner,
+                    waiter,
                     "UPDATE a SET n=n+1 WHERE id=1",
                     "UPDATE a JOIN (SELECT 1 AS id) d ON d.id=a.id SET n=n+1 WHERE a.id=1",
                     ((1, 6),),
                 )
+                execute(owner, "CREATE TABLE probe.link(id INT PRIMARY KEY)")
+                execute(owner, "INSERT INTO probe.link VALUES(1)")
+                execute(
+                    owner,
+                    "CREATE VIEW probe.v AS SELECT a.id,a.n,l.id AS link_id FROM probe.a a JOIN probe.link l ON a.id=l.id",
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c JOIN v ON c.id=v.link_id SET v.n=v.n+1 WHERE c.id=1",
+                    ((1, 8),),
+                )
                 try:
-                    execute(owner, "WITH c AS (SELECT 1 AS id,9 AS n) UPDATE a JOIN c ON c.id=a.id SET n=n+1 WHERE a.id=1")
+                    execute(
+                        owner,
+                        "WITH c AS (SELECT 1 AS id,9 AS n) UPDATE a JOIN c ON c.id=a.id SET n=n+1 WHERE a.id=1",
+                    )
                 except pymysql.MySQLError as error:
                     assert error.args[0] == 1052, error
                 else:
                     raise AssertionError("ambiguous CTE assignment was accepted")
                 try:
-                    execute(owner, "UPDATE a JOIN (SELECT 1 AS id,9 AS n) d ON d.id=a.id SET n=n+1 WHERE a.id=1")
+                    execute(
+                        owner,
+                        "UPDATE a JOIN (SELECT 1 AS id,9 AS n) d ON d.id=a.id SET n=n+1 WHERE a.id=1",
+                    )
                 except pymysql.MySQLError as error:
                     assert error.args[0] == 1052, error
                 else:
                     raise AssertionError("ambiguous derived assignment was accepted")
-                print("MySQL 8.4.11: CTE and derived joined writes waited and committed")
+                print(
+                    "MySQL 8.4.11: CTE, derived, and joined-view writes waited and committed"
+                )
             except Exception:
                 print((root / "mysql.log").read_text())
                 raise
@@ -119,9 +161,16 @@ def main():
                     owner.close()
                 if server and server.poll() is None:
                     subprocess.run(
-                        ["mysqladmin", "--no-defaults", f"--socket={socket}",
-                         "-uroot", "shutdown"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        [
+                            "mysqladmin",
+                            "--no-defaults",
+                            f"--socket={socket}",
+                            "-uroot",
+                            "shutdown",
+                        ],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                     )
                     server.wait(timeout=20)
 

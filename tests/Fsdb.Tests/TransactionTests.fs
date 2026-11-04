@@ -1638,6 +1638,39 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected both increments after CTE write contention, got %A" result
 
+          testCase "CTE-first joined view update waits for its physical target"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_cte_view_target(id INT PRIMARY KEY,n INT)" |> ignore
+              handle setup "CREATE TABLE tx_cte_view_link(id INT PRIMARY KEY)" |> ignore
+              handle setup "INSERT INTO tx_cte_view_target VALUES(1,0)" |> ignore
+              handle setup "INSERT INTO tx_cte_view_link VALUES(1)" |> ignore
+              handle setup "CREATE VIEW tx_cte_view AS SELECT t.id,t.n,l.id AS link_id FROM tx_cte_view_target t JOIN tx_cte_view_link l ON t.id=l.id" |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_cte_view_target SET n=n+1 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "owner changes the physical row"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              let sql =
+                  "WITH c AS (SELECT id FROM tx_cte_view_link) "
+                  + "UPDATE c JOIN tx_cte_view v ON c.id=v.link_id SET v.n=v.n+1 WHERE c.id=1"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter sql)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "view writer starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "view writer resumes"
+              let waiter, updated = waiting.Result
+              Expect.isTrue blocked "view writer waits for physical target"
+              Expect.equal updated (Affected 1UL) "view writer updates committed row"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "view writer commits"
+              match handle setup "SELECT n FROM tx_cte_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both increments after view contention, got %A" result
+
           testCase "CTE-joined update with an unqualified target waits and rebases"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
