@@ -31640,6 +31640,14 @@ let transactionWriteTargets
                 | OrderedNumber number, (VInt _ | VUInt _ | VDecimal _)
                     when not (isDateColumn name || isTimeColumn name || (temporalColumnType name).IsSome) ->
                     Some(Value.compare (VDecimal number) bound)
+                // A wider integer bound can round when converted to binary64;
+                // retaining the claim is safer than excluding a matching insert.
+                | OrderedFloat number, VInt bound when bound >= -9007199254740992L && bound <= 9007199254740992L ->
+                    Some(Operators.compare number (float bound))
+                | OrderedFloat number, VUInt bound when bound <= 9007199254740992UL ->
+                    Some(Operators.compare number (float bound))
+                | OrderedFloat number, VDouble bound when System.Double.IsFinite bound ->
+                    Some(Operators.compare number bound)
                 | OrderedNumber number, bound when isDateColumn name ->
                     dateBound bound |> Option.map (fun value -> Operators.compare number value)
                 | OrderedNumber number, bound when isTimeColumn name ->
@@ -31777,7 +31785,7 @@ let transactionWriteTargets
                                     equalsIgnoreCase owner qualifier && equalsIgnoreCase name columnName
                                 | _ -> false
                             let comparableLiteral = function
-                                | LiteralValue(VInt _ | VUInt _ | VDecimal _) -> true
+                                | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VDouble _) -> true
                                 | LiteralValue(VDate _) when column.Type = TDate -> true
                                 | LiteralValue(VTime _) when (match column.Type with TTime _ -> true | _ -> false) -> true
                                 | LiteralValue(VDate _ | VDateTime _ | VTimestamp _ as bound)
@@ -31842,6 +31850,7 @@ let transactionWriteTargets
                     | OrderedNull, _ -> -1
                     | _, OrderedNull -> 1
                     | OrderedNumber a, OrderedNumber b -> Operators.compare a b
+                    | OrderedFloat a, OrderedFloat b -> Operators.compare a b
                     | OrderedText a, OrderedText b -> System.String.CompareOrdinal(a, b)
                     | _ -> 0
                 let rec compareOrdered left right directions =
@@ -31859,6 +31868,7 @@ let transactionWriteTargets
                     | VUInt integer
                     | VBit(_, integer) -> Some(OrderedNumber(decimal integer))
                     | VDecimal number -> Some(OrderedNumber number)
+                    | VDouble number when System.Double.IsFinite number -> Some(OrderedFloat number)
                     | VDate date -> Some(OrderedNumber(decimal date.DayNumber))
                     | VTime time -> Some(OrderedNumber(decimal (timeTicks time)))
                     | VDateTime value | VTimestamp value -> Some(OrderedNumber(decimal value.Ticks))

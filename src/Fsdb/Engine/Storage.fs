@@ -2858,7 +2858,8 @@ let private insertOrderKeyGroups (table: Table) : IndexKeyGroup list =
     let supportedColumn index =
         match table.Columns.[index].Type with
         | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _
-        | TDecimal _ | TDate | TTime _ | TDateTime _ | TTimestamp _ | TChar _ | TVarchar _ -> true
+        | TDecimal _ | TFloat _ | TDouble _ | TDate | TTime _ | TDateTime _ | TTimestamp _
+        | TChar _ | TVarchar _ -> true
         | _ -> false
     orderedKeyGroups table
     |> visibleGroups
@@ -4355,6 +4356,7 @@ let acquireTransactionWriteTargets
 type OrderedIndexKeyPart =
     | OrderedNull
     | OrderedNumber of decimal
+    | OrderedFloat of float
     | OrderedText of string
 
 /// Active numeric, temporal, or text ordered index claims that another transaction holds.
@@ -4371,6 +4373,7 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
             match keyType with
             | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ -> Some 'I'
             | TDecimal _ -> Some 'M'
+            | TFloat _ | TDouble _ -> Some 'D'
             | TDate -> Some 'T'
             | TTime _ -> Some 'H'
             | TDateTime _ -> Some 'V'
@@ -4381,6 +4384,10 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
         | _ when value = "N" -> Some OrderedNull
         | Some 'S' when value.Length > 1 && value.[0] = 'S' ->
             Some(OrderedText(value.Substring(1)))
+        | Some 'D' when value.Length > 1 && value.[0] = 'D' ->
+            match Double.TryParse(value.Substring(1), NumberStyles.Float, CultureInfo.InvariantCulture) with
+            | true, ordered when Double.IsFinite ordered -> Some(OrderedFloat ordered)
+            | _ -> None
         | Some tag when value.Length > 1 && value.[0] = tag ->
             let style = if tag = 'M' then NumberStyles.Float else NumberStyles.Integer
             match Decimal.TryParse(value.Substring(1), style, CultureInfo.InvariantCulture) with

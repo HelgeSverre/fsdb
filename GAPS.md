@@ -723,6 +723,8 @@ then refresh and recheck selected row identities after a wait
 Keyless limited filesort writes additionally observe pending ordered secondary
 inserts on [audited integer, text, DATE, TIME, DATETIME, and TIMESTAMP index shapes](torture/findings/2026-10-16-limited-ordered-write-rebase.md#keyless-filesort-writes),
 and [DECIMAL secondary keys](torture/findings/2026-11-04-decimal-ordered-write.md).
+[FLOAT and DOUBLE secondary keys](torture/findings/2026-11-04-floating-ordered-write.md)
+now follow the same audited wait and indexed-range exclusion rules.
 General full scans do not claim gaps or later inserted rows. A [focused unindexed-write load
 probe](benchmarks/results/92b019ff-full-scan-write-load.md) records the current
 worker-scaling slope. Unique-key claims, incremental index validation, and merged-result
