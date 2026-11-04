@@ -187,7 +187,17 @@ order and permits a `JSON_TABLE` operand only when its column references
 are qualified by already available group sources. Bare columns, nested
 subqueries, and out-of-group qualifiers keep the original association.
 The native oracle matches 42 UPDATE cases and 26 contended rebases; the
-focused F# regression checks both target rows. `LATERAL` remains excluded.
+focused F# regression checks both target rows. Lateral groups still require
+their own dependency check.
+
+The analogous `LATERAL (SELECT l.id AS next_id)` group also returned 1146
+before the rewrite. A source-free lateral SELECT can now move with the group
+when every expression references only preceding group aliases. This includes
+its projection, filter, grouping, ordering, and limit expressions; local
+FROM/JOIN, CTE, window, locking, and output destinations remain on the
+original path. The maintained MySQL oracle matches 43 UPDATE cases and 26
+contended rebases. The focused F# regression pins both physical target rows,
+and the existing grouped mutation tests retain left-dependent lateral scope.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:

@@ -273,6 +273,9 @@ def main():
                     "COLUMNS(next_id INT PATH '$')) j ON TRUE "
                     "JOIN vb ON vb.link_id=j.next_id) ON va.link_id=l.id "
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
+                    "UPDATE va LEFT JOIN (link l JOIN LATERAL (SELECT l.id AS next_id) q ON TRUE "
+                    "JOIN vb ON vb.link_id=q.next_id) ON va.link_id=l.id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)

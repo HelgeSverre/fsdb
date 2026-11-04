@@ -4709,6 +4709,18 @@ let private updateSources: Parser<TableRef * Join list, unit> =
                     match inner.Table with
                     | FromTable _ | FromSubquery _ -> true
                     | FromJsonTable(expression, _, _, _) -> not (referencesOutside expression)
+                    | FromLateral(PlainSelect select, _)
+                        when select.From.IsNone && select.Joins.IsEmpty && select.Ctes.IsEmpty
+                             && select.Windows.IsEmpty && select.IntoVariables.IsEmpty
+                             && select.IntoFile.IsNone && select.Locking.IsEmpty ->
+                        [ yield! select.Projections |> List.map _.Expression
+                          yield! Option.toList select.Where
+                          yield! select.GroupBy
+                          yield! Option.toList select.Having
+                          yield! select.OrderBy |> List.map fst
+                          yield! Option.toList select.Limit
+                          yield! Option.toList select.Offset ]
+                        |> List.forall (referencesOutside >> not)
                     | _ -> false
                 if not sourceAllowed then false
                 else
