@@ -2248,7 +2248,16 @@ let private arith
 
 let add = arith (Checked.(+)) (+) (+)
 let sub = arith (Checked.(-)) (-) (-)
-let mul = arith (Checked.( * )) ( * ) ( * )
+// MySQL keeps signed integer multiplication in BIGINT and raises error 1690
+// on overflow, even when both operands are literals. Raise our domain error
+// inside arith so its DECIMAL fallback does not swallow this overflow.
+let mul =
+    arith
+        (fun left right ->
+            try Checked.( * ) left right
+            with :? OverflowException -> raise SignedOutOfRange)
+        ( * )
+        ( * )
 
 let subSigned (a: Value) (b: Value) : Value =
     match classify a, classify b with

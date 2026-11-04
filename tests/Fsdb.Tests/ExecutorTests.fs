@@ -14539,6 +14539,29 @@ let tests =
                         | other -> failtestf "expected multiplied OR matches, got %A" other
                         Expect.isLessThan calls 100 (source + " multiplication OR must bound residual work")
 
+                testCase "BIGINT multiplication overflow remains visible in correlated scans"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE big_multiply(k BIGINT, KEY ix_k(k))" |> ignore
+                    runDefault store
+                        "INSERT INTO big_multiply VALUES(-9223372036854775808),(-5),(5),(9223372036854775807)"
+                    |> ignore
+                    runDefault store "CREATE TABLE big_bounds(x BIGINT)" |> ignore
+                    runDefault store "INSERT INTO big_bounds VALUES(5),(10)" |> ignore
+
+                    for sql in
+                        [ "SELECT 9223372036854775807*2"
+                          "SELECT COUNT(*) FROM big_multiply WHERE k*2=10"
+                          "SELECT o.x,(SELECT COUNT(*) FROM big_multiply i WHERE i.k*2=o.x) FROM big_bounds o ORDER BY o.x" ] do
+                        match runDefault store sql with
+                        | Err(1690, message) ->
+                            Expect.stringContains message "BIGINT value is out of range" sql
+                        | other -> failtestf "expected BIGINT multiplication overflow for %s, got %A" sql other
+
+                    match runDefault store "SELECT 2147483647*2" with
+                    | ResultSet(_, [ [ Some "4294967294" ] ]) -> ()
+                    | other -> failtestf "expected an in-range BIGINT product, got %A" other
+
                 testCase "correlated byte LIKE prefixes bound physical and materialized candidates"
                 <| fun _ ->
                     let mutable calls = 0

@@ -18,3 +18,22 @@ MySQL-matched counts.
 
 Factors of zero, non-integer factors, unsigned or BIGINT inner columns, and
 broader arithmetic forms retain their scan path.
+
+## BIGINT overflow boundary
+
+The excluded signed `BIGINT` case needs overflow-preserving evaluation before
+it can use an inverse index lookup. On MySQL 8.4.11, a table containing
+`BIGINT` keys `-9223372036854775808`, `-5`, `5`, and
+`9223372036854775807` raises error 1690 for both `WHERE k*2=10` and a
+correlated `COUNT(*)` with `WHERE i.k*2=o.x`. The overflowing row matters even
+though a key of `5` satisfies the comparison. `SELECT
+9223372036854775807*2` also raises 1690; `2147483647*2` returns
+`4294967294`.
+
+Fsdb previously promoted overflowing signed multiplication to DECIMAL and
+returned a count for the scanned predicates. It now raises 1690 for the
+audited literal, scan, and correlated cases. The `BIGINT` inverse probe remains
+disabled because narrowing to matching keys could skip an overflowing row and
+suppress the required error. Extending the probe requires a proof that all
+rows in its evaluation scope are safe to multiply, or equivalent overflow
+evaluation before candidate narrowing.

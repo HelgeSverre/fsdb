@@ -330,8 +330,11 @@ materialized correlated sources. The audited two-table inner join with a
 selective DECIMAL index and a smaller DOUBLE-bound table uses MySQL's exact
 index cut in either written join order, including the plan-dependent
 `DECIMAL(20,2)` comparisons near `2^53`; other join plans and shapes remain open.
-Other approximate numeric combinations, text, and functional-expression
-bounds retain their prior paths.
+Signed `BIGINT` multiplication retains the correlated scan path so overflow
+on nonmatching rows remains observable; [the native overflow probe](torture/findings/2026-11-04-correlated-signed-multiplication.md#bigint-overflow-boundary)
+now matches error 1690 in literal, scan, and correlated evaluation. Other
+approximate numeric combinations, text, and functional-expression bounds
+retain their prior paths.
 Correlated forms preserve MySQL NULL and multi-column error semantics.
 [Side-effecting correlated function calls](torture/findings/2026-10-17-correlated-function-stability.md)
 remain row-by-row: stored SQL functions and unannotated custom scalars do not
