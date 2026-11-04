@@ -1067,6 +1067,19 @@ let tests =
                   [ [ Some "1"; Some "31" ]; [ Some "3"; Some "41" ] ]
                   "the preserving second view updates without a first-view row"
 
+              for sql in
+                  [ "UPDATE grouped_va va LEFT JOIN (grouped_link l JOIN grouped_vb vb ON vb.link_id=l.id) ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1"
+                    "UPDATE grouped_va va RIGHT JOIN (grouped_link l LEFT JOIN grouped_vb vb ON vb.link_id=l.id) ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE l.id=1" ] do
+                  Expect.equal (run store sql) (Affected 2UL) "a grouped right operand keeps both views writable"
+              Expect.equal
+                  (rows store "SELECT id,n FROM grouped_a ORDER BY id")
+                  [ [ Some "1"; Some "13" ]; [ Some "2"; Some "21" ] ]
+                  "the grouped right operand updates the first view's physical target"
+              Expect.equal
+                  (rows store "SELECT id,n FROM grouped_b ORDER BY id")
+                  [ [ Some "1"; Some "33" ]; [ Some "3"; Some "41" ] ]
+                  "the grouped right operand updates the second view's physical target"
+
           testCase "an unchecked outer join enforces only the inner view check"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

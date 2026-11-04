@@ -1092,9 +1092,9 @@ multi-target shapes, and broader security-layer combinations remain open.
 [A parenthesized first outer-join operand](torture/findings/2026-10-18-two-joined-view-outer-writes.md#parenthesized-outer-join-source)
 now reaches two writable joined views with MySQL-matched affected rows on
 matched and one-sided rows.
-[A grouped right operand containing the second writable view](torture/findings/2026-10-18-two-joined-view-outer-writes.md#grouped-right-operand-with-a-writable-view)
-still returns 1146 in fsdb where MySQL updates both target rows; the view
-rewrite must preserve the group's outer-join association when expanding it.
+[Audited grouped right operands containing the second writable view](torture/findings/2026-10-18-two-joined-view-outer-writes.md#grouped-right-operand-with-a-writable-view)
+now preserve the outer-join association and update both physical targets;
+`USING` joins and broader nested trees remain open.
 [Two writable joined views](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
 now update both physical targets even when their read-side internal table
 aliases, writable physical target aliases, or independent derived read-source

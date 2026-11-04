@@ -139,8 +139,8 @@ A follow-up added three passing grouped-first-source forms to the maintained
 oracle, including an explicitly parenthesized whole join tree. MySQL 8.4.11
 and fsdb match affected counts and both base tables after each statement.
 
-A grouped **right** operand remains a distinct gap. On the same fixture,
-MySQL updates both base rows (affected count 2) for either form:
+A grouped **right** operand exposed a separate parser-to-write gap. On the
+same fixture, MySQL updates both base rows (affected count 2) for either form:
 
 ```sql
 UPDATE va LEFT JOIN (link l JOIN vb ON vb.link_id=l.id)
@@ -152,15 +152,22 @@ ON va.link_id=l.id
 SET va.n=va.n+1,vb.n=vb.n+1 WHERE l.id=1;
 ```
 
-Fsdb returns 1146, `Table 'probe.vb' doesn't exist`, before changing either
-base table. The first joined view expands, but the second writable view is
-inside a `FromJoinGroup` on the right. The joined-view rewrite recognizes
-top-level `FromTable` join operands; the mutation join resolver leaves the
-grouped `vb` as a view row source with a physical target named `vb`. The
-subsequent write attempts to use that name as a base table. A fix must expand
-the nested writable view while preserving the right group's outer-join
-association and assignment expressions. Flattening the group would change
-which rows survive when the right side has no match.
+Fsdb previously returned 1146, `Table 'probe.vb' doesn't exist`, before
+changing either base table. The first joined view expanded, but the second
+writable view stayed inside a right-side `FromJoinGroup`, beyond the existing
+joined-view rewrite. The UPDATE parser now reverses the first LEFT/RIGHT join
+and moves its grouped right operand to the first position. For example,
+`va LEFT JOIN (link JOIN vb)` becomes `(link JOIN vb) RIGHT JOIN va`; the
+inner group is then a left-deep source chain and both writable views reach
+the existing rewrite. This preserves the outer-join association. The rewrite
+requires ordinary table operands inside the group: `LATERAL` and `JSON_TABLE`
+sources can depend on the original left table, so moving those groups first
+would lose their scope. `USING` joins, later grouped operands, and broader
+nested trees remain to audit.
+
+The maintained native oracle matches MySQL 8.4.11 in all 38 two-view UPDATE
+cases, including these two, and its 24 contention rebases. A focused F#
+regression checks both affected counts and the final physical rows.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:
