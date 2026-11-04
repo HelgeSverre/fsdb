@@ -372,3 +372,19 @@ at the two closest positive offsets to about 1.2488642 metres at
 `y=0.5000000000001`; fsdb reports about 0.09504187 metres across those
 positive offsets. This is a floating-point/geographic strategy boundary,
 not evidence for applying a broad coordinate tolerance to topology.
+
+## Current-head replay (2026-11-04)
+
+The maintained oracle was replayed against current `main` with Release fsdb
+and native MySQL 8.4.11. It reports 13 line relation mismatches among 412
+cases, three point relation mismatches among 189 near-hole points, 34 point
+distance mismatches among those 189 points at the script's 0.01 m tolerance,
+and zero mismatches among four near-exterior point controls. The three
+near-hole relation cases are `(86, 1.00001)` and `(88, 1.00001)`, which
+MySQL calls outside and fsdb calls inside, and `(86, 2.99999)`, for which
+the engines make the opposite decision. The separate 49-point polar-corner
+grid still has three mismatches. The additional polar samples in the
+maintained oracle account for why the current 189-point total exceeds the
+older one-mismatch summary; this replay does not identify a new code
+regression. The line cases remain concentrated near hole edges, including
+the near-polar MySQL relation/intersection inconsistency described above.
