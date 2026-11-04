@@ -2044,44 +2044,54 @@ let tests =
           testCase "limited ordered writes reselect after a contended predicate or sort key changes"
           <| fun _ ->
               for indexed in [ false; true ] do
-                  for initialRows, ownerWrite, statement, expectedRows in
-                      [ "(1,0),(2,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
-                        "UPDATE tx_limited_rebase SET n=n+1 WHERE n>=0 ORDER BY id LIMIT 1",
-                        [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "1" ] ]
-                        "(1,0),(2,0)", "UPDATE tx_limited_rebase SET n=-1 WHERE id=1",
-                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY id LIMIT 1",
-                        [ [ Some "1"; Some "-1" ] ]
-                        "(1,0),(2,1)", "UPDATE tx_limited_rebase SET n=2 WHERE id=1",
-                        "UPDATE tx_limited_rebase SET n=n+10 WHERE n>=0 ORDER BY n,id LIMIT 1",
-                        [ [ Some "1"; Some "2" ]; [ Some "2"; Some "11" ] ]
-                        "(1,0),(2,1)", "UPDATE tx_limited_rebase SET n=2 WHERE id=1",
-                        "DELETE FROM tx_limited_rebase WHERE n>=0 ORDER BY n,id LIMIT 1",
-                        [ [ Some "1"; Some "2" ] ] ] do
-                      let store = Fsdb.Storage.create ()
-                      let setup = create 1 store
-                      let index = if indexed then ", KEY ix_n(n)" else ""
-                      handle setup ("CREATE TABLE tx_limited_rebase (id INT PRIMARY KEY, n INT" + index + ")") |> ignore
-                      handle setup ("INSERT INTO tx_limited_rebase VALUES " + initialRows) |> ignore
-                      let owner, _ = handle (create 2 store) "BEGIN"
-                      let owner, firstWrite = handle owner ownerWrite
-                      Expect.equal firstWrite (Affected 1UL) "the owner changes the first candidate"
-                      let waiter, _ = handle (create 3 store) "BEGIN"
-                      use started = new Threading.ManualResetEventSlim(false)
-                      let waiting =
-                          Threading.Tasks.Task.Run(fun () ->
-                              started.Set()
-                              handle waiter statement)
-                      Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
-                      let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
-                      Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
-                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes"
-                      let waiter, result = waiting.Result
-                      Expect.isTrue blocked "limited writer waits for the first candidate"
-                      Expect.equal result (Affected 1UL) "limited writer changes one rebased target"
-                      Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
-                      match handle setup "SELECT id,n FROM tx_limited_rebase ORDER BY id" |> snd with
-                      | ResultSet(_, rows) -> Expect.equal rows expectedRows (statement + $" (indexed={indexed})")
-                      | actual -> failtestf "expected a result set after %s, got %A" statement actual
+                  for limit in [ 1; 4; 8 ] do
+                      for scenario in [ "predicate"; "sort_key" ] do
+                          for verb in [ "UPDATE"; "DELETE" ] do
+                              let store = Fsdb.Storage.create ()
+                              let setup = create 1 store
+                              let index = if indexed then ", KEY ix_n(n)" else ""
+                              handle setup ("CREATE TABLE tx_limited_rebase (id INT PRIMARY KEY, n INT" + index + ")") |> ignore
+                              let initialRows =
+                                  [ 1 .. limit + 1 ]
+                                  |> List.map (fun id -> sprintf "(%d,%d)" id (if scenario = "predicate" then 0 else id - 1))
+                                  |> String.concat ","
+                              handle setup ("INSERT INTO tx_limited_rebase VALUES " + initialRows) |> ignore
+                              let owner, _ = handle (create 2 store) "BEGIN"
+                              let ownerValue = if scenario = "predicate" then -1 else limit + 1
+                              let ownerWrite = $"UPDATE tx_limited_rebase SET n={ownerValue} WHERE id=1"
+                              let owner, firstWrite = handle owner ownerWrite
+                              Expect.equal firstWrite (Affected 1UL) "the owner changes the first candidate"
+                              let waiter, _ = handle (create 3 store) "BEGIN"
+                              let ordering = if scenario = "predicate" then "id" else "n,id"
+                              let action =
+                                  if verb = "DELETE" then "DELETE FROM tx_limited_rebase"
+                                  elif scenario = "predicate" then "UPDATE tx_limited_rebase SET n=n+1"
+                                  else "UPDATE tx_limited_rebase SET n=n+10"
+                              let statement = $"{action} WHERE n>=0 ORDER BY {ordering} LIMIT {limit}"
+                              use started = new Threading.ManualResetEventSlim(false)
+                              let waiting =
+                                  Threading.Tasks.Task.Run(fun () ->
+                                      started.Set()
+                                      handle waiter statement)
+                              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "limited writer starts"
+                              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "limited writer resumes"
+                              let waiter, result = waiting.Result
+                              Expect.isTrue blocked "limited writer waits for the first candidate"
+                              Expect.equal result (Affected(uint64 limit)) "limited writer fills the rebased limit"
+                              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "limited writer commits"
+                              let expectedRows =
+                                  [ [ Some "1"; Some(string ownerValue) ] ]
+                                  @ (if verb = "DELETE" then []
+                                     else
+                                         [ 2 .. limit + 1 ]
+                                         |> List.map (fun id ->
+                                             let value = if scenario = "predicate" then 1 else id + 9
+                                             [ Some(string id); Some(string value) ]))
+                              match handle setup "SELECT id,n FROM tx_limited_rebase ORDER BY id" |> snd with
+                              | ResultSet(_, rows) -> Expect.equal rows expectedRows (statement + $" (indexed={indexed})")
+                              | actual -> failtestf "expected a result set after %s, got %A" statement actual
 
           testCase "limited ordered writes reselect two rows after contention"
           <| fun _ ->
@@ -2177,7 +2187,7 @@ let tests =
 
           testCase "limited ordered writes reselect after a contended first row is deleted"
           <| fun _ ->
-              for limit in [ 1; 2; 3 ] do
+              for limit in [ 1; 2; 3; 4; 8 ] do
                   for indexed in [ false; true ] do
                       for verb in [ "UPDATE"; "DELETE" ] do
                           let store = Fsdb.Storage.create ()
