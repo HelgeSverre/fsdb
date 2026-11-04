@@ -39,6 +39,14 @@ point-to-segment strategy. The same replay retained 13/412 line relation
 mismatches, 3/189 near-hole point relation mismatches, and 44/100 seeded
 point-to-line distance mismatches.
 
+A local-distance fallback was trialed for the cross-track iteration when
+Andoyer rounds a nonidentical point pair to zero. It used the ellipsoid's
+meridian and parallel radii at the pair's mean latitude. The near-hole
+distance count worsened from 22 to 25 mismatches, while the seeded
+point-to-line count remained 44. The trial was reverted. Zero is also an
+observable MySQL cross-track outcome in this corpus, so replacing it with a
+locally more accurate metric is not a general compatibility fix.
+
 The focused spatial suite passed all 46 tests, and the full suite passed all
 3,875 tests after this change. The added point-to-line regression pins the
 resolved MySQL case.
