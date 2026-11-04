@@ -38,3 +38,27 @@ uv run --with pymysql python torture/scripts/general-ci-range-weight-oracle.py \
 uv run --with pymysql python torture/scripts/general-ci-range-weight-oracle.py \
   --compare-fsdb --pair-next --collation utf8mb4_unicode_ci 3B00 3C00
 ```
+
+## Implicit ideograph encoder follow-up
+
+The [MySQL 8.4.11 UCA implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/strings/ctype-uca.cc)
+computes two primary weights for ideographs: a lead determined by character
+group and the high code-point bits, followed by the low fifteen bits with
+bit 15 set. Native probes found the legacy 4.0 and 5.2 boundaries at
+U+4DB5/U+4DB6 and U+9FA5/U+9FA6. Both Unicode collations use the unassigned
+lead after those boundaries; `utf8mb4_general_ci` uses the literal two-byte
+code point throughout the audited BMP ranges.
+
+Fsdb now encodes strings composed entirely of U+3400–U+4DBF Extension A and
+U+4E00–U+9FFF unified ideographs with those rules. The differential oracle
+compared every adjacent pair inside both ranges under all three collations:
+82,746 pair results, zero exact-byte mismatches. The focused regression pins
+the assigned/unassigned boundaries, the U+8000 lead transition, and a pair
+mixing the two ideograph ranges. The oracle's `--pair-with` mode independently
+confirmed `U+3B00 U+4E00` against MySQL under all three collations with zero
+mismatches. This changes `WEIGHT_STRING` output; ngram
+membership and relevance continue to use the existing collation keys.
+
+Other characters in a string still use the ICU-based fallback, including
+mixed Latin/CJK text and `AS CHAR` padding. Supplementary ideographs and
+other legacy-collation weight families remain open.

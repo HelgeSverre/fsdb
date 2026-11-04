@@ -645,6 +645,24 @@ let tests =
                         Expect.equal paddedCollationWeight "000061000020000020" "CHAR pads text before binary collation weights"
                     | other -> failtestf "expected one WEIGHT_STRING row, got %A" other
 
+                testCase "legacy ideograph WEIGHT_STRING follows MySQL implicit weights"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ "\u3B00\u3B01", "utf8mb4_general_ci", "3B003B01"
+                          "\u3B00\u3B01", "utf8mb4_unicode_ci", "FB80BB00FB80BB01"
+                          "\u4DB5\u4DB6", "utf8mb4_unicode_520_ci", "FB80CDB5FBC0CDB6"
+                          "\u7FFF\u8000", "utf8mb4_unicode_ci", "FB40FFFFFB418000"
+                          "\u9FA5\u9FA6", "utf8mb4_unicode_ci", "FB419FA5FBC19FA6"
+                          "\u3B00\u4E00", "utf8mb4_general_ci", "3B004E00"
+                          "\u3B00\u4E00", "utf8mb4_unicode_520_ci", "FB80BB00FB40CE00" ]
+                    for sample, collation, expected in cases do
+                        let sql = sprintf "SELECT HEX(WEIGHT_STRING('%s' COLLATE %s))" sample collation
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some actual ] ]) ->
+                            Expect.equal actual expected (sprintf "legacy weight for %s under %s" sample collation)
+                        | other -> failtestf "expected legacy ideograph weight for %s, got %A" sample other
+
                 testCase "WEIGHT_STRING keeps BIT column bytes"
                 <| fun _ ->
                     let store = newStore ()

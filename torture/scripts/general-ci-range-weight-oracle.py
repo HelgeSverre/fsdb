@@ -36,16 +36,24 @@ def main():
         action="store_true",
         help="compare exact WEIGHT_STRING bytes with Release fsdb",
     )
-    parser.add_argument(
+    pairing = parser.add_mutually_exclusive_group()
+    pairing.add_argument(
         "--pair-next",
         action="store_true",
         help="probe each character followed by the next code point",
+    )
+    pairing.add_argument(
+        "--pair-with",
+        type=lambda value: int(value, 16),
+        help="probe each character followed by this hexadecimal code point",
     )
     args = parser.parse_args()
     if args.start < 0 or args.stop > 0x110000 or args.start >= args.stop:
         parser.error("expected a nonempty Unicode code-point range")
     if args.pair_next and args.stop > 0x10FFFF:
         parser.error("--pair-next requires a successor for every code point")
+    if args.pair_with is not None and not 0 <= args.pair_with <= 0x10FFFF:
+        parser.error("--pair-with requires a Unicode code point")
     with tempfile.TemporaryDirectory(prefix="fsdb-general-weight-") as directory:
         root = pathlib.Path(directory)
         data = root / "data"
@@ -111,6 +119,8 @@ def main():
                         sample = chr(codepoint)
                         if args.pair_next:
                             sample += chr(codepoint + 1)
+                        elif args.pair_with is not None:
+                            sample += chr(args.pair_with)
                         encoded = sample.encode("utf-8").hex()
                         query = (
                             "SELECT HEX(WEIGHT_STRING(_utf8mb4 0x"
@@ -135,7 +145,7 @@ def main():
                             for point, weight in weights.items()
                             if weight != f"{point:04X}"
                         ]
-                        if not args.pair_next
+                        if not args.pair_next and args.pair_with is None
                         else []
                     )
                     groups = {}
@@ -147,11 +157,11 @@ def main():
                         if len(points) > 1
                     ]
                     description = f"MySQL {version}: {len(weights)} weights"
-                    if not args.pair_next:
+                    if not args.pair_next and args.pair_with is None:
                         description += f", {len(nonliteral)} nonliteral"
                     description += f", {len(duplicate_groups)} duplicate groups"
                     print(description)
-                    if not args.pair_next:
+                    if not args.pair_next and args.pair_with is None:
                         print("nonliteral", nonliteral)
                     print("duplicate groups", duplicate_groups)
                     if fsdb_connection is not None:

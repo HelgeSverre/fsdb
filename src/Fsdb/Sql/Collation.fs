@@ -803,6 +803,40 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         else
             Charset.tryEncodeStrict charset s |> Option.defaultWith (fun () -> binaryBytesWithoutPadding s)
 
+    let legacyIdeographWeight (s: string) =
+        let general = name = "utf8mb4_general_ci"
+        let isLegacy =
+            general || name = "utf8mb4_unicode_ci"
+            || name = "utf8mb4_unicode_520_ci"
+        if not isLegacy || s.Length = 0 then None
+        else
+            let bytes = ResizeArray<byte>()
+            let mutable allIdeographs = true
+            for rune in s.EnumerateRunes() do
+                let codepoint = rune.Value
+                // UCA 4.0/5.2 assigns ideographs through these boundaries;
+                // later scalars in the same BMP blocks use the unassigned lead.
+                let lead =
+                    if codepoint >= 0x3400 && codepoint <= 0x4DBF then
+                        Some(if codepoint <= 0x4DB5 then 0xFB80 else 0xFBC0)
+                    elif codepoint >= 0x4E00 && codepoint <= 0x9FFF then
+                        Some(if codepoint <= 0x9FA5 then 0xFB40 else 0xFBC0)
+                    else
+                        None
+                match lead with
+                | None -> allIdeographs <- false
+                | Some _ when general ->
+                    bytes.Add(byte (codepoint >>> 8))
+                    bytes.Add(byte codepoint)
+                | Some lead ->
+                    let first = lead + (codepoint >>> 15)
+                    let second = 0x8000 ||| (codepoint &&& 0x7FFF)
+                    bytes.Add(byte (first >>> 8))
+                    bytes.Add(byte first)
+                    bytes.Add(byte (second >>> 8))
+                    bytes.Add(byte second)
+            if allIdeographs then Some(bytes.ToArray()) else None
+
     let compareFull (a: string) (b: string) : int =
         if String.Equals(a, b, StringComparison.Ordinal) then
             0
@@ -849,7 +883,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             if spec.ByteOrder then
                 binaryWeight s
             else
-                ci.GetSortKey(foldText s, spec.Fold).KeyData
+                legacyIdeographWeight s
+                |> Option.defaultWith (fun () -> ci.GetSortKey(foldText s, spec.Fold).KeyData)
       HashOf =
         fun s ->
             if spec.ByteOrder then
