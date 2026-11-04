@@ -5152,7 +5152,7 @@ let private collationKeyOf (ctx: EvalContext) (expr: Expr) (value: Value) : Valu
     | VBinaryLiteral bytes -> VBytes bytes
     | _ -> value
 
-/// Converts a displayed ENUM label into its 1-based declaration ordinal for
+/// Converts displayed ENUM and SET labels into their numeric storage order for
 /// one ORDER BY key, and tags string-typed columns with the collation their
 /// sort must use. The original row/projection value remains a string; only
 /// the private sort key changes. Invalid labels cannot normally reach
@@ -5170,6 +5170,8 @@ let private orderValueFor
             |> Option.map (fun index -> VInt(int64 (index + 1)))
             |> Option.defaultValue (VInt 0L)
         ordinal, None
+    | Some { Type = TSet members }, VString labels ->
+        VUInt(Storage.setBits members labels), None
     | _ ->
         match value with
         | VString _ -> value, Some collation
@@ -31914,6 +31916,10 @@ let transactionWriteTargets
                         | _ -> None
                     | VEnumOrdinal ordinal when (match column.Type with TEnum _ -> true | _ -> false) ->
                         Some(OrderedNumber(decimal ordinal))
+                    | VString labels when (match column.Type with TSet _ -> true | _ -> false) ->
+                        match column.Type with
+                        | TSet members -> Some(OrderedNumber(decimal (Storage.setBits members labels)))
+                        | _ -> None
                     | VString text when (match column.Type with TChar _ | TVarchar _ -> true | _ -> false) ->
                         Some(OrderedText((column.Collation |> Collation.findOrDefault).KeyOf text))
                     | VEncodedString(charset, bytes)

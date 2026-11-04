@@ -2859,7 +2859,7 @@ let private insertOrderKeyGroups (table: Table) : IndexKeyGroup list =
         match table.Columns.[index].Type with
         | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBool | TBit _ | TYear
         | TDecimal _ | TFloat _ | TDouble _ | TDate | TTime _ | TDateTime _ | TTimestamp _
-        | TChar _ | TVarchar _ | TEnum _ -> true
+        | TChar _ | TVarchar _ | TEnum _ | TSet _ -> true
         | _ -> false
     orderedKeyGroups table
     |> visibleGroups
@@ -2935,6 +2935,13 @@ let internal enumOrdinal members label =
     |> List.tryFindIndex (fun memberName -> String.Equals(memberName, label, StringComparison.OrdinalIgnoreCase))
     |> Option.map (fun index -> uint64 (index + 1))
     |> Option.defaultValue 0UL
+
+let internal setBits members (labels: string) =
+    let selected = labels.Split(',') |> Set.ofArray
+    members
+    |> List.indexed
+    |> List.fold (fun bits (index, memberName) ->
+        if selected.Contains memberName then bits ||| (1UL <<< index) else bits) 0UL
 
 /// Stable equality key for values already coerced into a table column's
 /// declared type. Strings use the same case-insensitive, PAD SPACE semantics
@@ -3216,7 +3223,7 @@ let tryInsertLockTargets
                                 not (group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
                                 || group.Indices |> List.exists (fun index ->
                                     match table.Columns.[index].Type with
-                                    | TEnum _ -> true
+                                    | TEnum _ | TSet _ -> true
                                     | _ -> false))
                             |> List.choose (fun group ->
                                 group.Indices
@@ -3232,6 +3239,8 @@ let tryInsertLockTargets
                                                 match table.Columns.[index].Type, value with
                                                 | TEnum members, VString label ->
                                                     VEnumOrdinal(enumOrdinal members label)
+                                                | TSet members, VString labels ->
+                                                    VUInt(setBits members labels)
                                                 | _ -> value)
                                         let encoded = encodeEqualityValues table.Columns group.Indices orderedValues
                                         if group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase) then
@@ -3702,11 +3711,7 @@ let private foreignKeyStorageValue (column: ColumnDef) value =
         VUInt(enumOrdinal members label)
     | TEnum _, VEnumOrdinal ordinal -> VUInt ordinal
     | TSet members, VString labels ->
-        let selected = labels.Split(',') |> Set.ofArray
-        members
-        |> List.indexed
-        |> List.fold (fun bits (index, memberName) -> if selected.Contains memberName then bits ||| (1UL <<< index) else bits) 0UL
-        |> VUInt
+        VUInt(setBits members labels)
     | _ -> value
 
 // InnoDB foreign keys compare packed DECIMAL key bytes, even across declarations
@@ -4399,6 +4404,7 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
             | TTimestamp _ -> Some 'P'
             | TChar _ | TVarchar _ -> Some 'S'
             | TEnum _ -> Some 'R'
+            | TSet _ -> Some 'I'
             | _ -> None
         match expectedTag with
         | _ when value = "N" -> Some OrderedNull

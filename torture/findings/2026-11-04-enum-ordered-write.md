@@ -5,7 +5,7 @@ MySQL orders an `ENUM` by declaration ordinal. With
 insert, `UPDATE` or `DELETE ... ORDER BY rank_value ASC LIMIT 1` waits for
 the insert and then changes `'z'`. With visible `'z'` and `'a'`, a pending
 `'m'` insert has the same effect under descending order. The [disposable
-MySQL 8.4.11 oracle](../scripts/keyless-enum-ordered-write-oracle.py) pins
+MySQL 8.4.11 oracle](../scripts/enum-set-ordered-write-oracle.py) pins
 wait behavior, one affected row, and final rows for all eight combinations
 of primary or secondary key, write verb, and direction.
 
@@ -20,9 +20,10 @@ The eight-case transaction regression covers both key layouts.
 For an ENUM primary key, the ordinary unique-key claim still encodes the
 label for equality. A separate primary observation claim encodes its ordinal
 so the ordered writer can see the pending row. This covers single-column ENUM
-primary and secondary keys with `LIMIT 1`. SET, composite indexes, range
+primary and secondary keys with `LIMIT 1`. SET is covered in the
+[companion finding](2026-11-04-set-ordered-write.md). Composite indexes, range
 predicates, and broader isolation histories remain to audit.
 
 ```sh
-uv run --with pymysql python torture/scripts/keyless-enum-ordered-write-oracle.py
+uv run --with pymysql python torture/scripts/enum-set-ordered-write-oracle.py
 ```

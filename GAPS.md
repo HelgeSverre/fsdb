@@ -733,8 +733,10 @@ now follow the same audited wait and indexed-range exclusion rules.
 [YEAR secondary keys](torture/findings/2026-11-04-year-ordered-write.md)
 also wait and reselect for audited pending ascending and descending `LIMIT 1`
 inserts on keyless tables.
-[ENUM secondary keys](torture/findings/2026-11-04-enum-ordered-write.md)
-now use declaration ordinals for the same audited wait and reselection shape.
+[ENUM primary and secondary keys](torture/findings/2026-11-04-enum-ordered-write.md)
+now use declaration ordinals for audited waits and reselection, while
+[SET primary and secondary keys](torture/findings/2026-11-04-set-ordered-write.md)
+use member bitmasks, including multi-member values.
 General full scans do not claim gaps or later inserted rows. A [focused unindexed-write load
 probe](benchmarks/results/92b019ff-full-scan-write-load.md) records the current
 worker-scaling slope. Unique-key claims, incremental index validation, and merged-result
