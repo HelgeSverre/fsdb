@@ -32,3 +32,11 @@ WarmupCount=3
 | CorrelatedScalarNoSource    | mysql  |  80.65 μs |  42.48 μs |  2.328 μs |     504 B |
 | CorrelatedPhysicalExists    | mysql  | 205.12 μs |  75.90 μs |  4.160 μs |     504 B |
 | CorrelatedPhysicalEquality  | mysql  | 214.88 μs |  28.07 μs |  1.539 μs |     728 B |
+
+The indexed `EXISTS` mean is above the earlier 600 μs ShortRun, but this is
+not evidence of a code regression on its own. A same-head repeat of only
+`CorrelatedEqualityOuterOnly` and `CorrelatedPhysicalExists` measured the
+fsdb control at 423 μs and `EXISTS` at 1,691 μs; the three `EXISTS` measured
+iterations ranged from roughly 991 to 2,515 μs. The repeat's MySQL `EXISTS`
+mean was 189 μs. With this level of run-to-run variation, a planner change
+needs a more stable profile and a matched before/after comparison.
