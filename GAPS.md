@@ -2008,8 +2008,10 @@ extends the indexed path to unused nonaggregate inner projections such as
 validation and more complex projection/source shapes remain open.
 Successful validation of [inner-only `EXISTS` projections](benchmarks/results/2026-11-04-correlated-exists-projection-cache-summary.md)
 is now statement-scoped; the expression control measured 0.60 ms in a later
-ShortRun. Outer-dependent projections retain per-row validation, and the
-broader query overhead remains open.
+ShortRun. More complex projection and source shapes remain open.
+Successful validation of [outer-bound expressions in a stable top-level scope](benchmarks/results/2026-11-04-correlated-exists-outer-expression-cache.md)
+is now cached by scope identity within a statement. The matched 100-row
+ShortRun fell from 1.13 to 0.64 ms; nested scopes retain per-row validation.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

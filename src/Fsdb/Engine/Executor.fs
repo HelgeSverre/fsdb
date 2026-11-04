@@ -786,6 +786,7 @@ type private StatementMemo =
       EqualityIndexMatches: Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
       InnerExistsProjections: Dictionary<SelectStmt, bool>
+      ScopedExistsProjections: Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
 type private SharedViewCteScope =
@@ -828,6 +829,7 @@ let private freshStatementMemo () =
       EqualityIndexMatches = Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>(HashIdentity.Reference)
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
       InnerExistsProjections = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
+      ScopedExistsProjections = Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
@@ -9197,16 +9199,49 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                     |> Option.exists (fun context -> validateExpressionInContext context expression |> Result.isOk)
                 | _ -> false
         let projectionsAreSafe =
-            let cache = (currentStatementMemo ()).InnerExistsProjections
-            match cache.TryGetValue select with
-            | true, safe -> safe
-            | false, _ ->
-                let safe = select.Projections |> List.forall projectionIsSafe
-                // Only inner-bound names have the same validation result for
-                // every outer row. Keep outer references on the ordinary path.
-                if safe && (select.Projections |> List.forall (fun projection -> innerOnly projection.Expression)) then
-                    cache.[select] <- true
-                safe
+            let memo = currentStatementMemo ()
+            if memo.InnerExistsProjections.ContainsKey select then true
+            else
+                let scopeColumns = outer.ColumnIndex :> obj
+                let scopeQualifiers = outer.Qualifiers :> obj
+                let scopedCache =
+                    match memo.ScopedExistsProjections.TryGetValue select with
+                    | true, scopes -> Some scopes
+                    | _ -> None
+                // A top-level outer scope reuses its binding maps across rows.
+                // Cache only successful validation, so errors keep their normal path.
+                let scopedSuccess =
+                    if outer.Outer.IsSome then false
+                    else
+                        scopedCache
+                        |> Option.bind (fun scopes ->
+                            match scopes.TryGetValue scopeColumns with
+                            | true, qualifiers -> Some(qualifiers.Contains scopeQualifiers)
+                            | _ -> None)
+                        |> Option.defaultValue false
+                if scopedSuccess then true
+                else
+                    let safe = select.Projections |> List.forall projectionIsSafe
+                    if safe then
+                        if select.Projections |> List.forall (fun projection -> innerOnly projection.Expression) then
+                            memo.InnerExistsProjections.[select] <- true
+                        elif outer.Outer.IsNone then
+                            let scopes =
+                                match scopedCache with
+                                | Some scopes -> scopes
+                                | None ->
+                                    let scopes = Dictionary<obj, HashSet<obj>>(HashIdentity.Reference)
+                                    memo.ScopedExistsProjections.[select] <- scopes
+                                    scopes
+                            let qualifiers =
+                                match scopes.TryGetValue scopeColumns with
+                                | true, qualifiers -> qualifiers
+                                | _ ->
+                                    let qualifiers = HashSet<obj>(HashIdentity.Reference)
+                                    scopes.[scopeColumns] <- qualifiers
+                                    qualifiers
+                            qualifiers.Add scopeQualifiers |> ignore
+                    safe
         if not projectionsAreSafe then None
         else
             tryCorrelatedEqualityCount outer source select.Where
