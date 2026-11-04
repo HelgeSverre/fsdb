@@ -79,94 +79,136 @@ def main():
                         ),
                     ),
                 ):
-                    for key_definition in (
-                        "PRIMARY KEY(rank_value)",
-                        "KEY ix_rank(rank_value)",
-                    ):
-                        for verb in ("UPDATE", "DELETE"):
-                            for direction, pending, visible, ordered in cases:
-                                waiter = connect(socket)
-                                try:
-                                    with owner.cursor() as cursor:
-                                        cursor.execute("DROP TABLE IF EXISTS target")
-                                        cursor.execute(
-                                            f"CREATE TABLE target(rank_value {column_type}('z','a','m'),n INT,{key_definition})"
-                                        )
-                                        values = ",".join(
-                                            f"('{label}',0)" for label in visible
-                                        )
-                                        cursor.execute(
-                                            "INSERT INTO target VALUES" + values
-                                        )
-                                        cursor.execute("BEGIN")
-                                        cursor.execute(
-                                            f"INSERT INTO target VALUES('{pending}',0)"
-                                        )
-                                    with waiter.cursor() as cursor:
-                                        cursor.execute("USE probe")
-                                        cursor.execute("BEGIN")
-                                    action = (
-                                        "UPDATE target SET n=1"
-                                        if verb == "UPDATE"
-                                        else "DELETE FROM target"
-                                    )
-                                    statement = f"{action} ORDER BY rank_value {direction} LIMIT 1"
-                                    started = threading.Event()
-                                    outcome = {}
+                    for composite in (False, True):
+                        key_columns = "rank_value,id" if composite else "rank_value"
+                        id_column = "id INT," if composite else ""
 
-                                    def write(
-                                        waiter=waiter,
-                                        started=started,
-                                        statement=statement,
-                                        outcome=outcome,
-                                    ):
-                                        try:
-                                            with waiter.cursor() as cursor:
-                                                started.set()
-                                                cursor.execute(statement)
-                                                outcome["affected"] = cursor.rowcount
-                                                cursor.execute("COMMIT")
-                                        except pymysql.MySQLError as error:
-                                            outcome["error"] = error
+                        def row_value(label, row_id, composite=composite):
+                            if composite:
+                                return f"('{label}',{row_id},0)"
+                            return f"('{label}',0)"
 
-                                    thread = threading.Thread(target=write, daemon=True)
-                                    thread.start()
-                                    assert started.wait(2), statement
-                                    thread.join(0.2)
-                                    assert thread.is_alive(), (
-                                        statement,
-                                        "did not wait",
+                        for key_definition in (
+                            f"PRIMARY KEY({key_columns})",
+                            f"KEY ix_rank({key_columns})",
+                        ):
+                            for verb in ("UPDATE", "DELETE"):
+                                probes = cases
+                                if composite:
+                                    probes += (
+                                        ("ASC", "a", ("a", "a"), ("a", "a", "a")),
                                     )
-                                    with owner.cursor() as cursor:
-                                        cursor.execute("COMMIT")
-                                    thread.join(5)
-                                    assert not thread.is_alive(), statement
-                                    assert outcome == {"affected": 1}, (
-                                        statement,
-                                        outcome,
-                                    )
-                                    with owner.cursor() as cursor:
-                                        cursor.execute(
-                                            "SELECT rank_value,n FROM target ORDER BY rank_value"
+                                for direction, pending, visible, ordered in probes:
+                                    tie = composite and visible == ("a", "a")
+                                    waiter = connect(socket)
+                                    try:
+                                        with owner.cursor() as cursor:
+                                            cursor.execute(
+                                                "DROP TABLE IF EXISTS target"
+                                            )
+                                            cursor.execute(
+                                                f"CREATE TABLE target(rank_value {column_type}('z','a','m'),{id_column}n INT,{key_definition})"
+                                            )
+                                            values = ",".join(
+                                                row_value(label, index + 1)
+                                                for index, label in enumerate(visible)
+                                            )
+                                            cursor.execute(
+                                                "INSERT INTO target VALUES" + values
+                                            )
+                                            cursor.execute("BEGIN")
+                                            cursor.execute(
+                                                "INSERT INTO target VALUES"
+                                                + row_value(pending, 0 if tie else 9)
+                                            )
+                                        with waiter.cursor() as cursor:
+                                            cursor.execute("USE probe")
+                                            cursor.execute("BEGIN")
+                                        action = (
+                                            "UPDATE target SET n=1"
+                                            if verb == "UPDATE"
+                                            else "DELETE FROM target"
                                         )
-                                        rows = cursor.fetchall()
-                                    expected = tuple(
-                                        (label, 1 if label == pending else 0)
-                                        for label in ordered
-                                        if verb == "UPDATE" or label != pending
-                                    )
-                                    assert rows == expected, (statement, rows, expected)
-                                    print(
-                                        column_type,
-                                        key_definition,
-                                        verb,
-                                        direction,
-                                        pending,
-                                        "waited, affected 1",
-                                        rows,
-                                    )
-                                finally:
-                                    waiter.close()
+                                        order_by = f"rank_value {direction}"
+                                        if composite:
+                                            order_by += f",id {direction}"
+                                        statement = (
+                                            f"{action} ORDER BY {order_by} LIMIT 1"
+                                        )
+                                        started = threading.Event()
+                                        outcome = {}
+
+                                        def write(
+                                            waiter=waiter,
+                                            started=started,
+                                            statement=statement,
+                                            outcome=outcome,
+                                        ):
+                                            try:
+                                                with waiter.cursor() as cursor:
+                                                    started.set()
+                                                    cursor.execute(statement)
+                                                    outcome["affected"] = (
+                                                        cursor.rowcount
+                                                    )
+                                                    cursor.execute("COMMIT")
+                                            except pymysql.MySQLError as error:
+                                                outcome["error"] = error
+
+                                        thread = threading.Thread(
+                                            target=write, daemon=True
+                                        )
+                                        thread.start()
+                                        assert started.wait(2), statement
+                                        thread.join(0.2)
+                                        assert thread.is_alive(), (
+                                            statement,
+                                            "did not wait",
+                                        )
+                                        with owner.cursor() as cursor:
+                                            cursor.execute("COMMIT")
+                                        thread.join(5)
+                                        assert not thread.is_alive(), statement
+                                        assert outcome == {"affected": 1}, (
+                                            statement,
+                                            outcome,
+                                        )
+                                        with owner.cursor() as cursor:
+                                            cursor.execute(
+                                                "SELECT rank_value,id,n FROM target ORDER BY rank_value,id"
+                                                if tie
+                                                else "SELECT rank_value,n FROM target ORDER BY rank_value"
+                                            )
+                                            rows = cursor.fetchall()
+                                        if tie:
+                                            expected = (
+                                                (("a", 0, 1), ("a", 1, 0), ("a", 2, 0))
+                                                if verb == "UPDATE"
+                                                else (("a", 1, 0), ("a", 2, 0))
+                                            )
+                                        else:
+                                            expected = tuple(
+                                                (label, 1 if label == pending else 0)
+                                                for label in ordered
+                                                if verb == "UPDATE" or label != pending
+                                            )
+                                        assert rows == expected, (
+                                            statement,
+                                            rows,
+                                            expected,
+                                        )
+                                        print(
+                                            column_type,
+                                            key_definition,
+                                            "composite" if composite else "single",
+                                            verb,
+                                            direction,
+                                            pending,
+                                            "waited, affected 1",
+                                            rows,
+                                        )
+                                    finally:
+                                        waiter.close()
                 owner.close()
             finally:
                 subprocess.run(

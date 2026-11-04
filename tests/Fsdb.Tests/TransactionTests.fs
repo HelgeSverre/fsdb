@@ -2842,87 +2842,112 @@ let tests =
                       | ResultSet(_, rows) -> Expect.equal rows expected statement
                       | other -> failtestf "expected YEAR-ordered rows, got %A" other
 
-          testCase "limited ENUM ordered write waits for pending indexed or primary-key insert"
+          testCase "limited ENUM and SET ordered writes observe pending single and composite keys"
           <| fun _ ->
-              for keyDefinition in [ "KEY ix_rank(rank_value)"; "PRIMARY KEY(rank_value)" ] do
-                  for verb in [ "UPDATE"; "DELETE" ] do
-                      for direction, pending, visible in
-                          [ "ASC", "z", [ "a"; "m" ]; "DESC", "m", [ "z"; "a" ] ] do
-                          let store = Fsdb.Storage.create ()
-                          let setup = create 1 store
-                          handle setup (sprintf "CREATE TABLE tx_enum_order(rank_value ENUM('z','a','m'),n INT,%s)" keyDefinition) |> ignore
-                          let visibleRows = visible |> List.map (fun label -> sprintf "('%s',0)" label) |> String.concat ","
-                          handle setup ("INSERT INTO tx_enum_order VALUES" + visibleRows) |> ignore
-                          let owner, _ = handle (create 2 store) "BEGIN"
-                          let owner, inserted = handle owner (sprintf "INSERT INTO tx_enum_order VALUES('%s',0)" pending)
-                          Expect.equal inserted (Affected 1UL) "owner inserts pending enum"
-                          let waiter, _ = handle (create 3 store) "BEGIN"
-                          use started = new Threading.ManualResetEventSlim(false)
-                          let statement =
-                              (if verb = "UPDATE" then "UPDATE tx_enum_order SET n=1" else "DELETE FROM tx_enum_order")
-                              + sprintf " ORDER BY rank_value %s LIMIT 1" direction
-                          let waiting =
-                              Threading.Tasks.Task.Run(fun () ->
-                                  started.Set()
-                                  handle waiter statement)
-                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "ENUM writer starts"
-                          let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
-                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits enum"
-                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "ENUM writer resumes"
-                          let waiter, result = waiting.Result
-                          Expect.isTrue blocked (statement + " waits for pending ordinal")
-                          Expect.equal result (Affected 1UL) "one ENUM-ordered row changes"
-                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
-                          let expected =
-                              [ "z"; "a"; "m" ]
-                              |> List.filter (fun label -> verb = "UPDATE" || label <> pending)
-                              |> List.map (fun label ->
-                                  [ Some label; Some(if verb = "UPDATE" && label = pending then "1" else "0") ])
-                          match handle setup "SELECT rank_value,n FROM tx_enum_order ORDER BY rank_value" |> snd with
-                          | ResultSet(_, rows) -> Expect.equal rows expected statement
-                          | other -> failtestf "expected ENUM-ordered rows, got %A" other
+              let memberCases =
+                  [ "ENUM", [ "ASC", "z", [ "a"; "m" ], [ "z"; "a"; "m" ]
+                              "DESC", "m", [ "z"; "a" ], [ "z"; "a"; "m" ] ]
+                    "SET", [ "ASC", "z", [ "a"; "m" ], [ "z"; "a"; "m" ]
+                             "DESC", "m", [ "z"; "a" ], [ "z"; "a"; "m" ]
+                             "DESC", "z,a", [ "z"; "a" ], [ "z"; "a"; "z,a" ] ] ]
+              for columnType, cases in memberCases do
+                  for keyKind in [ "KEY ix_rank"; "PRIMARY KEY" ] do
+                      for composite in [ false; true ] do
+                          let keyColumns = if composite then "rank_value,id" else "rank_value"
+                          let keyDefinition = sprintf "%s(%s)" keyKind keyColumns
+                          let idColumn = if composite then "id INT," else ""
+                          let rowValue label id =
+                              if composite then sprintf "('%s',%d,0)" label id
+                              else sprintf "('%s',0)" label
+                          for verb in [ "UPDATE"; "DELETE" ] do
+                              for direction, pending, visible, ordered in cases do
+                                  let store = Fsdb.Storage.create ()
+                                  let setup = create 1 store
+                                  let ddl =
+                                      sprintf "CREATE TABLE tx_member_order(rank_value %s('z','a','m'),%sn INT,%s)"
+                                          columnType idColumn keyDefinition
+                                  handle setup ddl |> ignore
+                                  let visibleRows =
+                                      visible
+                                      |> List.mapi (fun index label -> rowValue label (index + 1))
+                                      |> String.concat ","
+                                  handle setup ("INSERT INTO tx_member_order VALUES" + visibleRows) |> ignore
+                                  let owner, _ = handle (create 2 store) "BEGIN"
+                                  let owner, inserted =
+                                      handle owner ("INSERT INTO tx_member_order VALUES" + rowValue pending 9)
+                                  Expect.equal inserted (Affected 1UL) "owner inserts pending member value"
+                                  let waiter, _ = handle (create 3 store) "BEGIN"
+                                  use started = new Threading.ManualResetEventSlim(false)
+                                  let orderBy =
+                                      sprintf " ORDER BY rank_value %s" direction
+                                      + (if composite then sprintf ",id %s" direction else "")
+                                      + " LIMIT 1"
+                                  let statement =
+                                      (if verb = "UPDATE" then "UPDATE tx_member_order SET n=1"
+                                       else "DELETE FROM tx_member_order") + orderBy
+                                  let waiting =
+                                      Threading.Tasks.Task.Run(fun () ->
+                                          started.Set()
+                                          handle waiter statement)
+                                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "ordered writer starts"
+                                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+                                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "ordered writer resumes"
+                                  let waiter, result = waiting.Result
+                                  Expect.isTrue blocked (statement + " waits for pending key")
+                                  Expect.equal result (Affected 1UL) "one row changes"
+                                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                                  let expected =
+                                      ordered
+                                      |> List.filter (fun label -> verb = "UPDATE" || label <> pending)
+                                      |> List.map (fun label ->
+                                          [ Some label; Some(if verb = "UPDATE" && label = pending then "1" else "0") ])
+                                  match handle setup "SELECT rank_value,n FROM tx_member_order ORDER BY rank_value" |> snd with
+                                  | ResultSet(_, rows) -> Expect.equal rows expected statement
+                                  | other -> failtestf "expected member-ordered rows, got %A" other
 
-          testCase "limited SET ordered write waits for pending indexed or primary-key insert"
-          <| fun _ ->
-              for keyDefinition in [ "KEY ix_rank(rank_value)"; "PRIMARY KEY(rank_value)" ] do
-                  for verb in [ "UPDATE"; "DELETE" ] do
-                      for direction, pending, visible, ordered in
-                          [ "ASC", "z", [ "a"; "m" ], [ "z"; "a"; "m" ]
-                            "DESC", "m", [ "z"; "a" ], [ "z"; "a"; "m" ]
-                            "DESC", "z,a", [ "z"; "a" ], [ "z"; "a"; "z,a" ] ] do
+              for columnType in [ "ENUM"; "SET" ] do
+                  for keyKind in [ "KEY ix_rank"; "PRIMARY KEY" ] do
+                      for verb in [ "UPDATE"; "DELETE" ] do
                           let store = Fsdb.Storage.create ()
                           let setup = create 1 store
-                          handle setup (sprintf "CREATE TABLE tx_set_order(rank_value SET('z','a','m'),n INT,%s)" keyDefinition) |> ignore
-                          let visibleRows = visible |> List.map (fun label -> sprintf "('%s',0)" label) |> String.concat ","
-                          handle setup ("INSERT INTO tx_set_order VALUES" + visibleRows) |> ignore
+                          let ddl =
+                              sprintf "CREATE TABLE tx_member_tie(rank_value %s('z','a','m'),id INT,n INT,%s(rank_value,id))"
+                                  columnType keyKind
+                          handle setup ddl |> ignore
+                          handle setup "INSERT INTO tx_member_tie VALUES('a',1,0),('a',2,0)" |> ignore
                           let owner, _ = handle (create 2 store) "BEGIN"
-                          let owner, inserted = handle owner (sprintf "INSERT INTO tx_set_order VALUES('%s',0)" pending)
-                          Expect.equal inserted (Affected 1UL) "owner inserts pending set"
+                          let owner, inserted = handle owner "INSERT INTO tx_member_tie VALUES('a',0,0)"
+                          Expect.equal inserted (Affected 1UL) "owner inserts the first tied key"
                           let waiter, _ = handle (create 3 store) "BEGIN"
-                          use started = new Threading.ManualResetEventSlim(false)
                           let statement =
-                              (if verb = "UPDATE" then "UPDATE tx_set_order SET n=1" else "DELETE FROM tx_set_order")
-                              + sprintf " ORDER BY rank_value %s LIMIT 1" direction
+                              (if verb = "UPDATE" then "UPDATE tx_member_tie SET n=1"
+                               else "DELETE FROM tx_member_tie")
+                              + " ORDER BY rank_value ASC,id ASC LIMIT 1"
+                          use started = new Threading.ManualResetEventSlim(false)
                           let waiting =
                               Threading.Tasks.Task.Run(fun () ->
                                   started.Set()
                                   handle waiter statement)
-                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "SET writer starts"
+                          Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "tied writer starts"
                           let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
-                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits set"
-                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "SET writer resumes"
+                          Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits tie"
+                          Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "tied writer resumes"
                           let waiter, result = waiting.Result
-                          Expect.isTrue blocked (statement + " waits for pending bitmask")
-                          Expect.equal result (Affected 1UL) "one SET-ordered row changes"
-                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits"
+                          Expect.isTrue blocked (statement + " waits for pending suffix")
+                          Expect.equal result (Affected 1UL) "one tied row changes"
+                          Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "writer commits tie"
                           let expected =
-                              ordered
-                              |> List.filter (fun label -> verb = "UPDATE" || label <> pending)
-                              |> List.map (fun label ->
-                                  [ Some label; Some(if verb = "UPDATE" && label = pending then "1" else "0") ])
-                          match handle setup "SELECT rank_value,n FROM tx_set_order ORDER BY rank_value" |> snd with
+                              if verb = "UPDATE" then
+                                  [ [ Some "a"; Some "0"; Some "1" ]
+                                    [ Some "a"; Some "1"; Some "0" ]
+                                    [ Some "a"; Some "2"; Some "0" ] ]
+                              else
+                                  [ [ Some "a"; Some "1"; Some "0" ]
+                                    [ Some "a"; Some "2"; Some "0" ] ]
+                          match handle setup "SELECT rank_value,id,n FROM tx_member_tie ORDER BY rank_value,id" |> snd with
                           | ResultSet(_, rows) -> Expect.equal rows expected statement
-                          | other -> failtestf "expected SET-ordered rows, got %A" other
+                          | other -> failtestf "expected tied member rows, got %A" other
 
           testCase "limited ordered write reselects secondary-index inserts at LIMIT two"
           <| fun _ ->

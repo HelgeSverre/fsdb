@@ -736,7 +736,8 @@ inserts on keyless tables.
 [ENUM primary and secondary keys](torture/findings/2026-11-04-enum-ordered-write.md)
 now use declaration ordinals for audited waits and reselection, while
 [SET primary and secondary keys](torture/findings/2026-11-04-set-ordered-write.md)
-use member bitmasks, including multi-member values.
+use member bitmasks, including multi-member values. Both cover the audited
+two-part shapes with an integer suffix.
 General full scans do not claim gaps or later inserted rows. A [focused unindexed-write load
 probe](benchmarks/results/92b019ff-full-scan-write-load.md) records the current
 worker-scaling slope. Unique-key claims, incremental index validation, and merged-result
