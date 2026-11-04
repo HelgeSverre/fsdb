@@ -857,7 +857,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             for rune in s.EnumerateRunes() do
                 let codepoint = rune.Value
                 let supplementaryIdeograph =
-                    (codepoint >= 0x20000 && codepoint <= 0x2EBEF)
+                    (codepoint >= 0x20000 && codepoint <= 0x2EE5F)
                     || (codepoint >= 0x30000 && codepoint <= 0x323AF)
                 let supplementaryCompatibility = codepoint >= 0x2F800 && codepoint <= 0x2FA1F
                 let bmpCompatibility = codepoint >= 0xF900 && codepoint <= 0xFAFF

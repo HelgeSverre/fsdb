@@ -533,7 +533,7 @@ limited derived sources and limited or `TEMPTABLE` views use the exposed alias.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [current-head distance replay](torture/findings/2026-11-04-geographic-cross-track-trial.md#endpoint-ordering-follow-up) matches all 100 seeded point-to-line distances but retains 23 point-distance mismatches across 189 near-hole points, three point relation mismatches, no mismatch across four near-exterior controls, and 13 line relation mismatches across 412 cases, including a near-polar MySQL relation/intersection inconsistency; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
+| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [current-head distance replay](torture/findings/2026-11-04-geographic-cross-track-trial.md#current-head-residual-classification) matches all 100 seeded point-to-line distances but retains 10 point-distance mismatches across 189 near-hole points, three point relation mismatches, no mismatch across four near-exterior controls, and 13 line relation mismatches across 412 cases, including a near-polar MySQL relation/intersection inconsistency; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
 
 The [geographic strategy follow-up](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
 confirms zero distance on both engines for every remaining line mismatch,
@@ -1337,7 +1337,9 @@ The [CJK Extension I audit](torture/findings/2026-11-04-cjk-extension-i-ngram.md
 finds no two-column membership or relevance differences across the printable
 U+2EBF0–U+2EE5F scalars under Unicode 9.0 and legacy Unicode collations at
 token sizes 1–10, plus Japanese kana-sensitive collation at sizes 1–10. Other
-collations and MeCab remain open.
+collations and MeCab remain open. Exact legacy `WEIGHT_STRING` bytes now match
+all 624 singletons and 623 adjacent pairs under general, Unicode 4.0, and
+Unicode 5.2 `utf8mb4` collations.
 The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
 likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
 plus 1,464 legacy Unicode searches over its later part at size 1.

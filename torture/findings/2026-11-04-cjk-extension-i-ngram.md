@@ -21,3 +21,12 @@ these results establish two-column ngram search parity for the sampled modes
 and sizes, not general collation equality. Japanese sizes 3–10 were completed
 in a separate current-head replay using the same fixture and oracle. MeCab
 and other query shapes remain open.
+
+An exact-byte `WEIGHT_STRING` follow-up found that MySQL 8.4.11 gives all 624
+Extension I scalars replacement weight `FFFD` under `utf8mb4_general_ci` and
+`utf8mb4_unicode_ci`, while `utf8mb4_unicode_520_ci` uses the supplementary
+implicit pair (`FBC5`, then the scalar's low 16 bits). Fsdb's legacy encoder
+now covers this block. The native differential oracle compared all 624
+singletons and 623 adjacent pairs in each of the three collations, with zero
+exact-byte mismatches after the change. This does not establish exact weights
+for mixed scripts or other collations.

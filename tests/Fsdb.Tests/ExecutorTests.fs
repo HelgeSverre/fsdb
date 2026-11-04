@@ -649,6 +649,8 @@ let tests =
                 <| fun _ ->
                     let store = newStore ()
                     let extensionB = System.Char.ConvertFromUtf32 0x20000
+                    let extensionI = System.Char.ConvertFromUtf32 0x2EBF0
+                    let extensionILast = System.Char.ConvertFromUtf32 0x2EE5F
                     let extensionG = System.Char.ConvertFromUtf32 0x30000
                     let compatibilityBmp = System.Char.ConvertFromUtf32 0x2F800
                     let compatibilitySupplementary = System.Char.ConvertFromUtf32 0x2F803
@@ -673,6 +675,10 @@ let tests =
                           extensionB + extensionB, "utf8mb4_general_ci", "FFFDFFFD"
                           extensionB + extensionB, "utf8mb4_unicode_ci", "FFFDFFFD"
                           extensionB + extensionB, "utf8mb4_unicode_520_ci", "FBC48000FBC48000"
+                          extensionI + extensionILast, "utf8mb4_general_ci", "FFFDFFFD"
+                          extensionI + extensionILast, "utf8mb4_unicode_ci", "FFFDFFFD"
+                          extensionI + extensionILast, "utf8mb4_unicode_520_ci", "FBC5EBF0FBC5EE5F"
+                          extensionI + "a", "utf8mb4_unicode_520_ci", "FBC5EBF0120F"
                           extensionG + "a", "utf8mb4_unicode_520_ci", "FBC68000120F"
                           compatibilityBmp, "utf8mb4_general_ci", "FFFD"
                           compatibilityBmp, "utf8mb4_unicode_520_ci", "FB40CE3D"
