@@ -10,6 +10,7 @@ import pymysql
 
 SHAPES = {
     "duplicate derived rows": "SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id",
+    "union-all derived rows": "SELECT a.id,a.n,u.flag FROM (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) u JOIN a ON a.id=u.id",
     "middle aggregates": "SELECT a.id,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=a.id",
     "middle JSON_TABLE": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id",
     "derived JSON_TABLE target": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN JSON_TABLE(JSON_ARRAY(d1.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d1.id JOIN a ON a.id=j.x",
@@ -107,18 +108,20 @@ def main():
                     assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 0)), name
                     run(connection, "DROP VIEW vc")
 
-                    if name == "duplicate derived rows":
+                    if name in ("duplicate derived rows", "union-all derived rows"):
                         for first, second in [(7, 8), (8, 7)]:
                             run(connection, "DELETE FROM b")
                             run(connection, f"INSERT INTO b VALUES(1,{first}),(1,{second})")
-                            run(connection, "CREATE VIEW vcp AS " + definition + " WHERE d1.flag > a.n WITH CASCADED CHECK OPTION")
+                            source_alias = "u" if name == "union-all derived rows" else "d1"
+                            run(connection, "CREATE VIEW vcp AS " + definition + f" WHERE {source_alias}.flag > a.n WITH CASCADED CHECK OPTION")
                             assert_error(connection, "UPDATE vcp SET n=7 WHERE id=1", 1369)
                             assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 0))
                             run(connection, "DROP VIEW vcp")
-                            run(connection, "CREATE VIEW vcj AS SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id AND d1.flag>a.n WITH CASCADED CHECK OPTION")
-                            assert_error(connection, "UPDATE vcj SET n=7 WHERE id=1", 1369)
-                            assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 0))
-                            run(connection, "DROP VIEW vcj")
+                            if name == "duplicate derived rows":
+                                run(connection, "CREATE VIEW vcj AS SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id AND d1.flag>a.n WITH CASCADED CHECK OPTION")
+                                assert_error(connection, "UPDATE vcj SET n=7 WHERE id=1", 1369)
+                                assert run(connection, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 0))
+                                run(connection, "DROP VIEW vcj")
 
                 run(connection, "CREATE TABLE insert_target(id INT PRIMARY KEY,n INT)")
                 run(connection, "CREATE VIEW insert_checked AS SELECT z.id,z.n,b.flag FROM insert_target z JOIN b ON b.id=z.id WHERE b.flag>z.n WITH CASCADED CHECK OPTION")

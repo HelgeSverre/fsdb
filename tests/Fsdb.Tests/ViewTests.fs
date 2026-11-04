@@ -76,6 +76,44 @@ let tests =
               | Err(1111, _) -> ()
               | other -> failtestf "expected nested aggregate alias rejection, got %A" other
 
+          testCase "a UNION ALL derived source can precede a writable joined view target"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE union_view_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE union_view_left(id INT,flag INT)"
+                    "CREATE TABLE union_view_right(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO union_view_target VALUES(1,0),(2,0)"
+                    "INSERT INTO union_view_left VALUES(1,7),(1,8)"
+                    "INSERT INTO union_view_right VALUES(1,9)"
+                    "CREATE VIEW union_joined_view AS SELECT t.id,t.n,u.flag FROM (SELECT id,flag FROM union_view_left UNION ALL SELECT id,aux AS flag FROM union_view_right) u JOIN union_view_target t ON t.id=u.id WHERE t.n>=0 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_schema='fsdb' AND table_name='union_joined_view'")
+                  [ [ Some "YES" ] ]
+                  "the physical component remains updatable"
+              Expect.equal
+                  (run store "UPDATE union_joined_view SET n=n+1 WHERE id=1")
+                  (Affected 1UL)
+                  "duplicate UNION rows update the physical row once"
+              match run store "UPDATE union_joined_view SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection through UNION source, got %A" other
+              Expect.equal
+                  (rows store "SELECT id,n FROM union_view_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
+                  "the rejected write is atomic"
+              expectOk
+                  (run store "CREATE VIEW union_checked_rows AS SELECT t.id,t.n,u.flag FROM (SELECT id,flag FROM union_view_left UNION ALL SELECT id,aux AS flag FROM union_view_right) u JOIN union_view_target t ON t.id=u.id WHERE u.flag>t.n WITH CASCADED CHECK OPTION")
+                  "create a view whose check depends on duplicate UNION rows"
+              match run store "UPDATE union_checked_rows SET n=7 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected duplicate UNION row CHECK OPTION rejection, got %A" other
+              Expect.equal
+                  (rows store "SELECT n FROM union_view_target WHERE id=1")
+                  [ [ Some "1" ] ]
+                  "one passing joined row cannot conceal a failing row"
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()

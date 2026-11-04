@@ -1125,6 +1125,11 @@ trigger is created.
 | Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | joined UPDATE and explicit-column INSERT/INSERT SELECT reach a mergeable component with a distinct definer and verify its grant chain; `INSERT ... SET`, `IGNORE`, ODKU, and audited component CHECK OPTION cases work; audited three-layer outer views and renamed column grants work; single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, [a checked single-source layer above a joined view](torture/findings/2026-10-17-checked-layered-join-view.md), and [audited joined layers over a joined writable source](torture/findings/2026-10-17-nested-joined-view-source.md), including private inner aliases reused by outer joins, qualified inner `JSON_TABLE` joins and inner `LATERAL` joins with qualified references or unambiguous bare local or known preceding-source columns, including LATERAL outputs, and a nested target after multiple read-only derived sources, compose writable targets; aggregate/UNION/`JSON_TABLE` read-only join components and audited independent and [recursive/dependent CTE](torture/findings/2026-10-16-recursive-cte-joined-view.md) read sources also precede a joined UPDATE target; additional layered source orders, security combinations, CTE compositions, and expression shapes stay open | medium | subset |
 | View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 
+A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
+now has a native MySQL contract and fsdb regression: duplicate derived rows
+update the physical target once, and a cascaded check rejects a value that
+fails for any joined row.
+
 ## 10. Stored routines, events, schedulers
 
 The implemented routine and event boundary is summarized in the
