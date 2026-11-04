@@ -657,6 +657,15 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedNestedExistsOuterExpression() =
+        this.Query(
+            "SELECT u.id, (SELECT COUNT(*) FROM orders c "
+            + "WHERE c.user_id = u.id AND EXISTS(SELECT c.id+0 FROM orders d WHERE d.id = c.id)) "
+            + "FROM users u WHERE u.id <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedPhysicalEquality() =
         this.Query(
             "SELECT u.id, (SELECT COUNT(*) FROM orders c WHERE c.user_id = u.id) "

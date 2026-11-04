@@ -2012,6 +2012,10 @@ ShortRun. More complex projection and source shapes remain open.
 Successful validation of [outer-bound expressions in a stable top-level scope](benchmarks/results/2026-11-04-correlated-exists-outer-expression-cache.md)
 is now cached by scope identity within a statement. The matched 100-row
 ShortRun fell from 1.13 to 0.64 ms; nested scopes retain per-row validation.
+The [nested-scope benchmark](benchmarks/results/2026-11-04-nested-exists-projection-check.md)
+exercises an intermediate outer-bound projection through two correlated
+levels. A full-binding-chain cache trial did not beat baseline variation and
+was reverted; this shape remains open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell
