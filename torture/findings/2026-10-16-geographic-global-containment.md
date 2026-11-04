@@ -131,9 +131,19 @@ the same two disagreements, cases 76 and 92. The script pins this known
 baseline so a future intersection change must remove both disagreements
 without introducing another one in the corpus.
 
+A November 4 expansion of that same disposable-server oracle kept the fixed
+300-ring assertion and added configurable count and seed. The first 1,000
+seed-9173 rings contained exactly the same two disagreements; the additional
+700 rings found none. An independent 1,000-ring seed-9174 corpus found no
+disagreements (734 MySQL-valid rings). The combined sample is 2,000 rings
+with two mismatches; it narrows the observed frequency but does not resolve
+the two known long-edge cases or prove validity parity for other shapes.
+
 ```sh
 dotnet build src/Fsdb.Cli -c Release --nologo
 uv run --with pymysql python torture/scripts/geographic-validity-oracle.py
+uv run --with pymysql python torture/scripts/geographic-validity-oracle.py --count 1000
+uv run --with pymysql python torture/scripts/geographic-validity-oracle.py --count 1000 --seed 9174
 ```
 
 ## Validity strategy follow-up

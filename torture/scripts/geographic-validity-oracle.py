@@ -4,6 +4,7 @@ Build the Release CLI first, then run with ``uv run --with pymysql``.
 The known pre-fix mismatch set is {76, 92}; any change to it is reported.
 """
 
+import argparse
 import pathlib
 import random
 import socket
@@ -33,8 +34,8 @@ def scalar(connection, sql):
         return cursor.fetchone()[0]
 
 
-def polygon_wkts(count):
-    rng = random.Random(9173)
+def polygon_wkts(count, seed):
+    rng = random.Random(seed)
     for _ in range(count):
         vertices = [(rng.uniform(-85, 85), rng.uniform(-180, 180)) for _ in range(4)]
         # Preserve the point-probe draws in geographic-winding-oracle.py so
@@ -47,6 +48,12 @@ def polygon_wkts(count):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--count", type=int, default=300)
+    parser.add_argument("--seed", type=int, default=9173)
+    args = parser.parse_args()
+    if args.count < 1:
+        parser.error("--count must be positive")
     if not FSDB.is_file():
         raise RuntimeError(f"build the Release CLI first: {FSDB}")
     with tempfile.TemporaryDirectory(prefix="fsdb-geographic-validity-") as directory:
@@ -103,7 +110,7 @@ def main():
 
                 mismatches = {}
                 mysql_valid = 0
-                for case, wkt in enumerate(polygon_wkts(300)):
+                for case, wkt in enumerate(polygon_wkts(args.count, args.seed)):
                     sql = f"SELECT ST_IsValid(ST_GeomFromText('{wkt}',4326))"
                     expected = scalar(mysql_connection, sql)
                     actual = scalar(fsdb_connection, sql)
@@ -116,12 +123,13 @@ def main():
                         )
 
                 print(
-                    f"MySQL {version}: 300 rings, {mysql_valid} valid, mismatches={mismatches}"
+                    f"MySQL {version}: seed={args.seed}, {args.count} rings, {mysql_valid} valid, mismatches={mismatches}"
                 )
-                assert mismatches == KNOWN_MISMATCHES, (
-                    "geographic validity baseline changed; investigate before updating it",
-                    mismatches,
-                )
+                if args.count == 300 and args.seed == 9173:
+                    assert mismatches == KNOWN_MISMATCHES, (
+                        "geographic validity baseline changed; investigate before updating it",
+                        mismatches,
+                    )
             finally:
                 if fsdb_connection:
                     fsdb_connection.close()

@@ -2259,9 +2259,9 @@ implementation effort:
    [Global and antipodal containment counterexamples](torture/findings/2026-10-16-geographic-global-containment.md)
    now use Boost-shaped geographic winding and ring orientation; 3,600 random
    global point probes and 1,200 random, vertex, and antipodal probes matched
-   MySQL 8.4.11. Two global `ST_IsValid` disagreements in the larger corpus
-   remain open, so broader geographic polygon validity still needs separate
-   validation.
+   MySQL 8.4.11. The same two global `ST_IsValid` disagreements remain in an
+   expanded 2,000-ring, two-seed oracle sample; broader geographic polygon
+   validity still needs the Boost geographic intersection decision.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)
    are covered for audited cases. [Point-to-polygon distance](torture/findings/2026-10-11-geographic-point-polygon-distance.md)
