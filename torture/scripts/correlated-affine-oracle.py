@@ -52,6 +52,9 @@ def main():
                         "INSERT INTO vals VALUES(1,9),(2,11),(3,-11),(4,-9),"
                         "(5,-2147483648),(6,2147483647),(7,-2147483647),"
                         "(8,8),(9,-12)",
+                        "CREATE TABLE multiply_bound(id INT PRIMARY KEY,x BIGINT)",
+                        "INSERT INTO multiply_bound VALUES(1,18),(2,22),(3,-18),(4,-22),"
+                        "(5,17),(6,NULL),(7,4294967294),(8,-4294967296)",
                     ]:
                         cursor.execute(sql)
 
@@ -75,6 +78,17 @@ def main():
                             cursor.execute(
                                 prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
                                 + " WHERE " + expression + "=o.x) FROM bound o ORDER BY o.id"
+                            )
+                            actual = tuple(count for _, count in cursor.fetchall())
+                            assert actual == expected, (source, expression, actual, expected)
+                        for expression, expected in [
+                            ("d.k*2", (1, 1, 1, 1, 0, 0, 1, 1)),
+                            ("2*d.k", (1, 1, 1, 1, 0, 0, 1, 1)),
+                            ("d.k*-2", (1, 1, 1, 1, 0, 0, 1, 0)),
+                        ]:
+                            cursor.execute(
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE " + expression + "=o.x) FROM multiply_bound o ORDER BY o.id"
                             )
                             actual = tuple(count for _, count in cursor.fetchall())
                             assert actual == expected, (source, expression, actual, expected)

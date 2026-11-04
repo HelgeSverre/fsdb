@@ -15389,21 +15389,28 @@ and private correlatedAffineEqualityProbes source (columns: ColumnDef list) cont
             Some(-value)
         | _ -> None
 
+    let literalFactor expression =
+        literalOffset expression |> Option.filter ((<>) 0L)
+
     let inverse indexed bound =
-        let inverseForm column offset transform =
+        let inverseForm literal column offset transform =
             Option.map2 (fun name value -> name, transform (decimal value))
-                (tryCorrelatedSignedIntegerColumn source columns column) (literalOffset offset)
+                (tryCorrelatedSignedIntegerColumn source columns column) (literal offset)
 
         let form =
             match indexed with
             | BinOp(Add, column, offset) ->
-                inverseForm column offset (fun value bound -> bound - value)
+                inverseForm literalOffset column offset (fun value bound -> bound - value)
                 |> Option.orElseWith (fun () ->
-                    inverseForm offset column (fun value bound -> bound - value))
+                    inverseForm literalOffset offset column (fun value bound -> bound - value))
             | BinOp(Sub, column, offset) ->
-                inverseForm column offset (fun value bound -> bound + value)
+                inverseForm literalOffset column offset (fun value bound -> bound + value)
                 |> Option.orElseWith (fun () ->
-                    inverseForm offset column (fun value bound -> value - bound))
+                    inverseForm literalOffset offset column (fun value bound -> value - bound))
+            | BinOp(Mul, column, factor) ->
+                inverseForm literalFactor column factor (fun value bound -> bound / value)
+                |> Option.orElseWith (fun () ->
+                    inverseForm literalFactor factor column (fun value bound -> bound / value))
             | _ -> None
 
         form
@@ -15415,7 +15422,7 @@ and private correlatedAffineEqualityProbes source (columns: ColumnDef list) cont
                     let key = transform (decimal value)
                     correlatedSignedIntegerBounds columns name
                     |> Option.map (fun (minimum, maximum) ->
-                        if key < decimal minimum || key > decimal maximum then
+                        if key <> System.Decimal.Truncate key || key < decimal minimum || key > decimal maximum then
                             name, None
                         else
                             name, Some(VInt(int64 key)))

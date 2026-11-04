@@ -14387,6 +14387,60 @@ let tests =
                         | other -> failtestf "expected %s boundary matches, got %A" columnType other
                         Expect.isLessThan calls 8 (columnType + " out-of-range keys must not scan")
 
+                testCase "correlated signed multiplication probes inverse integer keys"
+                <| fun _ ->
+                    let mutable calls = 0
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE multiply_bounds(id INT PRIMARY KEY,x BIGINT)" |> ignore
+                    runDefault store "CREATE TABLE multiply_rows(id INT PRIMARY KEY,k INT,KEY ix_k(k))" |> ignore
+                    runDefault store
+                        "INSERT INTO multiply_bounds VALUES(1,18),(2,22),(3,-18),(4,-22),(5,17),(6,NULL),(7,4294967294),(8,-4294967296)"
+                    |> ignore
+                    [ 0..999 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (id - 500))
+                    |> String.concat ","
+                    |> fun values -> runDefault store ("INSERT INTO multiply_rows VALUES" + values)
+                    |> ignore
+                    runDefault store "INSERT INTO multiply_rows VALUES(1000,-2147483648),(1001,2147483647)" |> ignore
+
+                    for prefix, source in
+                        [ "", "multiply_rows d"
+                          "", "(SELECT id,k FROM multiply_rows) d"
+                          "WITH passthrough AS (SELECT id,k FROM multiply_rows) ", "passthrough d"
+                          "", "(SELECT DISTINCT id,k FROM multiply_rows) d"
+                          "WITH materialized AS (SELECT DISTINCT id,k FROM multiply_rows) ", "materialized d" ] do
+                        for expression, expected in
+                            [ "d.k*2", [ 1; 1; 1; 1; 0; 0; 1; 1 ]
+                              "2*d.k", [ 1; 1; 1; 1; 0; 0; 1; 1 ]
+                              "d.k*-2", [ 1; 1; 1; 1; 0; 0; 0; 0 ] ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND " + expression + "=o.x) "
+                                + "FROM multiply_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, rows) ->
+                                let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                                Expect.equal actual (expected |> List.map Some) (source + " " + expression)
+                            | other -> failtestf "expected multiplied matches, got %A" other
+                            Expect.isLessThan calls 80 (source + " " + expression + " must bound residual work")
+                        calls <- 0
+                        let unionSql =
+                            prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                            + " WHERE TOUCH(d.id)=d.id AND (d.k*2=o.x OR d.id=0)) "
+                            + "FROM multiply_bounds o ORDER BY o.id"
+                        match run store registry unionSql with
+                        | ResultSet(_, rows) ->
+                            let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                            Expect.equal actual ([ 2; 2; 2; 2; 1; 1; 2; 2 ] |> List.map Some) "complete multiplication OR"
+                        | other -> failtestf "expected multiplied OR matches, got %A" other
+                        Expect.isLessThan calls 100 (source + " multiplication OR must bound residual work")
+
                 testCase "correlated byte LIKE prefixes bound physical and materialized candidates"
                 <| fun _ ->
                     let mutable calls = 0
