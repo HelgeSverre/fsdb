@@ -104,3 +104,16 @@ distances; no polygon aggregation difference was observed. The replay also
 retained 13/412 line relations, 3/189 near-hole point relations, and 0/100
 seeded point-to-line distance mismatches. These counts are a regression
 baseline, not evidence of general geographic parity.
+
+## Boost branch comparison
+
+The pinned [Boost cross-track implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/strategies/geographic/distance_cross_track.hpp)
+checks meridian alignment and endpoint projections before its Newton loop.
+Fsdb has corresponding angular endpoint checks but does not reproduce Boost's
+meridian-alignment early return. The Newton implementations also differ in
+their stopping and result-selection details. These are candidate causes, not
+verified explanations for the ten residuals. A useful next experiment is to
+trace which Boost branch handles each residual point and compare the first
+Newton position and distance when both engines reach the loop. The current
+oracle already reports individual hole-segment distances, allowing that
+comparison without changing polygon aggregation.
