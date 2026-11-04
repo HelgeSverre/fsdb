@@ -608,6 +608,15 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedComputedDerivedEquality() =
+        this.Query(
+            "SELECT u.id, (SELECT COUNT(*) FROM "
+            + "(SELECT user_id+0 AS user_id FROM orders WHERE id <= 1000) c "
+            + "WHERE c.user_id = u.id) FROM users u WHERE u.id <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedEqualityOuterOnly() =
         this.Query "SELECT u.id, 0 FROM users u WHERE u.id <= 100"
 

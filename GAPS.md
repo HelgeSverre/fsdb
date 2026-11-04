@@ -1943,6 +1943,10 @@ Statement-local [equality index-match caching](benchmarks/results/2026-11-04-cor
 now avoids rediscovering the same index for every bound outer row. Matched
 controls showed lower correlated increments for both direct and derived
 `COUNT(*)` shapes; fixed query handling and other row work remain open.
+The [computed-derived control](benchmarks/results/2026-11-04-projection-miss-cache.md)
+now memoizes unsuccessful physical-projection discovery within a statement;
+the matched ShortRun fell from 4.68 to 3.71 ms for 100 outer rows. This is a
+narrow planner improvement, not general cost-based selection.
 
 The [correlated functional-key profile](benchmarks/results/2bb13632-quick.md)
 extends that coverage to compatible unary and composed expression indexes.

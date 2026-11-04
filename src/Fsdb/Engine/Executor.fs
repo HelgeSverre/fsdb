@@ -781,7 +781,7 @@ type private StatementMemo =
       MaterializedCorrelatedTextRanges: Dictionary<FromItem, Dictionary<Expr * string, MaterializedRangeLookup option>>
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
-      PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
+      PhysicalProjections: Dictionary<FromItem, PhysicalProjection option>
       EqualityIndexMatches: Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
@@ -821,7 +821,7 @@ let private freshStatementMemo () =
         Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>(HashIdentity.Reference)
       MaterializedCorrelatedNullBuckets =
         Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>(HashIdentity.Reference)
-      PhysicalProjections = Dictionary<FromItem, PhysicalProjection>(HashIdentity.Reference)
+      PhysicalProjections = Dictionary<FromItem, PhysicalProjection option>(HashIdentity.Reference)
       EqualityIndexMatches = Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>(HashIdentity.Reference)
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
@@ -15698,14 +15698,9 @@ and private tryPhysicalProjection
     (source: FromItem)
     : PhysicalProjection option =
     let projections = (currentStatementMemo ()).PhysicalProjections
-
-    match projections.TryGetValue source with
-    | true, projection -> Some projection
-    | false, _ ->
-        tryPhysicalProjectionUncached store registry dbName source
-        |> Option.map (fun projection ->
-            projections.[source] <- projection
-            projection)
+    // A rejected source shape is stable too; avoid rechecking it for each
+    // outer row of a correlated query.
+    getMemoized projections source (fun () -> tryPhysicalProjectionUncached store registry dbName source)
 
 and private tryPhysicalProjectionUncached
     (store: Store)
