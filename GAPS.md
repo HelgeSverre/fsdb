@@ -884,6 +884,9 @@ recursive-only view that reports `YES` but still rejects UPDATE with 1288.
 also precede a writable physical target in an inner joined view, including
 duplicate elimination, ordered limited sources, one target write, and cascaded
 CHECK OPTION rejection.
+[A dependent `LATERAL` UNION read source](torture/findings/2026-11-04-lateral-union-updatable-view.md)
+also precedes a writable physical target; duplicate elimination is local to
+each lateral invocation, and the audited joined write changes the target once.
 
 Direct physical inner-join views can update one component table per statement
 and insert through explicit target columns into one insertable component.

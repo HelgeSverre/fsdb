@@ -33,6 +33,7 @@ SHAPES = {
     "grouped aggregate lateral JSON target": "SELECT a.id,a.n,d1.flag,e.x,j.y FROM ((SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN LATERAL (SELECT d1.id x) e ON TRUE JOIN JSON_TABLE(JSON_ARRAY(e.x),'$[*]' COLUMNS(y INT PATH '$')) j ON j.y=e.x) JOIN a ON a.id=j.y",
     "independent lateral first": "SELECT a.id,a.n,e.x FROM LATERAL (SELECT 1 x) e JOIN a ON a.id=e.x",
     "independent lateral JSON target": "SELECT a.id,a.n,e.x,j.y FROM LATERAL (SELECT 1 x) e JOIN JSON_TABLE(JSON_ARRAY(e.x),'$[*]' COLUMNS(y INT PATH '$')) j ON j.y=e.x JOIN a ON a.id=j.y",
+    "dependent lateral UNION target": "SELECT a.id,a.n,u.flag FROM b src JOIN LATERAL (SELECT src.id AS id,src.flag AS flag UNION DISTINCT SELECT src.id,src.flag+1 UNION DISTINCT SELECT src.id,src.flag+1) u ON TRUE JOIN a ON a.id=u.id",
     "grouped read-only pair": "SELECT a.id,a.n,d1.flag,d2.aux FROM ((SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=d1.id) JOIN a ON a.id=d1.id",
     "grouped target pair": "SELECT a.id,a.n,d1.flag,d2.aux FROM ((SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id) JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=a.id",
     "target JSON_TABLE aggregate": "SELECT a.id,a.n,j.x,d1.flag FROM a JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id JOIN (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 ON d1.id=j.x",
@@ -125,6 +126,13 @@ def main():
                         connection,
                         "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='v'",
                     ) == (("YES",),), name
+                    if name == "dependent lateral UNION target":
+                        assert run(connection, "SELECT flag FROM v ORDER BY flag") == (
+                            (7,),
+                            (8,),
+                            (8,),
+                            (9,),
+                        )
                     assert run(connection, "UPDATE v SET n=n+1 WHERE id=1") == 1, name
                     assert run(connection, "SELECT id,n FROM a ORDER BY id") == (
                         (1, 1),

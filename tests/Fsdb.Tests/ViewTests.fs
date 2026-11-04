@@ -281,6 +281,34 @@ let tests =
                   | other -> failtestf "expected %s CHECK OPTION rejection, got %A" source other
                   Expect.equal (rows store "SELECT n FROM distinct_target") [ [ Some "1" ] ] (source + " atomic rejection")
 
+          testCase "dependent lateral UNION source keeps a joined target writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE lateral_union_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE lateral_union_source(id INT,flag INT)"
+                    "INSERT INTO lateral_union_target VALUES(1,0),(2,0)"
+                    "INSERT INTO lateral_union_source VALUES(1,7),(1,8)" ] do
+                  expectOk (run store sql) sql
+              expectOk
+                  (run store
+                      "CREATE VIEW lateral_union_joined AS SELECT t.id,t.n,u.flag FROM lateral_union_source src JOIN LATERAL (SELECT src.id AS id,src.flag AS flag UNION DISTINCT SELECT src.id,src.flag+1 UNION DISTINCT SELECT src.id,src.flag+1) u ON TRUE JOIN lateral_union_target t ON t.id=u.id WHERE u.flag>t.n WITH CASCADED CHECK OPTION")
+                  "create dependent UNION view"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='lateral_union_joined'")
+                  [ [ Some "YES" ] ]
+                  "dependent UNION keeps writable metadata"
+              Expect.equal
+                  (rows store "SELECT flag FROM lateral_union_joined ORDER BY flag")
+                  [ [ Some "7" ]; [ Some "8" ]; [ Some "8" ]; [ Some "9" ] ]
+                  "UNION removes duplicates within each dependent invocation"
+              Expect.equal (run store "UPDATE lateral_union_joined SET n=n+1 WHERE id=1") (Affected 1UL) "one physical update"
+              Expect.equal (run store "UPDATE lateral_union_joined SET n=n+1 WHERE id=2") (Affected 0UL) "missing dependent rows"
+              match run store "UPDATE lateral_union_joined SET n=7 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected dependent UNION CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM lateral_union_target WHERE id=1") [ [ Some "1" ] ] "rejection is atomic"
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()
