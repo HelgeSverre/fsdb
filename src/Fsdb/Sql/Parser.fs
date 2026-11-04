@@ -4694,19 +4694,36 @@ let private singleTableOrderLimit (joins: Join list) : Parser<OrderKey list * Ex
 let private updateSources: Parser<TableRef * Join list, unit> =
     fromItem .>>. many joinClause
     >>= fun (source, joins) ->
+        let independentGroup (first: FromItem) (groupedJoins: Join list) =
+            let available = HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            FromItem.tryQualifier first |> Option.iter (fun name -> available.Add name |> ignore)
+            let referencesOutside expression =
+                not (Expression.collectSubqueries expression).IsEmpty
+                || Expression.exists (function
+                    | Col _ -> true
+                    | QualifiedCol(name, _) -> not (available.Contains name)
+                    | _ -> false) expression
+            groupedJoins
+            |> List.forall (fun inner ->
+                let sourceAllowed =
+                    match inner.Table with
+                    | FromTable _ | FromSubquery _ -> true
+                    | FromJsonTable(expression, _, _, _) -> not (referencesOutside expression)
+                    | _ -> false
+                if not sourceAllowed then false
+                else
+                    FromItem.tryQualifier inner.Table
+                    |> Option.iter (fun name -> available.Add name |> ignore)
+                    not (referencesOutside inner.On))
         // Reorient a first outer join with an independent group on the right.
-        // Non-lateral derived sources are independent; LATERAL/JSON_TABLE
-        // operands may need the original left source in scope.
+        // LATERAL and JSON_TABLE expressions reaching the original left source
+        // need that source in scope and keep their original association.
         let source, joins =
             match source, joins with
             | FromTable table, ({ Kind = (LeftJoin | RightJoin) as kind
                                   Table = FromJoinGroup(FromTable groupedFirst, groupedJoins)
                                   Using = [] } as join) :: rest
-                when groupedJoins
-                     |> List.forall (fun inner ->
-                         match inner.Table with
-                         | FromTable _ | FromSubquery _ -> true
-                         | _ -> false) ->
+                when independentGroup (FromTable groupedFirst) groupedJoins ->
                 let reversed = if kind = LeftJoin then RightJoin else LeftJoin
                 let outer = { join with Kind = reversed; Table = FromTable table }
                 FromTable groupedFirst, groupedJoins @ (outer :: rest)

@@ -269,6 +269,10 @@ def main():
                     "UPDATE va LEFT JOIN (link l JOIN (SELECT id FROM link) d ON d.id=l.id "
                     "JOIN vb ON vb.link_id=d.id) ON va.link_id=l.id "
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
+                    "UPDATE va LEFT JOIN (link l JOIN JSON_TABLE(JSON_ARRAY(l.id),'$[*]' "
+                    "COLUMNS(next_id INT PATH '$')) j ON TRUE "
+                    "JOIN vb ON vb.link_id=j.next_id) ON va.link_id=l.id "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)

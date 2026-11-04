@@ -180,6 +180,15 @@ the oracle now matches 41 UPDATE cases and still matches all 26 contention
 rebases. A focused regression checks both physical target rows. The guard
 continues to exclude dependent `LATERAL` and `JSON_TABLE` operands.
 
+The group-local `JSON_TABLE(JSON_ARRAY(l.id))` form then exposed the same
+1146 error: its input depends on `link l` inside the group, not on the
+original left-side `va`. The parser now checks each group's sources in
+order and permits a `JSON_TABLE` operand only when its column references
+are qualified by already available group sources. Bare columns, nested
+subqueries, and out-of-group qualifiers keep the original association.
+The native oracle matches 42 UPDATE cases and 26 contended rebases; the
+focused F# regression checks both target rows. `LATERAL` remains excluded.
+
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:
 
