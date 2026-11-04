@@ -18,10 +18,13 @@ the highest two flags. The native oracle and fsdb regression pin both
 outcomes. The other focused cases verify metadata, one physical update,
 duplicate rows, and atomic CHECK OPTION rejection.
 
-This covers independent UNION bodies with distinct first-branch output names
-in this joined-view shape. Duplicate original names behind an explicit CTE
-column list, dependent branches, nested CTEs, and broader security contexts
-remain to audit.
+This also covers duplicate first-branch names when an explicit CTE column
+list supplies distinct output names and the UNION has no internal ORDER BY.
+MySQL accepts a similarly named view with `ORDER BY 2`, reports it writable,
+then rejects UPDATE with ambiguous-column error 1052; the native oracle pins
+that boundary. Fsdb does not yet reproduce that metadata/error sequence.
+Dependent branches, nested CTEs, and broader security contexts remain to
+audit.
 
 ```sh
 uv run --with pymysql python torture/scripts/composed-join-view-oracle.py

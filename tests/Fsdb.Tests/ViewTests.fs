@@ -178,6 +178,18 @@ let tests =
                   [ [ Some "7" ] ]
                   "the rejected ordered CTE write is atomic"
 
+              expectOk
+                  (run store "CREATE VIEW union_cte_duplicate_originals AS WITH u(id,flag) AS (SELECT id AS x,flag AS x FROM union_view_left UNION ALL SELECT id,aux FROM union_view_right LIMIT 3) SELECT t.id,t.n,u.flag FROM u JOIN union_view_target t ON t.id=u.id WHERE t.n>=0 WITH CASCADED CHECK OPTION")
+                  "create UNION CTE with duplicate original output names"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='union_cte_duplicate_originals'")
+                  [ [ Some "YES" ] ]
+                  "explicit CTE columns make duplicate original names writable"
+              Expect.equal
+                  (run store "UPDATE union_cte_duplicate_originals SET n=n+1 WHERE id=1")
+                  (Affected 1UL)
+                  "limited UNION CTE updates the target once"
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()

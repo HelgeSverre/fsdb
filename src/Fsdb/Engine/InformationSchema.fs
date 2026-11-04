@@ -1809,12 +1809,15 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                             ||> List.map2 (fun name projection -> { projection with Alias = Some name })
                         match cte.Body with
                         | PlainSelect body -> Some(PlainSelect { body with Projections = projections })
-                        | UnionSelect _ ->
+                        | UnionSelect(_, rest, orderBy, limit, offset) ->
                             let originalNames = expanded |> List.map projectionName
                             if originalNames |> List.exists Option.isNone then None
                             else
                                 let originalNames = originalNames |> List.choose id
-                                if (originalNames |> List.map _.ToLowerInvariant() |> Set.ofList).Count <> originalNames.Length then None
+                                if (originalNames |> List.map _.ToLowerInvariant() |> Set.ofList).Count <> originalNames.Length then
+                                    if orderBy.IsEmpty then
+                                        Some(UnionSelect({ first with Projections = projections }, rest, orderBy, limit, offset))
+                                    else None
                                 else
                                     let alias = "__fsdb_cte_output"
                                     let renamed =

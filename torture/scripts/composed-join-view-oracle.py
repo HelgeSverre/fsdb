@@ -16,6 +16,7 @@ SHAPES = {
     "union-all CTE ordered limited": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c ORDER BY flag DESC LIMIT 2) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
     "union-all CTE offset": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c ORDER BY flag DESC LIMIT 2 OFFSET 1) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
     "union-all CTE renamed ordered": "WITH u(id,flag) AS (SELECT id AS raw_id,flag AS raw_flag FROM b UNION ALL SELECT id,aux FROM c ORDER BY raw_flag DESC LIMIT 2) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
+    "union-all CTE duplicate originals": "WITH u(id,flag) AS (SELECT id AS x,flag AS x FROM b UNION ALL SELECT id,aux FROM c LIMIT 3) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
     "middle aggregates": "SELECT a.id,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=a.id",
     "middle JSON_TABLE": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id",
     "derived JSON_TABLE target": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN JSON_TABLE(JSON_ARRAY(d1.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d1.id JOIN a ON a.id=j.x",
@@ -207,6 +208,24 @@ def main():
                 )
                 assert run(connection, "SELECT n FROM a WHERE id=1") == ((7,),)
                 run(connection, "DROP VIEW union_ordered_checked")
+
+                run(
+                    connection,
+                    "CREATE VIEW union_duplicate_ordered AS WITH u(id,flag) AS "
+                    "(SELECT id AS x,flag AS x FROM b UNION ALL SELECT id,aux FROM c "
+                    "ORDER BY 2 DESC LIMIT 2) SELECT a.id,a.n,u.flag "
+                    "FROM u JOIN a ON a.id=u.id",
+                )
+                assert run(
+                    connection,
+                    "SELECT is_updatable FROM information_schema.views WHERE table_name='union_duplicate_ordered'",
+                ) == (("YES",),)
+                assert_error(
+                    connection,
+                    "UPDATE union_duplicate_ordered SET n=n+1 WHERE id=1",
+                    1052,
+                )
+                run(connection, "DROP VIEW union_duplicate_ordered")
 
                 run(connection, "CREATE TABLE insert_target(id INT PRIMARY KEY,n INT)")
                 run(
