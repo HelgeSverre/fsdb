@@ -642,6 +642,11 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedPhysicalExistsBareColumn() =
+        this.Query "SELECT u.id, EXISTS(SELECT id FROM orders c WHERE c.user_id = u.id) FROM users u WHERE u.id <= 100"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedPhysicalEquality() =
         this.Query(
             "SELECT u.id, (SELECT COUNT(*) FROM orders c WHERE c.user_id = u.id) "

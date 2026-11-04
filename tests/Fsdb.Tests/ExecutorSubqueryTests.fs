@@ -431,9 +431,25 @@ let tests =
                   (runDefault store "SELECT o.id,EXISTS(SELECT i.id FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o WHERE o.id IN (1,50) ORDER BY o.id")
                   (ResultSet([ "id"; "hit" ], [ [ Some "1"; Some "1" ]; [ Some "50"; Some "0" ] ]))
                   "a qualified column projection does not require reading its value for EXISTS"
+              let bareResult, bareExamined =
+                  withExaminedRows (fun () ->
+                      runDefault store "SELECT o.id,EXISTS(SELECT id FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o ORDER BY o.id")
+              match bareResult with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows.Length 50 "bare projected column preserves outer rows"
+                  Expect.isTrue (rows |> List.mapi (fun index row -> row.[1] = Some(if index < 25 then "1" else "0")) |> List.forall id) "bare projection preserves EXISTS values"
+              | other -> failtestf "expected bare-column EXISTS rows, got %A" other
+              Expect.isLessThan bareExamined 200L "bare inner projection uses the indexed EXISTS path"
+              Expect.equal
+                  (runDefault store "SELECT o.id,EXISTS(SELECT o.id FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o WHERE o.id IN (1,50) ORDER BY o.id")
+                  (ResultSet([ "id"; "hit" ], [ [ Some "1"; Some "1" ]; [ Some "50"; Some "0" ] ]))
+                  "an outer-qualified projection keeps ordinary correlated binding"
               match runDefault store "SELECT EXISTS(SELECT i.missing FROM exists_inner i WHERE i.outer_id=1)" with
               | Err(1054, _) -> ()
               | other -> failtestf "expected unknown EXISTS projection column, got %A" other
+              match runDefault store "SELECT EXISTS(SELECT missing FROM exists_inner i WHERE i.outer_id=1)" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected unknown bare EXISTS projection column, got %A" other
               Expect.equal
                   (runDefault store "SELECT o.id FROM exists_outer o WHERE o.id=50 AND EXISTS(SELECT COUNT(*) FROM exists_inner i WHERE i.outer_id=o.id)")
                   (ResultSet([ "id" ], [ [ Some "50" ] ]))

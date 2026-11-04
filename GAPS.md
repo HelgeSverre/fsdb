@@ -1988,6 +1988,10 @@ The [qualified-column `EXISTS` follow-up](benchmarks/results/2026-11-04-correlat
 extends that indexed path to a validated inner-source column projection;
 its matched 100-row ShortRun fell from 4.00 to 0.72 ms while preserving
 MySQL's unknown-column error. Other projection and source shapes remain open.
+The [bare-column follow-up](benchmarks/results/2026-11-04-correlated-exists-bare-fast-path.md)
+also resolves a unique inner-source column before taking that path; its
+matched 100-row ShortRun fell from 4.23 to 0.78 ms. Outer-only and unknown
+names retain normal binding and diagnostics.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

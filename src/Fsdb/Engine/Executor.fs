@@ -9145,13 +9145,19 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
     match select.From with
     | Some(FromItem.Qualified _ as source) when plainShape ->
         let sourceColumns = lazy (selectSourceColumns outer.Store outer.DbName source |> List.choose id)
+        let uniqueInnerColumn name =
+            sourceColumns.Value
+            |> List.filter (fun candidate -> equalsIgnoreCase candidate.Name name)
+            |> List.length
+            |> (=) 1
         let projectionIsSafe projection =
             if plainExistsProjection projection then true
             else
                 match projection.Expression, FromItem.tryQualifier source with
                 | QualifiedCol(qualifier, column), Some sourceQualifier
                     when equalsIgnoreCase qualifier sourceQualifier ->
-                    sourceColumns.Value |> List.exists (fun candidate -> equalsIgnoreCase candidate.Name column)
+                    uniqueInnerColumn column
+                | Col column, _ -> uniqueInnerColumn column
                 | _ -> false
         if not (select.Projections |> List.forall projectionIsSafe) then None
         else
