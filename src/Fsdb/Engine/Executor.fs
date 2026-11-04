@@ -782,6 +782,7 @@ type private StatementMemo =
       MaterializedCorrelatedRanges: Dictionary<FromItem, Dictionary<string, MaterializedRangeLookup option>>
       MaterializedCorrelatedNullBuckets: Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>
       PhysicalProjections: Dictionary<FromItem, PhysicalProjection option>
+      ScopedPhysicalProjections: Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>
       EqualityIndexMatches: Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
@@ -822,6 +823,7 @@ let private freshStatementMemo () =
       MaterializedCorrelatedNullBuckets =
         Dictionary<FromItem, Dictionary<string * NullTestKind, Value[] list>>(HashIdentity.Reference)
       PhysicalProjections = Dictionary<FromItem, PhysicalProjection option>(HashIdentity.Reference)
+      ScopedPhysicalProjections = Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>(HashIdentity.Reference)
       EqualityIndexMatches = Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>(HashIdentity.Reference)
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
@@ -15697,10 +15699,18 @@ and private tryPhysicalProjection
     (dbName: string)
     (source: FromItem)
     : PhysicalProjection option =
-    let projections = (currentStatementMemo ()).PhysicalProjections
-    // A rejected source shape is stable too; avoid rechecking it for each
-    // outer row of a correlated query.
-    getMemoized projections source (fun () -> tryPhysicalProjectionUncached store registry dbName source)
+    let memo = currentStatementMemo ()
+    let scope = currentCteScope ()
+    let compute () = tryPhysicalProjectionUncached store registry dbName source
+    // A rejected source shape is stable within one CTE binding too. Recursive
+    // iterations can replace that binding, so retain its map by identity.
+    if Map.isEmpty scope then
+        getMemoized memo.PhysicalProjections source compute
+    else
+        let byScope =
+            getMemoized memo.ScopedPhysicalProjections source (fun () ->
+                Dictionary<obj, PhysicalProjection option>(HashIdentity.Reference))
+        getMemoized byScope (box scope) compute
 
 and private tryPhysicalProjectionUncached
     (store: Store)

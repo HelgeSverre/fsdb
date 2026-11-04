@@ -24,5 +24,11 @@ percentage improvement. The result supports avoiding repeated unsuccessful
 classification for this shape. `just check` passed 3,870 tests, including
 computed-derived and CTE query cases, with no build warnings.
 
-The memo remains statement-local and uses the source AST node as its key.
-Broader query setup and correlated row costs remain open.
+The memo remains statement-local. Its source AST node key is now paired with
+the current CTE binding map's identity when a CTE scope is active. Recursive
+iterations can replace that map, so a success or miss from one binding must
+not be reused under another. The empty-scope path keeps its direct lookup.
+A follow-up [ShortRun](969c075a-quick.md) measured the scope-aware version at
+3.36 ms for this computed-derived case and 0.68 ms for correlated CTE equality;
+the earlier gains were retained, though these short runs are not precise
+speedup estimates. Broader query setup and correlated row costs remain open.
