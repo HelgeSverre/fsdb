@@ -19160,6 +19160,7 @@ let tests =
                           "POINT(50.2 5)", "POLYGON((50 0,50 10,52 10,52 0,50 0))", 0.0
                           "POINT(15 180)", "POLYGON((10 170,10 -170,20 -170,20 170,10 170))", 0.0
                           "POINT(85 0)", "POLYGON((80 -120,80 0,80 120,80 -120))", 0.0
+                          "POINT(41.00001 2.99999)", "POLYGON((40 0,40 4,44 4,44 0,40 0),(41 1,43 1,43 3,41 3,41 1))", 0.8351905929261193
                           "MULTIPOINT((10 10),(1 1))", "MULTIPOLYGON(((0 0,0 2,2 2,2 0,0 0)),((20 20,20 22,22 22,22 20,20 20)))", 0.0 ]
                     for point, polygon, expected in cases do
                         for first, second in [ point, polygon; polygon, point ] do

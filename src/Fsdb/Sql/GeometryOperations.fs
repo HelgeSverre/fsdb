@@ -338,12 +338,15 @@ let private geographicCrossTrackDistance referenceSystem point start endpoint =
     if Double.IsFinite best then min best endpointDistance else endpointDistance
 
 let private geographicPointSegmentDistance referenceSystem point start endpoint =
-    // Boost's geographic cross-track strategy orders endpoints by longitude
-    // before its inverse azimuths, endpoint tests, and Newton seed.
+    // Boost orders endpoints by longitude, then starts same-longitude
+    // meridian segments at the latitude with smaller absolute value.
     let start, endpoint =
-        let _, startLongitude = start
-        let _, endLongitude = endpoint
-        if startLongitude > endLongitude then endpoint, start else start, endpoint
+        let startLatitude, startLongitude = start
+        let endLatitude, endLongitude = endpoint
+        if startLongitude > endLongitude
+           || (startLongitude = endLongitude && abs startLatitude > abs endLatitude) then
+            endpoint, start
+        else start, endpoint
     let pointDistance = geographicPointDistance referenceSystem
     let length = pointDistance start endpoint
     let startDistance = pointDistance point start

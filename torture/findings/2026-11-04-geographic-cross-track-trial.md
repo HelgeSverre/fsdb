@@ -65,3 +65,14 @@ mismatches respectively. This is a substantial broader-distance gain, but
 the high-latitude corner behavior still needs the remaining Boost strategy
 details. Two formerly mismatching seeded line cases are pinned in the focused
 regression. All 31 geographic tests and the full 3,875-test suite passed.
+
+## Meridian endpoint ordering follow-up
+
+Boost also orders the latitudes of a same-longitude meridian segment by
+absolute value before computing inverse azimuths. Applying that rule in fsdb
+reduced near-hole point-to-polygon distance mismatches from 23 to 10 of 189.
+The 100 seeded point-to-line distances still have zero mismatches. The 412
+line relations and 189 point relations remain at 13 and three mismatches.
+The newly resolved high-latitude `POINT(41.00001 2.99999)` case is pinned in
+the point-to-polygon regression. The ten remaining distance cases include
+near-corner segment selection and numerical zero-distance disagreements.
