@@ -1136,6 +1136,19 @@ let tests =
                   [ [ Some "36" ] ]
                   "the second view changes through the LATERAL group"
 
+              Expect.equal
+                  (run store "UPDATE grouped_va va LEFT JOIN (grouped_link l JOIN LATERAL (SELECT r.id AS next_id FROM grouped_link r WHERE r.id=l.id) q ON TRUE JOIN grouped_vb vb ON vb.link_id=q.next_id) ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1")
+                  (Affected 2UL)
+                  "a group-local LATERAL read table keeps both joined views writable"
+              Expect.equal
+                  (rows store "SELECT n FROM grouped_a WHERE id=1")
+                  [ [ Some "17" ] ]
+                  "the first view changes through the LATERAL read table"
+              Expect.equal
+                  (rows store "SELECT n FROM grouped_b WHERE id=1")
+                  [ [ Some "37" ] ]
+                  "the second view changes through the LATERAL read table"
+
           testCase "an unchecked outer join enforces only the inner view check"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

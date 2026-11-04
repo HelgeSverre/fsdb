@@ -4697,36 +4697,45 @@ let private updateSources: Parser<TableRef * Join list, unit> =
         let independentGroup (first: FromItem) (groupedJoins: Join list) =
             let available = HashSet<string>(StringComparer.OrdinalIgnoreCase)
             FromItem.tryQualifier first |> Option.iter (fun name -> available.Add name |> ignore)
-            let referencesOutside expression =
+            let referencesOutside (known: HashSet<string>) expression =
                 not (Expression.collectSubqueries expression).IsEmpty
                 || Expression.exists (function
                     | Col _ -> true
-                    | QualifiedCol(name, _) -> not (available.Contains name)
+                    | QualifiedCol(name, _) -> not (known.Contains name)
                     | _ -> false) expression
             groupedJoins
             |> List.forall (fun inner ->
                 let sourceAllowed =
                     match inner.Table with
                     | FromTable _ | FromSubquery _ -> true
-                    | FromJsonTable(expression, _, _, _) -> not (referencesOutside expression)
+                    | FromJsonTable(expression, _, _, _) -> not (referencesOutside available expression)
                     | FromLateral(PlainSelect select, _)
-                        when select.From.IsNone && select.Joins.IsEmpty && select.Ctes.IsEmpty
+                        when select.Joins.IsEmpty && select.Ctes.IsEmpty
                              && select.Windows.IsEmpty && select.IntoVariables.IsEmpty
                              && select.IntoFile.IsNone && select.Locking.IsEmpty ->
-                        [ yield! select.Projections |> List.map _.Expression
-                          yield! Option.toList select.Where
-                          yield! select.GroupBy
-                          yield! Option.toList select.Having
-                          yield! select.OrderBy |> List.map fst
-                          yield! Option.toList select.Limit
-                          yield! Option.toList select.Offset ]
-                        |> List.forall (referencesOutside >> not)
+                        let known = HashSet<string>(available, StringComparer.OrdinalIgnoreCase)
+                        let localSourceAllowed =
+                            match select.From with
+                            | None -> true
+                            | Some(FromTable table) ->
+                                known.Add(table.Alias |> Option.defaultValue table.Table) |> ignore
+                                true
+                            | _ -> false
+                        localSourceAllowed
+                        && ([ yield! select.Projections |> List.map _.Expression
+                              yield! Option.toList select.Where
+                              yield! select.GroupBy
+                              yield! Option.toList select.Having
+                              yield! select.OrderBy |> List.map fst
+                              yield! Option.toList select.Limit
+                              yield! Option.toList select.Offset ]
+                            |> List.forall (referencesOutside known >> not))
                     | _ -> false
                 if not sourceAllowed then false
                 else
                     FromItem.tryQualifier inner.Table
                     |> Option.iter (fun name -> available.Add name |> ignore)
-                    not (referencesOutside inner.On))
+                    not (referencesOutside available inner.On))
         // Reorient a first outer join with an independent group on the right.
         // LATERAL and JSON_TABLE expressions reaching the original left source
         // need that source in scope and keep their original association.

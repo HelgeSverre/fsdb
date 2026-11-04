@@ -199,6 +199,13 @@ original path. The maintained MySQL oracle matches 43 UPDATE cases and 26
 contended rebases. The focused F# regression pins both physical target rows,
 and the existing grouped mutation tests retain left-dependent lateral scope.
 
+A lateral SELECT with its own `FROM link r WHERE r.id=l.id` then exposed
+the same former 1146 error. The dependency check now adds that one local
+read-table alias to the known group aliases before validating the lateral
+expressions. Unknown or bare references, local joins, and nested query
+blocks remain excluded. The native oracle matches 44 UPDATE cases and 26
+contended rebases, and the focused F# regression checks both physical rows.
+
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:
 
