@@ -805,6 +805,9 @@ the same weak worker-scaling slope, so WAL work alone is not the full cause.
 A [same-run stage profile](benchmarks/results/2026-10-17-keyless-write-handler-stage-profile.md)
 locates eight-writer growth in both durable acknowledgement and execution work
 outside that acknowledgement; it does not yet isolate the latter's cause.
+A [November 4 durability-matched checkpoint](benchmarks/results/2026-11-04-durable-keyless-current.md)
+measures 0.50× MySQL with one writer and 0.28× with eight, leaving the
+eight-writer scaling ratio unchanged from the October 15 run.
 
 ## 8. Persistence and durability
 
