@@ -11,6 +11,11 @@ SHAPES = {
     "duplicate derived rows": "SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id",
     "union-all derived rows": "SELECT a.id,a.n,u.flag FROM (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) u JOIN a ON a.id=u.id",
     "union-all CTE rows": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
+    "union-all CTE ordered": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c ORDER BY flag DESC) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
+    "union-all CTE limited": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c LIMIT 3) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
+    "union-all CTE ordered limited": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c ORDER BY flag DESC LIMIT 2) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
+    "union-all CTE offset": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c ORDER BY flag DESC LIMIT 2 OFFSET 1) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
+    "union-all CTE renamed ordered": "WITH u(id,flag) AS (SELECT id AS raw_id,flag AS raw_flag FROM b UNION ALL SELECT id,aux FROM c ORDER BY raw_flag DESC LIMIT 2) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",
     "middle aggregates": "SELECT a.id,a.n,d1.flag,d2.aux FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN (SELECT id,SUM(aux) aux FROM c GROUP BY id) d2 ON d2.id=a.id",
     "middle JSON_TABLE": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN a ON a.id=d1.id JOIN JSON_TABLE(JSON_ARRAY(a.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=a.id",
     "derived JSON_TABLE target": "SELECT a.id,a.n,d1.flag,j.x FROM (SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 JOIN JSON_TABLE(JSON_ARRAY(d1.id),'$[*]' COLUMNS(x INT PATH '$')) j ON j.x=d1.id JOIN a ON a.id=j.x",
@@ -179,6 +184,29 @@ def main():
                                     connection, "SELECT id,n FROM a ORDER BY id"
                                 ) == ((1, 0), (2, 0))
                                 run(connection, "DROP VIEW vcj")
+
+                run(connection, "UPDATE a SET n=6")
+                run(
+                    connection,
+                    "CREATE VIEW union_ordered_checked AS WITH u(id,flag) AS "
+                    "(SELECT id AS raw_id,flag AS raw_flag FROM b UNION ALL "
+                    "SELECT id,aux FROM c ORDER BY raw_flag DESC LIMIT 2) "
+                    "SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id "
+                    "WHERE u.flag>a.n WITH CASCADED CHECK OPTION",
+                )
+                assert run(
+                    connection,
+                    "SELECT flag FROM union_ordered_checked ORDER BY flag DESC",
+                ) == ((9,), (8,))
+                assert (
+                    run(connection, "UPDATE union_ordered_checked SET n=7 WHERE id=1")
+                    == 1
+                )
+                assert_error(
+                    connection, "UPDATE union_ordered_checked SET n=8 WHERE id=1", 1369
+                )
+                assert run(connection, "SELECT n FROM a WHERE id=1") == ((7,),)
+                run(connection, "DROP VIEW union_ordered_checked")
 
                 run(connection, "CREATE TABLE insert_target(id INT PRIMARY KEY,n INT)")
                 run(

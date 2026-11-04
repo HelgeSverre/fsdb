@@ -1144,7 +1144,8 @@ update the physical target once, and a cascaded check rejects a value that
 fails for any joined row.
 An [independent UNION ALL CTE before that component](torture/findings/2026-11-04-union-cte-updatable-view.md)
 now has the same audited metadata, single-update, and CHECK OPTION behavior.
-Ordered or limited UNION bodies and other CTE compositions remain open.
+Ordered and limited UNION bodies, including OFFSET and explicit output-column
+renaming, are covered. Other CTE compositions remain open.
 
 ## 10. Stored routines, events, schedulers
 

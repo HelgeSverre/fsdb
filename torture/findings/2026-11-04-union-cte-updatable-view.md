@@ -9,15 +9,19 @@ orders of duplicate source rows.
 
 Fsdb previously rejected the view at creation with error 1368. Its writable
 view resolver treated only plain SELECT CTE bodies as read-only derived
-sources. It now inlines independent UNION bodies without a trailing ORDER BY,
-LIMIT, or OFFSET. Explicit CTE column names are applied to the first UNION
-branch, which defines the derived output names. The focused view regressions
-verify metadata, one physical update, duplicate rows, and atomic CHECK OPTION
-rejection.
+sources. It now inlines independent UNION bodies, including trailing ORDER BY,
+LIMIT, and OFFSET. Explicit CTE column names are applied in an outer
+projection after the UNION has sorted and limited its rows. Renaming the
+first branch instead made CHECK OPTION examine the wrong two rows: with
+flags 7, 8, and 9, MySQL accepts `n=7` and rejects `n=8` when the CTE keeps
+the highest two flags. The native oracle and fsdb regression pin both
+outcomes. The other focused cases verify metadata, one physical update,
+duplicate rows, and atomic CHECK OPTION rejection.
 
-This covers independent UNION bodies in this joined-view shape. Ordered or
-limited UNION bodies, dependent branches, nested CTEs, and broader security
-contexts remain to audit.
+This covers independent UNION bodies with distinct first-branch output names
+in this joined-view shape. Duplicate original names behind an explicit CTE
+column list, dependent branches, nested CTEs, and broader security contexts
+remain to audit.
 
 ```sh
 uv run --with pymysql python torture/scripts/composed-join-view-oracle.py

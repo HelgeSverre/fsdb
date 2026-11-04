@@ -133,6 +133,51 @@ let tests =
                   [ [ Some "2" ] ]
                   "the rejected CTE write leaves the target unchanged"
 
+              for suffix, tail in
+                  [ "ordered", " ORDER BY flag DESC"
+                    "limited", " LIMIT 3"
+                    "ordered_limited", " ORDER BY flag DESC LIMIT 2"
+                    "offset", " ORDER BY flag DESC LIMIT 2 OFFSET 1" ] do
+                  let view = "union_cte_" + suffix
+                  let definition =
+                      "CREATE VIEW " + view
+                      + " AS WITH u AS (SELECT id,flag FROM union_view_left UNION ALL SELECT id,aux AS flag FROM union_view_right"
+                      + tail
+                      + ") SELECT t.id,t.n,u.flag FROM u JOIN union_view_target t ON t.id=u.id WHERE t.n>=0 WITH CASCADED CHECK OPTION"
+                  expectOk (run store definition) ("create " + view)
+                  Expect.equal
+                      (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{view}'"))
+                      [ [ Some "YES" ] ]
+                      (view + " remains writable")
+                  Expect.equal (run store ($"UPDATE {view} SET n=n+1 WHERE id=1")) (Affected 1UL) view
+
+              expectOk
+                  (run store "CREATE VIEW union_cte_renamed_ordered AS WITH u(id,flag) AS (SELECT id AS raw_id,flag AS raw_flag FROM union_view_left UNION ALL SELECT id,aux FROM union_view_right ORDER BY raw_flag DESC LIMIT 2) SELECT t.id,t.n,u.flag FROM u JOIN union_view_target t ON t.id=u.id WHERE u.flag>t.n WITH CASCADED CHECK OPTION")
+                  "create ordered UNION CTE with renamed output columns"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='union_cte_renamed_ordered'")
+                  [ [ Some "YES" ] ]
+                  "renamed ordered UNION CTE keeps the target writable"
+              Expect.equal
+                  (rows store "SELECT flag FROM union_cte_renamed_ordered ORDER BY flag DESC")
+                  [ [ Some "9" ]; [ Some "8" ] ]
+                  "the internal LIMIT keeps the two highest flags before the update"
+              Expect.equal
+                  (run store "UPDATE union_cte_renamed_ordered SET n=n+1 WHERE id=1")
+                  (Affected 1UL)
+                  "the internal UNION order resolves its original output alias"
+              Expect.equal
+                  (rows store "SELECT flag FROM union_cte_renamed_ordered ORDER BY flag DESC")
+                  [ [ Some "9" ]; [ Some "8" ] ]
+                  "the internal LIMIT keeps the two highest flags"
+              match run store "UPDATE union_cte_renamed_ordered SET n=8 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected ordered UNION CTE CHECK OPTION rejection, got %A" other
+              Expect.equal
+                  (rows store "SELECT n FROM union_view_target WHERE id=1")
+                  [ [ Some "7" ] ]
+                  "the rejected ordered CTE write is atomic"
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()

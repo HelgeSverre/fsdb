@@ -1787,9 +1787,8 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         let independentBody =
             match cte.Body with
             | PlainSelect body -> independentSelect body
-            | UnionSelect(first, rest, orderBy, limit, offset) ->
-                orderBy.IsEmpty && limit.IsNone && offset.IsNone
-                && independentSelect first && (rest |> List.forall (snd >> independentSelect))
+            | UnionSelect(first, rest, _, _, _) ->
+                independentSelect first && (rest |> List.forall (snd >> independentSelect))
 
         if cte.Recursive || not (referencesCte cte.CteName) || not independentBody then None
         else
@@ -1810,8 +1809,36 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                             ||> List.map2 (fun name projection -> { projection with Alias = Some name })
                         match cte.Body with
                         | PlainSelect body -> Some(PlainSelect { body with Projections = projections })
-                        | UnionSelect(_, rest, orderBy, limit, offset) ->
-                            Some(UnionSelect({ first with Projections = projections }, rest, orderBy, limit, offset)))
+                        | UnionSelect _ ->
+                            let originalNames = expanded |> List.map projectionName
+                            if originalNames |> List.exists Option.isNone then None
+                            else
+                                let originalNames = originalNames |> List.choose id
+                                if (originalNames |> List.map _.ToLowerInvariant() |> Set.ofList).Count <> originalNames.Length then None
+                                else
+                                    let alias = "__fsdb_cte_output"
+                                    let renamed =
+                                        List.map2 (fun original name ->
+                                            Projection.create (QualifiedCol(alias, original)) (Some name)) originalNames cte.CteColumns
+                                    Some(PlainSelect
+                                        { Projections = renamed
+                                          IntoVariables = []
+                                          IntoFile = None
+                                          Distinct = false
+                                          CalculateFoundRows = false
+                                          StraightJoin = false
+                                          From = Some(FromSubquery(cte.Body, alias))
+                                          Joins = []
+                                          Where = None
+                                          GroupBy = []
+                                          Rollup = false
+                                          Windows = []
+                                          Ctes = []
+                                          Having = None
+                                          OrderBy = []
+                                          Limit = None
+                                          Offset = None
+                                          Locking = [] }))
 
     let inlineBodies =
         select.Ctes
