@@ -1929,6 +1929,11 @@ repeats those queries and the point control across three ShortRuns. Derived
 equality stays near 1 ms on fsdb, while noisy MySQL and point controls still
 do not isolate a correlated-planner regression or justify changing access-path
 heuristics.
+The [November 4 current-head check](benchmarks/results/2026-11-04-correlated-planner-current-check.md)
+again measures roughly 1 ms for the derived and CTE equality shapes, versus
+about 0.24 ms on MySQL; the point-key control has a larger relative latency
+gap. This points the next investigation at statement setup and projection
+costs before changing candidate selection.
 
 The [correlated functional-key profile](benchmarks/results/2bb13632-quick.md)
 extends that coverage to compatible unary and composed expression indexes.
