@@ -715,6 +715,34 @@ let private foldLegacySpace (value: string) =
             elif c <> '\u200c' && c <> '\u200d' && c <> '\u2060' then result.Append(c) |> ignore
         result.ToString()
 
+// MySQL 8.4.11 legacy UCA primary weights for ASCII 0x20–0x60 and 0x7B–0x7E.
+// Lowercase letters share the uppercase weight.
+let private unicode40AsciiWeights =
+    [|
+        0x0209; 0x0251; 0x027E; 0x02D2; 0x0E0F; 0x02D3; 0x02CF; 0x0277
+        0x0288; 0x0289; 0x02C8; 0x0428; 0x022F; 0x0221; 0x025D; 0x02CC
+        0x0E29; 0x0E2A; 0x0E2B; 0x0E2C; 0x0E2D; 0x0E2E; 0x0E2F; 0x0E30
+        0x0E31; 0x0E32; 0x023D; 0x023A; 0x042C; 0x042D; 0x042E; 0x0255
+        0x02C7; 0x0E33; 0x0E4A; 0x0E60; 0x0E6D; 0x0E8B; 0x0EB9; 0x0EC1
+        0x0EE1; 0x0EFB; 0x0F10; 0x0F21; 0x0F2E; 0x0F5B; 0x0F64; 0x0F82
+        0x0FA7; 0x0FB4; 0x0FC0; 0x0FEA; 0x1002; 0x101F; 0x1044; 0x1051
+        0x105A; 0x105E; 0x106A; 0x028A; 0x02CE; 0x028B; 0x020F; 0x021B
+        0x020C; 0x028C; 0x0430; 0x028D; 0x0433
+    |]
+
+let private unicode52AsciiWeights =
+    [|
+        0x020A; 0x026E; 0x02F5; 0x0362; 0x11E1; 0x0363; 0x035F; 0x02EE
+        0x02FF; 0x0300; 0x0357; 0x0550; 0x0234; 0x0223; 0x0281; 0x035C
+        0x1205; 0x1206; 0x1207; 0x1208; 0x1209; 0x120A; 0x120B; 0x120C
+        0x120D; 0x120E; 0x0247; 0x0243; 0x0554; 0x0555; 0x0556; 0x0273
+        0x0356; 0x120F; 0x1225; 0x123D; 0x1250; 0x126B; 0x12A3; 0x12B0
+        0x12D3; 0x12EC; 0x1305; 0x131E; 0x1330; 0x135F; 0x136D; 0x138E
+        0x13B3; 0x13C8; 0x13DA; 0x1410; 0x1433; 0x1453; 0x147B; 0x148D
+        0x1497; 0x149C; 0x14AD; 0x0301; 0x035E; 0x0302; 0x0211; 0x021D
+        0x020E; 0x0303; 0x0558; 0x0304; 0x055B
+    |]
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) =
@@ -805,6 +833,9 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
 
     let legacyIdeographWeight (s: string) =
         let general = name = "utf8mb4_general_ci" || name = "utf8mb3_general_ci"
+        let asciiWeights =
+            if name = "utf8mb4_unicode_520_ci" then unicode52AsciiWeights
+            else unicode40AsciiWeights
         let isLegacy =
             general || name = "utf8mb4_unicode_ci"
             || name = "utf8mb4_unicode_520_ci"
@@ -826,10 +857,14 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     else
                         None
                 match lead with
-                | None when general && codepoint >= 0x20 && codepoint <= 0x7E ->
+                | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =
-                        if codepoint >= int 'a' && codepoint <= int 'z' then codepoint - 0x20
-                        else codepoint
+                        let uppercase =
+                            if codepoint >= int 'a' && codepoint <= int 'z' then codepoint - 0x20
+                            else codepoint
+                        if general then uppercase
+                        elif uppercase <= 0x60 then asciiWeights[uppercase - 0x20]
+                        else asciiWeights[uppercase - 0x7B + 65]
                     bytes.Add(byte (weight >>> 8))
                     bytes.Add(byte weight)
                 | None -> supported <- false

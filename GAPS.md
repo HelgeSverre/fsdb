@@ -1247,7 +1247,8 @@ of their posting and matched rows.
 now match all 137,910 adjacent-pair oracle cases across Extension A and the
 unified-ideograph range under five `utf8mb3`/`utf8mb4` collations. Printable
 ASCII followed by a BMP ideograph also matches all 95 oracle cases in each
-`*_general_ci` collation. Other mixed text, supplementary ideographs, and
+of those five collations, using MySQL's UCA 4.0 and 5.2 ASCII primary weights
+for the Unicode collations. Other mixed text, supplementary ideographs, and
 other exact legacy weights remain open.
 
 The [remaining supplementary compatibility-ideograph block](torture/findings/2026-10-17-compatibility-ideograph-audit.md)
