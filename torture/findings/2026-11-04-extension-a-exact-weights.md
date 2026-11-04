@@ -62,3 +62,10 @@ membership and relevance continue to use the existing collation keys.
 Other characters in a string still use the ICU-based fallback, including
 mixed Latin/CJK text and `AS CHAR` padding. Supplementary ideographs and
 other legacy-collation weight families remain open.
+
+The equivalent `utf8mb3_general_ci` and `utf8mb3_unicode_ci` collations use
+the same BMP weights. The oracle now selects the matching charset introducer
+and compared all 55,164 adjacent pairs across the two ranges and both
+`utf8mb3` collations, again with zero mismatches. A cross-range pair also
+matched under both. Across all five collations, the audited adjacent-pair
+total is 137,910 with zero exact-byte differences.

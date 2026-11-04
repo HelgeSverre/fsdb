@@ -804,10 +804,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             Charset.tryEncodeStrict charset s |> Option.defaultWith (fun () -> binaryBytesWithoutPadding s)
 
     let legacyIdeographWeight (s: string) =
-        let general = name = "utf8mb4_general_ci"
+        let general = name = "utf8mb4_general_ci" || name = "utf8mb3_general_ci"
         let isLegacy =
             general || name = "utf8mb4_unicode_ci"
             || name = "utf8mb4_unicode_520_ci"
+            || name = "utf8mb3_unicode_ci"
         if not isLegacy || s.Length = 0 then None
         else
             let bytes = ResizeArray<byte>()

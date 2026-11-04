@@ -28,7 +28,13 @@ def main():
     parser.add_argument("stop", type=lambda value: int(value, 16))
     parser.add_argument(
         "--collation",
-        choices=("utf8mb4_general_ci", "utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci"),
+        choices=(
+            "utf8mb4_general_ci",
+            "utf8mb4_unicode_ci",
+            "utf8mb4_unicode_520_ci",
+            "utf8mb3_general_ci",
+            "utf8mb3_unicode_ci",
+        ),
         default="utf8mb4_general_ci",
     )
     parser.add_argument(
@@ -122,8 +128,11 @@ def main():
                         elif args.pair_with is not None:
                             sample += chr(args.pair_with)
                         encoded = sample.encode("utf-8").hex()
+                        charset = args.collation.split("_", 1)[0]
                         query = (
-                            "SELECT HEX(WEIGHT_STRING(_utf8mb4 0x"
+                            "SELECT HEX(WEIGHT_STRING(_"
+                            + charset
+                            + " 0x"
                             + encoded
                             + " COLLATE "
                             + args.collation

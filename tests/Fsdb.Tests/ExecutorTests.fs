@@ -651,6 +651,8 @@ let tests =
                     let cases =
                         [ "\u3B00\u3B01", "utf8mb4_general_ci", "3B003B01"
                           "\u3B00\u3B01", "utf8mb4_unicode_ci", "FB80BB00FB80BB01"
+                          "\u3B00\u3B01", "utf8mb3_general_ci", "3B003B01"
+                          "\u3B00\u3B01", "utf8mb3_unicode_ci", "FB80BB00FB80BB01"
                           "\u4DB5\u4DB6", "utf8mb4_unicode_520_ci", "FB80CDB5FBC0CDB6"
                           "\u7FFF\u8000", "utf8mb4_unicode_ci", "FB40FFFFFB418000"
                           "\u9FA5\u9FA6", "utf8mb4_unicode_ci", "FB419FA5FBC19FA6"
