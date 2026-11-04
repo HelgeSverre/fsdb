@@ -43,24 +43,42 @@ def main():
         with (root / "mysql.log").open("w") as log:
             try:
                 subprocess.run(
-                    ["mysqld", "--no-defaults", "--initialize-insecure", f"--datadir={data}",
-                     "--innodb-redo-log-capacity=64M"],
-                    check=True, stdout=log, stderr=subprocess.STDOUT,
+                    [
+                        "mysqld",
+                        "--no-defaults",
+                        "--initialize-insecure",
+                        f"--datadir={data}",
+                        "--innodb-redo-log-capacity=64M",
+                    ],
+                    check=True,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
                 )
                 server = subprocess.Popen(
-                    ["mysqld", "--no-defaults", f"--datadir={data}", "--skip-networking",
-                     f"--socket={socket}", f"--pid-file={root / 'mysql.pid'}", "--mysqlx=0",
-                     "--innodb-buffer-pool-size=64M", "--innodb-redo-log-capacity=64M"],
-                    stdout=log, stderr=subprocess.STDOUT,
+                    [
+                        "mysqld",
+                        "--no-defaults",
+                        f"--datadir={data}",
+                        "--skip-networking",
+                        f"--socket={socket}",
+                        f"--pid-file={root / 'mysql.pid'}",
+                        "--mysqlx=0",
+                        "--innodb-buffer-pool-size=64M",
+                        "--innodb-redo-log-capacity=64M",
+                    ],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
                 )
                 connection = connect(socket)
                 version = run(connection, "SELECT VERSION()")[0][0]
                 assert version.startswith("8.4.11"), version
                 for sql in [
-                    "CREATE DATABASE probe", "USE probe",
+                    "CREATE DATABASE probe",
+                    "USE probe",
                     "CREATE TABLE target(id INT PRIMARY KEY,n INT)",
                     "INSERT INTO target VALUES(1,0)",
-                    "CREATE USER inner_owner", "CREATE USER outer_owner",
+                    "CREATE USER inner_owner",
+                    "CREATE USER outer_owner",
                     "GRANT SELECT,UPDATE ON probe.target TO inner_owner",
                     "GRANT CREATE VIEW ON probe.* TO inner_owner,outer_owner",
                     "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW inner_view AS SELECT id,n FROM target",
@@ -82,7 +100,12 @@ def main():
                 run(connection, "GRANT SELECT ON probe.target TO inner_owner")
                 run(connection, "REVOKE UPDATE ON probe.target FROM inner_owner")
                 assert_error(connection, update, 1356)
-                writer = pymysql.connect(unix_socket=socket, user="nested_writer", autocommit=True, database="probe")
+                writer = pymysql.connect(
+                    unix_socket=socket,
+                    user="nested_writer",
+                    autocommit=True,
+                    database="probe",
+                )
                 try:
                     assert_error(writer, update, 1356)
                 finally:
@@ -96,14 +119,24 @@ def main():
                     "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW json_outer AS SELECT id,n AS metric,x FROM json_inner",
                 ]:
                     run(connection, sql)
-                assert run(connection, "UPDATE json_outer SET metric=metric+1 WHERE id=1") == 1
+                assert (
+                    run(connection, "UPDATE json_outer SET metric=metric+1 WHERE id=1")
+                    == 1
+                )
                 run(connection, "REVOKE SELECT ON probe.target FROM inner_owner")
-                denied = assert_error(connection, "UPDATE json_outer SET metric=metric+1 WHERE id=1", 1143)
+                denied = assert_error(
+                    connection, "UPDATE json_outer SET metric=metric+1 WHERE id=1", 1143
+                )
                 assert "column 'id'" in denied[1], denied
                 run(connection, "GRANT SELECT(id) ON probe.target TO inner_owner")
-                assert_error(connection, "UPDATE json_outer SET metric=metric WHERE id=1", 1356)
+                assert_error(
+                    connection, "UPDATE json_outer SET metric=metric WHERE id=1", 1356
+                )
                 run(connection, "GRANT SELECT(n) ON probe.target TO inner_owner")
-                assert run(connection, "UPDATE json_outer SET metric=metric WHERE id=1") == 0
+                assert (
+                    run(connection, "UPDATE json_outer SET metric=metric WHERE id=1")
+                    == 0
+                )
                 run(connection, "REVOKE SELECT(id,n) ON probe.target FROM inner_owner")
                 assert run(connection, "SELECT n FROM target") == ((3,),)
                 run(connection, "GRANT SELECT ON probe.target TO inner_owner")
@@ -116,13 +149,20 @@ def main():
                     "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW joined_outer AS SELECT id,n AS metric FROM joined_inner",
                 ]:
                     run(connection, sql)
-                assert run(connection, "UPDATE joined_outer SET metric=metric WHERE id=1") == 0
+                assert (
+                    run(connection, "UPDATE joined_outer SET metric=metric WHERE id=1")
+                    == 0
+                )
                 run(connection, "REVOKE SELECT ON probe.target FROM inner_owner")
-                denied = assert_error(connection, "UPDATE joined_outer SET metric=metric WHERE id=1", 1143)
+                denied = assert_error(
+                    connection, "UPDATE joined_outer SET metric=metric WHERE id=1", 1143
+                )
                 assert "column 'id'" in denied[1], denied
                 run(connection, "GRANT SELECT ON probe.target TO inner_owner")
                 run(connection, "REVOKE SELECT ON probe.companion FROM inner_owner")
-                denied = assert_error(connection, "UPDATE joined_outer SET metric=metric WHERE id=1", 1143)
+                denied = assert_error(
+                    connection, "UPDATE joined_outer SET metric=metric WHERE id=1", 1143
+                )
                 assert "column 'id' in table 'companion'" in denied[1], denied
                 run(connection, "GRANT SELECT ON probe.companion TO inner_owner")
                 for sql in [
@@ -131,9 +171,19 @@ def main():
                     "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW dependent_outer AS SELECT id,n AS metric,x FROM dependent_inner",
                 ]:
                     run(connection, sql)
-                assert run(connection, "UPDATE dependent_outer SET metric=metric+1 WHERE id=1") == 1
+                assert (
+                    run(
+                        connection,
+                        "UPDATE dependent_outer SET metric=metric+1 WHERE id=1",
+                    )
+                    == 1
+                )
                 run(connection, "REVOKE SELECT ON probe.target FROM inner_owner")
-                assert_error(connection, "UPDATE dependent_outer SET metric=metric+1 WHERE id=1", 1143)
+                assert_error(
+                    connection,
+                    "UPDATE dependent_outer SET metric=metric+1 WHERE id=1",
+                    1143,
+                )
                 assert run(connection, "SELECT n FROM target") == ((4,),)
                 run(connection, "GRANT SELECT ON probe.target TO inner_owner")
                 for sql in [
@@ -143,37 +193,118 @@ def main():
                     "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW invoker_outer AS SELECT id,n AS metric,x FROM invoker_inner",
                 ]:
                     run(connection, sql)
-                assert run(connection, "UPDATE invoker_outer SET metric=metric WHERE id=1") == 0
+                assert (
+                    run(connection, "UPDATE invoker_outer SET metric=metric WHERE id=1")
+                    == 0
+                )
                 run(connection, "REVOKE SELECT ON probe.target FROM outer_owner")
-                denied = assert_error(connection, "UPDATE invoker_outer SET metric=metric WHERE id=1", 1143)
+                denied = assert_error(
+                    connection,
+                    "UPDATE invoker_outer SET metric=metric WHERE id=1",
+                    1143,
+                )
                 assert "outer_owner" in denied[1] and "column 'id'" in denied[1], denied
                 run(connection, "GRANT SELECT ON probe.target TO outer_owner")
-                inner = pymysql.connect(unix_socket=socket, user="inner_owner", autocommit=True, database="probe")
+                inner = pymysql.connect(
+                    unix_socket=socket,
+                    user="inner_owner",
+                    autocommit=True,
+                    database="probe",
+                )
                 try:
                     run(inner, "CREATE VIEW inner_secured AS SELECT id,n FROM target")
                 finally:
                     inner.close()
-                run(connection, "GRANT SELECT,UPDATE ON probe.inner_secured TO outer_owner")
-                outer = pymysql.connect(unix_socket=socket, user="outer_owner", autocommit=True, database="probe")
+                run(
+                    connection,
+                    "GRANT SELECT,UPDATE ON probe.inner_secured TO outer_owner",
+                )
+                outer = pymysql.connect(
+                    unix_socket=socket,
+                    user="outer_owner",
+                    autocommit=True,
+                    database="probe",
+                )
                 try:
-                    run(outer, "CREATE VIEW outer_secured AS SELECT id,n FROM inner_secured")
+                    run(
+                        outer,
+                        "CREATE VIEW outer_secured AS SELECT id,n FROM inner_secured",
+                    )
                 finally:
                     outer.close()
-                run(connection, "GRANT SELECT,UPDATE ON probe.outer_secured TO nested_writer")
+                run(
+                    connection,
+                    "GRANT SELECT,UPDATE ON probe.outer_secured TO nested_writer",
+                )
                 run(connection, "REVOKE UPDATE ON probe.target FROM inner_owner")
-                writer = pymysql.connect(unix_socket=socket, user="nested_writer", autocommit=True, database="probe")
+                writer = pymysql.connect(
+                    unix_socket=socket,
+                    user="nested_writer",
+                    autocommit=True,
+                    database="probe",
+                )
                 try:
-                    assert_error(writer, "UPDATE outer_secured SET n=n+1 WHERE id=1", 1356)
+                    assert_error(
+                        writer, "UPDATE outer_secured SET n=n+1 WHERE id=1", 1356
+                    )
                 finally:
                     writer.close()
-                print(f"MySQL {version}: direct layered grants 1356; joined-view key denial 1143, projection denial 1356")
+                for sql in [
+                    "GRANT UPDATE ON probe.target TO inner_owner",
+                    "CREATE TABLE lateral_source(id INT,flag INT)",
+                    "INSERT INTO lateral_source VALUES(1,7),(1,8)",
+                    "GRANT SELECT ON probe.lateral_source TO inner_owner",
+                    "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW target_first_control AS SELECT t.id,t.n,src.flag FROM target t JOIN lateral_source src ON src.id=t.id",
+                    "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW source_first_control AS SELECT t.id,t.n,src.flag FROM lateral_source src JOIN target t ON t.id=src.id",
+                    "CREATE DEFINER='inner_owner'@'%' SQL SECURITY DEFINER VIEW lateral_union_inner AS SELECT t.id,t.n,u.flag FROM lateral_source src JOIN LATERAL (SELECT src.id AS id,src.flag AS flag UNION DISTINCT SELECT src.id,src.flag+1) u ON TRUE JOIN target t ON t.id=u.id",
+                    "GRANT SELECT,UPDATE ON probe.lateral_union_inner TO outer_owner",
+                    "CREATE DEFINER='outer_owner'@'%' SQL SECURITY DEFINER VIEW lateral_union_outer AS SELECT id,n AS metric,flag FROM lateral_union_inner",
+                ]:
+                    run(connection, sql)
+                assert (
+                    run(connection, "UPDATE target_first_control SET n=n WHERE id=1")
+                    == 0
+                )
+                assert_error(
+                    connection, "UPDATE source_first_control SET n=n WHERE id=1", 1356
+                )
+                assert_error(
+                    connection, "UPDATE lateral_union_inner SET n=n WHERE id=1", 1356
+                )
+                run(connection, "GRANT UPDATE ON probe.lateral_source TO inner_owner")
+                assert (
+                    run(
+                        connection,
+                        "UPDATE lateral_union_outer SET metric=metric+1 WHERE id=1",
+                    )
+                    == 1
+                )
+                run(
+                    connection, "REVOKE SELECT ON probe.lateral_source FROM inner_owner"
+                )
+                assert_error(
+                    connection,
+                    "UPDATE lateral_union_outer SET metric=metric+1 WHERE id=1",
+                    1356,
+                )
+                print(
+                    f"MySQL {version}: direct layered grants 1356; joined-view key denial 1143, projection denial 1356"
+                )
             finally:
                 if connection:
                     connection.close()
                 if server and server.poll() is None:
                     subprocess.run(
-                        ["mysqladmin", "--no-defaults", f"--socket={socket}", "-uroot", "shutdown"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        [
+                            "mysqladmin",
+                            "--no-defaults",
+                            f"--socket={socket}",
+                            "-uroot",
+                            "shutdown",
+                        ],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                     )
                     server.wait(timeout=20)
 

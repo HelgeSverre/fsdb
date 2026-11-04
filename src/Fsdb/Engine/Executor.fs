@@ -28841,6 +28841,15 @@ let rec executeAs
 
                 let physicalUpdate = Update { authorizationUpdate with From = from; Joins = joins }
 
+                // MySQL checks UPDATE on the leading table of a writable join view,
+                // even when the assignment writes a later table in the join.
+                let leadingSourceUpdate =
+                    if equalsIgnoreCase from.Table view.Table
+                       && equalsIgnoreCase (from.Database |> Option.defaultValue view.Database) view.Database then
+                        []
+                    else
+                        [ "UPDATE", Auth.OnTable(from.Database |> Option.defaultValue view.ViewDatabase, from.Table) ]
+
                 let authorizeLayered () =
                     let invalid () = Error(ViewGrantDenied(invalidViewError view.ViewDatabase view.ViewName))
 
@@ -28910,6 +28919,10 @@ let rec executeAs
                                     store current access.SecurityType access.Definer joinRequirements
                                 |> Result.mapError JoinColumnDenied)
                             |> Result.bind (fun _ ->
+                                registryForViewRequirements
+                                    store current access.SecurityType access.Definer leadingSourceUpdate
+                                |> Result.mapError ViewGrantDenied)
+                            |> Result.bind (fun _ ->
                                 registryForViewSecurity
                                     store current access.SecurityType access.Definer access.Database physicalUpdate
                                 |> Result.mapError ViewGrantDenied)
@@ -28926,8 +28939,11 @@ let rec executeAs
                          | ViewGrantDenied(code, message) -> invalidGrant (code, message)
                          | JoinColumnDenied(code, message) -> code, message)
                  else
-                     registryForViewSecurity
-                         store registry view.SecurityType view.Definer view.ViewDatabase physicalUpdate
+                     registryForViewRequirements
+                         store registry view.SecurityType view.Definer leadingSourceUpdate
+                     |> Result.bind (fun current ->
+                         registryForViewSecurity
+                             store current view.SecurityType view.Definer view.ViewDatabase physicalUpdate)
                      |> Result.mapError invalidGrant)
                 |> Result.bind checkReadPaths
                 |> Result.bind (fun current -> checkPath current componentPath)

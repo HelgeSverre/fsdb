@@ -926,6 +926,11 @@ audited joined views return 1143 for the first denied join column and 1356
 when only a projected column remains denied; an inner INVOKER view under an
 outer DEFINER layer uses the outer definer's base grants. Broader grant
 ordering across multi-source layers remains open.
+MySQL also checks UPDATE on the first physical source of an updatable join
+view, even when the assignment writes a later table. Fsdb now enforces this
+for direct and layered views; the target-first control needs only SELECT on
+its joined read source. The MySQL 8.4.11 oracle and regression cover a
+source-first join and a dependent LATERAL UNION read source.
 [Aggregate-derived read sources in a layered writable join](torture/findings/2026-10-15-layered-derived-view-grants.md)
 now report 1356 for revoked source grants before a physical target join-key
 denial; a revoked target read alone still reports 1143. An audited

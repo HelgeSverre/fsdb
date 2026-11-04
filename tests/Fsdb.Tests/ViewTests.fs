@@ -309,6 +309,41 @@ let tests =
               | other -> failtestf "expected dependent UNION CHECK OPTION rejection, got %A" other
               Expect.equal (rows store "SELECT n FROM lateral_union_target WHERE id=1") [ [ Some "1" ] ] "rejection is atomic"
 
+          testCase "layered dependent lateral UNION checks its definer grants"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE secured_union_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE secured_union_source(id INT,flag INT)"
+                    "INSERT INTO secured_union_target VALUES(1,0)"
+                    "INSERT INTO secured_union_source VALUES(1,7),(1,8)"
+                    "CREATE USER union_inner_owner"
+                    "CREATE USER union_outer_owner"
+                    "GRANT SELECT,UPDATE ON fsdb.secured_union_target TO union_inner_owner"
+                    "GRANT SELECT ON fsdb.secured_union_source TO union_inner_owner"
+                    "GRANT CREATE VIEW ON fsdb.* TO union_inner_owner,union_outer_owner"
+                    "CREATE DEFINER='union_inner_owner'@'%' SQL SECURITY DEFINER VIEW secured_target_first AS SELECT t.id,t.n,src.flag FROM secured_union_target t JOIN secured_union_source src ON src.id=t.id"
+                    "CREATE DEFINER='union_inner_owner'@'%' SQL SECURITY DEFINER VIEW secured_source_first AS SELECT t.id,t.n,src.flag FROM secured_union_source src JOIN secured_union_target t ON t.id=src.id"
+                    "CREATE DEFINER='union_inner_owner'@'%' SQL SECURITY DEFINER VIEW secured_union_inner AS SELECT t.id,t.n,u.flag FROM secured_union_source src JOIN LATERAL (SELECT src.id AS id,src.flag AS flag UNION DISTINCT SELECT src.id,src.flag+1) u ON TRUE JOIN secured_union_target t ON t.id=u.id"
+                    "GRANT SELECT,UPDATE ON fsdb.secured_union_inner TO union_outer_owner"
+                    "CREATE DEFINER='union_outer_owner'@'%' SQL SECURITY DEFINER VIEW secured_union_outer AS SELECT id,n AS metric,flag FROM secured_union_inner" ] do
+                  expectOk (run store sql) sql
+              Expect.equal (run store "UPDATE secured_target_first SET n=n WHERE id=1") (Affected 0UL) "target-first view needs no source UPDATE grant"
+              match run store "UPDATE secured_source_first SET n=n WHERE id=1" with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected source-first view to require its leading source UPDATE grant, got %A" other
+              let update () = run store "UPDATE secured_union_outer SET metric=metric+1 WHERE id=1"
+              match update () with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected missing lateral-source UPDATE grant to invalidate the view, got %A" other
+              expectOk (run store "GRANT UPDATE ON fsdb.secured_union_source TO union_inner_owner") "grant lateral-source update"
+              Expect.equal (update ()) (Affected 1UL) "complete definer grants allow one physical update"
+              expectOk (run store "REVOKE SELECT ON fsdb.secured_union_source FROM union_inner_owner") "revoke source read"
+              match update () with
+              | Err(1356, _) -> ()
+              | other -> failtestf "expected revoked lateral-source read to invalidate the view, got %A" other
+              Expect.equal (rows store "SELECT n FROM secured_union_target") [ [ Some "1" ] ] "denied writes leave the target unchanged"
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()
