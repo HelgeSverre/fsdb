@@ -849,6 +849,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 let supplementaryIdeograph =
                     (codepoint >= 0x20000 && codepoint <= 0x2EBEF)
                     || (codepoint >= 0x30000 && codepoint <= 0x323AF)
+                let supplementaryCompatibility = codepoint >= 0x2F800 && codepoint <= 0x2FA1F
                 // UCA 4.0/5.2 assigns ideographs through these boundaries;
                 // later scalars in the same BMP blocks use the unassigned lead.
                 let lead =
@@ -859,6 +860,24 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     else
                         None
                 match lead with
+                | None when supplementaryCompatibility && name.StartsWith("utf8mb4_") ->
+                    let weights =
+                        if name = "utf8mb4_unicode_520_ci" then
+                            let mapped =
+                                rune.ToString().Normalize(NormalizationForm.FormKC).EnumerateRunes()
+                                |> Seq.head
+                                |> fun value -> value.Value
+                            let implicitLead =
+                                if mapped = codepoint then 0xFBC0
+                                elif mapped >= 0x10000 then 0xFB80
+                                elif mapped <= 0x4DB5 then 0xFB80
+                                elif mapped <= 0x9FA5 then 0xFB40
+                                else 0xFBC0
+                            [ implicitLead + (mapped >>> 15); 0x8000 ||| (mapped &&& 0x7FFF) ]
+                        else [ 0xFFFD ]
+                    for weight in weights do
+                        bytes.Add(byte (weight >>> 8))
+                        bytes.Add(byte weight)
                 | None when supplementaryIdeograph && name.StartsWith("utf8mb4_") ->
                     let weights =
                         if name = "utf8mb4_unicode_520_ci" then

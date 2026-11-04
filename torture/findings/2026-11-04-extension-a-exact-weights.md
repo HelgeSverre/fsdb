@@ -87,7 +87,24 @@ Five sampled ranges near the start and boundaries of those blocks produced
 An additional 384 adjacent-pair and 96 ASCII-suffix comparisons also matched.
 The UCA 5.2 formula was checked against sampled emoji, musical, Deseret, and
 compatibility-ideograph blocks before limiting it to unified ideographs;
-those other blocks do not all follow this formula and remain open.
+those other blocks do not all follow this formula. Compatibility ideographs
+are handled separately below, while the other blocks remain open.
+
+## Supplementary compatibility ideographs
+
+For U+2F800–U+2FA1F, MySQL 8.4.11 returns `FFFD` under
+`utf8mb4_general_ci` and `utf8mb4_unicode_ci`. Under
+`utf8mb4_unicode_520_ci`, 542 mapped characters use their NFKC ideograph
+scalar: BMP targets use the existing BMP implicit lead; supplementary targets
+use `0xFB80 + (target >> 15)` and `0x8000 | (target & 0x7FFF)`. The two
+unassigned characters U+2FA1E and U+2FA1F use the `FBC0` implicit lead.
+This differs from directly weighting their supplementary targets, which use
+the unassigned lead in this collation.
+
+All 544 singleton characters under each of the three collations, 543 adjacent
+pairs under each, and 544 compatibility-plus-ASCII pairs under UCA 5.2 match
+native MySQL exactly. The regression pins BMP-mapped, supplementary-mapped,
+and unassigned examples.
 
 The equivalent `utf8mb3_general_ci` and `utf8mb3_unicode_ci` collations use
 the same BMP weights. The oracle now selects the matching charset introducer

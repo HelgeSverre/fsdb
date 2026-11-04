@@ -650,6 +650,9 @@ let tests =
                     let store = newStore ()
                     let extensionB = System.Char.ConvertFromUtf32 0x20000
                     let extensionG = System.Char.ConvertFromUtf32 0x30000
+                    let compatibilityBmp = System.Char.ConvertFromUtf32 0x2F800
+                    let compatibilitySupplementary = System.Char.ConvertFromUtf32 0x2F803
+                    let compatibilityUnassigned = System.Char.ConvertFromUtf32 0x2FA1E
                     let cases =
                         [ "\u3B00\u3B01", "utf8mb4_general_ci", "3B003B01"
                           "\u3B00\u3B01", "utf8mb4_unicode_ci", "FB80BB00FB80BB01"
@@ -671,6 +674,10 @@ let tests =
                           extensionB + extensionB, "utf8mb4_unicode_ci", "FFFDFFFD"
                           extensionB + extensionB, "utf8mb4_unicode_520_ci", "FBC48000FBC48000"
                           extensionG + "a", "utf8mb4_unicode_520_ci", "FBC68000120F"
+                          compatibilityBmp, "utf8mb4_general_ci", "FFFD"
+                          compatibilityBmp, "utf8mb4_unicode_520_ci", "FB40CE3D"
+                          compatibilitySupplementary, "utf8mb4_unicode_520_ci", "FB848122"
+                          compatibilityUnassigned, "utf8mb4_unicode_520_ci", "FBC5FA1E"
                           "\u3B00\u4E00", "utf8mb4_unicode_520_ci", "FB80BB00FB40CE00" ]
                     for sample, collation, expected in cases do
                         let sql = sprintf "SELECT HEX(WEIGHT_STRING('%s' COLLATE %s))" sample collation
