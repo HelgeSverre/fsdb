@@ -456,6 +456,10 @@ let tests =
                   (runDefault store "SELECT o.id,EXISTS(SELECT o.id FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o WHERE o.id IN (1,50) ORDER BY o.id")
                   (ResultSet([ "id"; "hit" ], [ [ Some "1"; Some "1" ]; [ Some "50"; Some "0" ] ]))
                   "an outer-qualified projection keeps ordinary correlated binding"
+              Expect.equal
+                  (runDefault store "SELECT o.id,EXISTS(SELECT o.id+1 FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o WHERE o.id IN (1,50) ORDER BY o.id")
+                  (ResultSet([ "id"; "hit" ], [ [ Some "1"; Some "1" ]; [ Some "50"; Some "0" ] ]))
+                  "an outer-dependent expression projection keeps ordinary correlated binding"
               match runDefault store "SELECT EXISTS(SELECT i.missing FROM exists_inner i WHERE i.outer_id=1)" with
               | Err(1054, _) -> ()
               | other -> failtestf "expected unknown EXISTS projection column, got %A" other

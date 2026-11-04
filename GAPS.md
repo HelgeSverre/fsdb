@@ -2001,6 +2001,10 @@ A [validated-expression follow-up](benchmarks/results/2026-11-04-correlated-exis
 extends the indexed path to unused nonaggregate inner projections such as
 `c.id+0`; its matched 100-row ShortRun fell from 4.94 to 0.97 ms. Per-row
 validation and more complex projection/source shapes remain open.
+Successful validation of [inner-only `EXISTS` projections](benchmarks/results/2026-11-04-correlated-exists-projection-cache-summary.md)
+is now statement-scoped; the expression control measured 0.60 ms in a later
+ShortRun. Outer-dependent projections retain per-row validation, and the
+broader query overhead remains open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

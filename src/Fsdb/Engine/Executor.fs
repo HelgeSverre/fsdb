@@ -785,6 +785,7 @@ type private StatementMemo =
       ScopedPhysicalProjections: Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>
       EqualityIndexMatches: Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
+      InnerExistsProjections: Dictionary<SelectStmt, bool>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
 type private SharedViewCteScope =
@@ -826,6 +827,7 @@ let private freshStatementMemo () =
       ScopedPhysicalProjections = Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>(HashIdentity.Reference)
       EqualityIndexMatches = Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>(HashIdentity.Reference)
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
+      InnerExistsProjections = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
@@ -9168,10 +9170,22 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
             |> List.filter (fun candidate -> equalsIgnoreCase candidate.Name name)
             |> List.length
             |> (=) 1
+        let rec innerOnly expression =
+            match expression with
+            | Star(Some qualifier) ->
+                FromItem.tryQualifier source
+                |> Option.exists (equalsIgnoreCase qualifier)
+            | Col column -> uniqueInnerColumn column
+            | QualifiedCol(qualifier, column) ->
+                FromItem.tryQualifier source
+                |> Option.exists (fun sourceQualifier ->
+                    equalsIgnoreCase qualifier sourceQualifier && uniqueInnerColumn column)
+            | _ -> Expression.children expression |> List.forall innerOnly
         let projectionIsSafe projection =
             if plainExistsProjection projection then true
             else
                 match projection.Expression, FromItem.tryQualifier source with
+                | Star(Some qualifier), Some sourceQualifier -> equalsIgnoreCase qualifier sourceQualifier
                 | QualifiedCol(qualifier, column), Some sourceQualifier
                     when equalsIgnoreCase qualifier sourceQualifier ->
                     uniqueInnerColumn column
@@ -9182,7 +9196,18 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                     sourceContext.Value
                     |> Option.exists (fun context -> validateExpressionInContext context expression |> Result.isOk)
                 | _ -> false
-        if not (select.Projections |> List.forall projectionIsSafe) then None
+        let projectionsAreSafe =
+            let cache = (currentStatementMemo ()).InnerExistsProjections
+            match cache.TryGetValue select with
+            | true, safe -> safe
+            | false, _ ->
+                let safe = select.Projections |> List.forall projectionIsSafe
+                // Only inner-bound names have the same validation result for
+                // every outer row. Keep outer references on the ordinary path.
+                if safe && (select.Projections |> List.forall (fun projection -> innerOnly projection.Expression)) then
+                    cache.[select] <- true
+                safe
+        if not projectionsAreSafe then None
         else
             tryCorrelatedEqualityCount outer source select.Where
             |> Option.map (fun count -> Ok(boolToValue (count > 0)))
