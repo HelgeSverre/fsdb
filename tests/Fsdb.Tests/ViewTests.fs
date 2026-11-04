@@ -332,6 +332,9 @@ let tests =
               match run store "UPDATE secured_source_first SET n=n WHERE id=1" with
               | Err(1356, _) -> ()
               | other -> failtestf "expected source-first view to require its leading source UPDATE grant, got %A" other
+              expectOk (run store "GRANT UPDATE(id) ON fsdb.secured_union_source TO union_inner_owner") "grant one leading-source column"
+              Expect.equal (run store "UPDATE secured_source_first SET n=n WHERE id=1") (Affected 0UL) "one column UPDATE grant permits the source-first view"
+              expectOk (run store "REVOKE UPDATE(id) ON fsdb.secured_union_source FROM union_inner_owner") "revoke leading-source column"
               let update () = run store "UPDATE secured_union_outer SET metric=metric+1 WHERE id=1"
               match update () with
               | Err(1356, _) -> ()

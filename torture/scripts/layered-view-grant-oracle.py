@@ -271,6 +271,18 @@ def main():
                 assert_error(
                     connection, "UPDATE lateral_union_inner SET n=n WHERE id=1", 1356
                 )
+                run(
+                    connection,
+                    "GRANT UPDATE(id) ON probe.lateral_source TO inner_owner",
+                )
+                assert (
+                    run(connection, "UPDATE source_first_control SET n=n WHERE id=1")
+                    == 0
+                )
+                run(
+                    connection,
+                    "REVOKE UPDATE(id) ON probe.lateral_source FROM inner_owner",
+                )
                 run(connection, "GRANT UPDATE ON probe.lateral_source TO inner_owner")
                 assert (
                     run(

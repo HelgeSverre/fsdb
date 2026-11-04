@@ -28843,12 +28843,30 @@ let rec executeAs
 
                 // MySQL checks UPDATE on the leading table of a writable join view,
                 // even when the assignment writes a later table in the join.
-                let leadingSourceUpdate =
-                    if equalsIgnoreCase from.Table view.Table
-                       && equalsIgnoreCase (from.Database |> Option.defaultValue view.Database) view.Database then
-                        []
+                let checkLeadingSourceUpdate current securityType definer =
+                    let database = from.Database |> Option.defaultValue view.ViewDatabase
+                    if equalsIgnoreCase from.Table view.Table && equalsIgnoreCase database view.Database then
+                        Ok current
                     else
-                        [ "UPDATE", Auth.OnTable(from.Database |> Option.defaultValue view.ViewDatabase, from.Table) ]
+                        registryForViewRequirements store current securityType definer []
+                        |> Result.bind (fun effective ->
+                            match registryAccount effective with
+                            | None -> Error(1449, "The current invoker account does not exist")
+                            | Some account ->
+                                let columns =
+                                    match InformationSchema.findTable store.Catalog database from.Table with
+                                    | Ok table -> table.Columns |> List.map _.Name
+                                    | Error _ ->
+                                        tryStoredView store database from.Table
+                                        |> Option.map _.Columns
+                                        |> Option.defaultValue []
+                                if columns
+                                   |> List.exists (fun column ->
+                                       Auth.checkForAccount store account [ "UPDATE", Auth.OnColumn(database, from.Table, column) ]
+                                       |> Result.isOk) then
+                                    Ok effective
+                                else
+                                    Error(1142, "Write privilege missing for leading view source"))
 
                 let authorizeLayered () =
                     let invalid () = Error(ViewGrantDenied(invalidViewError view.ViewDatabase view.ViewName))
@@ -28919,8 +28937,7 @@ let rec executeAs
                                     store current access.SecurityType access.Definer joinRequirements
                                 |> Result.mapError JoinColumnDenied)
                             |> Result.bind (fun _ ->
-                                registryForViewRequirements
-                                    store current access.SecurityType access.Definer leadingSourceUpdate
+                                checkLeadingSourceUpdate current access.SecurityType access.Definer
                                 |> Result.mapError ViewGrantDenied)
                             |> Result.bind (fun _ ->
                                 registryForViewSecurity
@@ -28939,8 +28956,7 @@ let rec executeAs
                          | ViewGrantDenied(code, message) -> invalidGrant (code, message)
                          | JoinColumnDenied(code, message) -> code, message)
                  else
-                     registryForViewRequirements
-                         store registry view.SecurityType view.Definer leadingSourceUpdate
+                     checkLeadingSourceUpdate registry view.SecurityType view.Definer
                      |> Result.bind (fun current ->
                          registryForViewSecurity
                              store current view.SecurityType view.Definer view.ViewDatabase physicalUpdate)
