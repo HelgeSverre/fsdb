@@ -1216,6 +1216,11 @@ matches another 39,936 searches across the same five collations and token
 sizes. A combined U+3400–U+37FF index matches 24,576 searches at sizes 1–2
 under general and legacy Unicode collations; later Extension A blocks and
 exact weight bytes remain open.
+The [U+3800–U+38FF follow-up](torture/findings/2026-11-04-extension-a-3800-ngram-audit.md)
+matches 39,936 standalone searches across five collations and audited token
+sizes, plus 15,360 searches on a combined U+3400–U+38FF index under legacy
+Unicode collation at sizes 1–2. Later Extension A blocks, cross-form
+equivalences, exact weight bytes, and MeCab remain open.
 A [legacy-collation selector and CJK punctuation audit](torture/findings/2026-10-18-legacy-cjk-selector-audit.md)
 found no membership or relevance differences across 4,800 additional
 two-column ngram queries at token sizes 1–10. This narrows the sampled
