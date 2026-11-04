@@ -43,13 +43,14 @@ def six_source_update(row_id):
     )
 
 
-def contended_update(owner, waiter_options, table, row_id, sql):
+def contended_update(owner, waiter_options, held_rows, sql):
     waiter = connect(**waiter_options)
     outcome = {}
     try:
         assert execute(waiter, "USE probe") == 0
         assert execute(owner, "BEGIN") == 0
-        assert execute(owner, f"UPDATE {table} SET n=n+10 WHERE id={row_id}") == 1
+        for table, row_id in held_rows:
+            assert execute(owner, f"UPDATE {table} SET n=n+10 WHERE id={row_id}") == 1
         assert execute(waiter, "BEGIN") == 0
 
         def run_waiter():
@@ -297,9 +298,11 @@ def main():
                     ("a", 2, six_source_update(2)),
                     ("b", 3, six_source_update(3)),
                 ]
-                for table, row_id, sql in contended:
-                    expected = contended_update(mysql_connection, {"unix_socket": mysql_socket}, table, row_id, sql)
-                    actual = contended_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, table, row_id, sql)
+                held_cases = [([(table, row_id)], sql) for table, row_id, sql in contended]
+                held_cases.append(([("a", 1), ("b", 1)], six_source_update(1)))
+                for held_rows, sql in held_cases:
+                    expected = contended_update(mysql_connection, {"unix_socket": mysql_socket}, held_rows, sql)
+                    actual = contended_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, held_rows, sql)
                     assert expected == actual and expected[0], (sql, expected, actual)
                     for target in ("a", "b"):
                         query = f"SELECT id,n FROM {target} ORDER BY id"
@@ -307,7 +310,7 @@ def main():
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
                 print(
                     f"MySQL 8.4.11: {len(cases)} two-view outer UPDATE cases, atomic CHECK OPTION, "
-                    f"and {len(contended)} contended rebases matched"
+                    f"and {len(held_cases)} contended rebases matched"
                 )
             finally:
                 if fsdb_connection:

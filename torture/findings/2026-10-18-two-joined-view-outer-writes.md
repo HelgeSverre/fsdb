@@ -111,8 +111,10 @@ tables after each statement. These extend the audited outer-join width from
 five to six sources for this shape. Four contention checks hold either
 physical target on the matched row, the first target on its one-sided row,
 or the second target on its one-sided row. Both engines wait, rebase, and
-commit the same row values, bringing the contention matrix to twenty-one
-cases. Other join trees and contention involving multiple simultaneously
+commit the same row values. A further case holds both physical targets in
+one transaction before the six-source UPDATE starts. It also waits for the
+holder and rebases both assignments to MySQL's result, bringing the
+contention matrix to twenty-two cases. Other join trees and independently
 held targets remain open.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
