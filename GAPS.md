@@ -1334,7 +1334,8 @@ sizes 1–2. Representative first-page Unicode 5.2, Unicode 9.0, and Japanese
 The [CJK Extension I audit](torture/findings/2026-11-04-cjk-extension-i-ngram.md)
 finds no two-column membership or relevance differences across the printable
 U+2EBF0–U+2EE5F scalars under Unicode 9.0 and legacy Unicode collations at
-token sizes 1–2. Other collations, token sizes, and MeCab remain open.
+token sizes 1–10, plus Japanese kana-sensitive collation at sizes 1–2. Other
+collations, Japanese sizes 3–10, and MeCab remain open.
 The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
 likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
 plus 1,464 legacy Unicode searches over its later part at size 1.
