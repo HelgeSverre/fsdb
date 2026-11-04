@@ -440,6 +440,18 @@ let tests =
                   Expect.isTrue (rows |> List.mapi (fun index row -> row.[1] = Some(if index < 25 then "1" else "0")) |> List.forall id) "bare projection preserves EXISTS values"
               | other -> failtestf "expected bare-column EXISTS rows, got %A" other
               Expect.isLessThan bareExamined 200L "bare inner projection uses the indexed EXISTS path"
+              let expressionResult, expressionExamined =
+                  withExaminedRows (fun () ->
+                      runDefault store "SELECT o.id,EXISTS(SELECT i.id+0 FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o ORDER BY o.id")
+              match expressionResult with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows.Length 50 "expression projection preserves outer rows"
+                  Expect.isTrue (rows |> List.mapi (fun index row -> row.[1] = Some(if index < 25 then "1" else "0")) |> List.forall id) "expression projection preserves EXISTS values"
+              | other -> failtestf "expected expression-projection EXISTS rows, got %A" other
+              Expect.isLessThan expressionExamined 200L "validated expression projection uses the indexed EXISTS path"
+              match runDefault store "SELECT EXISTS(SELECT 1/0 FROM exists_inner i WHERE i.outer_id=1)" with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected a true EXISTS without evaluating division, got %A" other
               Expect.equal
                   (runDefault store "SELECT o.id,EXISTS(SELECT o.id FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o WHERE o.id IN (1,50) ORDER BY o.id")
                   (ResultSet([ "id"; "hit" ], [ [ Some "1"; Some "1" ]; [ Some "50"; Some "0" ] ]))
@@ -450,6 +462,9 @@ let tests =
               match runDefault store "SELECT EXISTS(SELECT missing FROM exists_inner i WHERE i.outer_id=1)" with
               | Err(1054, _) -> ()
               | other -> failtestf "expected unknown bare EXISTS projection column, got %A" other
+              match runDefault store "SELECT EXISTS(SELECT i.missing+0 FROM exists_inner i WHERE i.outer_id=1)" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected unknown EXISTS expression column, got %A" other
               Expect.equal
                   (runDefault store "SELECT o.id FROM exists_outer o WHERE o.id=50 AND EXISTS(SELECT COUNT(*) FROM exists_inner i WHERE i.outer_id=o.id)")
                   (ResultSet([ "id" ], [ [ Some "50" ] ]))

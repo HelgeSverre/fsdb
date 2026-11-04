@@ -1992,6 +1992,10 @@ The [bare-column follow-up](benchmarks/results/2026-11-04-correlated-exists-bare
 also resolves a unique inner-source column before taking that path; its
 matched 100-row ShortRun fell from 4.23 to 0.78 ms. Outer-only and unknown
 names retain normal binding and diagnostics.
+A [validated-expression follow-up](benchmarks/results/2026-11-04-correlated-exists-expression-fast-path.md)
+extends the indexed path to unused nonaggregate inner projections such as
+`c.id+0`; its matched 100-row ShortRun fell from 4.94 to 0.97 ms. Per-row
+validation and more complex projection/source shapes remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

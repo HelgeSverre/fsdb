@@ -9144,7 +9144,25 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
 
     match select.From with
     | Some(FromItem.Qualified _ as source) when plainShape ->
-        let sourceColumns = lazy (selectSourceColumns outer.Store outer.DbName source |> List.choose id)
+        let projectedColumns = lazy (selectSourceColumns outer.Store outer.DbName source)
+        let sourceColumns = lazy (projectedColumns.Value |> List.choose id)
+        let sourceContext =
+            lazy
+                (let projected = projectedColumns.Value
+                 match FromItem.tryQualifier source with
+                 | Some qualifier when projected |> List.forall Option.isSome ->
+                     let columns = projected |> List.choose id
+                     Some(
+                         contextFactory
+                             outer.Store
+                             outer.Registry
+                             outer.DbName
+                             (columnIndexOf columns)
+                             (singleQualifier qualifier columns)
+                             (Some outer)
+                             (probeRow columns)
+                     )
+                 | _ -> None)
         let uniqueInnerColumn name =
             sourceColumns.Value
             |> List.filter (fun candidate -> equalsIgnoreCase candidate.Name name)
@@ -9158,6 +9176,11 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                     when equalsIgnoreCase qualifier sourceQualifier ->
                     uniqueInnerColumn column
                 | Col column, _ -> uniqueInnerColumn column
+                | expression, _ when not (containsAggregate outer.Registry expression)
+                                     && (collectWindowFuncs expression).IsEmpty
+                                     && (Expression.collectSubqueries expression).IsEmpty ->
+                    sourceContext.Value
+                    |> Option.exists (fun context -> validateExpressionInContext context expression |> Result.isOk)
                 | _ -> false
         if not (select.Projections |> List.forall projectionIsSafe) then None
         else
