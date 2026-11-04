@@ -884,6 +884,10 @@ let tests =
                       (execute "CREATE FULLTEXT INDEX missing ON docs(body) WITH PARSER missing_parser")
                       (Err(1128, "Function 'missing_parser' is not defined"))
                       "unknown parser"
+                  Expect.equal
+                      (execute "CREATE FULLTEXT INDEX mecab ON docs(body) WITH PARSER mecab")
+                      (Err(1128, "Function 'mecab' is not defined"))
+                      "MeCab is unavailable on the pinned MySQL build"
                   match execute "CREATE INDEX ordinary ON docs(body(10)) WITH PARSER ngram" with
                   | Err(1064, _) -> ()
                   | other -> failtestf "expected non-fulltext syntax rejection, got %A" other
