@@ -190,6 +190,26 @@ let tests =
                   (Affected 1UL)
                   "limited UNION CTE updates the target once"
 
+              expectOk
+                  (run store "CREATE VIEW union_cte_duplicate_ordered AS WITH u(id,flag) AS (SELECT id AS x,flag AS x FROM union_view_left UNION ALL SELECT id,aux FROM union_view_right ORDER BY 2 DESC LIMIT 2) SELECT t.id,t.n,u.flag FROM u JOIN union_view_target t ON t.id=u.id")
+                  "create ordered UNION CTE with duplicate original names"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='union_cte_duplicate_ordered'")
+                  [ [ Some "YES" ] ]
+                  "MySQL reports writable metadata for the ambiguous ordered UNION CTE"
+              match run store "UPDATE union_cte_duplicate_ordered SET n=n+1 WHERE id=1" with
+              | Err(1052, message) ->
+                  Expect.equal message "Column 'x' in order clause is ambiguous" "MySQL diagnoses the original duplicate name"
+              | other -> failtestf "expected ambiguous UNION CTE update, got %A" other
+              match run store "UPDATE union_cte_duplicate_ordered v JOIN union_view_target t2 ON t2.id=v.id SET v.n=v.n+1 WHERE v.id=1" with
+              | Err(1052, message) ->
+                  Expect.equal message "Column 'x' in order clause is ambiguous" "joined UPDATE preserves the native ambiguity"
+              | other -> failtestf "expected ambiguous joined UNION CTE update, got %A" other
+              Expect.equal
+                  (rows store "SELECT n FROM union_view_target WHERE id=1")
+                  [ [ Some "8" ] ]
+                  "ambiguous UPDATE does not change the physical target"
+
           testCase "a direct single-table view accepts UPDATE and DELETE"
           <| fun _ ->
               let store = setup ()

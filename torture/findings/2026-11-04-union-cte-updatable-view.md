@@ -22,7 +22,11 @@ This also covers duplicate first-branch names when an explicit CTE column
 list supplies distinct output names and the UNION has no internal ORDER BY.
 MySQL accepts a similarly named view with `ORDER BY 2`, reports it writable,
 then rejects UPDATE with ambiguous-column error 1052; the native oracle pins
-that boundary. Fsdb does not yet reproduce that metadata/error sequence.
+that boundary and verifies the physical row remains unchanged. Fsdb now
+preserves the explicit CTE output names while resolving writable metadata,
+then diagnoses the duplicate original name at UPDATE time before modifying
+the target. Both direct and joined UPDATE forms return 1052 in the native
+oracle and focused regression; the target row remains unchanged.
 Dependent branches, nested CTEs, and broader security contexts remain to
 audit.
 

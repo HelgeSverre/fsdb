@@ -24095,6 +24095,31 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
         | Ok(Select select) -> updatableViewOfSelect store view select
         | _ -> None
 
+/// MySQL reports this view writable, but its UPDATE rewrite re-resolves the
+/// UNION's original duplicate output name in the order clause and raises 1052.
+let private orderedUnionCteAmbiguity (store: Store) (dbName: string) (viewName: string) =
+    tryStoredView store dbName viewName
+    |> Option.bind (fun view ->
+        match parseStoredViewStatement view with
+        | Ok(Select select) ->
+            let referenced name =
+                (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+                |> List.exists (function
+                    | FromTable table -> table.Database.IsNone && equalsIgnoreCase table.Table name
+                    | _ -> false)
+            select.Ctes
+            |> List.tryPick (fun cte ->
+                match cte.Body with
+                | UnionSelect(first, _, orderBy, _, _) when not orderBy.IsEmpty && referenced cte.CteName ->
+                    first.Projections
+                    |> List.choose (fun projection -> projection.Alias |> Option.orElse projection.SourceName)
+                    |> List.groupBy (fun name -> name.ToLowerInvariant())
+                    |> List.tryPick (function
+                        | _, first :: _ :: _ -> Some first
+                        | _ -> None)
+                | _ -> None)
+        | _ -> None)
+
 let private joinedViewLoadError viewName =
     Err(1288, sprintf "The target table %s of the LOAD is not updatable" viewName)
 
@@ -30393,10 +30418,13 @@ let rec executeAs
              && targetsFirstJoinedView store dbName updateStmt ->
         let updateStmt = writableViewFirst store dbName updateStmt
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
+        let ambiguity = orderedUnionCteAmbiguity store viewDb updateStmt.From.Table
 
-        match tryUpdatableView store viewDb updateStmt.From.Table with
-        | None -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
-        | Some view ->
+        match tryUpdatableView store viewDb updateStmt.From.Table, ambiguity with
+        | None, _ -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
+        | Some _, Some column ->
+            ids, Err(1052, sprintf "Column '%s' in order clause is ambiguous" column)
+        | Some view, None ->
             let runtimeView = freshenViewAliases store dbName updateStmt view
             let viewQualifier = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
             let baseQualifier = runtimeView.UpdateFrom.Alias |> Option.defaultValue runtimeView.UpdateFrom.Table
@@ -30526,14 +30554,17 @@ let rec executeAs
 
     | Update updateStmt when updateStmt.Joins.IsEmpty && tryStoredView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome ->
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
+        let ambiguity = orderedUnionCteAmbiguity store viewDb updateStmt.From.Table
 
-        match tryUpdatableView store viewDb updateStmt.From.Table with
-        | None -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
-        | Some view when not view.UpdateJoins.IsEmpty && (not view.OrderBy.IsEmpty || not updateStmt.OrderBy.IsEmpty) ->
+        match tryUpdatableView store viewDb updateStmt.From.Table, ambiguity with
+        | None, _ -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
+        | Some _, Some column ->
+            ids, Err(1052, sprintf "Column '%s' in order clause is ambiguous" column)
+        | Some view, None when not view.UpdateJoins.IsEmpty && (not view.OrderBy.IsEmpty || not updateStmt.OrderBy.IsEmpty) ->
             ids, Err(1221, "Incorrect usage of UPDATE and ORDER BY")
-        | Some view when not view.UpdateJoins.IsEmpty && updateStmt.Limit.IsSome ->
+        | Some view, None when not view.UpdateJoins.IsEmpty && updateStmt.Limit.IsSome ->
             ids, Err(1221, "Incorrect usage of UPDATE and LIMIT")
-        | Some view ->
+        | Some view, None ->
             let rewrite = rewriteViewExpression view
             match
                 updateStmt.Assignments

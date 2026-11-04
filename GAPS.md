@@ -1146,8 +1146,8 @@ An [independent UNION ALL CTE before that component](torture/findings/2026-11-04
 now has the same audited metadata, single-update, and CHECK OPTION behavior.
 Ordered and limited UNION bodies, including OFFSET and explicit output-column
 renaming, are covered. Duplicate first-branch names with an explicit CTE
-column list work without internal ORDER BY; MySQL's ambiguous ordered case
-and other CTE compositions remain open.
+column list work without internal ORDER BY; with internal ORDER BY, writable
+metadata and UPDATE error 1052 match MySQL. Other CTE compositions remain open.
 
 ## 10. Stored routines, events, schedulers
 

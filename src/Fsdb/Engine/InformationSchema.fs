@@ -1815,9 +1815,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                             else
                                 let originalNames = originalNames |> List.choose id
                                 if (originalNames |> List.map _.ToLowerInvariant() |> Set.ofList).Count <> originalNames.Length then
-                                    if orderBy.IsEmpty then
-                                        Some(UnionSelect({ first with Projections = projections }, rest, orderBy, limit, offset))
-                                    else None
+                                    Some(UnionSelect({ first with Projections = projections }, rest, orderBy, limit, offset))
                                 else
                                     let alias = "__fsdb_cte_output"
                                     let renamed =

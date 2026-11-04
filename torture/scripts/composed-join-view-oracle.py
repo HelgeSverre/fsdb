@@ -225,6 +225,12 @@ def main():
                     "UPDATE union_duplicate_ordered SET n=n+1 WHERE id=1",
                     1052,
                 )
+                assert_error(
+                    connection,
+                    "UPDATE union_duplicate_ordered v JOIN a a2 ON a2.id=v.id SET v.n=v.n+1 WHERE v.id=1",
+                    1052,
+                )
+                assert run(connection, "SELECT n FROM a WHERE id=1") == ((7,),)
                 run(connection, "DROP VIEW union_duplicate_ordered")
 
                 run(connection, "CREATE TABLE insert_target(id INT PRIMARY KEY,n INT)")
