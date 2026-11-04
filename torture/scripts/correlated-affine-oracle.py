@@ -83,6 +83,12 @@ def main():
                             "INSERT INTO decimal_bound VALUES(1,4.50),(2,5.50),(3,-4.50),(4,4.60),"
                             "(5,NULL),(6,1073741823.50),(7,1073741824.00)"
                         ),
+                        "CREATE TABLE precise_bound(id INT PRIMARY KEY,x DECIMAL(20,7))",
+                        (
+                            "INSERT INTO precise_bound VALUES(1,0.0000009),(2,0.0000011),"
+                            "(3,-0.0000009),(4,0.0000008),(5,NULL),"
+                            "(6,214.7483647),(7,-214.7483648)"
+                        ),
                     ]:
                         cursor.execute(sql)
 
@@ -116,6 +122,25 @@ def main():
                                 + " WHERE "
                                 + expression
                                 + "=o.x) FROM bound o ORDER BY o.id"
+                            )
+                            actual = tuple(count for _, count in cursor.fetchall())
+                            assert actual == expected, (
+                                source,
+                                expression,
+                                actual,
+                                expected,
+                            )
+                        for expression, expected in [
+                            ("d.k*0.0000001", (1, 1, 1, 1, 0, 1, 1)),
+                            ("ABS(d.k)*0.0000001", (2, 2, 0, 1, 0, 2, 0)),
+                        ]:
+                            cursor.execute(
+                                prefix
+                                + "SELECT o.id,(SELECT COUNT(*) FROM "
+                                + source
+                                + " WHERE "
+                                + expression
+                                + "=o.x) FROM precise_bound o ORDER BY o.id"
                             )
                             actual = tuple(count for _, count in cursor.fetchall())
                             assert actual == expected, (

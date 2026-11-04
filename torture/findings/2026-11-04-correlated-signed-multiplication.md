@@ -30,6 +30,8 @@ The MySQL 8.4.11 oracle checks physical, pass-through, and materialized
 sources; the fsdb regression checks the same counts with fewer than 100
 residual calls per query against a source with more than 1,000 rows. Zero,
 approximate DOUBLE factors, and wider factor magnitudes still scan.
+The lower supported factor `0.0000001` is also checked with seven-place
+DECIMAL bounds, including both signed INT extremes and the two-key ABS case.
 
 ## BIGINT overflow boundary
 

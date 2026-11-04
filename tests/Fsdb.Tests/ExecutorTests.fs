@@ -14367,9 +14367,13 @@ let tests =
                             List.exactlyOne values)
                     let store = newStore ()
                     runDefault store "CREATE TABLE decimal_factor_bounds(id INT PRIMARY KEY,x DECIMAL(20,2))" |> ignore
+                    runDefault store "CREATE TABLE precise_factor_bounds(id INT PRIMARY KEY,x DECIMAL(20,7))" |> ignore
                     runDefault store "CREATE TABLE decimal_factor_rows(id INT PRIMARY KEY,k INT,KEY ix_k(k))" |> ignore
                     runDefault store
                         "INSERT INTO decimal_factor_bounds VALUES(1,4.50),(2,5.50),(3,-4.50),(4,4.60),(5,NULL),(6,1073741823.50),(7,1073741824.00)"
+                    |> ignore
+                    runDefault store
+                        "INSERT INTO precise_factor_bounds VALUES(1,0.0000009),(2,0.0000011),(3,-0.0000009),(4,0.0000008),(5,NULL),(6,214.7483647),(7,-214.7483648)"
                     |> ignore
                     [ 0..999 ]
                     |> List.map (fun id -> sprintf "(%d,%d)" (id + 100) (id + 1000))
@@ -14402,6 +14406,21 @@ let tests =
                                 let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
                                 Expect.equal actual (expected |> List.map Some) (source + " " + predicate)
                             | other -> failtestf "expected decimal factor matches, got %A" other
+                            Expect.isLessThan calls 100 (source + " " + predicate + " must bound residual work")
+
+                        for predicate, expected in
+                            [ "d.k*0.0000001=o.x", [ 1; 1; 1; 1; 0; 1; 1 ]
+                              "ABS(d.k)*0.0000001=o.x", [ 2; 2; 0; 1; 0; 2; 0 ] ] do
+                            calls <- 0
+                            let sql =
+                                prefix + "SELECT o.id,(SELECT COUNT(*) FROM " + source
+                                + " WHERE TOUCH(d.id)=d.id AND " + predicate + ") "
+                                + "FROM precise_factor_bounds o ORDER BY o.id"
+                            match run store registry sql with
+                            | ResultSet(_, rows) ->
+                                let actual = rows |> List.map (fun row -> row.[1] |> Option.map int)
+                                Expect.equal actual (expected |> List.map Some) (source + " " + predicate)
+                            | other -> failtestf "expected precise factor matches, got %A" other
                             Expect.isLessThan calls 100 (source + " " + predicate + " must bound residual work")
 
                 testCase "materialized correlated affine equality probes inverse signed keys"
