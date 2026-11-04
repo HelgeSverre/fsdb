@@ -1322,6 +1322,12 @@ matches 39,936 standalone searches across five collations and audited token
 sizes, plus 24,576 searches on a combined U+3400–U+3BFF index under legacy
 Unicode collation at sizes 1–2. Later Extension A blocks, cross-form
 equivalences, exact weight bytes, and MeCab remain open.
+The [U+3C00–U+3CFF follow-up](torture/findings/2026-11-05-extension-a-3c00-ngram-audit.md)
+matches 39,936 standalone searches across the same five collations and token
+sizes, plus 27,648 searches on a combined U+3400–U+3CFF index under legacy
+Unicode collation at sizes 1–2. Later blocks, cross-form equivalences, and
+MeCab remain open; exact legacy ideograph weight bytes are covered separately
+above.
 An [exact-byte differential probe](torture/findings/2026-11-04-extension-a-exact-weights.md)
 finds that all 256 single-character U+3B00–U+3BFF `WEIGHT_STRING` values
 differ from MySQL in each of three legacy collations, despite the matching
