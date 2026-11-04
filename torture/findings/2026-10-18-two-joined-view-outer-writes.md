@@ -108,8 +108,12 @@ joined views and four physical read aliases. The chain preserves a matched
 row, a row with only the first view present, and a row with only the second
 view present. MySQL and fsdb agree on affected rows and both physical target
 tables after each statement. These extend the audited outer-join width from
-five to six sources for this shape; other join trees and contention involving
-multiple simultaneously held targets remain open.
+five to six sources for this shape. Four contention checks hold either
+physical target on the matched row, the first target on its one-sided row,
+or the second target on its one-sided row. Both engines wait, rebase, and
+commit the same row values, bringing the contention matrix to twenty-one
+cases. Other join trees and contention involving multiple simultaneously
+held targets remain open.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:

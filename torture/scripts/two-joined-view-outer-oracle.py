@@ -34,6 +34,15 @@ def execute(connection, sql):
         return "error", error.args
 
 
+def six_source_update(row_id):
+    return (
+        "UPDATE link l0 LEFT JOIN va ON va.link_id=l0.id "
+        "LEFT JOIN link l1 ON l1.id=l0.id LEFT JOIN vb ON vb.link_id=l1.id "
+        "LEFT JOIN link l2 ON l2.id=l1.id LEFT JOIN link l3 ON l3.id=l2.id "
+        f"SET va.n=va.n+1,vb.n=vb.n+1 WHERE l0.id={row_id}"
+    )
+
+
 def contended_update(owner, waiter_options, table, row_id, sql):
     waiter = connect(**waiter_options)
     outcome = {}
@@ -202,18 +211,9 @@ def main():
                     "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
                     "RIGHT JOIN va ON g.id=va.link_id LEFT JOIN vb ON vb.link_id=va.link_id "
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
-                    ("UPDATE link l0 LEFT JOIN va ON va.link_id=l0.id "
-                     "LEFT JOIN link l1 ON l1.id=l0.id LEFT JOIN vb ON vb.link_id=l1.id "
-                     "LEFT JOIN link l2 ON l2.id=l1.id LEFT JOIN link l3 ON l3.id=l2.id "
-                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE l0.id=1"),
-                    ("UPDATE link l0 LEFT JOIN va ON va.link_id=l0.id "
-                     "LEFT JOIN link l1 ON l1.id=l0.id LEFT JOIN vb ON vb.link_id=l1.id "
-                     "LEFT JOIN link l2 ON l2.id=l1.id LEFT JOIN link l3 ON l3.id=l2.id "
-                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE l0.id=2"),
-                    ("UPDATE link l0 LEFT JOIN va ON va.link_id=l0.id "
-                     "LEFT JOIN link l1 ON l1.id=l0.id LEFT JOIN vb ON vb.link_id=l1.id "
-                     "LEFT JOIN link l2 ON l2.id=l1.id LEFT JOIN link l3 ON l3.id=l2.id "
-                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE l0.id=3"),
+                    six_source_update(1),
+                    six_source_update(2),
+                    six_source_update(3),
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)
@@ -292,6 +292,10 @@ def main():
                     ("a", 1, "UPDATE (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) g "
                      "RIGHT JOIN va ON g.id=va.link_id LEFT JOIN vb ON vb.link_id=va.link_id "
                      "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1"),
+                    ("a", 1, six_source_update(1)),
+                    ("b", 1, six_source_update(1)),
+                    ("a", 2, six_source_update(2)),
+                    ("b", 3, six_source_update(3)),
                 ]
                 for table, row_id, sql in contended:
                     expected = contended_update(mysql_connection, {"unix_socket": mysql_socket}, table, row_id, sql)

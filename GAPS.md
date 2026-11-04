@@ -1082,8 +1082,10 @@ now claim every assigned table before rebasing the audited four- and
 five-source outer joins.
 The [six-source two-view LEFT JOIN audit](torture/findings/2026-10-18-two-joined-view-outer-writes.md)
 also matches MySQL when both views, only the first view, or only the second
-view supplies a writable row. Other wider outer-join trees, multi-target shapes, and broader security-layer
-combinations remain open. [Two writable joined views](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
+view supplies a writable row and covers four held-row waits and rebases
+across both physical view targets. Other wider outer-join trees,
+multi-target shapes, and broader security-layer combinations remain open.
+[Two writable joined views](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
 now update both physical targets even when their read-side internal table
 aliases, writable physical target aliases, or independent derived read-source
 aliases match; [dependent `LATERAL` and `JSON_TABLE` read aliases](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
