@@ -124,3 +124,24 @@ The full edge oracle still reported exactly ten near-hole point-distance
 mismatches and zero of 100 seeded point-to-line mismatches. The trial was
 reverted. This rules out that fallback as the explanation on the current
 corpus; it does not rule out other inverse or direct-position differences.
+
+## November 5 current-head replay and branch review
+
+The Release [edge oracle](../scripts/geographic-edge-oracle.py) on current
+head `e574499c` reproduced the same residual counts: 10/189 near-hole
+point-to-polygon distances, 3/189 point relations, and 13/412 line relations
+differed from MySQL 8.4.11; all 100 seeded point-to-line distances matched.
+The point-distance discrepancies still equal each engine's own hole-line
+distance, so polygon distance aggregation is not the cause on this corpus.
+
+The pinned Boost 1.84 cross-track source orders endpoints and runs a Newton
+step using the angle to the segment endpoint, reduced length, geodesic scale,
+and a distance-improvement stop condition. Fsdb has corresponding steps and
+the same angle-normalization branches. Boost also has an early zero return
+when a query aligns with a non-pole-crossing meridian and its latitude lies
+between the endpoints. The ten residual queries are near, but not on, their
+hole edges; this branch cannot explain their observed differences. The next
+comparison should instrument the inverse/direct quantities and first Newton
+position for a same-edge residual, such as `POINT(71.00001 1.00001)`, before
+changing the shared algorithm. This review does not establish equivalence of
+the two implementations outside the audited cases.
