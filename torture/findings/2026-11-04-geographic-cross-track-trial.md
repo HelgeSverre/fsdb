@@ -28,6 +28,17 @@ for broad geographic input. The remaining 22 near-hole differences include
 near-corner edge selection and zero-distance classifications. The separate
 topology disagreements remain open.
 
+A current-head replay after preview.46 isolated all 22 remaining polygon
+distance differences to the hole boundary: each engine's polygon distance
+equals its own hole `LINESTRING` distance in every differing case. Both
+engines choose the same nearest hole segment in 13 of the 22 cases; the
+other nine also need segment-selection parity. Several high-latitude cases
+return zero on only one engine. This rules out polygon distance aggregation
+as the cause on this corpus and directs the next fix to the geographic
+point-to-segment strategy. The same replay retained 13/412 line relation
+mismatches, 3/189 near-hole point relation mismatches, and 44/100 seeded
+point-to-line distance mismatches.
+
 The focused spatial suite passed all 46 tests, and the full suite passed all
 3,875 tests after this change. The added point-to-line regression pins the
 resolved MySQL case.
