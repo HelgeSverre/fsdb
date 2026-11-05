@@ -37,3 +37,17 @@ rows with distinct assignment values, in both orders. Both engines update
 the view target once using the first source value in the audited cases.
 This checks a result-order risk from moving the view into the rewrite's first
 position; it does not establish all `STRAIGHT_JOIN` multi-match behavior.
+
+## NATURAL JOIN follow-up
+
+MySQL also waits and rebases when the CTE and the writable view use a
+two-source `NATURAL JOIN`. Fsdb initially returned 1146 for the CTE; simply
+promoting the view then returned 1052 because the view's hidden physical
+join exposed a second `id` to the natural-key resolver. The rewrite now
+identifies common names from the view's exposed columns and the CTE source,
+then carries their qualified equalities into the flattened physical join.
+An unqualified `WHERE id=1` resolves to the merged column. A second control
+shares both `id` and `n` but deliberately mismatches `n`, yielding no update
+on both engines. Promotion is limited to this audited two-source natural
+form; longer natural-join chains need their merged-column ownership traced
+before the same rewrite can be applied.

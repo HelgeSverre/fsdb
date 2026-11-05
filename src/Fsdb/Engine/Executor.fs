@@ -24406,7 +24406,8 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             | None when isPhysical source -> move (join :: prior) rest
             | None -> update
         | ({ Table = FromTable source; Using = [] } as join) :: rest
-            when join.Kind = InnerJoin || join.Kind = CrossJoin || join.Kind = StraightJoin ->
+            when join.Kind = InnerJoin || join.Kind = CrossJoin || join.Kind = StraightJoin
+                 || (join.Kind = NaturalJoin && prior.IsEmpty && rest.IsEmpty) ->
             let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->
@@ -30692,6 +30693,18 @@ let rec executeAs
             let viewExposes (column: string) =
                 view.OrderedColumns
                 |> List.exists (fun name -> equalsIgnoreCase name column)
+            let naturalSharedNames =
+                match updateStmt.Joins with
+                | [ { Kind = NaturalJoin; Table = source } ] ->
+                    let sourceNames =
+                        selectSourceColumns store dbName source
+                        |> List.choose id
+                        |> List.map _.Name
+                    view.OrderedColumns
+                    |> List.filter (fun name -> sourceNames |> List.exists (equalsIgnoreCase name))
+                | _ -> []
+            let isNaturalShared (name: string) =
+                naturalSharedNames |> List.exists (equalsIgnoreCase name)
             let mutable ambiguousColumn = None
             let callerCurrentUser =
                 Functions.lookup "CURRENT_USER" registry
@@ -30710,7 +30723,7 @@ let rec executeAs
                         |> Option.map qualifyView
                         |> Option.orElse (Some(QualifiedCol("__fsdb_view", name)))
                     | Col name when Map.containsKey (name.ToLowerInvariant()) runtimeView.Expressions ->
-                        if not (owners name).IsEmpty then
+                        if not (owners name).IsEmpty && not (isNaturalShared name) then
                             ambiguousColumn <- Some name
                             None
                         else
@@ -30760,6 +30773,21 @@ let rec executeAs
                     let externalJoins =
                         updateStmt.Joins
                         |> List.map (fun join ->
+                            let join =
+                                match join.Kind, FromItem.tryQualifier join.Table with
+                                | NaturalJoin, Some sourceQualifier when updateStmt.Joins.Length = 1 ->
+                                    // The moved view exposes one column per name, but its
+                                    // flattened physical join may have several. Resolve the
+                                    // NATURAL keys against the exposed view before flattening.
+                                    let condition =
+                                        naturalSharedNames
+                                        |> List.map (fun name ->
+                                            BinOp(Eq, QualifiedCol(viewQualifier, name), QualifiedCol(sourceQualifier, name)))
+                                        |> function
+                                            | [] -> Lit(VInt 1L)
+                                            | first :: rest -> rest |> List.fold (fun accumulated next -> BinOp(And, accumulated, next)) first
+                                    { join with Kind = InnerJoin; On = condition }
+                                | _ -> join
                             { Join.mapConditions rewrite join with
                                 Table = rewriteDependentSource join.Table })
                     let viewPredicate = runtimeView.Predicate |> Option.map qualifyView

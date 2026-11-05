@@ -1671,7 +1671,7 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected both increments after view contention, got %A" result
 
-          testCase "CTE-first CROSS and STRAIGHT joined view updates wait for their physical target"
+          testCase "CTE-first CROSS STRAIGHT and NATURAL joined view updates wait for their physical target"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup = create 1 store
@@ -1685,7 +1685,8 @@ let tests =
                   [ 0, "CROSS JOIN tx_cross_view v SET v.n=v.n+1 WHERE c.id=v.link_id AND c.id=1"
                     1, "CROSS JOIN tx_cross_view_link l CROSS JOIN tx_cross_view v "
                        + "SET v.n=v.n+1 WHERE c.id=l.id AND l.id=v.link_id AND c.id=1"
-                    2, "STRAIGHT_JOIN tx_cross_view v ON c.id=v.link_id SET v.n=v.n+1 WHERE c.id=1" ] do
+                    2, "STRAIGHT_JOIN tx_cross_view v ON c.id=v.link_id SET v.n=v.n+1 WHERE c.id=1"
+                    3, "NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE c.id=1" ] do
                   let owner, _ = handle (create (2 + index * 2) store) "BEGIN"
                   let owner, changed = handle owner "UPDATE tx_cross_view_target SET n=n+1 WHERE id=1"
                   Expect.equal changed (Affected 1UL) "owner changes the physical row"
@@ -1707,6 +1708,19 @@ let tests =
                   | ResultSet(_, [ [ Some value ] ]) ->
                       Expect.equal value (string ((index + 1) * 2)) "both increments persist"
                   | result -> failtestf "expected both increments after cross joined view contention, got %A" result
+              let mergedColumn =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              Expect.equal (handle setup mergedColumn |> snd) (Affected 1UL)
+                  "NATURAL JOIN merges the bare id filter"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "9" ] ]) -> ()
+              | result -> failtestf "expected the merged-column update, got %A" result
+              let mismatchedSharedColumn =
+                  "WITH c AS (SELECT id,-1 AS n FROM tx_cross_view_link) "
+                  + "UPDATE c NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              Expect.equal (handle setup mismatchedSharedColumn |> snd) (Affected 0UL)
+                  "all shared NATURAL JOIN columns must match"
               Expect.equal (handle setup "UPDATE tx_cross_view_target SET n=0 WHERE id=1" |> snd)
                   (Affected 1UL) "reset target for duplicate source"
               for first, second in [ 10, 20; 20, 10 ] do

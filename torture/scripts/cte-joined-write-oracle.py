@@ -161,6 +161,29 @@ def main():
                         == 1
                     )
                     assert execute(owner, "SELECT n FROM a WHERE id=1") == ((first,),)
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN v SET v.n=v.n+1 WHERE c.id=1",
+                    ((1, 22),),
+                )
+                assert (
+                    execute(
+                        owner,
+                        "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN v SET v.n=v.n+1 WHERE id=1",
+                    )
+                    == 1
+                )
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((23,),)
+                assert (
+                    execute(
+                        owner,
+                        "WITH c AS (SELECT id,-1 AS n FROM link) UPDATE c NATURAL JOIN v SET v.n=v.n+1 WHERE id=1",
+                    )
+                    == 0
+                )
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((23,),)
                 try:
                     execute(
                         owner,
@@ -180,7 +203,7 @@ def main():
                 else:
                     raise AssertionError("ambiguous derived assignment was accepted")
                 print(
-                    "MySQL 8.4.11: CTE, derived, and joined-view writes (including CROSS and STRAIGHT joins) waited and committed"
+                    "MySQL 8.4.11: CTE, derived, and joined-view writes (including CROSS, STRAIGHT, and NATURAL joins) waited and committed"
                 )
             except Exception:
                 print((root / "mysql.log").read_text())

@@ -2301,6 +2301,9 @@ implementation effort:
    [CTE-first `CROSS JOIN` and `STRAIGHT_JOIN` to a writable view](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md)
    now also wait and rebase, including one intervening physical read source
    for the `CROSS JOIN` form.
+   The [two-source CTE-first `NATURAL JOIN` form](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#natural-join-follow-up)
+   also waits and rebases while retaining exposed merged-column binding;
+   longer natural-join chains remain open.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.
