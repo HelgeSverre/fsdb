@@ -145,3 +145,19 @@ comparison should instrument the inverse/direct quantities and first Newton
 position for a same-edge residual, such as `POINT(71.00001 1.00001)`, before
 changing the shared algorithm. This review does not establish equivalence of
 the two implementations outside the audited cases.
+
+## Hole-ring winding follow-up
+
+The geographic point-in-polygon path previously normalized exterior and hole
+rings to the same traversal direction before applying the winding strategy.
+Maintaining opposite directions for the two ring roles resolves two of the
+three near-hole point-relation mismatches. All 49 sampled polar-corner points
+now match. The Release MySQL 8.4.11 edge oracle changed from 3 to 1 point
+relation mismatch across 189 near-hole points, 13 to 12 line relation
+mismatches across 412 cases, and 10 to 9 near-hole distance mismatches. All
+100 seeded point-to-line distances and four near-exterior controls still
+match. A focused regression pins two formerly divergent polar points.
+
+The remaining point-relation mismatch is `POINT(88 2.99999)` near the same
+hole. The nine distance mismatches still require point-to-segment numerical
+work. These measured improvements do not establish broader geographic parity.

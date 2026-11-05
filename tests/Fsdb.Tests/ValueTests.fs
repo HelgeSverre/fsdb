@@ -961,6 +961,18 @@ let tests =
                         Expect.equal (call "ST_Within" [ antipode; polygon ]) (VInt 0L) "antipodal exterior"
                         Expect.equal (call "ST_Intersects" [ antipode; polygon ]) (VInt 0L) "antipodal disjointness"
 
+                testCase "geographic hole winding excludes near-polar corner points"
+                <| fun _ ->
+                    let geography text = call "ST_GeomFromText" [ VString text; VInt 4326L ]
+                    let polygon =
+                        geography "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))"
+                    for coordinates in [ "86 1.00001"; "88 1.00001" ] do
+                        let point = geography ("POINT(" + coordinates + ")")
+                        Expect.equal (call "ST_Within" [ point; polygon ]) (VInt 0L)
+                            ("near-polar hole excludes " + coordinates)
+                        Expect.equal (call "ST_Intersects" [ point; polygon ]) (VInt 0L)
+                            ("near-polar hole is disjoint from " + coordinates)
+
                 testCase "global geographic rings use MySQL geodesic winding"
                 <| fun _ ->
                     let geography text = call "ST_GeomFromText" [ VString text; VInt 4326L ]

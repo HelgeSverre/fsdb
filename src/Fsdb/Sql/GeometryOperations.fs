@@ -504,7 +504,10 @@ let private geographicRingAreaSign referenceSystem ring =
 
 let private geographicRingContains referenceSystem includeBoundary point ring =
     let flattening = referenceSystem.InverseFlattening |> Option.map (fun value -> 1.0 / value) |> Option.defaultValue 0.0
-    let ring = if geographicRingAreaSign referenceSystem ring < 0.0 then List.rev ring else ring
+    let area = geographicRingAreaSign referenceSystem ring
+    // Boost corrects polygon winding by role: exterior and hole rings have
+    // opposite traversal directions even when their input WKT does not.
+    let ring = if (area < 0.0) <> includeBoundary then List.rev ring else ring
     // Boost traverses a counterclockwise polygon's stored exterior ring in
     // reverse when applying its point-in-ring winding strategy.
     let windingRing = ring |> List.rev |> List.map (fun (latitude, longitude) -> mysqlRadians latitude, mysqlRadians longitude)

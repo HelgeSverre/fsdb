@@ -538,18 +538,17 @@ limited derived sources and limited or `TEMPTABLE` views use the exposed alias.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [current-head distance replay](torture/findings/2026-11-04-geographic-cross-track-trial.md#current-head-residual-classification) matches all 100 seeded point-to-line distances but retains 10 point-distance mismatches across 189 near-hole points, three point relation mismatches, no mismatch across four near-exterior controls, and 13 line relation mismatches across 412 cases, including a near-polar MySQL relation/intersection inconsistency; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
+| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [hole-winding follow-up](torture/findings/2026-11-04-geographic-cross-track-trial.md#hole-ring-winding-follow-up) matches all 100 seeded point-to-line distances but retains nine point-distance mismatches across 189 near-hole points, one point relation mismatch, no mismatch across four near-exterior controls or 49 polar-corner points, and 12 line relation mismatches across 412 cases; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
 
 The [geographic strategy follow-up](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
-confirms zero distance on both engines for every remaining line mismatch,
+found zero distance on both engines for its line mismatches,
 including the MySQL case that reports no intersection. MySQL's point/area and
 line/area relations use distinct Boost geographic strategies; reproducing
 those decisions is the next spatial implementation step. The polar point
 audit also finds MySQL distance zero for standalone and combined rings even
 when its point relation reports disjointness, so distance is not a substitute
-for that strategy. A finer polar-corner grid confines the sampled point
-divergence to four same-latitude points within `0.00001` degrees of one hole
-corner; adjacent grid points agree.
+for that strategy. The hole-winding follow-up resolves the finer polar-corner
+grid; a separate near-hole point relation still differs.
 The expanded [near-hole distance oracle](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
 finds 34 point-to-polygon distance mismatches across 189 points. Reversing
 ring traversal globally or only for polygon distance does not reduce that
