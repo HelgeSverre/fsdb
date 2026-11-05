@@ -61,5 +61,17 @@ updates the physical view target. The rewrite resolves the first natural
 edge against the view's exposed columns while leaving the later join's ON
 condition in its original scope. A bare `id` remains valid when the later
 source has only `k`, but MySQL and fsdb return 1052 when that source exposes
-another `id`. This still leaves natural edges before the writable view and
-multiple successive natural joins open.
+another `id`. The next section covers a natural read edge before the view.
+
+## Natural read edge before the writable view
+
+MySQL 8.4.11 also waits and rebases when `c NATURAL JOIN r` precedes an
+ordinary join to writable `v`, and when `c NATURAL JOIN r NATURAL JOIN v`
+merges the same `id` across all three sources. Fsdb formerly left the CTE
+unresolved or reported an ambiguous `id`. The view promotion now turns the
+earlier natural edge into equalities between its original read operands before
+moving the view, and resolves the three-source merged column against the
+view's exposed `id`. A mismatched key in `r` yields zero affected rows on
+both engines. The native oracle and contended transaction regression cover
+both forms. Longer natural chains and additional sources after the second
+natural edge remain open.

@@ -2315,7 +2315,9 @@ implementation effort:
    also waits and rebases while retaining exposed merged-column binding;
    an [ordinary read join after that natural edge](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#later-read-source-after-the-natural-join)
    preserves the same behavior and later-column ambiguity. Natural edges
-   before the writable view and successive natural joins remain open.
+   [before the writable view, including a second natural edge to the view](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#natural-read-edge-before-the-writable-view),
+   now also wait and rebase for the audited three-source CTE forms. Longer
+   natural chains and later sources remain open.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.

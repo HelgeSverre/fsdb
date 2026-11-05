@@ -1678,9 +1678,11 @@ let tests =
               handle setup "CREATE TABLE tx_cross_view_target(id INT PRIMARY KEY,n INT)" |> ignore
               handle setup "CREATE TABLE tx_cross_view_link(id INT PRIMARY KEY)" |> ignore
               handle setup "CREATE TABLE tx_cross_view_tail(k INT PRIMARY KEY)" |> ignore
+              handle setup "CREATE TABLE tx_cross_natural_read(id INT PRIMARY KEY)" |> ignore
               handle setup "INSERT INTO tx_cross_view_target VALUES(1,0)" |> ignore
               handle setup "INSERT INTO tx_cross_view_link VALUES(1)" |> ignore
               handle setup "INSERT INTO tx_cross_view_tail VALUES(1)" |> ignore
+              handle setup "INSERT INTO tx_cross_natural_read VALUES(1)" |> ignore
               handle setup "CREATE VIEW tx_cross_view AS SELECT t.id,t.n,l.id AS link_id FROM tx_cross_view_target t JOIN tx_cross_view_link l ON t.id=l.id" |> ignore
               let prefix = "WITH c AS (SELECT id FROM tx_cross_view_link) UPDATE c "
               for index, statement in
@@ -1690,6 +1692,10 @@ let tests =
                     2, "STRAIGHT_JOIN tx_cross_view v ON c.id=v.link_id SET v.n=v.n+1 WHERE c.id=1"
                     3, "NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE c.id=1"
                     4, "NATURAL JOIN tx_cross_view v JOIN tx_cross_view_tail x ON x.k=c.id "
+                       + "SET v.n=v.n+1 WHERE id=1"
+                    5, "NATURAL JOIN tx_cross_natural_read r JOIN tx_cross_view v ON v.id=r.id "
+                       + "SET v.n=v.n+1 WHERE c.id=1"
+                    6, "NATURAL JOIN tx_cross_natural_read r NATURAL JOIN tx_cross_view v "
                        + "SET v.n=v.n+1 WHERE id=1" ] do
                   let owner, _ = handle (create (2 + index * 2) store) "BEGIN"
                   let owner, changed = handle owner "UPDATE tx_cross_view_target SET n=n+1 WHERE id=1"
@@ -1706,7 +1712,7 @@ let tests =
                   Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "cross joined view writer resumes"
                   let waiter, updated = waiting.Result
                   Expect.isTrue blocked (sprintf "joined view writer waits for physical target; result %A" updated)
-                  Expect.equal updated (Affected 1UL) "cross joined view writer updates committed row"
+                  Expect.equal updated (Affected 1UL) (sprintf "joined view writer %d updates committed row" index)
                   Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "cross joined view writer commits"
                   match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
                   | ResultSet(_, [ [ Some value ] ]) ->
@@ -1725,8 +1731,18 @@ let tests =
               Expect.equal (handle setup mergedColumn |> snd) (Affected 1UL)
                   "NATURAL JOIN merges the bare id filter"
               match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
-              | ResultSet(_, [ [ Some "11" ] ]) -> ()
+              | ResultSet(_, [ [ Some "15" ] ]) -> ()
               | result -> failtestf "expected the merged-column update, got %A" result
+              Expect.equal (handle setup "UPDATE tx_cross_natural_read SET id=2 WHERE id=1" |> snd)
+                  (Affected 1UL) "move the preceding natural source away from the view row"
+              for statement in
+                  [ "WITH c AS (SELECT id FROM tx_cross_view_link) UPDATE c NATURAL JOIN tx_cross_natural_read r JOIN tx_cross_view v ON v.id=r.id SET v.n=v.n+1 WHERE c.id=1"
+                    "WITH c AS (SELECT id FROM tx_cross_view_link) UPDATE c NATURAL JOIN tx_cross_natural_read r NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1" ] do
+                  Expect.equal (handle setup statement |> snd) (Affected 0UL)
+                      "a mismatched earlier natural key excludes the writable view row"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "15" ] ]) -> ()
+              | result -> failtestf "a mismatched natural key changed the view row: %A" result
               let mismatchedSharedColumn =
                   "WITH c AS (SELECT id,-1 AS n FROM tx_cross_view_link) "
                   + "UPDATE c NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"

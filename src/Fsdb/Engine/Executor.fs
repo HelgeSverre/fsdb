@@ -24377,8 +24377,34 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
         not (isCte table)
         && (tryStoredViewDefinition store (table.Database |> Option.defaultValue defaultDatabase) table.Table
             |> Option.isSome)
+    let sourceNames source =
+        let cte =
+            match source with
+            | FromTable table when isCte table ->
+                update.Ctes |> List.tryFind (fun item -> equalsIgnoreCase item.CteName table.Table)
+            | _ -> None
+        match cte with
+        | Some cte ->
+            let alias =
+                match source with
+                | FromTable table -> table.Alias |> Option.defaultValue table.Table
+                | _ -> cte.CteName
+            let inferred =
+                selectSourceColumns store defaultDatabase (FromSubquery(cte.Body, alias))
+                |> List.choose id
+                |> List.map _.Name
+            if cte.CteColumns.Length = inferred.Length then cte.CteColumns else inferred
+        | None ->
+            selectSourceColumns store defaultDatabase source
+            |> List.choose id
+            |> List.map _.Name
+    let canPromoteNatural prior rest =
+        match prior with
+        | [] -> true
+        | [ { Kind = NaturalJoin } ] when List.isEmpty rest -> true
+        | _ -> false
 
-    let rec move prior remaining =
+    let rec move (prior: Join list) (remaining: Join list) =
         match remaining with
         | ({ Table = FromTable source; Using = [] } as join) :: rest
             when join.Kind = LeftJoin || join.Kind = RightJoin ->
@@ -24407,7 +24433,7 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             | None -> update
         | ({ Table = FromTable source; Using = [] } as join) :: rest
             when join.Kind = InnerJoin || join.Kind = CrossJoin || join.Kind = StraightJoin
-                 || (join.Kind = NaturalJoin && prior.IsEmpty) ->
+                 || (join.Kind = NaturalJoin && canPromoteNatural prior rest) ->
             let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->
@@ -24429,10 +24455,47 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                     let joins =
                         match prior with
                         | [] -> { join with Table = FromTable update.From } :: rest
+                        | [ { Kind = NaturalJoin; Table = source } as natural ] ->
+                            // The natural edge belongs to the original read prefix.
+                            // Once the view moves first, leaving it implicit would
+                            // instead compare the read source with the view.
+                            let leftNames = sourceNames (FromTable update.From)
+                            let rightNames = sourceNames source
+                            let leftOwner = update.From.Alias |> Option.defaultValue update.From.Table
+                            let rightOwner = FromItem.tryQualifier source |> Option.defaultValue ""
+                            let condition =
+                                leftNames
+                                |> List.filter (fun name -> rightNames |> List.exists (equalsIgnoreCase name))
+                                |> List.map (fun name -> BinOp(Eq, QualifiedCol(leftOwner, name), QualifiedCol(rightOwner, name)))
+                                |> function
+                                    | [] -> Lit(VInt 1L)
+                                    | first :: rest -> rest |> List.fold (fun soFar next -> BinOp(And, soFar, next)) first
+                            [ { join with Table = FromTable update.From; On = Lit(VInt 1L) }
+                              { natural with Kind = InnerJoin; On = BinOp(And, condition, join.On) } ] @ rest
                         | last :: earlierReversed ->
                             let carried = { last with On = BinOp(And, last.On, join.On) }
                             { join with Table = FromTable update.From; On = Lit(VInt 1L) }
                             :: (List.rev (carried :: earlierReversed) @ rest)
+                    let update =
+                        match join.Kind, prior with
+                        | NaturalJoin, [ { Kind = NaturalJoin; Table = earlierSource } ] ->
+                            let leftNames = sourceNames (FromTable update.From)
+                            let earlierNames = sourceNames earlierSource
+                            let merged =
+                                view.OrderedColumns
+                                |> List.filter (fun name ->
+                                    leftNames |> List.exists (equalsIgnoreCase name)
+                                    && earlierNames |> List.exists (equalsIgnoreCase name))
+                            let rewriteMerged =
+                                rewriteExprWith (function
+                                    | Col name when merged |> List.exists (equalsIgnoreCase name) ->
+                                        Some(QualifiedCol(qualifier, name))
+                                    | _ -> None)
+                            { update with
+                                Where = update.Where |> Option.map rewriteMerged
+                                OrderBy = update.OrderBy |> List.map (fun (expression, direction) -> rewriteMerged expression, direction)
+                                Assignments = update.Assignments |> List.map (fun assignment -> { assignment with Value = rewriteMerged assignment.Value }) }
+                        | _ -> update
                     { update with From = source; Joins = joins }
             // An independent read-only view can remain ahead of a later
             // writable view while that target is moved into first position.
