@@ -1338,6 +1338,11 @@ matches 39,936 standalone searches across the same five collations and token
 sizes, plus 33,792 searches on a combined U+3400–U+3EFF index under legacy
 Unicode collation at sizes 1–2. Later blocks and other cross-form equivalences
 remain open.
+The [U+3F00–U+3FFF follow-up](torture/findings/2026-11-05-extension-a-3f00-ngram-audit.md)
+matches 39,936 standalone searches across the same five collations and token
+sizes, plus 36,864 searches on a combined U+3400–U+3FFF index under legacy
+Unicode collation at sizes 1–2. Later blocks and other cross-form equivalences
+remain open.
 An [exact-byte differential probe](torture/findings/2026-11-04-extension-a-exact-weights.md)
 finds that all 256 single-character U+3B00–U+3BFF `WEIGHT_STRING` values
 differ from MySQL in each of three legacy collations, despite the matching
