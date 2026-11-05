@@ -1860,6 +1860,37 @@ let tests =
               match handle setup ambiguousLaterSource |> snd with
               | Err(1052, _) -> ()
               | result -> failtestf "expected an ordinary later id to be ambiguous, got %A" result
+              let naturalAfterOrdinary =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c NATURAL JOIN tx_cross_view v "
+                  + "JOIN tx_cross_view_tail x ON x.k=c.id "
+                  + "NATURAL JOIN tx_cross_natural_tail t "
+                  + "SET v.n=v.n+1 WHERE id=1"
+              Expect.equal (handle setup naturalAfterOrdinary |> snd) (Affected 1UL)
+                  "a later natural source still merges id after an ordinary join"
+              Expect.equal (handle setup "UPDATE tx_cross_natural_tail SET id=2 WHERE id=1" |> snd)
+                  (Affected 1UL) "move the natural source after the ordinary join away"
+              Expect.equal (handle setup naturalAfterOrdinary |> snd) (Affected 0UL)
+                  "a mismatched later natural key excludes the view row"
+              Expect.equal (handle setup "UPDATE tx_cross_natural_tail SET id=1 WHERE id=2" |> snd)
+                  (Affected 1UL) "restore the later natural key"
+              let owner, _ = handle (create 54 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_cross_view_target SET n=n+1 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "owner changes the physical view row"
+              let waiter, _ = handle (create 55 store) "BEGIN"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting = Threading.Tasks.Task.Run(fun () -> started.Set(); handle waiter naturalAfterOrdinary)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "mixed-join writer starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "mixed-join owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "mixed-join writer resumes"
+              let waiter, updated = waiting.Result
+              Expect.isTrue blocked "mixed-join writer waits for the physical row"
+              Expect.equal updated (Affected 1UL) "mixed-join writer rebases"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "mixed-join writer commits"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "7" ] ]) -> ()
+              | result -> failtestf "expected the later-natural update to rebase, got %A" result
 
           testCase "two joined views with bare targets rebase after independent row holders"
           <| fun _ ->

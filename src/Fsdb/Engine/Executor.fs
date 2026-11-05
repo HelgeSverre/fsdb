@@ -30977,6 +30977,19 @@ let rec executeAs
                                 elif not (Map.containsKey key mergedKeyOwners) then
                                     mergedKeyOwners <- Map.add key rightOwner mergedKeyOwners
                             Some shared
+                    | _, Some rightOwner when inMergedPrefix
+                                              && (join.Kind = InnerJoin || join.Kind = CrossJoin || join.Kind = StraightJoin)
+                                              && join.Using.IsEmpty ->
+                        let names =
+                            selectSourceColumns store dbName join.Table
+                            |> List.choose id
+                            |> List.map _.Name
+                        if names |> List.exists (fun name -> Map.containsKey (name.ToLowerInvariant()) mergedKeyOwners) then
+                            inMergedPrefix <- false
+                        else
+                            for name in names do
+                                mergedKeyOwners <- Map.add (name.ToLowerInvariant()) rightOwner mergedKeyOwners
+                        None
                     | _ ->
                         inMergedPrefix <- false
                         None)

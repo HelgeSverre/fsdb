@@ -119,17 +119,18 @@ join, outer-join reorderings, and broader multi-match ordering remain open.
 
 ## Natural join after an ordinary read source
 
-The [native oracle](../scripts/cte-joined-write-oracle.py) now covers
+The [native oracle](../scripts/cte-joined-write-oracle.py) covers
 `c NATURAL JOIN v JOIN tail x ON x.k=c.id NATURAL JOIN natural_tail t`.
 MySQL 8.4.11 waits for the physical target row and rebases the view update
 after the holder commits. Moving `t.id` away yields zero affected rows.
-Fsdb currently returns 1052 (`Column 'id' in field list is ambiguous`) for
-the update with a bare `WHERE id=1`, instead of performing the update.
+Fsdb previously returned 1052 (`Column 'id' in field list is ambiguous`)
+for the bare `WHERE id=1`.
 
-A temporary rewrite that tracked the later natural edge through the ordinary
-join still returned 1052. Qualifying the filter as `c.id=1` changed the error
-to `Column 'id' in from clause is ambiguous`, which shows the problem is not
-limited to the bare filter. That candidate and its failing local regression
-were removed; the production rewrite remains unchanged. This is a confirmed
-open binding and view-flattening gap, with the MySQL behavior retained in the
-oracle for the eventual fix.
+The joined-view rewrite now carries exposed column ownership across an
+ordinary inner, cross, or straight join when that source introduces only new
+column names. It can then resolve the later natural edge against the view's
+exposed columns before flattening its physical sources. The focused fsdb
+regression covers the successful update, mismatched key, and contended wait
+and rebase. `just check` passed all 3,885 tests with zero build warnings.
+Ordinary joins that introduce duplicate names, outer joins, and longer mixed
+chains still need separate MySQL comparison before broadening this rewrite.
