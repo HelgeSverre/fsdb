@@ -48,6 +48,18 @@ identifies common names from the view's exposed columns and the CTE source,
 then carries their qualified equalities into the flattened physical join.
 An unqualified `WHERE id=1` resolves to the merged column. A second control
 shares both `id` and `n` but deliberately mismatches `n`, yielding no update
-on both engines. Promotion is limited to this audited two-source natural
-form; longer natural-join chains need their merged-column ownership traced
-before the same rewrite can be applied.
+on both engines. Promotion is limited to a first natural edge immediately
+before the writable view; earlier natural edges still need their merged-column
+ownership traced before the same rewrite can be applied.
+
+## Later read source after the natural join
+
+The first natural edge can also precede an ordinary joined read source.
+The native oracle updates `c NATURAL JOIN v JOIN tail x` under contention;
+fsdb previously returned 1146 for the CTE and now waits, rebases, and
+updates the physical view target. The rewrite resolves the first natural
+edge against the view's exposed columns while leaving the later join's ON
+condition in its original scope. A bare `id` remains valid when the later
+source has only `k`, but MySQL and fsdb return 1052 when that source exposes
+another `id`. This still leaves natural edges before the writable view and
+multiple successive natural joins open.

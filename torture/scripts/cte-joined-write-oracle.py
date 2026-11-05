@@ -176,6 +176,26 @@ def main():
                     == 1
                 )
                 assert execute(owner, "SELECT n FROM a WHERE id=1") == ((23,),)
+                execute(owner, "CREATE TABLE tail(k INT PRIMARY KEY)")
+                execute(owner, "INSERT INTO tail VALUES(1)")
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN v JOIN tail x ON x.k=c.id SET v.n=v.n+1 WHERE id=1",
+                    ((1, 25),),
+                )
+                try:
+                    execute(
+                        owner,
+                        "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN v JOIN link l ON l.id=c.id SET v.n=v.n+1 WHERE id=1",
+                    )
+                except pymysql.MySQLError as error:
+                    assert error.args[0] == 1052, error
+                else:
+                    raise AssertionError(
+                        "a later id source did not make the bare filter ambiguous"
+                    )
                 assert (
                     execute(
                         owner,
@@ -183,7 +203,7 @@ def main():
                     )
                     == 0
                 )
-                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((23,),)
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((25,),)
                 try:
                     execute(
                         owner,

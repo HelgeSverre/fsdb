@@ -24407,7 +24407,7 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             | None -> update
         | ({ Table = FromTable source; Using = [] } as join) :: rest
             when join.Kind = InnerJoin || join.Kind = CrossJoin || join.Kind = StraightJoin
-                 || (join.Kind = NaturalJoin && prior.IsEmpty && rest.IsEmpty) ->
+                 || (join.Kind = NaturalJoin && prior.IsEmpty) ->
             let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->
@@ -30693,18 +30693,22 @@ let rec executeAs
             let viewExposes (column: string) =
                 view.OrderedColumns
                 |> List.exists (fun name -> equalsIgnoreCase name column)
-            let naturalSharedNames =
+            let naturalSource, naturalSharedNames =
                 match updateStmt.Joins with
-                | [ { Kind = NaturalJoin; Table = source } ] ->
+                | { Kind = NaturalJoin; Table = source } :: _ ->
                     let sourceNames =
                         selectSourceColumns store dbName source
                         |> List.choose id
                         |> List.map _.Name
-                    view.OrderedColumns
-                    |> List.filter (fun name -> sourceNames |> List.exists (equalsIgnoreCase name))
-                | _ -> []
+                    FromItem.tryQualifier source,
+                    (view.OrderedColumns
+                     |> List.filter (fun name -> sourceNames |> List.exists (equalsIgnoreCase name)))
+                | _ -> None, []
             let isNaturalShared (name: string) =
                 naturalSharedNames |> List.exists (equalsIgnoreCase name)
+                && (match naturalSource, owners name with
+                    | Some source, [ owner ] -> equalsIgnoreCase source owner
+                    | _ -> false)
             let mutable ambiguousColumn = None
             let callerCurrentUser =
                 Functions.lookup "CURRENT_USER" registry
@@ -30772,10 +30776,10 @@ let rec executeAs
                             | _ -> None)
                     let externalJoins =
                         updateStmt.Joins
-                        |> List.map (fun join ->
+                        |> List.mapi (fun index join ->
                             let join =
                                 match join.Kind, FromItem.tryQualifier join.Table with
-                                | NaturalJoin, Some sourceQualifier when updateStmt.Joins.Length = 1 ->
+                                | NaturalJoin, Some sourceQualifier when index = 0 ->
                                     // The moved view exposes one column per name, but its
                                     // flattened physical join may have several. Resolve the
                                     // NATURAL keys against the exposed view before flattening.

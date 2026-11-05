@@ -1677,8 +1677,10 @@ let tests =
               let setup = create 1 store
               handle setup "CREATE TABLE tx_cross_view_target(id INT PRIMARY KEY,n INT)" |> ignore
               handle setup "CREATE TABLE tx_cross_view_link(id INT PRIMARY KEY)" |> ignore
+              handle setup "CREATE TABLE tx_cross_view_tail(k INT PRIMARY KEY)" |> ignore
               handle setup "INSERT INTO tx_cross_view_target VALUES(1,0)" |> ignore
               handle setup "INSERT INTO tx_cross_view_link VALUES(1)" |> ignore
+              handle setup "INSERT INTO tx_cross_view_tail VALUES(1)" |> ignore
               handle setup "CREATE VIEW tx_cross_view AS SELECT t.id,t.n,l.id AS link_id FROM tx_cross_view_target t JOIN tx_cross_view_link l ON t.id=l.id" |> ignore
               let prefix = "WITH c AS (SELECT id FROM tx_cross_view_link) UPDATE c "
               for index, statement in
@@ -1686,7 +1688,9 @@ let tests =
                     1, "CROSS JOIN tx_cross_view_link l CROSS JOIN tx_cross_view v "
                        + "SET v.n=v.n+1 WHERE c.id=l.id AND l.id=v.link_id AND c.id=1"
                     2, "STRAIGHT_JOIN tx_cross_view v ON c.id=v.link_id SET v.n=v.n+1 WHERE c.id=1"
-                    3, "NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE c.id=1" ] do
+                    3, "NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE c.id=1"
+                    4, "NATURAL JOIN tx_cross_view v JOIN tx_cross_view_tail x ON x.k=c.id "
+                       + "SET v.n=v.n+1 WHERE id=1" ] do
                   let owner, _ = handle (create (2 + index * 2) store) "BEGIN"
                   let owner, changed = handle owner "UPDATE tx_cross_view_target SET n=n+1 WHERE id=1"
                   Expect.equal changed (Affected 1UL) "owner changes the physical row"
@@ -1708,13 +1712,20 @@ let tests =
                   | ResultSet(_, [ [ Some value ] ]) ->
                       Expect.equal value (string ((index + 1) * 2)) "both increments persist"
                   | result -> failtestf "expected both increments after cross joined view contention, got %A" result
+              let ambiguousTail =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c NATURAL JOIN tx_cross_view v JOIN tx_cross_view_link l ON l.id=c.id "
+                  + "SET v.n=v.n+1 WHERE id=1"
+              match handle setup ambiguousTail |> snd with
+              | Err(1052, _) -> ()
+              | result -> failtestf "expected the later id source to make the bare filter ambiguous, got %A" result
               let mergedColumn =
                   "WITH c AS (SELECT id FROM tx_cross_view_link) "
                   + "UPDATE c NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
               Expect.equal (handle setup mergedColumn |> snd) (Affected 1UL)
                   "NATURAL JOIN merges the bare id filter"
               match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
-              | ResultSet(_, [ [ Some "9" ] ]) -> ()
+              | ResultSet(_, [ [ Some "11" ] ]) -> ()
               | result -> failtestf "expected the merged-column update, got %A" result
               let mismatchedSharedColumn =
                   "WITH c AS (SELECT id,-1 AS n FROM tx_cross_view_link) "
