@@ -228,3 +228,16 @@ among 412 cases, and from 9 to 10 point-distance mismatches. It also introduced
 four differences on the finer polar-corner grid. The trial was reverted. A
 future change needs to reproduce the role-specific winding and side decisions
 rather than treating standalone and hole traversals as interchangeable.
+
+## Endpoint projection follow-up
+
+The pinned Boost cross-track strategy checks whether a query point projects
+outside each endpoint using the forward and reverse azimuths from one segment
+inverse calculation. Fsdb recomputes the endpoint-facing azimuth separately.
+A trial used Boost's two signed projection expressions and the shared reverse
+azimuth in `geographicPointSegmentDistance`. The Release edge oracle remained
+at 12/412 line-relation mismatches, 1/189 near-hole point-relation mismatch,
+and 9/189 near-hole point-distance mismatches. All 100 seeded point-to-line
+distances still matched. The trial was reverted. Endpoint projection alone
+does not explain the residual; the next diagnostic needs paired intermediate
+cross-track values on a specific mismatching segment.
