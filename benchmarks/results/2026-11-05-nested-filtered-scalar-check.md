@@ -1,6 +1,6 @@
 # Nested filtered source-free scalar check
 
-The `CorrelatedNestedScalarNoSourceFiltered` control counts orders for 100 users. Its nested source-free scalar projection binds both the immediate order row and the ancestor user row; its predicate binds the order row. This covers a scope that the earlier top-level validated-plan cache intentionally excludes. BenchmarkDotNet ShortRun used the 10,000-user/50,000-order fixture on the M2 Max host, .NET 10.0.12, and MySQL 8.4.11. Raw [before](2026-11-05-nested-filtered-scalar-before.md) and [after](2026-11-05-nested-filtered-scalar-after.md) reports include the matched top-level control.
+The `CorrelatedNestedScalarNoSourceFiltered` control counts orders for 100 users. Its nested source-free scalar projection and predicate bind the immediate order row. The source-free SELECT executes under a second outer user scope, which the earlier top-level validated-plan cache intentionally excludes. BenchmarkDotNet ShortRun used the 10,000-user/50,000-order fixture on the M2 Max host, .NET 10.0.12, and MySQL 8.4.11. Raw [before](2026-11-05-nested-filtered-scalar-before.md) and [after](2026-11-05-nested-filtered-scalar-after.md) reports include the matched top-level control.
 
 | Query | fsdb before | fsdb after | MySQL before | MySQL after |
 |---|---:|---:|---:|---:|
