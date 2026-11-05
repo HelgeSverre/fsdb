@@ -24499,7 +24499,8 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
     let rec move (prior: Join list) (remaining: Join list) =
         match remaining with
         | ({ Table = FromTable source } as join) :: rest
-            when join.Kind = LeftJoin || join.Kind = RightJoin ->
+            when join.Kind = LeftJoin || join.Kind = RightJoin
+                 || (prior.IsEmpty && (join.Kind = NaturalLeftJoin || join.Kind = NaturalRightJoin)) ->
             let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->
@@ -24518,7 +24519,13 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                     { update with
                         From = source
                         Joins = { join with
-                                    Kind = if join.Kind = LeftJoin then RightJoin else LeftJoin
+                                    Kind =
+                                        match join.Kind with
+                                        | LeftJoin -> RightJoin
+                                        | RightJoin -> LeftJoin
+                                        | NaturalLeftJoin -> NaturalRightJoin
+                                        | NaturalRightJoin -> NaturalLeftJoin
+                                        | kind -> kind
                                     Table = preceding } :: rest }
                 else update
             | None when isPhysical source -> move (join :: prior) rest
@@ -30941,7 +30948,8 @@ let rec executeAs
                 |> List.map (fun join ->
                     match join.Kind, FromItem.tryQualifier join.Table with
                     | _, Some rightOwner when inMergedPrefix
-                                              && (join.Kind = NaturalJoin || not join.Using.IsEmpty) ->
+                                              && (join.Kind = NaturalJoin || join.Kind = NaturalLeftJoin
+                                                  || join.Kind = NaturalRightJoin || not join.Using.IsEmpty) ->
                         let names =
                             selectSourceColumns store dbName join.Table
                             |> List.choose id
@@ -30972,7 +30980,9 @@ let rec executeAs
                                 mergedKeyMembers <- Map.add key members mergedKeyMembers
                             for name in names do
                                 let key = name.ToLowerInvariant()
-                                if join.Kind = RightJoin && (join.Using |> List.exists (equalsIgnoreCase name)) then
+                                if (join.Kind = RightJoin || join.Kind = NaturalRightJoin)
+                                   && (join.Using |> List.exists (equalsIgnoreCase name)
+                                       || join.Kind = NaturalRightJoin) then
                                     mergedKeyOwners <- Map.add key rightOwner mergedKeyOwners
                                 elif not (Map.containsKey key mergedKeyOwners) then
                                     mergedKeyOwners <- Map.add key rightOwner mergedKeyOwners
@@ -31081,7 +31091,12 @@ let rec executeAs
                                             | [] -> Lit(VInt 1L)
                                             | first :: rest -> rest |> List.fold (fun accumulated next -> BinOp(And, accumulated, next)) first
                                     { join with
-                                        Kind = if join.Kind = NaturalJoin then InnerJoin else join.Kind
+                                        Kind =
+                                            match join.Kind with
+                                            | NaturalJoin -> InnerJoin
+                                            | NaturalLeftJoin -> LeftJoin
+                                            | NaturalRightJoin -> RightJoin
+                                            | kind -> kind
                                         Using = []
                                         On = BinOp(And, join.On, condition) }
                                 | _ -> join

@@ -137,3 +137,24 @@ natural edge returns 1052 on both MySQL and fsdb. The native oracle and the
 focused fsdb regression pin that ambiguity, so the rewrite deliberately
 stops carrying merged-key ownership at that source. Outer joins, other
 duplicate-name arrangements, and longer mixed chains remain to audit.
+
+## CTE-first natural outer join to a writable view
+
+MySQL 8.4.11 waits and rebases when `c NATURAL LEFT JOIN v` or
+`c NATURAL RIGHT JOIN v` updates the matched writable view row. An unmatched
+left-side CTE row changes no view row; an unmatched CTE row under the right
+join still updates the preserved view row. The
+[native oracle](../scripts/cte-joined-write-oracle.py) covers both waits and
+both unmatched cases.
+
+Fsdb previously returned 1146 for the CTE name in the left-join case. When
+the natural outer edge is the first join, view promotion now reverses its
+direction along with the source order. The joined-view rewrite resolves the
+natural keys against the view's exposed columns and turns the edge into an
+explicit outer join before the view's physical sources are flattened. The
+focused transaction regression covers both contended directions and the
+unmatched cases. The full `just check` run passed 3,885 tests with zero
+warnings before the final unmatched-right assertion was added; that focused
+test passed again afterward. Natural outer edges after an earlier joined
+source, other outer-join orderings, and broader multi-match behavior remain
+open.

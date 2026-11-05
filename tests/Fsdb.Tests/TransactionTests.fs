@@ -1900,6 +1900,51 @@ let tests =
               match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
               | ResultSet(_, [ [ Some "7" ] ]) -> ()
               | result -> failtestf "expected the later-natural update to rebase, got %A" result
+              let naturalLeft =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c NATURAL LEFT JOIN tx_cross_view v "
+                  + "SET v.n=v.n+1 WHERE id=1"
+              Expect.equal (handle setup naturalLeft |> snd) (Affected 1UL)
+                  "a CTE-first natural left join updates the matched view row"
+              let unmatchedNaturalLeft =
+                  "WITH c AS (SELECT 2 AS id) "
+                  + "UPDATE c NATURAL LEFT JOIN tx_cross_view v "
+                  + "SET v.n=v.n+1 WHERE id=2"
+              Expect.equal (handle setup unmatchedNaturalLeft |> snd) (Affected 0UL)
+                  "an unmatched natural left source does not update the view"
+              let naturalRight =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c NATURAL RIGHT JOIN tx_cross_view v "
+                  + "SET v.n=v.n+1 WHERE id=1"
+              let verifyNaturalOuterWait ownerId waiterId statement expected =
+                  let owner, _ = handle (create ownerId store) "BEGIN"
+                  let owner, changed = handle owner "UPDATE tx_cross_view_target SET n=n+1 WHERE id=1"
+                  Expect.equal changed (Affected 1UL) "owner changes the outer-joined view row"
+                  let waiter, _ = handle (create waiterId store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting = Threading.Tasks.Task.Run(fun () -> started.Set(); handle waiter statement)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "natural outer writer starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "natural outer owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "natural outer writer resumes"
+                  let waiter, updated = waiting.Result
+                  Expect.isTrue blocked "natural outer writer waits for the physical row"
+                  Expect.equal updated (Affected 1UL) "natural outer writer rebases"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "natural outer writer commits"
+                  match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some value ] ]) -> Expect.equal value (string expected) "both increments persist"
+                  | result -> failtestf "expected both natural outer increments, got %A" result
+              verifyNaturalOuterWait 56 57 naturalLeft 10
+              verifyNaturalOuterWait 58 59 naturalRight 12
+              let unmatchedNaturalRight =
+                  "WITH c AS (SELECT 2 AS id) "
+                  + "UPDATE c NATURAL RIGHT JOIN tx_cross_view v "
+                  + "SET v.n=v.n+1 WHERE id=1"
+              Expect.equal (handle setup unmatchedNaturalRight |> snd) (Affected 1UL)
+                  "a natural right join can update the preserved view row without a CTE match"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "13" ] ]) -> ()
+              | result -> failtestf "expected the unmatched natural right update, got %A" result
 
           testCase "two joined views with bare targets rebase after independent row holders"
           <| fun _ ->

@@ -2403,7 +2403,10 @@ implementation effort:
    now matches MySQL's wait, rebase, and mismatched-key exclusion when the
    ordinary source introduces distinct columns. A duplicate `id` introduced
    by that source returns MySQL's 1052 on both engines. Other duplicate-name
-   arrangements and outer-join variants remain to audit.
+   arrangements and outer-join variants remain to audit. A [first CTE natural
+   outer edge to a writable view](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#cte-first-natural-outer-join-to-a-writable-view)
+   now matches MySQL's left/right waits and rebases, including both unmatched
+   source cases. Earlier join groups and other outer edges remain open.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.
