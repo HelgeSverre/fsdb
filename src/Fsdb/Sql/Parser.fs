@@ -4742,8 +4742,7 @@ let private updateSources: Parser<TableRef * Join list, unit> =
         let source, joins =
             match source, joins with
             | FromTable table, ({ Kind = (LeftJoin | RightJoin) as kind
-                                  Table = FromJoinGroup(FromTable groupedFirst, groupedJoins)
-                                  Using = [] } as join) :: rest
+                                  Table = FromJoinGroup(FromTable groupedFirst, groupedJoins) } as join) :: rest
                 when independentGroup (FromTable groupedFirst) groupedJoins ->
                 let reversed = if kind = LeftJoin then RightJoin else LeftJoin
                 let outer = { join with Kind = reversed; Table = FromTable table }

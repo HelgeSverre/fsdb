@@ -1231,6 +1231,24 @@ let tests =
                   [ [ Some "37" ] ]
                   "the second view changes through the LATERAL read table"
 
+              for sql, affected in
+                  [ "UPDATE grouped_va va LEFT JOIN (grouped_link l JOIN grouped_vb vb USING(id)) USING(id) SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1", 2UL
+                    "UPDATE grouped_va va RIGHT JOIN (grouped_link l LEFT JOIN grouped_vb vb USING(id)) USING(id) SET va.n=va.n+1,vb.n=vb.n+1 WHERE l.id=3", 1UL
+                    "UPDATE grouped_va va LEFT JOIN (grouped_link l JOIN grouped_vb vb USING(id)) USING(id) SET va.n=va.n+1,vb.n=vb.n+1 WHERE id=1", 2UL
+                    "UPDATE grouped_va va RIGHT JOIN (grouped_link l LEFT JOIN grouped_vb vb USING(id)) USING(id) SET va.n=va.n+1,vb.n=vb.n+1 WHERE id=3", 1UL ] do
+                  Expect.equal (run store sql) (Affected affected) "grouped USING keeps exposed view keys and writable targets"
+              Expect.equal
+                  (rows store "SELECT id,n FROM grouped_a ORDER BY id")
+                  [ [ Some "1"; Some "19" ]; [ Some "2"; Some "22" ] ]
+                  "grouped USING updates only the matched first-view row"
+              Expect.equal
+                  (rows store "SELECT id,n FROM grouped_b ORDER BY id")
+                  [ [ Some "1"; Some "39" ]; [ Some "3"; Some "44" ] ]
+                  "grouped USING preserves the right-only second-view row"
+              match run store "UPDATE grouped_va va LEFT JOIN (grouped_link l JOIN grouped_vb vb USING(missing_key)) USING(id) SET va.n=va.n+1 WHERE va.id=1" with
+              | Err(1054, _) -> ()
+              | result -> failtestf "expected missing grouped USING key, got %A" result
+
           testCase "an unchecked outer join enforces only the inner view check"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

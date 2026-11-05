@@ -1132,7 +1132,9 @@ now preserve the outer-join association and update both physical targets,
 including groups with an independent derived read source or a group-local
 `JSON_TABLE` input or a group-local `LATERAL` projection with at most one
 local read table;
-`USING` joins and broader nested trees remain open.
+[grouped `USING` joins](torture/findings/2026-10-18-two-joined-view-outer-writes.md#grouped-using-joins)
+also update both physical targets under LEFT/RIGHT joins, preserve bare merged
+keys, and wait for two independently held rows. Broader nested trees remain open.
 [Two writable joined views](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
 now update both physical targets even when their read-side internal table
 aliases, writable physical target aliases, or independent derived read-source

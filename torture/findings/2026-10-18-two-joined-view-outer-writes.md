@@ -162,8 +162,8 @@ inner group is then a left-deep source chain and both writable views reach
 the existing rewrite. This preserves the outer-join association. The rewrite
 requires ordinary table operands inside the group: `LATERAL` and `JSON_TABLE`
 sources can depend on the original left table, so moving those groups first
-would lose their scope. `USING` joins, later grouped operands, and broader
-nested trees remain to audit.
+would lose their scope. Later grouped operands and broader nested trees
+remain to audit.
 
 The maintained native oracle now matches MySQL 8.4.11 in 40 two-view UPDATE
 cases, including matched and one-sided rows for both grouped-right forms.
@@ -205,6 +205,26 @@ read-table alias to the known group aliases before validating the lateral
 expressions. Unknown or bare references, local joins, and nested query
 blocks remain excluded. The native oracle matches 44 UPDATE cases and 26
 contended rebases, and the focused F# regression checks both physical rows.
+
+## Grouped `USING` joins
+
+`UPDATE va LEFT JOIN (link l JOIN vb USING(id)) USING(id)` initially failed
+with 1052 because the right group exposed two raw `id` columns to the outer
+key resolver. Reorienting the independent group revealed a second failure:
+the joined-view source rewrite stopped at the inner `USING` edge and treated
+`vb` as a missing physical table (1146). The parser now permits this group
+reorientation, and the joined-view rewrite resolves each `USING` key against
+the views' exposed columns before expanding their physical joins. The
+resolved keys become explicit join predicates, retaining LEFT/RIGHT
+association and bare merged-key binding. An invalid `USING` key remains an
+error instead of becoming an empty predicate.
+
+The native MySQL 8.4.11 oracle now matches 56 two-view UPDATE cases and 32
+contended rebases. The added cases cover matched and one-sided rows, qualified
+and bare merged `id` predicates, an unknown-key error, and a grouped `USING` update waiting on two
+physical targets held by separate transactions. A focused F# regression
+checks affected counts, final rows, and an unknown grouped key. Other grouped
+join trees and dependency combinations remain open.
 
 The oracle uses disposable native MySQL and fsdb servers. Run it after a
 Release CLI build:

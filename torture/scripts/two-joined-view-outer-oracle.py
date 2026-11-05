@@ -294,6 +294,16 @@ def main():
                     "NATURAL JOIN vb_unique vb SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1",
                     "WITH c AS (SELECT id FROM link) UPDATE (c NATURAL JOIN va) "
                     "NATURAL JOIN vb_unique vb SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1",
+                    "UPDATE va LEFT JOIN (link l JOIN vb USING(id)) USING(id) "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
+                    "UPDATE va RIGHT JOIN (link l LEFT JOIN vb USING(id)) USING(id) "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE l.id=3",
+                    "UPDATE va LEFT JOIN (link l JOIN vb USING(id)) USING(id) "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE id=1",
+                    "UPDATE va RIGHT JOIN (link l LEFT JOIN vb USING(id)) USING(id) "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE id=3",
+                    "UPDATE va LEFT JOIN (link l JOIN vb USING(missing_key)) USING(id) "
+                    "SET va.n=va.n+1 WHERE va.id=1",
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)
@@ -410,6 +420,8 @@ def main():
                     "ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
                     "UPDATE va RIGHT JOIN (link l LEFT JOIN vb ON vb.link_id=l.id) "
                     "ON va.link_id=l.id SET va.n=va.n+1,vb.n=vb.n+1 WHERE l.id=1",
+                    "UPDATE va LEFT JOIN (link l JOIN vb USING(id)) USING(id) "
+                    "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
                 ]
                 for sql in independently_held_cases:
                     expected = independently_held_update(mysql_connection, {"unix_socket": mysql_socket}, sql)
