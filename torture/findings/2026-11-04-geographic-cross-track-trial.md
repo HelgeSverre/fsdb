@@ -209,3 +209,22 @@ Matching Boost's operation order, together with its normalization loop, also
 left those oracle counts and the polar `POINT(88 2.99999)` result unchanged.
 Both trials were reverted. The specific ring-view traversal and side values
 for the two polar hole segments remain the next diagnostic target.
+
+## Polar ring-role control
+
+The edge oracle now compares the standalone hole, its reversed winding, and
+both combined-polygon windings at the residual polar points. MySQL 8.4.11
+classifies `POINT(88 2.99999)` and `POINT(88 1.00001)` inside either standalone
+hole winding but outside either combined polygon. Fsdb agrees on the first
+standalone hole and the second combined polygon, yet calls the first combined
+polygon interior and the second standalone hole exterior. This isolates a
+ring-role or geographic-side disagreement; reversing the WKT hole alone does
+not resolve it.
+
+A trial that used the standalone-ring winding result for holes fixed
+`POINT(88 2.99999)` but regressed the edge oracle from 1 to 3 point-relation
+mismatches among 189 near-hole points, from 12 to 13 line-relation mismatches
+among 412 cases, and from 9 to 10 point-distance mismatches. It also introduced
+four differences on the finer polar-corner grid. The trial was reverted. A
+future change needs to reproduce the role-specific winding and side decisions
+rather than treating standalone and hole traversals as interchangeable.

@@ -554,6 +554,10 @@ shows why unioning standalone hole classifications is insufficient: it fixes
 one point while breaking another. The pinned Boost polygon dispatcher also
 tests rings separately; corrected hole order and geographic side calculation
 remain the next point-relation investigation.
+The [polar ring-role control](torture/findings/2026-11-04-geographic-cross-track-trial.md#polar-ring-role-control)
+pins both residual polar points under standalone and combined hole windings;
+using the standalone result for holes fixes one point but increases mismatches
+in the broader edge oracle, so that trial was reverted.
 The expanded [near-hole distance oracle](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
 finds 34 point-to-polygon distance mismatches across 189 points. Reversing
 ring traversal globally or only for polygon distance does not reduce that

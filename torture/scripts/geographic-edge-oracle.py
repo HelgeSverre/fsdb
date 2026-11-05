@@ -396,6 +396,24 @@ def main():
                     mysql_distance,
                     point_distance(fsdb_connection, coordinates, ring),
                 )
+        for coordinates in ("88 2.99999", "88 1.00001"):
+            for label, ring in (
+                ("hole", polar_hole),
+                ("hole reversed", polar_hole_reversed),
+                ("combined", polar_combined),
+                ("combined reversed", polar_combined_reversed),
+            ):
+                expected = point_result(mysql_connection, coordinates, ring)
+                assert expected == (
+                    (1, 0, 1) if label.startswith("hole") else (0, 0, 0)
+                ), (coordinates, label, expected)
+                print(
+                    "polar residual ring",
+                    coordinates,
+                    label,
+                    expected,
+                    point_result(fsdb_connection, coordinates, ring),
+                )
         polar_grid_differences = []
         for latitude in (85.99999, 86, 86.00001, 87, 87.99999, 88, 88.00001):
             for longitude in (0.99999, 1, 1.00001, 2, 2.99999, 3, 3.00001):
