@@ -2399,7 +2399,10 @@ implementation effort:
    including physical-row waits, rebasing, mismatched-key exclusion, and
    ambiguity from a subsequent ordinary join. Natural joins after an
    intervening ordinary source, outer joins, and mixed outer-join prefixes
-   remain open.
+   remain open. A [MySQL contention oracle for a later natural join after an
+   ordinary read source](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#natural-join-after-an-ordinary-read-source)
+   confirms wait, rebase, and mismatched-key exclusion; fsdb still returns
+   1052 during binding for that form.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.

@@ -362,8 +362,22 @@ def main():
                 else:
                     raise AssertionError("an ordinary source after the natural chain did not make id ambiguous")
                 assert execute(owner, "SELECT n FROM a WHERE id=1") == ((42,),)
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN v JOIN tail x ON x.k=c.id NATURAL JOIN natural_tail t SET v.n=v.n+1 WHERE id=1",
+                    ((1, 44),),
+                )
+                execute(owner, "UPDATE natural_tail SET id=2 WHERE id=1")
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN v JOIN tail x ON x.k=c.id NATURAL JOIN natural_tail t SET v.n=v.n+1 WHERE id=1",
+                ) == 0
+                execute(owner, "UPDATE natural_tail SET id=1 WHERE id=2")
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((44,),)
                 print(
-                    "MySQL 8.4.11: CTE, derived, and joined-view writes (including four-source NATURAL chains) waited and committed"
+                    "MySQL 8.4.11: CTE, derived, and joined-view writes (including a NATURAL join after an ordinary source) waited and committed"
                 )
             except Exception:
                 print((root / "mysql.log").read_text())
