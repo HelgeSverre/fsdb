@@ -163,6 +163,9 @@ unmatched cases: the left join changes no view row, while the right join
 updates the preserved view row. Promotion converts the natural edge to an
 explicit outer join against the preceding source group, retaining its shared
 key and the bare merged-column binding. The native oracle and focused
-transaction regression cover all four cases. Duplicate column names in the
-preceding group, other outer-join orderings, and broader multi-match behavior
-remain open.
+transaction regression cover all four cases. If the preceding group exposes
+two `id` columns, MySQL returns 1052 in the `from clause` for either outer
+direction. Fsdb now promotes the writable view before checking the group, so
+the same ambiguity wins over a missing-CTE error. Other duplicate-name
+arrangements, outer-join orderings, and broader multi-match behavior remain
+open.

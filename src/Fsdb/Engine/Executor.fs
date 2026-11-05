@@ -24548,8 +24548,14 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                                 |> List.collect (fun item ->
                                     let owner = FromItem.tryQualifier item |> Option.defaultValue ""
                                     sourceNames item |> List.map (fun name -> name.ToLowerInvariant(), owner))
-                            let ambiguous = names |> List.countBy fst |> List.exists (fun (_, count) -> count > 1)
-                            if ambiguous then None
+                            let viewNames = view.OrderedColumns |> List.map _.ToLowerInvariant() |> Set.ofList
+                            let ambiguous =
+                                names
+                                |> List.countBy fst
+                                |> List.exists (fun (name, count) -> count > 1 && Set.contains name viewNames)
+                            // Keep the view first so join binding reports the group's
+                            // ambiguous column before the unresolved CTE table.
+                            if ambiguous then Some []
                             else
                                 let owners = names |> Map.ofList
                                 view.OrderedColumns

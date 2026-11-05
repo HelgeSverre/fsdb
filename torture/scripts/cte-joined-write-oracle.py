@@ -432,6 +432,18 @@ def main():
                     "WITH c AS (SELECT 2 AS id) UPDATE c JOIN tail x ON x.k=c.id NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
                 ) == 1
                 assert execute(owner, "SELECT n FROM a WHERE id=1") == ((54,),)
+                for direction in ("LEFT", "RIGHT"):
+                    statement = (
+                        "WITH c AS (SELECT id FROM link) "
+                        "UPDATE c JOIN link l ON l.id=c.id "
+                        f"NATURAL {direction} JOIN v SET v.n=v.n+1 WHERE id=1"
+                    )
+                    try:
+                        execute(owner, statement)
+                    except pymysql.MySQLError as error:
+                        assert error.args[0] == 1052, error
+                    else:
+                        raise AssertionError(f"duplicate grouped natural {direction} join was accepted")
                 print(
                     "MySQL 8.4.11: CTE, derived, and joined-view writes (including mixed NATURAL and grouped natural outer joins) waited and committed"
                 )

@@ -1972,6 +1972,14 @@ let tests =
               match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
               | ResultSet(_, [ [ Some "18" ] ]) -> ()
               | result -> failtestf "expected the unmatched grouped natural right update, got %A" result
+              for direction in [ "LEFT"; "RIGHT" ] do
+                  let duplicateGroup =
+                      "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                      + "UPDATE c JOIN tx_cross_view_link l ON l.id=c.id "
+                      + $"NATURAL {direction} JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+                  match handle setup duplicateGroup |> snd with
+                  | Err(1052, _) -> ()
+                  | result -> failtestf "expected ambiguous id in the grouped natural %s join, got %A" direction result
 
           testCase "two joined views with bare targets rebase after independent row holders"
           <| fun _ ->
