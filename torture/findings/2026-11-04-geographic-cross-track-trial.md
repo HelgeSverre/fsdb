@@ -192,3 +192,20 @@ oracle counts or the remaining point mismatch; the trial was reverted.
 on MySQL and fsdb for this polygon. The next comparison should focus on the
 side result for the two hole segments at `POINT(88 2.99999)` and the ring
 view's effective traversal, rather than WKT storage order alone.
+
+## Azimuth normalization and operation-order trials
+
+The pinned Boost 1.84 [azimuth side formula](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/formulas/spherical.hpp)
+normalizes the difference with repeated additions or subtractions of a full
+turn. Replacing fsdb's remainder-based normalization with that loop did not
+change the Release edge oracle: 9/189 near-hole distances, 1/189 point
+relations, and 12/412 line relations still differed; the 100 seeded
+point-to-line distances still matched.
+
+The pinned [Andoyer inverse](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/formulas/andoyer_inverse.hpp)
+computes each latitude tangent before multiplying by the opposite endpoint's
+cosine. Fsdb's algebraically equivalent expression divided after multiplying.
+Matching Boost's operation order, together with its normalization loop, also
+left those oracle counts and the polar `POINT(88 2.99999)` result unchanged.
+Both trials were reverted. The specific ring-view traversal and side values
+for the two polar hole segments remain the next diagnostic target.
