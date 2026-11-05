@@ -168,14 +168,27 @@ For `POINT(88 2.99999)`, MySQL 8.4.11 and fsdb both classify the standalone
 exterior polygon and standalone hole polygon as containing the point. MySQL
 classifies their combined polygon as disjoint; fsdb classifies it as
 intersecting. Fsdb's winding count is `-2` when the hole is treated as a
-standalone exterior, but `0` when traversed in its hole role. The current
-polygon path reduces each ring to a Boolean before combining them, losing
-the winding context MySQL's polygon strategy can use.
+standalone exterior, but `0` when traversed in its hole role. The pinned
+[Boost polygon dispatcher](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/algorithms/detail/within/point_in_geometry.hpp)
+also evaluates each ring separately. The difference therefore lies in the
+corrected hole traversal or its geographic side calculation, not in the
+polygon's Boolean combination of otherwise equal ring results.
 
 A trial that excluded points whenever either hole traversal reported
 containment fixed this residual but made `POINT(86 2.99999)` disagree. The
 full edge oracle changed from 12 to 13 line-relation mismatches and from
 nine to ten near-hole distance mismatches; point-relation mismatches stayed
-at one. The trial was reverted. The next candidate should preserve signed
-winding across the exterior and hole traversal and compare it with Boost's
-polygon strategy, rather than unioning independent ring Booleans.
+at one. The trial was reverted. The next candidate should compare the exact
+hole-ring order and geographic side result with Boost for this point, rather
+than unioning two independently oriented ring classifications.
+
+The pinned [Boost geographic side strategy](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/strategies/geographic/side.hpp)
+computes two Andoyer azimuths and
+classifies their normalized difference. Fsdb follows that structure, but its
+`sin(distance) ≈ 0` shortcut uses a wider threshold than Boost's equality
+check. Narrowing that threshold to machine epsilon did not change any edge
+oracle counts or the remaining point mismatch; the trial was reverted.
+`ST_AsText(ST_InteriorRingN(...))` returns the same stored hole vertex order
+on MySQL and fsdb for this polygon. The next comparison should focus on the
+side result for the two hole segments at `POINT(88 2.99999)` and the ring
+view's effective traversal, rather than WKT storage order alone.
