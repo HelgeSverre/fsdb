@@ -88,6 +88,17 @@ def point_line_distance(connection, coordinates, line):
         return cursor.fetchone()[0]
 
 
+def near_edge_newton_control(connection, distance):
+    line = "ST_GeomFromText('LINESTRING(3 1,3 3)',4326)"
+    point = "ST_GeomFromText('POINT(3 1.00001)',4326)"
+    projected = f"ST_PointAtDistance({line},{distance})"
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT ST_X({projected}),ST_Y({projected}),ST_Distance({point},{projected})"
+        )
+        return cursor.fetchone()
+
+
 def cases():
     polygons = [
         "POLYGON((0 0,0 4,4 4,4 0,0 0))",
@@ -595,6 +606,10 @@ def main():
             print("near-latitude segment", point,
                   point_line_distance(mysql_connection, point, line),
                   point_line_distance(fsdb_connection, point, line))
+        initial_distance = 1.1164968068957286
+        print("near-edge first Newton point", initial_distance,
+              near_edge_newton_control(mysql_connection, initial_distance),
+              near_edge_newton_control(fsdb_connection, initial_distance))
     finally:
         if fsdb_connection:
             fsdb_connection.close()

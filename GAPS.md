@@ -2541,8 +2541,9 @@ implementation effort:
    further reduces near-hole distance differences to 10 of 189, while the
    seeded point-to-line corpus remains at zero mismatches after longitude
    endpoint ordering. A [spherical-seed operation-order check](torture/findings/2026-11-04-geographic-cross-track-trial.md#spherical-seed-operation-order-check)
-   left all residual counts unchanged; a near-edge offset sweep points to
-   the first Newton position and inverse values as the next numerical probe.
+   left all residual counts unchanged. A [first-point and radian-path control](torture/findings/2026-11-04-geographic-cross-track-trial.md#first-newton-point-and-radian-path-control)
+   also found no gain; the next numerical probe needs Boost's internal
+   starting position and first Newton derivative for the mismatching edge.
    Numerical and topology gaps remain open.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.

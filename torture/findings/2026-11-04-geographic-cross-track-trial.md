@@ -264,3 +264,28 @@ the `POINT(3 1.00001)` result and the seven-offset sweep. The trial was
 reverted. The next useful comparison is the first Andoyer/Thomas Newton
 position and subsequent inverse values for this one segment, rather than
 another seed-only formula change.
+
+## First Newton point and radian-path control
+
+Temporary tracing of fsdb's `POINT(3 1.00001)` to `LINESTRING(3 1,3 3)`
+calculation found an initial along-track position of
+1.1164968068957286 m. Its first Thomas point was approximately
+`(3.000000009, 1.000010043)` and the Andoyer inverse distance to the query
+was 0.095042520370680394 m. A second fsdb iteration moved to
+1.2272286177283631 m, produced a slightly larger distance, and stopped.
+
+At the first fsdb position, the public `ST_PointAtDistance` and `ST_Distance`
+control now in the edge oracle gives matching MySQL and fsdb distances of
+0.0950425203706804 m. The returned latitudes differ only in the last
+displayed digit, about 4.4e-16 degrees. This control does not expose Boost's
+own starting position inside `ST_Distance`, so it cannot establish that both
+Newton loops start at the same value.
+
+A temporary radian-native fsdb trial kept the Thomas point and Andoyer
+distance in radians through the cross-track iterations, avoiding the
+degree-to-radian round trip. It left the edge oracle at 12/412 line-relation,
+1/189 point-relation, and 9/189 near-hole distance mismatches; the seven
+offset results and 100 seeded point-to-line distances were unchanged. The
+trial was reverted. The next probe needs Boost's actual initial position and
+first derivative or update for this segment; neither the spherical seed
+formula nor intermediate coordinate round-tripping explained the residual.
