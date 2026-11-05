@@ -1022,6 +1022,9 @@ rejects invalid target rows. An audited
 dependent-CTE UPDATE waits and rebases on its physical row under contention.
 Broader recursive compositions, layered security, and
 other concurrent write shapes remain open.
+An [independent CTE followed by two natural-joined writable views](torture/findings/2026-11-05-cte-natural-two-view-write.md)
+also matches MySQL for direct and parenthesized layouts, with a two-target
+write that waits for independently held physical rows and rebases both changes.
 Recursive-only views also report MySQL's audited `IS_UPDATABLE=YES` metadata
 for direct, joined, and nested-derived CTE projections, while UPDATE still
 returns 1288. Computed, distinct, and grouped *outer* projections report `NO`;

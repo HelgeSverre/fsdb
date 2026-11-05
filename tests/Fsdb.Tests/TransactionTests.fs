@@ -1887,7 +1887,10 @@ let tests =
                     "UPDATE natural_view_va va "
                     + "JOIN JSON_TABLE(JSON_ARRAY(va.link_id),'$[*]' COLUMNS(next_id INT PATH '$')) j ON TRUE "
                     + "JOIN natural_view_vb vb ON vb.link_id=j.next_id "
-                    + "SET n=n+1,bonus=bonus+1 WHERE va.id=1" ]
+                    + "SET n=n+1,bonus=bonus+1 WHERE va.id=1"
+                    "WITH c AS (SELECT id FROM natural_view_link) UPDATE c "
+                    + "NATURAL JOIN natural_view_va va NATURAL JOIN natural_view_vb vb "
+                    + "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1" ]
               for index, sql in List.indexed cases do
                   let ownerA, _ = handle (create (2 + 3 * index) store) "BEGIN"
                   let ownerA, _ = handle ownerA "UPDATE natural_view_a SET n=n+10 WHERE id=1"

@@ -290,6 +290,10 @@ def main():
                     "SET n=n+1,bonus=bonus+1 WHERE id=1",
                     "UPDATE (read_counts rc NATURAL JOIN va) NATURAL JOIN vb_unique vb "
                     "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE rc.id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN va "
+                    "NATURAL JOIN vb_unique vb SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE (c NATURAL JOIN va) "
+                    "NATURAL JOIN vb_unique vb SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1",
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)
@@ -390,6 +394,8 @@ def main():
                     "WITH c AS (SELECT id FROM link) UPDATE c "
                     "JOIN va ON va.link_id=c.id JOIN vb_unique vb ON vb.link_id=c.id "
                     "SET n=n+1,bonus=bonus+1 WHERE c.id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN va "
+                    "NATURAL JOIN vb_unique vb SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1",
                     "UPDATE va JOIN LATERAL (SELECT va.link_id AS next_id) q ON TRUE "
                     "JOIN vb_unique vb ON vb.link_id=q.next_id "
                     "SET n=n+1,bonus=bonus+1 WHERE va.id=1",
