@@ -2153,6 +2153,12 @@ extends direct evaluation to nested outer scopes while validating projection
 and predicate bindings for every row. Its matched 100-user ShortRun fell from
 10.19 to 5.34 ms. Reusing metadata across changing ancestor scopes and general
 filtered scalar materialization remain open.
+A [qualified-expression AST cache](benchmarks/results/2026-11-05-nested-ast-metadata-cache.md)
+now reuses successful metadata and binding validation for that nested filtered
+shape within one statement. Two interleaved checked in-process comparisons
+completed 8.7% and 10.0% more two-scope queries than unchanged code. The
+server ShortRun was noisier; other expression shapes and deeper correlation
+still require per-row work.
 The [computed-derived control](benchmarks/results/2026-11-04-projection-miss-cache.md)
 now memoizes unsuccessful physical-projection discovery within a statement;
 the matched ShortRun fell from 4.68 to 3.71 ms for 100 outer rows. This is a

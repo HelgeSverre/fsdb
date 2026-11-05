@@ -789,6 +789,7 @@ type private StatementMemo =
       ScopedExistsProjections: Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>
       SourceFreeScalarShapes: Dictionary<SelectStmt, bool>
       ScopedSourceFreeScalars: Dictionary<SelectStmt, Dictionary<obj, Dictionary<obj, ColumnMetadata>>>
+      NestedSourceFreeScalars: Dictionary<SelectStmt, ColumnMetadata>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
 type private SharedViewCteScope =
@@ -834,6 +835,7 @@ let private freshStatementMemo () =
       ScopedExistsProjections = Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>(HashIdentity.Reference)
       SourceFreeScalarShapes = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
       ScopedSourceFreeScalars = Dictionary<SelectStmt, Dictionary<obj, Dictionary<obj, ColumnMetadata>>>(HashIdentity.Reference)
+      NestedSourceFreeScalars = Dictionary<SelectStmt, ColumnMetadata>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
@@ -7503,9 +7505,24 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
             | [ { Expression = projection } ]
                 when not (scalarSubqueryMaterializes ctx.Registry select)
                      && Expression.exists (function Col _ | QualifiedCol _ -> true | _ -> false) projection ->
+                let rec qualifiedExpression = function
+                    | Lit _ | QualifiedCol _ -> true
+                    | BinOp(_, left, right) -> qualifiedExpression left && qualifiedExpression right
+                    | _ -> false
+                // A SELECT site keeps its qualified bindings throughout one statement,
+                // even when a dependent source builds fresh row contexts.
+                let cacheNestedMetadata =
+                    match ctx.Outer with
+                    | Some outer when outer.Outer.IsNone
+                                      && qualifiedExpression projection
+                                      && qualifiedExpression condition -> true
+                    | _ -> false
                 let cachedMetadata =
-                    if ctx.Outer.IsSome then None
-                    else
+                    if cacheNestedMetadata then
+                        match memo.NestedSourceFreeScalars.TryGetValue select with
+                        | true, metadata -> Some metadata
+                        | _ -> None
+                    elif ctx.Outer.IsNone then
                         match memo.ScopedSourceFreeScalars.TryGetValue select with
                         | true, scopes ->
                             match scopes.TryGetValue(ctx.ColumnIndex :> obj) with
@@ -7515,6 +7532,7 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
                                 | _ -> None
                             | _ -> None
                         | _ -> None
+                    else None
                 let metadata =
                     match cachedMetadata with
                     | Some metadata -> Ok(Some metadata)
@@ -7526,22 +7544,24 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
                 | Error error -> Some(Error error)
                 | Ok None -> None
                 | Ok(Some metadata) ->
-                    if cachedMetadata.IsNone && ctx.Outer.IsNone then
-                        let scopes =
-                            match memo.ScopedSourceFreeScalars.TryGetValue select with
-                            | true, scopes -> scopes
-                            | _ ->
-                                let scopes = Dictionary<obj, Dictionary<obj, ColumnMetadata>>(HashIdentity.Reference)
-                                memo.ScopedSourceFreeScalars.[select] <- scopes
-                                scopes
-                        let qualifiers =
-                            match scopes.TryGetValue(ctx.ColumnIndex :> obj) with
-                            | true, qualifiers -> qualifiers
-                            | _ ->
-                                let qualifiers = Dictionary<obj, ColumnMetadata>(HashIdentity.Reference)
-                                scopes.[ctx.ColumnIndex :> obj] <- qualifiers
-                                qualifiers
-                        qualifiers.[ctx.Qualifiers :> obj] <- metadata
+                    if cachedMetadata.IsNone then
+                        if cacheNestedMetadata then memo.NestedSourceFreeScalars.[select] <- metadata
+                        elif ctx.Outer.IsNone then
+                            let scopes =
+                                match memo.ScopedSourceFreeScalars.TryGetValue select with
+                                | true, scopes -> scopes
+                                | _ ->
+                                    let scopes = Dictionary<obj, Dictionary<obj, ColumnMetadata>>(HashIdentity.Reference)
+                                    memo.ScopedSourceFreeScalars.[select] <- scopes
+                                    scopes
+                            let qualifiers =
+                                match scopes.TryGetValue(ctx.ColumnIndex :> obj) with
+                                | true, qualifiers -> qualifiers
+                                | _ ->
+                                    let qualifiers = Dictionary<obj, ColumnMetadata>(HashIdentity.Reference)
+                                    scopes.[ctx.ColumnIndex :> obj] <- qualifiers
+                                    qualifiers
+                            qualifiers.[ctx.Qualifiers :> obj] <- metadata
                     evalExpr ctx condition
                     |> Result.bind (fun value ->
                         if truthy value = Some true then

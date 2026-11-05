@@ -46,9 +46,13 @@ let main _ =
     for _ in 1 .. 10 do run ()
     printfn "READY pid=%d" Environment.ProcessId
     Console.Out.Flush()
+    let durationSeconds =
+        match Environment.GetEnvironmentVariable "FSDB_PROFILE_SECONDS" with
+        | null -> 40.0
+        | value -> Double.Parse value
     let clock = Stopwatch.StartNew()
     let mutable queries = 0
-    while clock.Elapsed.TotalSeconds < 40.0 do
+    while clock.Elapsed.TotalSeconds < durationSeconds do
         run ()
         queries <- queries + 1
     printfn "queries=%d elapsed=%.3f" queries clock.Elapsed.TotalSeconds
