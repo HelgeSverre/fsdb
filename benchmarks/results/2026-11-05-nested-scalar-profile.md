@@ -1,0 +1,7 @@
+# Nested correlated scalar profile
+
+The [profile workload](../CorrelatedNestedProfile/Program.fs) runs the two-scope nested scalar query against 10,000 users and 50,000 orders in an in-memory fsdb store. It parses the query once, warms ten executions, then repeatedly executes the AST for 40 seconds. Every result must contain 100 rows and a count total of 250. The checked Release run completed 11,558 queries in 40.003 seconds on the M2 Max host; this count includes trace overhead and is not a latency comparison with MySQL.
+
+Attached `dotnet-trace` 10.0.731102 to the ready process using the `dotnet-sampled-thread-time` profile and a 32 MiB buffer. The local trace is `/tmp/fsdb-correlated-nested-checked-2026-11-05.nettrace`. The process ended after about nine seconds of capture despite a 15-second requested duration. The inclusive report places `tryCorrelatedCount` on 96.1% of sampled thread time, `trySourceFreeScalarSubquery` on 57.9%, `metadataOfExpr` on 45.1%, and `DynamicScope.withValue` on 47.8%. `Thread.PollGC` appears on 95.4% of samples, so these inclusive percentages overlap heavily and cannot be read as independent CPU costs.
+
+This narrows the next investigation to metadata inference and dynamic scope changes within the per-row source-free scalar path. The earlier statement-memo cache keyed by scope object identity [did not improve latency](2026-11-05-nested-scalar-cache-trial.md); the next trial needs a stable binding key or another way to avoid per-row metadata inference, with matched benchmark and scope-shadowing tests before retention.
