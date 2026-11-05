@@ -743,6 +743,75 @@ let private unicode52AsciiWeights =
         0x020E; 0x0303; 0x0558; 0x0304; 0x055B
     |]
 
+// MySQL 8.4.11 UCA 4.0/5.2 primary weights for CJK Symbols and Punctuation.
+// U+302A–U+302F have no primary weight; U+3006 and U+303C expand to two.
+let private legacyCjkSymbolWeights unicode520 codepoint =
+    let single value = [ value ]
+    if unicode520 then
+        match codepoint with
+        | 0x3000 -> single 0x020A
+        | 0x3001 -> single 0x0240
+        | 0x3002 -> single 0x0291
+        | 0x3003 -> single 0x0374
+        | 0x3004 -> single 0x1104
+        | 0x3005 -> single 0x11D7
+        | 0x3006 -> [ 0x2B20; 0x2B36 ]
+        | 0x3007 -> single 0x1205
+        | value when value >= 0x3008 && value <= 0x3011 -> single (0x033D + value - 0x3008)
+        | 0x3012 -> single 0x1105
+        | 0x3013 -> single 0x1106
+        | value when value >= 0x3014 && value <= 0x301B -> single (0x0347 + value - 0x3014)
+        | 0x301C -> single 0x0230
+        | value when value >= 0x301D && value <= 0x301F -> single (0x02FA + value - 0x301D)
+        | 0x3020 -> single 0x1107
+        | value when value >= 0x3021 && value <= 0x3029 -> single (0x1206 + value - 0x3021)
+        | value when value >= 0x302A && value <= 0x302F -> []
+        | 0x3030 -> single 0x0231
+        | value when value >= 0x3031 && value <= 0x3035 -> single (0x11D9 + (value - 0x3031) / 2)
+        | 0x3036 -> single 0x1105
+        | 0x3037 -> single 0x1108
+        | 0x3038 -> [ 0xFB40; 0xD341 ]
+        | 0x3039 -> [ 0xFB40; 0xD344 ]
+        | 0x303A -> [ 0xFB40; 0xD345 ]
+        | 0x303B -> single 0x11D8
+        | 0x303C -> [ 0x2B33; 0x2B21 ]
+        | 0x303D -> single 0x0375
+        | 0x303E -> single 0x1109
+        | 0x303F -> single 0x110A
+        | _ -> []
+    else
+        match codepoint with
+        | 0x3000 -> single 0x0209
+        | 0x3001 -> single 0x0237
+        | 0x3002 -> single 0x0266
+        | 0x3003 -> single 0x02E2
+        | 0x3004 -> single 0x0DBB
+        | 0x3005 -> single 0x0E05
+        | 0x3006 -> [ 0x1E5D; 0x1E73 ]
+        | 0x3007 -> single 0x0E29
+        | value when value >= 0x3008 && value <= 0x3011 -> single (0x02AE + value - 0x3008)
+        | 0x3012 -> single 0x0DBC
+        | 0x3013 -> single 0x0DBD
+        | value when value >= 0x3014 && value <= 0x301B -> single (0x02B8 + value - 0x3014)
+        | 0x301C -> single 0x022B
+        | value when value >= 0x301D && value <= 0x301F -> single (0x0283 + value - 0x301D)
+        | 0x3020 -> single 0x0DBE
+        | value when value >= 0x3021 && value <= 0x3029 -> single (0x0E2A + value - 0x3021)
+        | value when value >= 0x302A && value <= 0x302F -> []
+        | 0x3030 -> single 0x022C
+        | value when value >= 0x3031 && value <= 0x3035 -> single (0x0E07 + (value - 0x3031) / 2)
+        | 0x3036 -> single 0x0DBC
+        | 0x3037 -> single 0x0DBF
+        | 0x3038 -> [ 0xFB40; 0xD341 ]
+        | 0x3039 -> [ 0xFB40; 0xD344 ]
+        | 0x303A -> [ 0xFB40; 0xD345 ]
+        | 0x303B -> single 0x0E06
+        | 0x303C -> [ 0x1E70; 0x1E5E ]
+        | 0x303D -> single 0x02E3
+        | 0x303E -> single 0x0DC0
+        | 0x303F -> single 0x0DC1
+        | _ -> []
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) =
@@ -910,11 +979,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                             [ 0xFBC0 + (codepoint >>> 15); 0x8000 ||| (codepoint &&& 0x7FFF) ]
                         else [ 0xFFFD ]
                     for weight in weights do addWeight weight
-                | None when codepoint = 0x3000 ->
-                    addWeight (
-                        if general then 0x3000
-                        elif name = "utf8mb4_unicode_520_ci" then 0x020A
-                        else 0x0209)
+                | None when codepoint >= 0x3000 && codepoint <= 0x303F ->
+                    if general then addWeight codepoint
+                    else
+                        for weight in legacyCjkSymbolWeights (name = "utf8mb4_unicode_520_ci") codepoint do
+                            addWeight weight
                 | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =
                         let uppercase =

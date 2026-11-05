@@ -1428,7 +1428,9 @@ all 624 singletons and 623 adjacent pairs under general, Unicode 4.0, and
 Unicode 5.2 `utf8mb4` collations.
 [Ideographic-space composition](torture/findings/2026-11-05-ideographic-space-legacy-weight.md)
 now matches 1,280 Extension A plus U+3000 pairs across five legacy collations;
-other mixed CJK punctuation weights remain open.
+the [complete U+3000–U+303F weight audit](torture/findings/2026-11-05-cjk-symbol-legacy-weights.md)
+also matches 1,147 singleton, paired, and padded exact-byte comparisons.
+Other mixed CJK punctuation blocks remain open.
 The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
 likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
 plus 1,464 legacy Unicode searches over its later part at size 1.
