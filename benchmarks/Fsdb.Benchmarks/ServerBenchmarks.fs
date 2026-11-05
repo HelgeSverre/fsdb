@@ -655,6 +655,15 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedNestedScalarNoSourceFilteredThreeScopes() =
+        this.Query(
+            "SELECT u.id, (SELECT COUNT(*) FROM orders c "
+            + "WHERE c.user_id = u.id AND (SELECT 1 WHERE (SELECT c.id+u.id WHERE c.id % 2 = 0) IS NOT NULL) IS NOT NULL) "
+            + "FROM users u WHERE u.id <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedPhysicalExists() =
         this.Query "SELECT u.id, EXISTS(SELECT 1 FROM orders c WHERE c.user_id = u.id) FROM users u WHERE u.id <= 100"
 
