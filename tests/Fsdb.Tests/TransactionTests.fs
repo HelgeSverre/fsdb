@@ -1972,6 +1972,65 @@ let tests =
               match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
               | ResultSet(_, [ [ Some "18" ] ]) -> ()
               | result -> failtestf "expected the unmatched grouped natural right update, got %A" result
+              let leftOuterPrefix =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c LEFT JOIN tx_cross_view_tail x ON x.k=c.id "
+                  + "NATURAL LEFT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              let rightOuterPrefix =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c LEFT JOIN tx_cross_view_tail x ON x.k=c.id "
+                  + "NATURAL RIGHT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              verifyNaturalOuterWait 64 65 leftOuterPrefix 20
+              verifyNaturalOuterWait 66 67 rightOuterPrefix 22
+              Expect.equal
+                  (handle setup "WITH c AS (SELECT 3 AS id) UPDATE c LEFT JOIN tx_cross_view_tail x ON x.k=c.id NATURAL LEFT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=3" |> snd)
+                  (Affected 0UL) "an unmatched left prefix does not update the view"
+              Expect.equal
+                  (handle setup "WITH c AS (SELECT 3 AS id) UPDATE c LEFT JOIN tx_cross_view_tail x ON x.k=c.id NATURAL RIGHT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1" |> snd)
+                  (Affected 1UL) "the final right join preserves the view after an unmatched prefix"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "23" ] ]) -> ()
+              | result -> failtestf "expected the outer-prefix view update, got %A" result
+              handle setup "CREATE TABLE tx_cross_nullable_tail(k INT PRIMARY KEY,link_id INT)" |> ignore
+              handle setup "INSERT INTO tx_cross_nullable_tail VALUES(1,1)" |> ignore
+              let nullableLeft =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c LEFT JOIN tx_cross_nullable_tail x ON x.k=c.id "
+                  + "NATURAL LEFT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              let nullableRight =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c LEFT JOIN tx_cross_nullable_tail x ON x.k=c.id "
+                  + "NATURAL RIGHT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              verifyNaturalOuterWait 68 69 nullableLeft 25
+              verifyNaturalOuterWait 70 71 nullableRight 27
+              Expect.equal (handle setup "DELETE FROM tx_cross_nullable_tail WHERE k=1" |> snd)
+                  (Affected 1UL) "remove the nullable read-side match"
+              Expect.equal (handle setup nullableLeft |> snd) (Affected 0UL)
+                  "a missing nullable shared key excludes the view from a left join"
+              Expect.equal (handle setup nullableRight |> snd) (Affected 1UL)
+                  "the final right join preserves the view without the nullable read side"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "28" ] ]) -> ()
+              | result -> failtestf "expected the nullable-prefix view update, got %A" result
+              let earlierRightLeft =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c RIGHT JOIN tx_cross_view_tail x ON x.k=c.id "
+                  + "NATURAL LEFT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              let earlierRightRight =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c RIGHT JOIN tx_cross_view_tail x ON x.k=c.id "
+                  + "NATURAL RIGHT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              verifyNaturalOuterWait 72 73 earlierRightLeft 30
+              verifyNaturalOuterWait 74 75 earlierRightRight 32
+              Expect.equal
+                  (handle setup "WITH c AS (SELECT 3 AS id) UPDATE c RIGHT JOIN tx_cross_view_tail x ON x.k=c.id NATURAL LEFT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1" |> snd)
+                  (Affected 0UL) "a right-join prefix without a CTE match does not reach the view"
+              Expect.equal
+                  (handle setup "WITH c AS (SELECT 3 AS id) UPDATE c RIGHT JOIN tx_cross_view_tail x ON x.k=c.id NATURAL RIGHT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1" |> snd)
+                  (Affected 1UL) "the final right join preserves the view after an unmatched right prefix"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "33" ] ]) -> ()
+              | result -> failtestf "expected the right-prefix view update, got %A" result
               for direction in [ "LEFT"; "RIGHT" ] do
                   let duplicateGroup =
                       "WITH c AS (SELECT id FROM tx_cross_view_link) "

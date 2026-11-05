@@ -169,3 +169,20 @@ direction. Fsdb now promotes the writable view before checking the group, so
 the same ambiguity wins over a missing-CTE error. Other duplicate-name
 arrangements, outer-join orderings, and broader multi-match behavior remain
 open.
+
+## Earlier outer read join
+
+MySQL also waits and rebases when the CTE has an earlier `LEFT JOIN` or
+`RIGHT JOIN` to a physical read source before either natural outer edge to
+the writable view. Fsdb now keeps that earlier join inside the moved source
+group and builds the shared-key equalities against the exposed group columns.
+The native oracle and focused regression cover both final directions after
+both earlier directions, plus unmatched source cases. A nullable right side
+that introduces the view's `link_id` key is included: when the read match is
+removed, the final natural left join changes no view row, while the final
+natural right join updates the preserved view row. All matched writes wait
+for the physical target and rebase after the owner commits.
+
+This covers a single earlier outer read join with distinct source columns.
+Longer mixed outer chains, `USING` edges, and broader multi-match behavior
+remain to audit.

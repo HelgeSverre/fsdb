@@ -24538,7 +24538,9 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                     let groupedKeys =
                         if not groupedNatural then Some []
                         elif prior |> List.exists (fun earlier ->
-                            (earlier.Kind <> InnerJoin && earlier.Kind <> CrossJoin && earlier.Kind <> StraightJoin)
+                            (earlier.Kind <> InnerJoin && earlier.Kind <> CrossJoin
+                             && earlier.Kind <> StraightJoin
+                             && earlier.Kind <> LeftJoin && earlier.Kind <> RightJoin)
                             || not earlier.Using.IsEmpty) then None
                         else
                             let sources =

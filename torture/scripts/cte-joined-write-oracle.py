@@ -432,6 +432,78 @@ def main():
                     "WITH c AS (SELECT 2 AS id) UPDATE c JOIN tail x ON x.k=c.id NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
                 ) == 1
                 assert execute(owner, "SELECT n FROM a WHERE id=1") == ((54,),)
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c LEFT JOIN tail x ON x.k=c.id NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 56),),
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c LEFT JOIN tail x ON x.k=c.id NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 58),),
+                )
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT 3 AS id) UPDATE c LEFT JOIN tail x ON x.k=c.id NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=3",
+                ) == 0
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT 3 AS id) UPDATE c LEFT JOIN tail x ON x.k=c.id NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
+                ) == 1
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((59,),)
+                execute(owner, "CREATE TABLE nullable_tail(k INT PRIMARY KEY,link_id INT)")
+                execute(owner, "INSERT INTO nullable_tail VALUES(1,1)")
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c LEFT JOIN nullable_tail x ON x.k=c.id NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 61),),
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c LEFT JOIN nullable_tail x ON x.k=c.id NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 63),),
+                )
+                execute(owner, "DELETE FROM nullable_tail WHERE k=1")
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT id FROM link) UPDATE c LEFT JOIN nullable_tail x ON x.k=c.id NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1",
+                ) == 0
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT id FROM link) UPDATE c LEFT JOIN nullable_tail x ON x.k=c.id NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
+                ) == 1
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((64,),)
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c RIGHT JOIN tail x ON x.k=c.id NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 66),),
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c RIGHT JOIN tail x ON x.k=c.id NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 68),),
+                )
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT 3 AS id) UPDATE c RIGHT JOIN tail x ON x.k=c.id NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1",
+                ) == 0
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT 3 AS id) UPDATE c RIGHT JOIN tail x ON x.k=c.id NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
+                ) == 1
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((69,),)
                 for direction in ("LEFT", "RIGHT"):
                     statement = (
                         "WITH c AS (SELECT id FROM link) "
