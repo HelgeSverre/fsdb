@@ -2343,8 +2343,13 @@ implementation effort:
    carries successive read-source equalities into ordinary or natural view
    joins, including a shared column introduced by a later source. An
    [ordinary read join after either natural chain](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#read-source-after-the-longer-natural-chain)
-   also retains MySQL's merged-column binding and later ambiguity. Later
-   natural or outer joins and mixed outer-join prefixes remain open.
+   also retains MySQL's merged-column binding and later ambiguity. A
+   [natural read source after the writable view](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#natural-read-source-after-the-writable-view)
+   now retains the shared key across two- and three-edge natural prefixes,
+   including physical-row waits, rebasing, mismatched-key exclusion, and
+   ambiguity from a subsequent ordinary join. Natural joins after an
+   intervening ordinary source, outer joins, and mixed outer-join prefixes
+   remain open.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.

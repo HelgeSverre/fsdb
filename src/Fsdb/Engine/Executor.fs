@@ -24514,9 +24514,6 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
 
                 if not writesView then
                     move (join :: prior) rest
-                elif join.Kind = NaturalJoin && not prior.IsEmpty
-                     && (rest |> List.exists (fun later ->
-                         later.Kind <> InnerJoin && later.Kind <> CrossJoin && later.Kind <> StraightJoin)) then update
                 else
                     // Keep the old first source before its prior joins, so
                     // LATERAL and JSON_TABLE dependencies remain in scope.
@@ -24592,10 +24589,41 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                             let mergedOwners =
                                 viewShared
                                 |> List.fold (fun names name -> Map.add (name.ToLowerInvariant()) qualifier names) mergedOwners
-                            first :: (prefix @ rest), mergedOwners
+                            let rec convertLaterNatural owners = function
+                                | ({ Kind = NaturalJoin } as later) :: remaining ->
+                                    match FromItem.tryQualifier later.Table with
+                                    | Some rightOwner ->
+                                        let names = sourceNames later.Table
+                                        let shared =
+                                            names
+                                            |> List.choose (fun name ->
+                                                Map.tryFind (name.ToLowerInvariant()) owners
+                                                |> Option.map (fun leftOwner -> name, leftOwner))
+                                        let condition =
+                                            shared
+                                            |> List.map (fun (name, leftOwner) ->
+                                                BinOp(Eq, QualifiedCol(leftOwner, name), QualifiedCol(rightOwner, name)))
+                                            |> conjunction
+                                        let owners =
+                                            names
+                                            |> List.fold (fun owners name ->
+                                                let key = name.ToLowerInvariant()
+                                                if Map.containsKey key owners then owners else Map.add key rightOwner owners) owners
+                                        { later with Kind = InnerJoin; On = BinOp(And, later.On, condition) }
+                                        :: convertLaterNatural owners remaining
+                                    | None -> later :: remaining
+                                | remaining -> remaining
+                            let owners =
+                                view.OrderedColumns
+                                |> List.fold (fun owners name -> Map.add (name.ToLowerInvariant()) qualifier owners) owners
+                            first :: (prefix @ convertLaterNatural owners rest), mergedOwners
                     let rewriteMerged =
+                        let rec afterNaturalPrefix = function
+                            | { Kind = NaturalJoin } :: remaining -> afterNaturalPrefix remaining
+                            | remaining -> remaining
                         let laterNames =
                             rest
+                            |> afterNaturalPrefix
                             |> List.collect (fun later -> FromItem.leaves later.Table |> List.collect sourceNames)
                             |> List.map _.ToLowerInvariant()
                             |> Set.ofList
@@ -30875,22 +30903,51 @@ let rec executeAs
             let viewExposes (column: string) =
                 view.OrderedColumns
                 |> List.exists (fun name -> equalsIgnoreCase name column)
-            let naturalSource, naturalSharedNames =
-                match updateStmt.Joins with
-                | { Kind = NaturalJoin; Table = source } :: _ ->
-                    let sourceNames =
-                        selectSourceColumns store dbName source
-                        |> List.choose id
-                        |> List.map _.Name
-                    FromItem.tryQualifier source,
-                    (view.OrderedColumns
-                     |> List.filter (fun name -> sourceNames |> List.exists (equalsIgnoreCase name)))
-                | _ -> None, []
+            // Resolve the natural prefix against the view's exposed columns,
+            // before its physical sources add hidden duplicate column names.
+            let mutable naturalOwners =
+                view.OrderedColumns
+                |> List.map (fun name -> name.ToLowerInvariant(), viewQualifier)
+                |> Map.ofList
+            let mutable naturalMembers = Map.empty<string, Set<string>>
+            let mutable inNaturalPrefix = true
+            let naturalKeys =
+                updateStmt.Joins
+                |> List.map (fun join ->
+                    match join.Kind, FromItem.tryQualifier join.Table with
+                    | NaturalJoin, Some rightOwner when inNaturalPrefix ->
+                        let names =
+                            selectSourceColumns store dbName join.Table
+                            |> List.choose id
+                            |> List.map _.Name
+                        let shared =
+                            names
+                            |> List.choose (fun name ->
+                                Map.tryFind (name.ToLowerInvariant()) naturalOwners
+                                |> Option.map (fun leftOwner -> name, leftOwner, rightOwner))
+                        for name, leftOwner, rightOwner in shared do
+                            let key = name.ToLowerInvariant()
+                            let members =
+                                naturalMembers
+                                |> Map.tryFind key
+                                |> Option.defaultValue Set.empty
+                                |> Set.add (leftOwner.ToLowerInvariant())
+                                |> Set.add (rightOwner.ToLowerInvariant())
+                            naturalMembers <- Map.add key members naturalMembers
+                        for name in names do
+                            let key = name.ToLowerInvariant()
+                            if not (Map.containsKey key naturalOwners) then
+                                naturalOwners <- Map.add key rightOwner naturalOwners
+                        Some shared
+                    | _ ->
+                        inNaturalPrefix <- false
+                        None)
             let isNaturalShared (name: string) =
-                naturalSharedNames |> List.exists (equalsIgnoreCase name)
-                && (match naturalSource, owners name with
-                    | Some source, [ owner ] -> equalsIgnoreCase source owner
-                    | _ -> false)
+                match Map.tryFind (name.ToLowerInvariant()) naturalMembers with
+                | Some members ->
+                    owners name
+                    |> List.forall (fun owner -> Set.contains (owner.ToLowerInvariant()) members)
+                | None -> false
             let mutable ambiguousColumn = None
             let callerCurrentUser =
                 Functions.lookup "CURRENT_USER" registry
@@ -30960,15 +31017,15 @@ let rec executeAs
                         updateStmt.Joins
                         |> List.mapi (fun index join ->
                             let join =
-                                match join.Kind, FromItem.tryQualifier join.Table with
-                                | NaturalJoin, Some sourceQualifier when index = 0 ->
+                                match join.Kind, FromItem.tryQualifier join.Table, naturalKeys.[index] with
+                                | NaturalJoin, Some _, Some shared ->
                                     // The moved view exposes one column per name, but its
                                     // flattened physical join may have several. Resolve the
                                     // NATURAL keys against the exposed view before flattening.
                                     let condition =
-                                        naturalSharedNames
-                                        |> List.map (fun name ->
-                                            BinOp(Eq, QualifiedCol(viewQualifier, name), QualifiedCol(sourceQualifier, name)))
+                                        shared
+                                        |> List.map (fun (name, leftOwner, rightOwner) ->
+                                            BinOp(Eq, QualifiedCol(leftOwner, name), QualifiedCol(rightOwner, name)))
                                         |> function
                                             | [] -> Lit(VInt 1L)
                                             | first :: rest -> rest |> List.fold (fun accumulated next -> BinOp(And, accumulated, next)) first

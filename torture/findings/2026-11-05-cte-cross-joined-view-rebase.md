@@ -97,3 +97,22 @@ both engines report 1052 when that source exposes another `id`. The contended
 transaction regression covers both successful forms and the ambiguity case.
 Later natural or outer joins, mixed outer-join prefixes, and broader
 multi-match ordering remain open.
+
+## Natural read source after the writable view
+
+MySQL 8.4.11 also waits and rebases for `c NATURAL JOIN v NATURAL JOIN t`,
+and for `c NATURAL JOIN r NATURAL JOIN v NATURAL JOIN t`. The later `t` shares
+`id` with the accumulated natural column. Fsdb previously returned 1052 for
+the bare `WHERE id=1`: the view rewrite recognized the first natural edge,
+but its flattened physical join exposed another `id` before the later edge
+could merge it.
+
+The rewrite now resolves each edge of the contiguous natural prefix against
+the view's exposed columns, carries qualified equalities into the physical
+join, and retains the merged-column owner for the bare filter. Both contended
+forms wait for the target row and increment its committed value. Moving `t.id`
+away prevents the update; adding an ordinary later source with another `id`
+still reports 1052. The maintained native oracle and focused transaction
+regression cover these outcomes; the full `just check` run passed 3,884 tests.
+Natural joins after an intervening ordinary
+join, outer-join reorderings, and broader multi-match ordering remain open.

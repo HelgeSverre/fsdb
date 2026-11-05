@@ -330,6 +330,38 @@ def main():
                     assert error.args[0] == 1052, error
                 else:
                     raise AssertionError("ambiguous derived assignment was accepted")
+                execute(owner, "CREATE TABLE natural_tail(id INT PRIMARY KEY)")
+                execute(owner, "INSERT INTO natural_tail VALUES(1)")
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN v NATURAL JOIN natural_tail t SET v.n=v.n+1 WHERE id=1",
+                    ((1, 40),),
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_read r NATURAL JOIN v NATURAL JOIN natural_tail t SET v.n=v.n+1 WHERE id=1",
+                    ((1, 42),),
+                )
+                execute(owner, "UPDATE natural_tail SET id=2 WHERE id=1")
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_read r NATURAL JOIN v NATURAL JOIN natural_tail t SET v.n=v.n+1 WHERE id=1",
+                ) == 0
+                execute(owner, "UPDATE natural_tail SET id=1 WHERE id=2")
+                try:
+                    execute(
+                        owner,
+                        "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_read r NATURAL JOIN v NATURAL JOIN natural_tail t JOIN link l ON l.id=c.id SET v.n=v.n+1 WHERE id=1",
+                    )
+                except pymysql.MySQLError as error:
+                    assert error.args[0] == 1052, error
+                else:
+                    raise AssertionError("an ordinary source after the natural chain did not make id ambiguous")
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((42,),)
                 print(
                     "MySQL 8.4.11: CTE, derived, and joined-view writes (including four-source NATURAL chains) waited and committed"
                 )

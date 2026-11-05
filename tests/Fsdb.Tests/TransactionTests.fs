@@ -1801,6 +1801,65 @@ let tests =
                   | ResultSet(_, [ [ Some value ] ]) ->
                       Expect.equal value (string first) "first duplicate-source value wins"
                   | result -> failtestf "expected MySQL's first duplicate-source value, got %A" result
+              handle setup "CREATE TABLE tx_cross_natural_tail(id INT PRIMARY KEY)" |> ignore
+              handle setup "INSERT INTO tx_cross_natural_tail VALUES(1)" |> ignore
+              handle setup "UPDATE tx_cross_view_target SET n=0 WHERE id=1" |> ignore
+              let owner, _ = handle (create 50 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_cross_view_target SET n=n+1 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "owner changes the later-natural target row"
+              let waiter, _ = handle (create 51 store) "BEGIN"
+              let sql =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c NATURAL JOIN tx_cross_view v NATURAL JOIN tx_cross_natural_tail x "
+                  + "SET v.n=v.n+1 WHERE id=1"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting = Threading.Tasks.Task.Run(fun () -> started.Set(); handle waiter sql)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "later-natural writer starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "later-natural owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "later-natural writer resumes"
+              let waiter, updated = waiting.Result
+              Expect.isTrue blocked "later-natural writer waits for the physical target"
+              Expect.equal updated (Affected 1UL) "later-natural writer updates the committed row"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "later-natural writer commits"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both later-natural increments, got %A" result
+              let owner, _ = handle (create 52 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_cross_view_target SET n=n+1 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "owner changes the longer natural-chain target"
+              let waiter, _ = handle (create 53 store) "BEGIN"
+              let sql =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c NATURAL JOIN tx_cross_natural_read r NATURAL JOIN tx_cross_view v "
+                  + "NATURAL JOIN tx_cross_natural_tail x SET v.n=v.n+1 WHERE id=1"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting = Threading.Tasks.Task.Run(fun () -> started.Set(); handle waiter sql)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "longer natural-chain writer starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "longer natural-chain owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "longer natural-chain writer resumes"
+              let waiter, updated = waiting.Result
+              Expect.isTrue blocked "longer natural-chain writer waits for the physical target"
+              Expect.equal updated (Affected 1UL) "longer natural-chain writer updates the committed row"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "longer natural-chain writer commits"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "4" ] ]) -> ()
+              | result -> failtestf "expected both longer natural-chain increments, got %A" result
+              Expect.equal (handle setup "UPDATE tx_cross_natural_tail SET id=2 WHERE id=1" |> snd)
+                  (Affected 1UL) "move the later natural source away"
+              Expect.equal (handle setup sql |> snd) (Affected 0UL)
+                  "a later mismatched natural key excludes the view row"
+              Expect.equal (handle setup "UPDATE tx_cross_natural_tail SET id=1 WHERE id=2" |> snd)
+                  (Affected 1UL) "restore the later natural source"
+              let ambiguousLaterSource =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c NATURAL JOIN tx_cross_natural_read r NATURAL JOIN tx_cross_view v "
+                  + "NATURAL JOIN tx_cross_natural_tail x JOIN tx_cross_view_link l ON l.id=c.id "
+                  + "SET v.n=v.n+1 WHERE id=1"
+              match handle setup ambiguousLaterSource |> snd with
+              | Err(1052, _) -> ()
+              | result -> failtestf "expected an ordinary later id to be ambiguous, got %A" result
 
           testCase "CTE-joined update with an unqualified target waits and rebases"
           <| fun _ ->
