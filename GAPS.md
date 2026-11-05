@@ -2298,8 +2298,9 @@ implementation effort:
    sources](torture/findings/2026-10-15-nested-joined-view-mutation-source.md)
    do likewise, including uniquely owned bare assignments; a writable view
    in the second or third position of an inner join follows the same physical claim.
-   A [CTE-first `CROSS JOIN` to a writable view](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md)
-   now also waits and rebases, including one intervening physical read source.
+   [CTE-first `CROSS JOIN` and `STRAIGHT_JOIN` to a writable view](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md)
+   now also wait and rebase, including one intervening physical read source
+   for the `CROSS JOIN` form.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.

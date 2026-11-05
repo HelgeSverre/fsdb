@@ -1671,7 +1671,7 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected both increments after view contention, got %A" result
 
-          testCase "CTE-first cross joined view update waits for its physical target"
+          testCase "CTE-first CROSS and STRAIGHT joined view updates wait for their physical target"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup = create 1 store
@@ -1680,11 +1680,12 @@ let tests =
               handle setup "INSERT INTO tx_cross_view_target VALUES(1,0)" |> ignore
               handle setup "INSERT INTO tx_cross_view_link VALUES(1)" |> ignore
               handle setup "CREATE VIEW tx_cross_view AS SELECT t.id,t.n,l.id AS link_id FROM tx_cross_view_target t JOIN tx_cross_view_link l ON t.id=l.id" |> ignore
-              let prefix = "WITH c AS (SELECT id FROM tx_cross_view_link) UPDATE c CROSS JOIN "
-              for index, suffix in
-                  [ 0, "tx_cross_view v SET v.n=v.n+1 WHERE c.id=v.link_id AND c.id=1"
-                    1, "tx_cross_view_link l CROSS JOIN tx_cross_view v "
-                       + "SET v.n=v.n+1 WHERE c.id=l.id AND l.id=v.link_id AND c.id=1" ] do
+              let prefix = "WITH c AS (SELECT id FROM tx_cross_view_link) UPDATE c "
+              for index, statement in
+                  [ 0, "CROSS JOIN tx_cross_view v SET v.n=v.n+1 WHERE c.id=v.link_id AND c.id=1"
+                    1, "CROSS JOIN tx_cross_view_link l CROSS JOIN tx_cross_view v "
+                       + "SET v.n=v.n+1 WHERE c.id=l.id AND l.id=v.link_id AND c.id=1"
+                    2, "STRAIGHT_JOIN tx_cross_view v ON c.id=v.link_id SET v.n=v.n+1 WHERE c.id=1" ] do
                   let owner, _ = handle (create (2 + index * 2) store) "BEGIN"
                   let owner, changed = handle owner "UPDATE tx_cross_view_target SET n=n+1 WHERE id=1"
                   Expect.equal changed (Affected 1UL) "owner changes the physical row"
@@ -1693,19 +1694,32 @@ let tests =
                   let waiting =
                       Threading.Tasks.Task.Run(fun () ->
                           started.Set()
-                          handle waiter (prefix + suffix))
+                          handle waiter (prefix + statement))
                   Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "cross joined view writer starts"
                   let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
                   Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
                   Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "cross joined view writer resumes"
                   let waiter, updated = waiting.Result
-                  Expect.isTrue blocked "cross joined view writer waits for physical target"
+                  Expect.isTrue blocked (sprintf "joined view writer waits for physical target; result %A" updated)
                   Expect.equal updated (Affected 1UL) "cross joined view writer updates committed row"
                   Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "cross joined view writer commits"
                   match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
                   | ResultSet(_, [ [ Some value ] ]) ->
                       Expect.equal value (string ((index + 1) * 2)) "both increments persist"
                   | result -> failtestf "expected both increments after cross joined view contention, got %A" result
+              Expect.equal (handle setup "UPDATE tx_cross_view_target SET n=0 WHERE id=1" |> snd)
+                  (Affected 1UL) "reset target for duplicate source"
+              for first, second in [ 10, 20; 20, 10 ] do
+                  let duplicateSource =
+                      sprintf
+                          "WITH c AS (SELECT 1 id,%d x UNION ALL SELECT 1,%d) UPDATE c STRAIGHT_JOIN tx_cross_view v ON c.id=v.link_id SET v.n=c.x"
+                          first second
+                  Expect.equal (handle setup duplicateSource |> snd) (Affected 1UL)
+                      "a duplicate CTE source updates the view target once"
+                  match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some value ] ]) ->
+                      Expect.equal value (string first) "first duplicate-source value wins"
+                  | result -> failtestf "expected MySQL's first duplicate-source value, got %A" result
 
           testCase "CTE-joined update with an unqualified target waits and rebases"
           <| fun _ ->

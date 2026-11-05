@@ -23,3 +23,17 @@ dotnet run --project tests/Fsdb.Tests -c Release -- --sequenced --no-spinner \
 
 This covers the audited CTE-first order and one intervening physical source.
 Other dependent source and outer-join reorderings remain open.
+
+## STRAIGHT_JOIN follow-up
+
+MySQL also waits and rebases when the CTE first source uses `STRAIGHT_JOIN`
+to reach the writable view. Before this follow-up, fsdb returned 1146 for
+the CTE name after the mutation wrapper removed declarations, because the
+view promotion stopped at `STRAIGHT_JOIN`. The promotion now includes that
+join kind and the physical row claim occurs before the writer's snapshot.
+
+The native oracle and transaction regression also give the CTE two matching
+rows with distinct assignment values, in both orders. Both engines update
+the view target once using the first source value in the audited cases.
+This checks a result-order risk from moving the view into the rewrite's first
+position; it does not establish all `STRAIGHT_JOIN` multi-match behavior.
