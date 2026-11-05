@@ -549,6 +549,10 @@ audit also finds MySQL distance zero for standalone and combined rings even
 when its point relation reports disjointness, so distance is not a substitute
 for that strategy. The hole-winding follow-up resolves the finer polar-corner
 grid; a separate near-hole point relation still differs.
+The [remaining polar point trace](torture/findings/2026-11-04-geographic-cross-track-trial.md#remaining-polar-point-trace)
+shows why unioning standalone hole classifications is insufficient: it fixes
+one point while breaking another, so signed winding across polygon rings
+remains the next point-relation investigation.
 The expanded [near-hole distance oracle](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
 finds 34 point-to-polygon distance mismatches across 189 points. Reversing
 ring traversal globally or only for polygon distance does not reduce that

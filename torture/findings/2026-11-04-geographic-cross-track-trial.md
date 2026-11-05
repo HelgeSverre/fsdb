@@ -161,3 +161,21 @@ match. A focused regression pins two formerly divergent polar points.
 The remaining point-relation mismatch is `POINT(88 2.99999)` near the same
 hole. The nine distance mismatches still require point-to-segment numerical
 work. These measured improvements do not establish broader geographic parity.
+
+## Remaining polar point trace
+
+For `POINT(88 2.99999)`, MySQL 8.4.11 and fsdb both classify the standalone
+exterior polygon and standalone hole polygon as containing the point. MySQL
+classifies their combined polygon as disjoint; fsdb classifies it as
+intersecting. Fsdb's winding count is `-2` when the hole is treated as a
+standalone exterior, but `0` when traversed in its hole role. The current
+polygon path reduces each ring to a Boolean before combining them, losing
+the winding context MySQL's polygon strategy can use.
+
+A trial that excluded points whenever either hole traversal reported
+containment fixed this residual but made `POINT(86 2.99999)` disagree. The
+full edge oracle changed from 12 to 13 line-relation mismatches and from
+nine to ten near-hole distance mismatches; point-relation mismatches stayed
+at one. The trial was reverted. The next candidate should preserve signed
+winding across the exterior and hole traversal and compare it with Boost's
+polygon strategy, rather than unioning independent ring Booleans.
