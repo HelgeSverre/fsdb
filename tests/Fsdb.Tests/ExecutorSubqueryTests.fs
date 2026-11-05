@@ -500,6 +500,15 @@ let tests =
               match runDefault store "SELECT (SELECT o.missing) FROM scalar_outer o" with
               | Err(1054, _) -> ()
               | other -> failtestf "expected unknown source-free scalar column, got %A" other
+              runDefault store "CREATE TABLE scalar_inner (id INT PRIMARY KEY, parent_id INT)" |> ignore
+              runDefault store "INSERT INTO scalar_inner VALUES (1,1),(2,1),(3,2),(4,2)" |> ignore
+              Expect.equal
+                  (runDefault store "SELECT o.id,(SELECT COUNT(*) FROM scalar_inner i WHERE i.parent_id=o.id AND (SELECT i.id+o.id WHERE i.id % 2 = 0) IS NOT NULL) AS n FROM scalar_outer o ORDER BY o.id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ]))
+                  "nested filtered scalar binds the immediate and ancestor rows"
+              match runDefault store "SELECT o.id,(SELECT COUNT(*) FROM scalar_inner i WHERE i.parent_id=o.id AND (SELECT i.missing WHERE i.id=0) IS NOT NULL) FROM scalar_outer o" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected unknown nested filtered scalar column, got %A" other
 
           testCase "IN and NOT IN over BIGINT UNSIGNED candidates match across signedness"
           <| fun _ ->

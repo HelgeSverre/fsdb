@@ -7498,16 +7498,15 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
         match select.Where with
         | None -> direct ()
         | Some condition when isLiteralConstantExpression ctx.Registry condition -> direct ()
-        | Some condition when ctx.Outer.IsNone
-                              && not (Expression.exists (function RuntimeExpression _ -> true | _ -> false) condition) ->
+        | Some condition when not (Expression.exists (function RuntimeExpression _ -> true | _ -> false) condition) ->
             match select.Projections with
             | [ { Expression = projection } ]
                 when not (scalarSubqueryMaterializes ctx.Registry select)
                      && Expression.exists (function Col _ | QualifiedCol _ -> true | _ -> false) projection ->
                 let cachedMetadata =
-                    memo.ScopedSourceFreeScalars
-                    |> fun plans ->
-                        match plans.TryGetValue select with
+                    if ctx.Outer.IsSome then None
+                    else
+                        match memo.ScopedSourceFreeScalars.TryGetValue select with
                         | true, scopes ->
                             match scopes.TryGetValue(ctx.ColumnIndex :> obj) with
                             | true, qualifiers ->
@@ -7527,7 +7526,7 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
                 | Error error -> Some(Error error)
                 | Ok None -> None
                 | Ok(Some metadata) ->
-                    if cachedMetadata.IsNone then
+                    if cachedMetadata.IsNone && ctx.Outer.IsNone then
                         let scopes =
                             match memo.ScopedSourceFreeScalars.TryGetValue select with
                             | true, scopes -> scopes
