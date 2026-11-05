@@ -387,6 +387,9 @@ def main():
                     six_source_update(1),
                     "UPDATE va NATURAL JOIN vb_unique vb "
                     "SET n=n+1,bonus=bonus+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c "
+                    "JOIN va ON va.link_id=c.id JOIN vb_unique vb ON vb.link_id=c.id "
+                    "SET n=n+1,bonus=bonus+1 WHERE c.id=1",
                     "UPDATE (link l0 LEFT JOIN va ON va.link_id=l0.id) "
                     "RIGHT JOIN vb ON vb.link_id=l0.id "
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.id=1",

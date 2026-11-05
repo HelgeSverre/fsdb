@@ -1895,6 +1895,30 @@ let tests =
               match handle setup "SELECT (SELECT n FROM natural_view_a),(SELECT bonus FROM natural_view_b)" |> snd with
               | ResultSet(_, [ [ Some "11"; Some "11" ] ]) -> ()
               | result -> failtestf "expected both rebased natural-view increments, got %A" result
+              let ownerA, _ = handle (create 5 store) "BEGIN"
+              let ownerA, _ = handle ownerA "UPDATE natural_view_a SET n=n+10 WHERE id=1"
+              let ownerB, _ = handle (create 6 store) "BEGIN"
+              let ownerB, _ = handle ownerB "UPDATE natural_view_b SET bonus=bonus+10 WHERE id=1"
+              let waiter, _ = handle (create 7 store) "BEGIN"
+              let cteSql =
+                  "WITH c AS (SELECT id FROM natural_view_link) UPDATE c "
+                  + "JOIN natural_view_va va ON va.link_id=c.id "
+                  + "JOIN natural_view_vb vb ON vb.link_id=c.id "
+                  + "SET n=n+1,bonus=bonus+1 WHERE c.id=1"
+              use cteStarted = new Threading.ManualResetEventSlim(false)
+              let cteWaiting = Threading.Tasks.Task.Run(fun () -> cteStarted.Set(); handle waiter cteSql)
+              Expect.isTrue (cteStarted.Wait(TimeSpan.FromSeconds 1.0)) "CTE-first two-view writer starts"
+              Expect.isFalse (cteWaiting.Wait(TimeSpan.FromMilliseconds 100.0)) "CTE-first writer waits for first holder"
+              Expect.equal (handle ownerA "COMMIT" |> snd) (Affected 0UL) "CTE first holder commits"
+              Expect.isFalse (cteWaiting.Wait(TimeSpan.FromMilliseconds 100.0)) "CTE-first writer waits for second holder"
+              Expect.equal (handle ownerB "COMMIT" |> snd) (Affected 0UL) "CTE second holder commits"
+              Expect.isTrue (cteWaiting.Wait(TimeSpan.FromSeconds 5.0)) "CTE-first two-view writer resumes"
+              let waiter, changed = cteWaiting.Result
+              Expect.equal changed (Affected 2UL) "CTE-first writer changes both targets"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "CTE-first two-view writer commits"
+              match handle setup "SELECT (SELECT n FROM natural_view_a),(SELECT bonus FROM natural_view_b)" |> snd with
+              | ResultSet(_, [ [ Some "22"; Some "22" ] ]) -> ()
+              | result -> failtestf "expected both rebased CTE-first increments, got %A" result
 
           testCase "CTE-joined update with an unqualified target waits and rebases"
           <| fun _ ->

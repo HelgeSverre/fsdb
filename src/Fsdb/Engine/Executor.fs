@@ -32628,29 +32628,40 @@ let transactionWriteTargets
         let allSourceItems =
             FromTable update.From
             :: (update.Joins |> List.collect (fun (join: Join) -> FromItem.leaves join.Table))
-        let allSources =
-            allSourceItems
-            |> List.choose (function FromTable table -> Some table | _ -> None)
         let sourceColumns = lazy (
-            let columns (source: TableRef) =
-                let database = source.Database |> Option.defaultValue dbName
-                if source.Database.IsNone && Set.contains (source.Table.ToLowerInvariant()) cteNames then None
-                else
-                    physicalFastPathTable store dbName source
-                    |> Option.map (fun table -> table.Columns)
-                    |> Option.orElseWith (fun () -> viewColumns store registry database source.Table)
-            (if allSources.Length = allSourceItems.Length then allSources |> List.map columns else [])
+            let inferredNames source =
+                let columns = selectSourceColumns store dbName source
+                if columns.IsEmpty || (columns |> List.exists Option.isNone) then None
+                else Some(columns |> List.choose id |> List.map _.Name)
+            let columns = function
+                | FromTable source ->
+                    let database = source.Database |> Option.defaultValue dbName
+                    let cte =
+                        if source.Database.IsNone then
+                            update.Ctes |> List.tryFind (fun item -> equalsIgnoreCase item.CteName source.Table)
+                        else None
+                    match cte with
+                    | Some cte when not cte.CteColumns.IsEmpty -> Some cte.CteColumns
+                    | Some cte -> inferredNames (FromSubquery(cte.Body, source.Alias |> Option.defaultValue source.Table))
+                    | None ->
+                        physicalFastPathTable store dbName source
+                        |> Option.map (fun table -> table.Columns |> List.map _.Name)
+                        |> Option.orElseWith (fun () ->
+                            viewColumns store registry database source.Table
+                            |> Option.map (List.map _.Name))
+                | source -> inferredNames source
+            allSourceItems |> List.map columns
             |> fun columns ->
-                if columns.Length = allSources.Length && (columns |> List.forall Option.isSome) then
+                if columns |> List.forall Option.isSome then
                     Some(List.choose id columns)
                 else None)
         let bareAssignmentOwner column =
             sourceColumns.Value
             |> Option.bind (fun sourceColumns ->
-                List.zip allSources sourceColumns
+                List.zip allSourceItems sourceColumns
                 |> List.filter (fun (_, columns) ->
-                    columns |> List.exists (fun candidate -> equalsIgnoreCase candidate.Name column))
-                |> function [ source, _ ] -> Some source | _ -> None)
+                    columns |> List.exists (fun candidate -> equalsIgnoreCase candidate column))
+                |> function [ FromTable source, _ ] -> Some source | _ -> None)
         let viewTargetFor (source: TableRef) allowUnqualified =
             let viewDatabase = source.Database |> Option.defaultValue dbName
             let resolvedView =

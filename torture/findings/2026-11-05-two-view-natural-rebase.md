@@ -24,7 +24,28 @@ claim while the second holder was still pending, leaving a stale transaction
 base for commit.
 
 Write preparation now resolves a bare assignment to a joined view when its
-exposed column has exactly one known source owner. Unknown derived or CTE
-source columns do not trigger this inference. The oracle's 49 UPDATE cases
-and 27 contended rebases match MySQL after the change. A focused transaction
-regression independently holds both rows and checks the final increments.
+exposed column has exactly one known source owner. Unknown source columns do
+not trigger this inference. The oracle's 49 UPDATE cases and 27 contended
+rebases matched MySQL after the change. A focused transaction regression
+independently holds both rows and checks the final increments.
+
+## CTE source before both views
+
+A CTE-first joined UPDATE exposes the same missing claim when the CTE precedes
+both writable views:
+
+```sql
+WITH c AS (SELECT id FROM link)
+UPDATE c JOIN va ON va.link_id=c.id
+JOIN vb_unique vb ON vb.link_id=c.id
+SET n=n+1, bonus=bonus+1 WHERE c.id=1;
+```
+
+MySQL again waits for both independently held physical rows and commits.
+Fsdb previously reported two affected rows but failed COMMIT with 1205. The
+ownership check treated the CTE's columns as unknown and declined to infer
+the second view's bare `bonus` target. It now derives available CTE, derived,
+and table-function source column names before deciding whether a bare column
+has one owner. Unresolved source schemas still prevent the inference. The
+focused transaction test covers both the direct and CTE-first paths.
+The expanded oracle now matches 28 contended rebases.
