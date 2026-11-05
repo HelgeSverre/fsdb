@@ -2031,6 +2031,25 @@ let tests =
               match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
               | ResultSet(_, [ [ Some "33" ] ]) -> ()
               | result -> failtestf "expected the right-prefix view update, got %A" result
+              handle setup "CREATE TABLE tx_cross_mixed_tail(k INT PRIMARY KEY,link_id INT)" |> ignore
+              handle setup "INSERT INTO tx_cross_mixed_tail VALUES(1,1),(2,2)" |> ignore
+              let mixedOuterPrefix =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c LEFT JOIN tx_cross_view_tail x ON x.k=c.id "
+                  + "RIGHT JOIN tx_cross_mixed_tail y ON y.k=c.id "
+              let mixedLeft = mixedOuterPrefix + "NATURAL LEFT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              let mixedRight = mixedOuterPrefix + "NATURAL RIGHT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              verifyNaturalOuterWait 76 77 mixedLeft 35
+              verifyNaturalOuterWait 78 79 mixedRight 37
+              Expect.equal (handle setup "DELETE FROM tx_cross_mixed_tail WHERE k=1" |> snd)
+                  (Affected 1UL) "remove the matching row from the final read source"
+              Expect.equal (handle setup mixedLeft |> snd) (Affected 0UL)
+                  "the mixed prefix no longer reaches the view from the left"
+              Expect.equal (handle setup mixedRight |> snd) (Affected 1UL)
+                  "the final right join preserves the view after the mixed prefix misses"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "38" ] ]) -> ()
+              | result -> failtestf "expected the mixed outer-prefix view update, got %A" result
               for direction in [ "LEFT"; "RIGHT" ] do
                   let duplicateGroup =
                       "WITH c AS (SELECT id FROM tx_cross_view_link) "

@@ -504,6 +504,31 @@ def main():
                     "WITH c AS (SELECT 3 AS id) UPDATE c RIGHT JOIN tail x ON x.k=c.id NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
                 ) == 1
                 assert execute(owner, "SELECT n FROM a WHERE id=1") == ((69,),)
+                execute(owner, "CREATE TABLE mixed_tail(k INT PRIMARY KEY,link_id INT)")
+                execute(owner, "INSERT INTO mixed_tail VALUES(1,1),(2,2)")
+                mixed_prefix = (
+                    "WITH c AS (SELECT id FROM link) "
+                    "UPDATE c LEFT JOIN tail x ON x.k=c.id "
+                    "RIGHT JOIN mixed_tail y ON y.k=c.id "
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    mixed_prefix + "NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 71),),
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    mixed_prefix + "NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 73),),
+                )
+                execute(owner, "DELETE FROM mixed_tail WHERE k=1")
+                assert execute(owner, mixed_prefix + "NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1") == 0
+                assert execute(owner, mixed_prefix + "NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1") == 1
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((74,),)
                 for direction in ("LEFT", "RIGHT"):
                     statement = (
                         "WITH c AS (SELECT id FROM link) "

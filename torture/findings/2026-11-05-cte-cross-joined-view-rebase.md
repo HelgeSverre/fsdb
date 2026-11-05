@@ -184,5 +184,13 @@ natural right join updates the preserved view row. All matched writes wait
 for the physical target and rebase after the owner commits.
 
 This covers a single earlier outer read join with distinct source columns.
-Longer mixed outer chains, `USING` edges, and broader multi-match behavior
-remain to audit.
+A two-edge `LEFT JOIN` then `RIGHT JOIN` read prefix also matches MySQL. The
+second source introduces `link_id`, so the natural view edge must compare
+both the CTE's `id` and that nullable source's `link_id`. Both final outer
+directions wait and rebase while matched. After the second read match is
+deleted, the natural left edge changes no row and the natural right edge
+updates the preserved view row. The two read sources both expose `k`; their
+duplicate, unrelated name does not make the view's natural key ambiguous.
+This case passed the native oracle and the focused fsdb transaction test.
+Longer chains beyond this audited shape, `USING` edges, and broader
+multi-match behavior remain to audit.

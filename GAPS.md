@@ -2406,7 +2406,7 @@ implementation effort:
    now retains the shared key across two- and three-edge natural prefixes,
    including physical-row waits, rebasing, mismatched-key exclusion, and
    ambiguity from a subsequent ordinary join. Natural joins after an
-   intervening ordinary source, other outer joins, and longer mixed outer-join prefixes
+   intervening ordinary source, other outer joins, and other mixed outer-join prefixes
    remain open. [CTE-first natural outer joins](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#cte-first-natural-outer-join-to-a-writable-view)
    to a writable view now wait and rebase, including one preceding ordinary
    read join and matched and unmatched left and right cases; duplicate `id`
@@ -2417,7 +2417,9 @@ implementation effort:
    now matches MySQL's wait, rebase, and mismatched-key exclusion when the
    ordinary source introduces distinct columns. A duplicate `id` introduced
    by that source returns MySQL's 1052 on both engines. Other duplicate-name
-   arrangements and longer outer-join chains remain to audit.
+   arrangements and longer outer-join chains remain to audit. One
+   [two-edge mixed `LEFT`/`RIGHT` read prefix](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#earlier-outer-read-join)
+   now matches MySQL's waits, rebasing, and unmatched final view preservation.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.
