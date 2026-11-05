@@ -910,6 +910,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                             [ 0xFBC0 + (codepoint >>> 15); 0x8000 ||| (codepoint &&& 0x7FFF) ]
                         else [ 0xFFFD ]
                     for weight in weights do addWeight weight
+                | None when codepoint = 0x3000 ->
+                    addWeight (
+                        if general then 0x3000
+                        elif name = "utf8mb4_unicode_520_ci" then 0x020A
+                        else 0x0209)
                 | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =
                         let uppercase =
