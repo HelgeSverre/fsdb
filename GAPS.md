@@ -2480,6 +2480,12 @@ implementation effort:
    retained correctness but worsened the same 8 × 16 shape to a 2.49 ratio,
    versus 1.45–1.84 across three current-policy runs. The cap was reverted;
    synchronous wait and runnable-worker costs need more direct separation.
+   A [direct row-wait and worker-pressure profile](benchmarks/results/2026-11-05-multidb-row-wait-profile.md)
+   found that widening the hot account set cut row waits by about 11× while
+   high-fan-out wall time stayed near 14–16 seconds. A temporary 4× worker
+   reservation did not materially improve the same shape and was reverted;
+   the shared client/server process still prevents attribution of pending
+   work to the server alone.
    The group-commit leader now drains successive batches iteratively. A
    continuously replenished queue previously grew one call frame per batch;
    the [focused regression and matched write check](benchmarks/results/2026-10-15-iterative-group-commit-drain.md)
