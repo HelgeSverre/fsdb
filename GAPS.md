@@ -1354,7 +1354,9 @@ Unicode collation at sizes 1–2. Later blocks and other cross-form equivalences
 remain open.
 The [U+4100–U+41FF follow-up](torture/findings/2026-11-05-extension-a-4100-ngram-audit.md)
 matches another 39,936 standalone searches across the five collations and
-audited token sizes. Combined-range and exact-weight behavior remain open.
+audited token sizes, plus 3,072 targeted searches for the new block on a
+combined U+3400–U+41FF index. Broader combined-range and exact-weight
+behavior remain open.
 An [exact-byte differential probe](torture/findings/2026-11-04-extension-a-exact-weights.md)
 finds that all 256 single-character U+3B00–U+3BFF `WEIGHT_STRING` values
 differ from MySQL in each of three legacy collations, despite the matching

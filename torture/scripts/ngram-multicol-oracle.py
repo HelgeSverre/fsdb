@@ -172,7 +172,8 @@ def scores_agree(expected, actual):
     )
 
 
-def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None, collation_override=None):
+def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None,
+           collation_override=None, legacy_term_range=None):
     prefix = '中' * (size - 1)
     if legacy_radicals:
         legacy_chars = LEGACY_RADICALS
@@ -190,10 +191,12 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
         documents += [(prefix + char + '文', '') for char in ("가", "ㄱㅏ", "각")]
     if legacy_range == (0x1DC0, 0x1E00):
         documents += [(prefix + '\u036c' + '文', '')]
-    terms = ([prefix + char for char in legacy_chars]
+    term_chars = (legacy_chars if legacy_term_range is None else
+                  [char for char in legacy_chars if legacy_term_range[0] <= ord(char) < legacy_term_range[1]])
+    terms = ([prefix + char for char in term_chars]
              if legacy_chars is not None else TERMS)
     if legacy_range is not None:
-        terms += [f'"{prefix + char}"' for char in legacy_chars]
+        terms += [f'"{prefix + char}"' for char in term_chars]
     if legacy_range in ((0xFE20, 0xFE30), (0x1AB0, 0x1B00),
                         (0x1DC0, 0x1E00), (0x20D0, 0x2100)):
         terms += [prefix + char + '文' for char in legacy_chars]
@@ -336,6 +339,7 @@ if __name__ == "__main__":
     corpus.add_argument("--legacy-punctuation", action="store_true")
     corpus.add_argument("--legacy-radicals", action="store_true")
     corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
+    parser.add_argument("--legacy-term-range", help="search only this subrange of --legacy-range while indexing the whole range")
     parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_ja_0900_as_cs_ks", "utf8mb4_0900_as_cs"))
     args = parser.parse_args()
     legacy_range = None
@@ -346,5 +350,17 @@ if __name__ == "__main__":
                 raise ValueError
         except ValueError:
             parser.error("--legacy-range requires hexadecimal START:END")
+    legacy_term_range = None
+    if args.legacy_term_range:
+        if legacy_range is None:
+            parser.error("--legacy-term-range requires --legacy-range")
+        try:
+            legacy_term_range = tuple(int(value, 16) for value in args.legacy_term_range.split(":"))
+            if (len(legacy_term_range) != 2 or
+                    not legacy_range[0] <= legacy_term_range[0] < legacy_term_range[1] <= legacy_range[1]):
+                raise ValueError
+        except ValueError:
+            parser.error("--legacy-term-range must be a subrange of --legacy-range")
     sizes = args.sizes or list(range(1, 11))
-    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals, legacy_range, args.collation) for size in sizes) else 0)
+    raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals,
+                                     legacy_range, args.collation, legacy_term_range) for size in sizes) else 0)
