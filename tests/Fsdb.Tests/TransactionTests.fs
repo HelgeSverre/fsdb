@@ -1945,6 +1945,33 @@ let tests =
               match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
               | ResultSet(_, [ [ Some "13" ] ]) -> ()
               | result -> failtestf "expected the unmatched natural right update, got %A" result
+              let groupedNaturalLeft =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c JOIN tx_cross_view_tail x ON x.k=c.id "
+                  + "NATURAL LEFT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              let groupedNaturalRight =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c JOIN tx_cross_view_tail x ON x.k=c.id "
+                  + "NATURAL RIGHT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              verifyNaturalOuterWait 60 61 groupedNaturalLeft 15
+              verifyNaturalOuterWait 62 63 groupedNaturalRight 17
+              Expect.equal (handle setup "INSERT INTO tx_cross_view_tail VALUES(2)" |> snd)
+                  (Affected 1UL) "add a read source without a matching view row"
+              let groupedUnmatchedLeft =
+                  "WITH c AS (SELECT 2 AS id) "
+                  + "UPDATE c JOIN tx_cross_view_tail x ON x.k=c.id "
+                  + "NATURAL LEFT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=2"
+              Expect.equal (handle setup groupedUnmatchedLeft |> snd) (Affected 0UL)
+                  "the unmatched grouped left source does not update the view"
+              let groupedUnmatchedRight =
+                  "WITH c AS (SELECT 2 AS id) "
+                  + "UPDATE c JOIN tx_cross_view_tail x ON x.k=c.id "
+                  + "NATURAL RIGHT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              Expect.equal (handle setup groupedUnmatchedRight |> snd) (Affected 1UL)
+                  "the grouped natural right join preserves the writable view row"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "18" ] ]) -> ()
+              | result -> failtestf "expected the unmatched grouped natural right update, got %A" result
 
           testCase "two joined views with bare targets rebase after independent row holders"
           <| fun _ ->

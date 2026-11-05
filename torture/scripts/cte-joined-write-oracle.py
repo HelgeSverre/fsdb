@@ -408,8 +408,32 @@ def main():
                     "WITH c AS (SELECT 2 AS id) UPDATE c NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
                 ) == 1
                 assert execute(owner, "SELECT n FROM a WHERE id=1") == ((49,),)
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c JOIN tail x ON x.k=c.id NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 51),),
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c JOIN tail x ON x.k=c.id NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 53),),
+                )
+                execute(owner, "INSERT INTO tail VALUES(2)")
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT 2 AS id) UPDATE c JOIN tail x ON x.k=c.id NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=2",
+                ) == 0
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT 2 AS id) UPDATE c JOIN tail x ON x.k=c.id NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
+                ) == 1
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((54,),)
                 print(
-                    "MySQL 8.4.11: CTE, derived, and joined-view writes (including mixed NATURAL and first natural outer joins) waited and committed"
+                    "MySQL 8.4.11: CTE, derived, and joined-view writes (including mixed NATURAL and grouped natural outer joins) waited and committed"
                 )
             except Exception:
                 print((root / "mysql.log").read_text())

@@ -2398,8 +2398,10 @@ implementation effort:
    now retains the shared key across two- and three-edge natural prefixes,
    including physical-row waits, rebasing, mismatched-key exclusion, and
    ambiguity from a subsequent ordinary join. Natural joins after an
-   intervening ordinary source, outer joins, and mixed outer-join prefixes
-   remain open. A [later natural join after an ordinary read source](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#natural-join-after-an-ordinary-read-source)
+   intervening ordinary source, other outer joins, and mixed outer-join prefixes
+   remain open. [CTE-first natural outer joins](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#cte-first-natural-outer-join-to-a-writable-view)
+   to a writable view now wait and rebase, including one preceding ordinary
+   read join and matched and unmatched left and right cases. A [later natural join after an ordinary read source](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#natural-join-after-an-ordinary-read-source)
    now matches MySQL's wait, rebase, and mismatched-key exclusion when the
    ordinary source introduces distinct columns. A duplicate `id` introduced
    by that source returns MySQL's 1052 on both engines. Other duplicate-name

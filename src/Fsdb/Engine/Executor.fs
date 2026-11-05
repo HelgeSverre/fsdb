@@ -24486,7 +24486,16 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                 selectSourceColumns store defaultDatabase (FromSubquery(cte.Body, alias))
                 |> List.choose id
                 |> List.map _.Name
-            if cte.CteColumns.Length = inferred.Length then cte.CteColumns else inferred
+            if not cte.CteColumns.IsEmpty then cte.CteColumns
+            elif not inferred.IsEmpty then inferred
+            else
+                let first =
+                    match cte.Body with
+                    | PlainSelect body -> body
+                    | UnionSelect(body, _, _, _, _) -> body
+                if first.Projections |> List.exists (fun projection ->
+                    match projection.Expression with Star _ -> true | _ -> false) then []
+                else first.Projections |> List.map projectionLabel
         | None ->
             selectSourceColumns store defaultDatabase source
             |> List.choose id
@@ -24500,7 +24509,7 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
         match remaining with
         | ({ Table = FromTable source } as join) :: rest
             when join.Kind = LeftJoin || join.Kind = RightJoin
-                 || (prior.IsEmpty && (join.Kind = NaturalLeftJoin || join.Kind = NaturalRightJoin)) ->
+                 || join.Kind = NaturalLeftJoin || join.Kind = NaturalRightJoin ->
             let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->
@@ -24516,17 +24525,74 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                         match prior with
                         | [] -> FromTable update.From
                         | earlier -> FromJoinGroup(FromTable update.From, List.rev earlier)
-                    { update with
-                        From = source
-                        Joins = { join with
-                                    Kind =
-                                        match join.Kind with
-                                        | LeftJoin -> RightJoin
-                                        | RightJoin -> LeftJoin
-                                        | NaturalLeftJoin -> NaturalRightJoin
-                                        | NaturalRightJoin -> NaturalLeftJoin
-                                        | kind -> kind
-                                    Table = preceding } :: rest }
+                    let reversedKind =
+                        match join.Kind with
+                        | LeftJoin -> RightJoin
+                        | RightJoin -> LeftJoin
+                        | NaturalLeftJoin -> NaturalRightJoin
+                        | NaturalRightJoin -> NaturalLeftJoin
+                        | kind -> kind
+                    let groupedNatural =
+                        (join.Kind = NaturalLeftJoin || join.Kind = NaturalRightJoin)
+                        && not prior.IsEmpty
+                    let groupedKeys =
+                        if not groupedNatural then Some []
+                        elif prior |> List.exists (fun earlier ->
+                            (earlier.Kind <> InnerJoin && earlier.Kind <> CrossJoin && earlier.Kind <> StraightJoin)
+                            || not earlier.Using.IsEmpty) then None
+                        else
+                            let sources =
+                                FromTable update.From :: (List.rev prior |> List.map _.Table)
+                            let names =
+                                sources
+                                |> List.collect (fun item ->
+                                    let owner = FromItem.tryQualifier item |> Option.defaultValue ""
+                                    sourceNames item |> List.map (fun name -> name.ToLowerInvariant(), owner))
+                            let ambiguous = names |> List.countBy fst |> List.exists (fun (_, count) -> count > 1)
+                            if ambiguous then None
+                            else
+                                let owners = names |> Map.ofList
+                                view.OrderedColumns
+                                |> List.choose (fun name ->
+                                    Map.tryFind (name.ToLowerInvariant()) owners
+                                    |> Option.map (fun owner -> name, owner))
+                                |> Some
+                    match groupedKeys with
+                    | None -> update
+                    | Some groupedKeys ->
+                        let merged = groupedKeys |> List.map (fun (name, _) -> name.ToLowerInvariant()) |> Set.ofList
+                        let laterNames =
+                            rest
+                            |> List.collect (fun later -> FromItem.leaves later.Table |> List.collect sourceNames)
+                            |> List.map _.ToLowerInvariant()
+                            |> Set.ofList
+                        let rewriteMerged =
+                            rewriteExprWith (function
+                                | Col name when Set.contains (name.ToLowerInvariant()) merged
+                                                && not (Set.contains (name.ToLowerInvariant()) laterNames) ->
+                                    Some(QualifiedCol(qualifier, name))
+                                | _ -> None)
+                        let conditions =
+                            groupedKeys
+                            |> List.map (fun (name, owner) ->
+                                BinOp(Eq, QualifiedCol(qualifier, name), QualifiedCol(owner, name)))
+                            |> conjunction
+                        let moved =
+                            { join with
+                                Kind =
+                                    if groupedNatural then
+                                        if reversedKind = NaturalRightJoin then RightJoin else LeftJoin
+                                    else reversedKind
+                                Table = preceding
+                                On = if groupedNatural then BinOp(And, join.On, conditions) else join.On }
+                        let update =
+                            if not groupedNatural then update
+                            else
+                                { update with
+                                    Where = update.Where |> Option.map rewriteMerged
+                                    OrderBy = update.OrderBy |> List.map (fun (expression, direction) -> rewriteMerged expression, direction)
+                                    Assignments = update.Assignments |> List.map (fun assignment -> { assignment with Value = rewriteMerged assignment.Value }) }
+                        { update with From = source; Joins = moved :: rest }
                 else update
             | None when isPhysical source -> move (join :: prior) rest
             | None -> update

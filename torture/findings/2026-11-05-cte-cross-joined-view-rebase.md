@@ -155,6 +155,14 @@ explicit outer join before the view's physical sources are flattened. The
 focused transaction regression covers both contended directions and the
 unmatched cases. The full `just check` run passed 3,885 tests with zero
 warnings before the final unmatched-right assertion was added; that focused
-test passed again afterward. Natural outer edges after an earlier joined
-source, other outer-join orderings, and broader multi-match behavior remain
-open.
+test passed again afterward.
+
+An ordinary `JOIN` to a physical read source before the natural outer edge
+also waits and rebases in both directions. MySQL and fsdb agree on the
+unmatched cases: the left join changes no view row, while the right join
+updates the preserved view row. Promotion converts the natural edge to an
+explicit outer join against the preceding source group, retaining its shared
+key and the bare merged-column binding. The native oracle and focused
+transaction regression cover all four cases. Duplicate column names in the
+preceding group, other outer-join orderings, and broader multi-match behavior
+remain open.
