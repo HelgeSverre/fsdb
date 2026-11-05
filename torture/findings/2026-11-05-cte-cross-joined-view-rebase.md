@@ -132,5 +132,8 @@ column names. It can then resolve the later natural edge against the view's
 exposed columns before flattening its physical sources. The focused fsdb
 regression covers the successful update, mismatched key, and contended wait
 and rebase. `just check` passed all 3,885 tests with zero build warnings.
-Ordinary joins that introduce duplicate names, outer joins, and longer mixed
-chains still need separate MySQL comparison before broadening this rewrite.
+An ordinary `JOIN link l` that introduces a second `id` before the later
+natural edge returns 1052 on both MySQL and fsdb. The native oracle and the
+focused fsdb regression pin that ambiguity, so the rewrite deliberately
+stops carrying merged-key ownership at that source. Outer joins, other
+duplicate-name arrangements, and longer mixed chains remain to audit.

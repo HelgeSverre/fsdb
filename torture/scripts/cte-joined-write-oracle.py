@@ -376,6 +376,15 @@ def main():
                 ) == 0
                 execute(owner, "UPDATE natural_tail SET id=1 WHERE id=2")
                 assert execute(owner, "SELECT n FROM a WHERE id=1") == ((44,),)
+                try:
+                    execute(
+                        owner,
+                        "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN v JOIN link l ON l.id=c.id NATURAL JOIN natural_tail t SET v.n=v.n+1 WHERE id=1",
+                    )
+                except pymysql.MySQLError as error:
+                    assert error.args[0] == 1052, error
+                else:
+                    raise AssertionError("a duplicate id before the later natural join was accepted")
                 print(
                     "MySQL 8.4.11: CTE, derived, and joined-view writes (including a NATURAL join after an ordinary source) waited and committed"
                 )

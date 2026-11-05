@@ -1860,6 +1860,15 @@ let tests =
               match handle setup ambiguousLaterSource |> snd with
               | Err(1052, _) -> ()
               | result -> failtestf "expected an ordinary later id to be ambiguous, got %A" result
+              let duplicateBeforeNatural =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c NATURAL JOIN tx_cross_view v "
+                  + "JOIN tx_cross_view_link l ON l.id=c.id "
+                  + "NATURAL JOIN tx_cross_natural_tail t "
+                  + "SET v.n=v.n+1 WHERE id=1"
+              match handle setup duplicateBeforeNatural |> snd with
+              | Err(1052, _) -> ()
+              | result -> failtestf "expected a duplicate id before the later natural join to be ambiguous, got %A" result
               let naturalAfterOrdinary =
                   "WITH c AS (SELECT id FROM tx_cross_view_link) "
                   + "UPDATE c NATURAL JOIN tx_cross_view v "
