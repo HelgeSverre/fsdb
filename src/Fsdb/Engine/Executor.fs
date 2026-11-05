@@ -24398,11 +24398,10 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             selectSourceColumns store defaultDatabase source
             |> List.choose id
             |> List.map _.Name
-    let canPromoteNatural prior rest =
-        match prior with
-        | [] -> true
-        | [ { Kind = NaturalJoin } ] when List.isEmpty rest -> true
-        | _ -> false
+    let naturalPrefix prior = prior |> List.forall (fun join -> join.Kind = NaturalJoin)
+    let conjunction = function
+        | [] -> Lit(VInt 1L)
+        | first :: rest -> rest |> List.fold (fun soFar next -> BinOp(And, soFar, next)) first
 
     let rec move (prior: Join list) (remaining: Join list) =
         match remaining with
@@ -24433,7 +24432,7 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             | None -> update
         | ({ Table = FromTable source; Using = [] } as join) :: rest
             when join.Kind = InnerJoin || join.Kind = CrossJoin || join.Kind = StraightJoin
-                 || (join.Kind = NaturalJoin && canPromoteNatural prior rest) ->
+                 || (join.Kind = NaturalJoin && naturalPrefix prior) ->
             let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->
@@ -24447,55 +24446,99 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
 
                 if not writesView then
                     move (join :: prior) rest
+                elif join.Kind = NaturalJoin && not prior.IsEmpty && not rest.IsEmpty then update
                 else
                     // Keep the old first source before its prior joins, so
                     // LATERAL and JSON_TABLE dependencies remain in scope.
                     // Attach this join's predicate to the last prior operand,
                     // where every referenced alias has been bound.
-                    let joins =
-                        match prior with
-                        | [] -> { join with Table = FromTable update.From } :: rest
-                        | [ { Kind = NaturalJoin; Table = source } as natural ] ->
-                            // The natural edge belongs to the original read prefix.
-                            // Once the view moves first, leaving it implicit would
-                            // instead compare the read source with the view.
-                            let leftNames = sourceNames (FromTable update.From)
-                            let rightNames = sourceNames source
-                            let leftOwner = update.From.Alias |> Option.defaultValue update.From.Table
-                            let rightOwner = FromItem.tryQualifier source |> Option.defaultValue ""
-                            let condition =
-                                leftNames
-                                |> List.filter (fun name -> rightNames |> List.exists (equalsIgnoreCase name))
-                                |> List.map (fun name -> BinOp(Eq, QualifiedCol(leftOwner, name), QualifiedCol(rightOwner, name)))
-                                |> function
-                                    | [] -> Lit(VInt 1L)
-                                    | first :: rest -> rest |> List.fold (fun soFar next -> BinOp(And, soFar, next)) first
-                            [ { join with Table = FromTable update.From; On = Lit(VInt 1L) }
-                              { natural with Kind = InnerJoin; On = BinOp(And, condition, join.On) } ] @ rest
-                        | last :: earlierReversed ->
-                            let carried = { last with On = BinOp(And, last.On, join.On) }
-                            { join with Table = FromTable update.From; On = Lit(VInt 1L) }
-                            :: (List.rev (carried :: earlierReversed) @ rest)
+                    let joins, mergedOwners =
+                        if prior.IsEmpty || not (naturalPrefix prior) then
+                            let joins =
+                                match prior with
+                                | [] -> { join with Table = FromTable update.From } :: rest
+                                | last :: earlierReversed ->
+                                    let carried = { last with On = BinOp(And, last.On, join.On) }
+                                    { join with Table = FromTable update.From; On = Lit(VInt 1L) }
+                                    :: (List.rev (carried :: earlierReversed) @ rest)
+                            joins, Map.empty
+                        else
+                            // Resolve every natural edge against its original
+                            // left prefix before moving the writable view.
+                            let firstOwner = update.From.Alias |> Option.defaultValue update.From.Table
+                            let owners =
+                                sourceNames (FromTable update.From)
+                                |> List.map (fun name -> name.ToLowerInvariant(), firstOwner)
+                                |> Map.ofList
+                            let converted, owners, merged =
+                                (([], owners, Set.empty), List.rev prior)
+                                ||> List.fold (fun (converted, owners, merged) natural ->
+                                    let rightOwner = FromItem.tryQualifier natural.Table |> Option.defaultValue ""
+                                    let names = sourceNames natural.Table
+                                    let shared =
+                                        names
+                                        |> List.choose (fun name ->
+                                            Map.tryFind (name.ToLowerInvariant()) owners
+                                            |> Option.map (fun leftOwner -> name, leftOwner))
+                                    let condition =
+                                        shared
+                                        |> List.map (fun (name, leftOwner) ->
+                                            BinOp(Eq, QualifiedCol(leftOwner, name), QualifiedCol(rightOwner, name)))
+                                        |> conjunction
+                                    let owners =
+                                        names
+                                        |> List.fold (fun owners name ->
+                                            let key = name.ToLowerInvariant()
+                                            if Map.containsKey key owners then owners else Map.add key rightOwner owners) owners
+                                    let merged =
+                                        shared
+                                        |> List.fold (fun merged (name, _) -> Set.add (name.ToLowerInvariant()) merged) merged
+                                    { natural with Kind = InnerJoin; On = BinOp(And, natural.On, condition) } :: converted,
+                                    owners, merged)
+                            let viewShared =
+                                if join.Kind = NaturalJoin then
+                                    view.OrderedColumns
+                                    |> List.filter (fun name -> Map.containsKey (name.ToLowerInvariant()) owners)
+                                else []
+                            let viewCondition =
+                                viewShared
+                                |> List.map (fun name ->
+                                    BinOp(Eq, QualifiedCol(qualifier, name), QualifiedCol(owners.[name.ToLowerInvariant()], name)))
+                                |> conjunction
+                            let prefix =
+                                match converted with
+                                | last :: earlier ->
+                                    List.rev ({ last with On = BinOp(And, last.On, BinOp(And, join.On, viewCondition)) } :: earlier)
+                                | [] -> []
+                            let first =
+                                { join with
+                                    Kind = if join.Kind = NaturalJoin then InnerJoin else join.Kind
+                                    Table = FromTable update.From
+                                    On = Lit(VInt 1L) }
+                            let mergedOwners =
+                                merged
+                                |> Seq.choose (fun name -> Map.tryFind name owners |> Option.map (fun owner -> name, owner))
+                                |> Map.ofSeq
+                            let mergedOwners =
+                                viewShared
+                                |> List.fold (fun names name -> Map.add (name.ToLowerInvariant()) qualifier names) mergedOwners
+                            first :: (prefix @ rest), mergedOwners
+                    let rewriteMerged =
+                        rewriteExprWith (function
+                            | Col name ->
+                                let key = name.ToLowerInvariant()
+                                match Map.tryFind key mergedOwners with
+                                | Some owner when join.Kind = NaturalJoin || not (view.OrderedColumns |> List.exists (equalsIgnoreCase name)) ->
+                                    Some(QualifiedCol(owner, name))
+                                | _ -> None
+                            | _ -> None)
                     let update =
-                        match join.Kind, prior with
-                        | NaturalJoin, [ { Kind = NaturalJoin; Table = earlierSource } ] ->
-                            let leftNames = sourceNames (FromTable update.From)
-                            let earlierNames = sourceNames earlierSource
-                            let merged =
-                                view.OrderedColumns
-                                |> List.filter (fun name ->
-                                    leftNames |> List.exists (equalsIgnoreCase name)
-                                    && earlierNames |> List.exists (equalsIgnoreCase name))
-                            let rewriteMerged =
-                                rewriteExprWith (function
-                                    | Col name when merged |> List.exists (equalsIgnoreCase name) ->
-                                        Some(QualifiedCol(qualifier, name))
-                                    | _ -> None)
+                        if mergedOwners.IsEmpty then update
+                        else
                             { update with
                                 Where = update.Where |> Option.map rewriteMerged
                                 OrderBy = update.OrderBy |> List.map (fun (expression, direction) -> rewriteMerged expression, direction)
                                 Assignments = update.Assignments |> List.map (fun assignment -> { assignment with Value = rewriteMerged assignment.Value }) }
-                        | _ -> update
                     { update with From = source; Joins = joins }
             // An independent read-only view can remain ahead of a later
             // writable view while that target is moved into first position.

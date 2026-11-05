@@ -2316,8 +2316,12 @@ implementation effort:
    an [ordinary read join after that natural edge](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#later-read-source-after-the-natural-join)
    preserves the same behavior and later-column ambiguity. Natural edges
    [before the writable view, including a second natural edge to the view](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#natural-read-edge-before-the-writable-view),
-   now also wait and rebase for the audited three-source CTE forms. Longer
-   natural chains and later sources remain open.
+   now also wait and rebase for the audited three-source CTE forms. The
+   [four-source natural prefix follow-up](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#longer-natural-read-chains)
+   carries successive read-source equalities into ordinary or natural view
+   joins, including a shared column introduced by a later source. Natural
+   view joins followed by additional sources and mixed outer-join prefixes
+   remain open.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.

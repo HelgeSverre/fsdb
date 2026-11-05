@@ -236,6 +236,56 @@ def main():
                     == 0
                 )
                 assert execute(owner, "SELECT n FROM a WHERE id=1") == ((29,),)
+                execute(owner, "UPDATE natural_read SET id=1 WHERE id=2")
+                execute(owner, "CREATE TABLE natural_read_next(id INT PRIMARY KEY)")
+                execute(owner, "INSERT INTO natural_read_next VALUES(1)")
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_read r NATURAL JOIN natural_read_next s JOIN v ON v.id=s.id SET v.n=v.n+1 WHERE c.id=1",
+                    ((1, 31),),
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_read r NATURAL JOIN natural_read_next s NATURAL JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 33),),
+                )
+                execute(owner, "UPDATE natural_read_next SET id=2 WHERE id=1")
+                assert (
+                    execute(
+                        owner,
+                        "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_read r NATURAL JOIN natural_read_next s JOIN v ON v.id=s.id SET v.n=v.n+1 WHERE c.id=1",
+                    )
+                    == 0
+                )
+                assert (
+                    execute(
+                        owner,
+                        "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_read r NATURAL JOIN natural_read_next s NATURAL JOIN v SET v.n=v.n+1 WHERE id=1",
+                    )
+                    == 0
+                )
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((33,),)
+                execute(owner, "CREATE TABLE natural_extra(id INT PRIMARY KEY,n INT)")
+                execute(owner, "INSERT INTO natural_extra VALUES(1,33)")
+                assert (
+                    execute(
+                        owner,
+                        "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_extra r NATURAL JOIN v SET v.n=v.n+1 WHERE id=1",
+                    )
+                    == 1
+                )
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((34,),)
+                assert (
+                    execute(
+                        owner,
+                        "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_extra r NATURAL JOIN v SET v.n=v.n+1 WHERE id=1",
+                    )
+                    == 0
+                )
                 try:
                     execute(
                         owner,
@@ -255,7 +305,7 @@ def main():
                 else:
                     raise AssertionError("ambiguous derived assignment was accepted")
                 print(
-                    "MySQL 8.4.11: CTE, derived, and joined-view writes (including preceding and successive NATURAL joins) waited and committed"
+                    "MySQL 8.4.11: CTE, derived, and joined-view writes (including four-source NATURAL chains) waited and committed"
                 )
             except Exception:
                 print((root / "mysql.log").read_text())

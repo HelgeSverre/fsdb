@@ -73,5 +73,17 @@ earlier natural edge into equalities between its original read operands before
 moving the view, and resolves the three-source merged column against the
 view's exposed `id`. A mismatched key in `r` yields zero affected rows on
 both engines. The native oracle and contended transaction regression cover
-both forms. Longer natural chains and additional sources after the second
-natural edge remain open.
+both forms.
+
+## Longer natural read chains
+
+MySQL 8.4.11 also waits and rebases for `c NATURAL JOIN r NATURAL JOIN s`
+followed by an ordinary join or a natural join to writable `v`. The prefix
+rewrite now resolves each natural edge against the original accumulated read
+columns and carries its equalities into the promoted view write. A mismatched
+key in the second read source yields zero affected rows. A separate control
+introduces `n` in the later read source: the final natural join compares both
+`id` and `n` with the view, and stops matching after `v.n` changes. The native
+MySQL oracle and Fsdb regression agree on these cases. Natural joins to the
+view followed by additional sources, mixed outer-join prefixes, and broader
+multi-match ordering remain open.
