@@ -1357,6 +1357,11 @@ matches another 39,936 standalone searches across the five collations and
 audited token sizes, plus 3,072 targeted searches for the new block on a
 combined U+3400–U+41FF index. Broader combined-range and exact-weight
 behavior remain open.
+The [U+4200–U+42FF follow-up](torture/findings/2026-11-05-extension-a-4200-ngram-audit.md)
+matches another 39,936 standalone searches across the same collations and
+token sizes, plus 3,072 targeted searches on a combined U+3400–U+42FF index.
+Later blocks, broader combined-range behavior, and cross-form equivalences
+remain open.
 An [exact-byte differential probe](torture/findings/2026-11-04-extension-a-exact-weights.md)
 finds that all 256 single-character U+3B00–U+3BFF `WEIGHT_STRING` values
 differ from MySQL in each of three legacy collations, despite the matching
