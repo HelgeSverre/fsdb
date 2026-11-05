@@ -2414,6 +2414,9 @@ implementation effort:
    Its conditional 25 microsecond follow-up measured larger eight-writer
    batches but no throughput gain against same-run MySQL controls; it too was
    reverted.
+   A [November 5 leader-yield A/B/A/B trial](benchmarks/results/2026-11-05-group-commit-yield-trial.md)
+   also failed to establish a gain. Both engines' rates varied sharply on a
+   busy, nearly full host, so the one-yield candidate was reverted.
    A [WAL queue and batch-stage profile](benchmarks/results/2026-10-15-wal-queue-stage-profile.md)
    found queue admission small relative to completion and measured per-batch
    file-open and flush costs. A retained-handle prototype removed the open
