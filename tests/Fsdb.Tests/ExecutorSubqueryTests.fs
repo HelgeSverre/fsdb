@@ -490,6 +490,13 @@ let tests =
                   (runDefault store "SELECT (SELECT COUNT(*)) AS total")
                   (ResultSet([ "total" ], [ [ Some "1" ] ]))
                   "source-free aggregate still materializes"
+              Expect.equal
+                  (runDefault store "SELECT o.id,(SELECT o.id+0 WHERE o.id % 2 = 0) AS filtered FROM scalar_outer o ORDER BY o.id")
+                  (ResultSet([ "id"; "filtered" ], [ [ Some "1"; None ]; [ Some "2"; Some "2" ] ]))
+                  "filtered source-free scalar evaluates against each outer row"
+              match runDefault store "SELECT (SELECT o.missing WHERE o.id=0) FROM scalar_outer o" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected unknown filtered source-free projection, got %A" other
               match runDefault store "SELECT (SELECT o.missing) FROM scalar_outer o" with
               | Err(1054, _) -> ()
               | other -> failtestf "expected unknown source-free scalar column, got %A" other

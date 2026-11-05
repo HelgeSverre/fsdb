@@ -2116,6 +2116,11 @@ measured a direct outer-column predicate shortcut at 2.05 ms versus 1.56 ms
 for the existing path, and it was reverted. Runtime-only predicates also
 require MySQL's conditional materialization and coercion, so a broader
 shortcut cannot simply evaluate the predicate before the projection.
+A [statement-scoped validated-plan follow-up](benchmarks/results/2026-11-05-filtered-cached-plan-check.md)
+reduced the matched 100-row filtered scalar control from 1.79 to 0.60 ms.
+The path retains per-row predicate evaluation and applies to outer-bound
+projections in a stable top-level scope; nested scopes and general filtered
+scalar materialization remain open.
 The [computed-derived control](benchmarks/results/2026-11-04-projection-miss-cache.md)
 now memoizes unsuccessful physical-projection discovery within a statement;
 the matched ShortRun fell from 4.68 to 3.71 ms for 100 outer rows. This is a

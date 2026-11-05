@@ -787,6 +787,8 @@ type private StatementMemo =
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
       InnerExistsProjections: Dictionary<SelectStmt, bool>
       ScopedExistsProjections: Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>
+      SourceFreeScalarShapes: Dictionary<SelectStmt, bool>
+      ScopedSourceFreeScalars: Dictionary<SelectStmt, Dictionary<obj, Dictionary<obj, ColumnMetadata>>>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
 type private SharedViewCteScope =
@@ -830,6 +832,8 @@ let private freshStatementMemo () =
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
       InnerExistsProjections = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
       ScopedExistsProjections = Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>(HashIdentity.Reference)
+      SourceFreeScalarShapes = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
+      ScopedSourceFreeScalars = Dictionary<SelectStmt, Dictionary<obj, Dictionary<obj, ColumnMetadata>>>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
@@ -7458,32 +7462,96 @@ and private coerceScalarSubqueryResult ctx expression metadata value =
     | _ -> value
 
 and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
+    let memo = currentStatementMemo ()
     let plainShape =
-        select.From.IsNone
-        && select.Joins.IsEmpty
-        && select.Ctes.IsEmpty
-        && select.Where.IsNone
-        && select.GroupBy.IsEmpty
-        && select.Having.IsNone
-        && select.OrderBy.IsEmpty
-        && select.Limit.IsNone
-        && select.Offset.IsNone
-        && select.Windows.IsEmpty
-        && select.Locking.IsEmpty
-        && not select.Distinct
-        && not select.Rollup
-        && not select.CalculateFoundRows
-        && not (SelectStmt.hasDestination select)
-        && not (isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope select)
+        match memo.SourceFreeScalarShapes.TryGetValue select with
+        | true, shape -> shape
+        | _ ->
+            let shape =
+                select.From.IsNone
+                && select.Joins.IsEmpty
+                && select.Ctes.IsEmpty
+                && select.GroupBy.IsEmpty
+                && select.Having.IsNone
+                && select.OrderBy.IsEmpty
+                && select.Limit.IsNone
+                && select.Offset.IsNone
+                && select.Windows.IsEmpty
+                && select.Locking.IsEmpty
+                && not select.Distinct
+                && not select.Rollup
+                && not select.CalculateFoundRows
+                && not (SelectStmt.hasDestination select)
+                && not (isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope select)
+            memo.SourceFreeScalarShapes.[select] <- shape
+            shape
 
     if not plainShape then None
     else
-        tryReducedScalarProjection ctx select
-        |> Option.bind (fun projection ->
-            metadataOfExpr ctx projection
-            |> Option.map (fun metadata ->
-                evalExpr ctx projection
-                |> Result.map (coerceScalarSubqueryResult ctx (Subquery select) [ metadata ])))
+        let direct () =
+            tryReducedScalarProjection ctx select
+            |> Option.bind (fun projection ->
+                metadataOfExpr ctx projection
+                |> Option.map (fun metadata ->
+                    evalExpr ctx projection
+                    |> Result.map (coerceScalarSubqueryResult ctx (Subquery select) [ metadata ])))
+        match select.Where with
+        | None -> direct ()
+        | Some condition when isLiteralConstantExpression ctx.Registry condition -> direct ()
+        | Some condition when ctx.Outer.IsNone
+                              && not (Expression.exists (function RuntimeExpression _ -> true | _ -> false) condition) ->
+            match select.Projections with
+            | [ { Expression = projection } ]
+                when not (scalarSubqueryMaterializes ctx.Registry select)
+                     && Expression.exists (function Col _ | QualifiedCol _ -> true | _ -> false) projection ->
+                let cachedMetadata =
+                    memo.ScopedSourceFreeScalars
+                    |> fun plans ->
+                        match plans.TryGetValue select with
+                        | true, scopes ->
+                            match scopes.TryGetValue(ctx.ColumnIndex :> obj) with
+                            | true, qualifiers ->
+                                match qualifiers.TryGetValue(ctx.Qualifiers :> obj) with
+                                | true, metadata -> Some metadata
+                                | _ -> None
+                            | _ -> None
+                        | _ -> None
+                let metadata =
+                    match cachedMetadata with
+                    | Some metadata -> Ok(Some metadata)
+                    | None ->
+                        validateExpressionInContext ctx projection
+                        |> Result.bind (fun () -> validateExpressionInContext ctx condition)
+                        |> Result.map (fun () -> metadataOfExpr ctx projection)
+                match metadata with
+                | Error error -> Some(Error error)
+                | Ok None -> None
+                | Ok(Some metadata) ->
+                    if cachedMetadata.IsNone then
+                        let scopes =
+                            match memo.ScopedSourceFreeScalars.TryGetValue select with
+                            | true, scopes -> scopes
+                            | _ ->
+                                let scopes = Dictionary<obj, Dictionary<obj, ColumnMetadata>>(HashIdentity.Reference)
+                                memo.ScopedSourceFreeScalars.[select] <- scopes
+                                scopes
+                        let qualifiers =
+                            match scopes.TryGetValue(ctx.ColumnIndex :> obj) with
+                            | true, qualifiers -> qualifiers
+                            | _ ->
+                                let qualifiers = Dictionary<obj, ColumnMetadata>(HashIdentity.Reference)
+                                scopes.[ctx.ColumnIndex :> obj] <- qualifiers
+                                qualifiers
+                        qualifiers.[ctx.Qualifiers :> obj] <- metadata
+                    evalExpr ctx condition
+                    |> Result.bind (fun value ->
+                        if truthy value = Some true then
+                            evalExpr ctx projection
+                            |> Result.map (coerceScalarSubqueryResult ctx (Subquery select) [ metadata ] >> Value.materialize)
+                        else Ok VNull)
+                    |> Some
+            | _ -> None
+        | Some _ -> None
 
 and private validateExpressionInContext ctx expression =
     validateExpressionBindings
