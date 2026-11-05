@@ -589,6 +589,12 @@ def main():
         print(f"100 seeded point-line distances; {len(segment_mismatches)} mismatches")
         for mismatch in segment_mismatches[:10]:
             print("sampled point-line distance", mismatch)
+        for offset in (0.000001, 0.000002, 0.000005, 0.00001, 0.00002, 0.00005, 0.0001):
+            point = f"3 {1 + offset:.8f}"
+            line = "LINESTRING(3 1,3 3)"
+            print("near-latitude segment", point,
+                  point_line_distance(mysql_connection, point, line),
+                  point_line_distance(fsdb_connection, point, line))
     finally:
         if fsdb_connection:
             fsdb_connection.close()

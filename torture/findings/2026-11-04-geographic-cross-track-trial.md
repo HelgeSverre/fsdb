@@ -241,3 +241,26 @@ and 9/189 near-hole point-distance mismatches. All 100 seeded point-to-line
 distances still matched. The trial was reverted. Endpoint projection alone
 does not explain the residual; the next diagnostic needs paired intermediate
 cross-track values on a specific mismatching segment.
+
+## Spherical seed operation-order check
+
+The current-head edge oracle still reports 12/412 line-relation differences,
+1/189 near-hole point-relation difference, and 9/189 near-hole point-distance
+differences. All 100 seeded point-to-line distances match. For
+`POINT(3 1.00001)` against the standalone hole line, MySQL returns zero and
+fsdb returns 0.0950425203706804 m; the engines select the same nearest
+segment. A direct sweep against `LINESTRING(3 1,3 3)` gives the same
+disagreement at longitude 1.00001000, while offsets 0.000005 and 0.000020
+both yield zero in both engines. The result is sensitive to floating-point
+operation order near this edge; a fixed geometric tolerance would not explain
+the observed sequence.
+
+The [pinned Boost spherical direct formula](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/formulas/spherical.hpp)
+constructs the cross-track Newton seed through reduced azimuth and sigma
+quantities. A temporary fsdb trial matched that operation sequence in place
+of its algebraically equivalent spherical projection. The Release edge oracle
+retained exactly the same relation and distance mismatch counts, including
+the `POINT(3 1.00001)` result and the seven-offset sweep. The trial was
+reverted. The next useful comparison is the first Andoyer/Thomas Newton
+position and subsequent inverse values for this one segment, rather than
+another seed-only formula change.
