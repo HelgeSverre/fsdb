@@ -2177,8 +2177,11 @@ The [three-scope filtered-literal follow-up](benchmarks/results/2026-11-05-three
 avoids materializing a middle source-free `SELECT 1 WHERE (SELECT ...)` and
 reuses its successful binding validation within a statement. The matched
 100-user embedded workload completed about 2.1 times as many queries across
-interleaved runs, with MySQL-matched results. Other literal types, expressions,
-and general multi-scope correlation still use the ordinary path.
+interleaved runs, with MySQL-matched results. [Other scalar literal
+types](benchmarks/results/2026-11-05-three-scope-literal-types.md) now use the
+same guarded path; the string projection completed about 2.5 times as many
+queries in exploratory runs and matches the native MySQL result. Computed
+projections and general multi-scope correlation still use the ordinary path.
 The [computed-derived control](benchmarks/results/2026-11-04-projection-miss-cache.md)
 now memoizes unsuccessful physical-projection discovery within a statement;
 the matched ShortRun fell from 4.68 to 3.71 ms for 100 outer rows. This is a

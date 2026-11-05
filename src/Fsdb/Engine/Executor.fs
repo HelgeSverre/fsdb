@@ -7490,7 +7490,7 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
 
     if not plainShape then None
     else
-        let integerLiteralProjection = function Lit(VInt _ | VUInt _) -> true | _ -> false
+        let fixedLiteralProjection = function Lit _ -> true | _ -> false
         let direct () =
             tryReducedScalarProjection ctx select
             |> Option.bind (fun projection ->
@@ -7505,7 +7505,7 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
             match select.Projections with
             | [ { Expression = projection } ]
                 when not (scalarSubqueryMaterializes ctx.Registry select)
-                     && ((integerLiteralProjection projection
+                    && ((fixedLiteralProjection projection
                           && Expression.exists (function Subquery _ -> true | _ -> false) condition)
                          || Expression.exists (function Col _ | QualifiedCol _ -> true | _ -> false) projection) ->
                 let rec qualifiedExpression = function
@@ -7514,11 +7514,11 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
                     | _ -> false
                 // A SELECT site keeps its bindings throughout one statement,
                 // even when a dependent source builds fresh row contexts.
-                // An integer literal also has fixed output metadata after its
+                // A literal also has fixed output metadata after its
                 // nested predicate has been validated at this site.
                 let cacheNestedMetadata =
                     match ctx.Outer with
-                    | Some _ when integerLiteralProjection projection -> true
+                    | Some _ when fixedLiteralProjection projection -> true
                     | Some outer when outer.Outer.IsNone
                                       && qualifiedExpression projection
                                       && qualifiedExpression condition -> true

@@ -28,9 +28,12 @@ let main _ =
         |> ignore
     let sql =
         match Environment.GetEnvironmentVariable "FSDB_PROFILE_QUERY" with
-        | "three" ->
+        | "three" | "three_text" ->
+            let literal =
+                if Environment.GetEnvironmentVariable "FSDB_PROFILE_QUERY" = "three_text" then "'matched'"
+                else "1"
             "SELECT u.id,(SELECT COUNT(*) FROM orders c WHERE c.user_id=u.id "
-            + "AND (SELECT 1 WHERE (SELECT c.id+u.id WHERE c.id % 2=0) IS NOT NULL) IS NOT NULL) "
+            + "AND (SELECT " + literal + " WHERE (SELECT c.id+u.id WHERE c.id % 2=0) IS NOT NULL) IS NOT NULL) "
             + "FROM users u WHERE u.id<=100"
         | _ ->
             "SELECT u.id,(SELECT COUNT(*) FROM orders c WHERE c.user_id=u.id "
