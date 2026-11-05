@@ -494,6 +494,13 @@ let tests =
                   (runDefault store "SELECT o.id,(SELECT o.id+0 WHERE o.id % 2 = 0) AS filtered FROM scalar_outer o ORDER BY o.id")
                   (ResultSet([ "id"; "filtered" ], [ [ Some "1"; None ]; [ Some "2"; Some "2" ] ]))
                   "filtered source-free scalar evaluates against each outer row"
+              Expect.equal
+                  (runDefault store "SELECT o.id,(SELECT 1 WHERE o.id % 2 = 0) AS filtered FROM scalar_outer o ORDER BY o.id")
+                  (ResultSet([ "id"; "filtered" ], [ [ Some "1"; None ]; [ Some "2"; Some "1" ] ]))
+                  "filtered literal scalar keeps its row-dependent empty result"
+              match runDefault store "SELECT (SELECT 1 WHERE o.missing=0) FROM scalar_outer o" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected unknown filtered source-free condition, got %A" other
               match runDefault store "SELECT (SELECT o.missing WHERE o.id=0) FROM scalar_outer o" with
               | Err(1054, _) -> ()
               | other -> failtestf "expected unknown filtered source-free projection, got %A" other
@@ -514,6 +521,13 @@ let tests =
                   (runDefault store "SELECT o.id,(SELECT COUNT(*) FROM scalar_inner i WHERE i.parent_id=o.id AND (SELECT 1 WHERE (SELECT i.id+o.id WHERE i.id % 2 = 0) IS NOT NULL) IS NOT NULL) AS n FROM scalar_outer o ORDER BY o.id")
                   (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ]))
                   "three-level filtered scalar preserves ancestor bindings"
+              Expect.equal
+                  (runDefault store "SELECT o.id,q.n FROM scalar_outer o JOIN LATERAL (SELECT COUNT(*) AS n FROM scalar_inner i WHERE i.parent_id=o.id AND (SELECT 1 WHERE (SELECT i.id+o.id WHERE i.id % 2 = 0) IS NOT NULL) IS NOT NULL) q ON TRUE ORDER BY o.id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ]))
+                  "repeated three-level lateral evaluation retains ancestor bindings"
+              match runDefault store "SELECT o.id,(SELECT COUNT(*) FROM scalar_inner i WHERE i.parent_id=o.id AND (SELECT 1 WHERE (SELECT i.missing) IS NOT NULL) IS NOT NULL) FROM scalar_outer o" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected unknown three-level scalar condition column, got %A" other
               match runDefault store "SELECT o.id,(SELECT COUNT(*) FROM scalar_inner i WHERE i.parent_id=o.id AND (SELECT i.missing WHERE i.id=0) IS NOT NULL) FROM scalar_outer o" with
               | Err(1054, _) -> ()
               | other -> failtestf "expected unknown nested filtered scalar column, got %A" other

@@ -7490,6 +7490,7 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
 
     if not plainShape then None
     else
+        let integerLiteralProjection = function Lit(VInt _ | VUInt _) -> true | _ -> false
         let direct () =
             tryReducedScalarProjection ctx select
             |> Option.bind (fun projection ->
@@ -7504,15 +7505,20 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
             match select.Projections with
             | [ { Expression = projection } ]
                 when not (scalarSubqueryMaterializes ctx.Registry select)
-                     && Expression.exists (function Col _ | QualifiedCol _ -> true | _ -> false) projection ->
+                     && ((integerLiteralProjection projection
+                          && Expression.exists (function Subquery _ -> true | _ -> false) condition)
+                         || Expression.exists (function Col _ | QualifiedCol _ -> true | _ -> false) projection) ->
                 let rec qualifiedExpression = function
                     | Lit _ | QualifiedCol _ -> true
                     | BinOp(_, left, right) -> qualifiedExpression left && qualifiedExpression right
                     | _ -> false
-                // A SELECT site keeps its qualified bindings throughout one statement,
+                // A SELECT site keeps its bindings throughout one statement,
                 // even when a dependent source builds fresh row contexts.
+                // An integer literal also has fixed output metadata after its
+                // nested predicate has been validated at this site.
                 let cacheNestedMetadata =
                     match ctx.Outer with
+                    | Some _ when integerLiteralProjection projection -> true
                     | Some outer when outer.Outer.IsNone
                                       && qualifiedExpression projection
                                       && qualifiedExpression condition -> true

@@ -2168,6 +2168,12 @@ shape within one statement. Two interleaved checked in-process comparisons
 completed 8.7% and 10.0% more two-scope queries than unchanged code. The
 server ShortRun was noisier; other expression shapes and deeper correlation
 still require per-row work.
+The [three-scope filtered-literal follow-up](benchmarks/results/2026-11-05-three-scope-literal-scalar.md)
+avoids materializing a middle source-free `SELECT 1 WHERE (SELECT ...)` and
+reuses its successful binding validation within a statement. The matched
+100-user embedded workload completed about 2.1 times as many queries across
+interleaved runs, with MySQL-matched results. Other literal types, expressions,
+and general multi-scope correlation still use the ordinary path.
 The [computed-derived control](benchmarks/results/2026-11-04-projection-miss-cache.md)
 now memoizes unsuccessful physical-projection discovery within a statement;
 the matched ShortRun fell from 4.68 to 3.71 ms for 100 outer rows. This is a
