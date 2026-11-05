@@ -1813,7 +1813,10 @@ ran migrations and selected feature tests from Reflow, Boatflow, Chatflow,
 Spamcalls, and Sysflow against isolated fsdb databases. It exposed a
 stack-overflowing prepared bulk-insert binder, now covered by a 3,000-marker
 regression. An overlapping three-app run also produced a 50-second metadata
-lock wait that still needs an isolated scheduler reproduction. The
+lock wait. A [focused cross-database lock-scope regression](torture/findings/2026-10-16-real-app-compatibility.md)
+isolated a qualified-foreign-key validation amplifier; unrelated writes now
+avoid the parent database slot, and the three application files subsequently
+overlapped successfully. Broader concurrent workloads remain to measure. The
 `crescat-website` migration stops at partial-index syntax rejected by both
 fsdb and MySQL 8.4.
 
@@ -2386,6 +2389,12 @@ implementation effort:
    again measured about 0.45× MySQL throughput with one writer and 0.28×
    with eight. The write-scaling gap remains open; that matched run does not
    justify changing queue ownership or WAL policy.
+   A [November 5 multi-database correctness and scaling checkpoint](benchmarks/results/2026-11-05-multidb-write-checkpoint.md)
+   passed all commits and rollbacks across four databases and eight writers
+   per database. Its 0.63 ratio to serial-projected wall time narrowly met the
+   harness threshold. An eight-database, 16-writer run also preserved every
+   transaction but took 1.64 times the serial projection; high-fan-out
+   scheduling and durable throughput remain open.
    The group-commit leader now drains successive batches iteratively. A
    continuously replenished queue previously grew one call frame per batch;
    the [focused regression and matched write check](benchmarks/results/2026-10-15-iterative-group-commit-drain.md)
