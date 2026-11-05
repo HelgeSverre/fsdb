@@ -2405,6 +2405,10 @@ implementation effort:
    harness threshold. An eight-database, 16-writer run also preserved every
    transaction but took 1.64 times the serial projection; high-fan-out
    scheduling and durable throughput remain open.
+   A [64-worker reserve trial](benchmarks/results/2026-11-05-multidb-worker-reserve-trial.md)
+   retained correctness but worsened the same 8 × 16 shape to a 2.49 ratio,
+   versus 1.45–1.84 across three current-policy runs. The cap was reverted;
+   synchronous wait and runnable-worker costs need more direct separation.
    The group-commit leader now drains successive batches iteratively. A
    continuously replenished queue previously grew one call frame per batch;
    the [focused regression and matched write check](benchmarks/results/2026-10-15-iterative-group-commit-drain.md)
