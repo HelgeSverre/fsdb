@@ -32625,6 +32625,32 @@ let transactionWriteTargets
             |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
         let update = writableViewFirst store dbName update
+        let allSourceItems =
+            FromTable update.From
+            :: (update.Joins |> List.collect (fun (join: Join) -> FromItem.leaves join.Table))
+        let allSources =
+            allSourceItems
+            |> List.choose (function FromTable table -> Some table | _ -> None)
+        let sourceColumns = lazy (
+            let columns (source: TableRef) =
+                let database = source.Database |> Option.defaultValue dbName
+                if source.Database.IsNone && Set.contains (source.Table.ToLowerInvariant()) cteNames then None
+                else
+                    physicalFastPathTable store dbName source
+                    |> Option.map (fun table -> table.Columns)
+                    |> Option.orElseWith (fun () -> viewColumns store registry database source.Table)
+            (if allSources.Length = allSourceItems.Length then allSources |> List.map columns else [])
+            |> fun columns ->
+                if columns.Length = allSources.Length && (columns |> List.forall Option.isSome) then
+                    Some(List.choose id columns)
+                else None)
+        let bareAssignmentOwner column =
+            sourceColumns.Value
+            |> Option.bind (fun sourceColumns ->
+                List.zip allSources sourceColumns
+                |> List.filter (fun (_, columns) ->
+                    columns |> List.exists (fun candidate -> equalsIgnoreCase candidate.Name column))
+                |> function [ source, _ ] -> Some source | _ -> None)
         let viewTargetFor (source: TableRef) allowUnqualified =
             let viewDatabase = source.Database |> Option.defaultValue dbName
             let resolvedView =
@@ -32638,7 +32664,9 @@ let transactionWriteTargets
                     |> List.filter (fun assignment ->
                         match assignment.Table with
                         | Some owner -> equalsIgnoreCase owner viewQualifier
-                        | None -> allowUnqualified && Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+                        | None ->
+                            Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets
+                            && (allowUnqualified || bareAssignmentOwner assignment.Column = Some source))
                 viewAssignments
                 |> traverse (fun assignment ->
                     Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets

@@ -1861,6 +1861,41 @@ let tests =
               | Err(1052, _) -> ()
               | result -> failtestf "expected an ordinary later id to be ambiguous, got %A" result
 
+          testCase "two natural-joined views with bare targets rebase after independent row holders"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE natural_view_a(id INT PRIMARY KEY,n INT)" |> ignore
+              handle setup "CREATE TABLE natural_view_b(id INT PRIMARY KEY,bonus INT)" |> ignore
+              handle setup "CREATE TABLE natural_view_link(id INT PRIMARY KEY)" |> ignore
+              handle setup "INSERT INTO natural_view_a VALUES(1,0)" |> ignore
+              handle setup "INSERT INTO natural_view_b VALUES(1,0)" |> ignore
+              handle setup "INSERT INTO natural_view_link VALUES(1)" |> ignore
+              handle setup "CREATE VIEW natural_view_va AS SELECT a.id,a.n,l.id AS link_id FROM natural_view_a a JOIN natural_view_link l ON l.id=a.id" |> ignore
+              handle setup "CREATE VIEW natural_view_vb AS SELECT b.id,b.bonus,l.id AS link_id FROM natural_view_b b JOIN natural_view_link l ON l.id=b.id" |> ignore
+              let ownerA, _ = handle (create 2 store) "BEGIN"
+              let ownerA, _ = handle ownerA "UPDATE natural_view_a SET n=n+10 WHERE id=1"
+              let ownerB, _ = handle (create 3 store) "BEGIN"
+              let ownerB, _ = handle ownerB "UPDATE natural_view_b SET bonus=bonus+10 WHERE id=1"
+              let waiter, _ = handle (create 4 store) "BEGIN"
+              let sql =
+                  "UPDATE natural_view_va va NATURAL JOIN natural_view_vb vb "
+                  + "SET n=n+1,bonus=bonus+1 WHERE id=1"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting = Threading.Tasks.Task.Run(fun () -> started.Set(); handle waiter sql)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "two-view writer starts"
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "two-view writer waits for first holder"
+              Expect.equal (handle ownerA "COMMIT" |> snd) (Affected 0UL) "first holder commits"
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "two-view writer waits for second holder"
+              Expect.equal (handle ownerB "COMMIT" |> snd) (Affected 0UL) "second holder commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "two-view writer resumes"
+              let waiter, changed = waiting.Result
+              Expect.equal changed (Affected 2UL) "both physical targets change"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "two-view writer commits"
+              match handle setup "SELECT (SELECT n FROM natural_view_a),(SELECT bonus FROM natural_view_b)" |> snd with
+              | ResultSet(_, [ [ Some "11"; Some "11" ] ]) -> ()
+              | result -> failtestf "expected both rebased natural-view increments, got %A" result
+
           testCase "CTE-joined update with an unqualified target waits and rebases"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

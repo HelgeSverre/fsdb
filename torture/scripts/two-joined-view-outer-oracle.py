@@ -280,6 +280,16 @@ def main():
                     "FROM link r WHERE r.id=l.id) q ON TRUE "
                     "JOIN vb ON vb.link_id=q.next_id) ON va.link_id=l.id "
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
+                    "UPDATE va NATURAL JOIN vb_unique vb "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE va.id=1",
+                    "UPDATE va NATURAL JOIN vb_unique vb "
+                    "SET n=n+1,bonus=bonus+1 WHERE id=1",
+                    "UPDATE read_counts rc NATURAL JOIN va NATURAL JOIN vb_unique vb "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE rc.id=1",
+                    "UPDATE read_counts rc NATURAL JOIN va NATURAL JOIN vb_unique vb "
+                    "SET n=n+1,bonus=bonus+1 WHERE id=1",
+                    "UPDATE (read_counts rc NATURAL JOIN va) NATURAL JOIN vb_unique vb "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE rc.id=1",
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)
@@ -375,6 +385,8 @@ def main():
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
                 independently_held_cases = [
                     six_source_update(1),
+                    "UPDATE va NATURAL JOIN vb_unique vb "
+                    "SET n=n+1,bonus=bonus+1 WHERE id=1",
                     "UPDATE (link l0 LEFT JOIN va ON va.link_id=l0.id) "
                     "RIGHT JOIN vb ON vb.link_id=l0.id "
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE vb.id=1",
