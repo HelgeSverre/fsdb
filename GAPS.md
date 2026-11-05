@@ -558,6 +558,12 @@ The [polar ring-role control](torture/findings/2026-11-04-geographic-cross-track
 pins both residual polar points under standalone and combined hole windings;
 using the standalone result for holes fixes one point but increases mismatches
 in the broader edge oracle, so that trial was reverted.
+The [cross-track reduced-length probe](torture/findings/2026-11-05-geographic-cross-track-reduced-length.md)
+reproduces one current distance mismatch with Boost 1.84, which matches MySQL.
+Both engines start at nearly the same candidate point, but fsdb's Andoyer
+reduced length changes the Newton step enough to miss Boost's zero-distance
+result. Endpoint projection and radians-only iteration trials did not change
+the edge oracle; the azimuth and differential inputs need closer comparison.
 The expanded [near-hole distance oracle](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
 finds 34 point-to-polygon distance mismatches across 189 points. Reversing
 ring traversal globally or only for polygon distance does not reduce that
