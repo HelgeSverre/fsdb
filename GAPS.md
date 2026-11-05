@@ -1381,13 +1381,16 @@ Later blocks, broader combined-range behavior, and cross-form equivalences
 remain open.
 The [U+4300–U+43FF follow-up](torture/findings/2026-11-05-extension-a-4300-ngram-audit.md)
 matches 39,936 standalone searches across the same collations and token sizes,
-plus 3,072 targeted searches on a combined U+3400–U+43FF index. Later blocks,
+plus 3,072 targeted searches on a combined U+3400–U+43FF index.
+The [U+4400–U+44FF follow-up](torture/findings/2026-11-05-extension-a-4400-ngram-audit.md)
+matches another 39,936 standalone searches across the same collations and
+token sizes, plus 3,072 targeted searches on a combined U+3400–U+44FF index. Later blocks,
 broader combined-range behavior, and cross-form equivalences remain open.
 An [exact-byte differential probe](torture/findings/2026-11-04-extension-a-exact-weights.md)
-finds that all 256 single-character U+3B00–U+3BFF `WEIGHT_STRING` values
-differ from MySQL in each of three legacy collations, despite the matching
-ngram behavior. Fsdb still emits ICU sort-key bytes; a general legacy weight
-encoder remains open.
+originally found that all 256 single-character U+3B00–U+3BFF `WEIGHT_STRING`
+values differed from MySQL in each of three legacy collations. The later
+implicit-ideograph encoder follow-up in that report resolved the audited
+ideograph cases; other mixed text and legacy weight families remain open.
 A [legacy-collation selector and CJK punctuation audit](torture/findings/2026-10-18-legacy-cjk-selector-audit.md)
 found no membership or relevance differences across 4,800 additional
 two-column ngram queries at token sizes 1–10. This narrows the sampled
