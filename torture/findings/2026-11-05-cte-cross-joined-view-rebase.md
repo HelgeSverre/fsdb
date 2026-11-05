@@ -84,6 +84,16 @@ columns and carries its equalities into the promoted view write. A mismatched
 key in the second read source yields zero affected rows. A separate control
 introduces `n` in the later read source: the final natural join compares both
 `id` and `n` with the view, and stops matching after `v.n` changes. The native
-MySQL oracle and Fsdb regression agree on these cases. Natural joins to the
-view followed by additional sources, mixed outer-join prefixes, and broader
+MySQL oracle and Fsdb regression agree on these cases. The next section
+covers an ordinary read source after the natural view join.
+
+## Read source after the longer natural chain
+
+The native MySQL oracle also waits and rebases when either the three-source or
+four-source natural chain ends at `v` and an ordinary read join follows it.
+Fsdb now promotes that view while retaining the later source. Its bare `id`
+still names the merged natural column when the later source exposes only `k`;
+both engines report 1052 when that source exposes another `id`. The contended
+transaction regression covers both successful forms and the ambiguity case.
+Later natural or outer joins, mixed outer-join prefixes, and broader
 multi-match ordering remain open.

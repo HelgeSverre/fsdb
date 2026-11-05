@@ -2319,9 +2319,10 @@ implementation effort:
    now also wait and rebase for the audited three-source CTE forms. The
    [four-source natural prefix follow-up](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#longer-natural-read-chains)
    carries successive read-source equalities into ordinary or natural view
-   joins, including a shared column introduced by a later source. Natural
-   view joins followed by additional sources and mixed outer-join prefixes
-   remain open.
+   joins, including a shared column introduced by a later source. An
+   [ordinary read join after either natural chain](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#read-source-after-the-longer-natural-chain)
+   also retains MySQL's merged-column binding and later ambiguity. Later
+   natural or outer joins and mixed outer-join prefixes remain open.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.

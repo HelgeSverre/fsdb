@@ -286,6 +286,32 @@ def main():
                     )
                     == 0
                 )
+                execute(owner, "UPDATE natural_read_next SET id=1 WHERE id=2")
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_read r NATURAL JOIN v JOIN tail x ON x.k=c.id SET v.n=v.n+1 WHERE id=1",
+                    ((1, 36),),
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_read r NATURAL JOIN natural_read_next s NATURAL JOIN v JOIN tail x ON x.k=c.id SET v.n=v.n+1 WHERE id=1",
+                    ((1, 38),),
+                )
+                try:
+                    execute(
+                        owner,
+                        "WITH c AS (SELECT id FROM link) UPDATE c NATURAL JOIN natural_read r NATURAL JOIN v JOIN link l ON l.id=c.id SET v.n=v.n+1 WHERE id=1",
+                    )
+                except pymysql.MySQLError as error:
+                    assert error.args[0] == 1052, error
+                else:
+                    raise AssertionError(
+                        "a later id source did not make the merged id ambiguous"
+                    )
                 try:
                     execute(
                         owner,

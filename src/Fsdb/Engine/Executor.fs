@@ -24446,7 +24446,9 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
 
                 if not writesView then
                     move (join :: prior) rest
-                elif join.Kind = NaturalJoin && not prior.IsEmpty && not rest.IsEmpty then update
+                elif join.Kind = NaturalJoin && not prior.IsEmpty
+                     && (rest |> List.exists (fun later ->
+                         later.Kind <> InnerJoin && later.Kind <> CrossJoin && later.Kind <> StraightJoin)) then update
                 else
                     // Keep the old first source before its prior joins, so
                     // LATERAL and JSON_TABLE dependencies remain in scope.
@@ -24524,11 +24526,17 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                                 |> List.fold (fun names name -> Map.add (name.ToLowerInvariant()) qualifier names) mergedOwners
                             first :: (prefix @ rest), mergedOwners
                     let rewriteMerged =
+                        let laterNames =
+                            rest
+                            |> List.collect (fun later -> FromItem.leaves later.Table |> List.collect sourceNames)
+                            |> List.map _.ToLowerInvariant()
+                            |> Set.ofList
                         rewriteExprWith (function
                             | Col name ->
                                 let key = name.ToLowerInvariant()
                                 match Map.tryFind key mergedOwners with
-                                | Some owner when join.Kind = NaturalJoin || not (view.OrderedColumns |> List.exists (equalsIgnoreCase name)) ->
+                                | Some owner when not (Set.contains key laterNames)
+                                                  && (join.Kind = NaturalJoin || not (view.OrderedColumns |> List.exists (equalsIgnoreCase name))) ->
                                     Some(QualifiedCol(owner, name))
                                 | _ -> None
                             | _ -> None)

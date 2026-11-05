@@ -1702,7 +1702,12 @@ let tests =
                     7, "NATURAL JOIN tx_cross_natural_read r NATURAL JOIN tx_cross_natural_next s "
                        + "JOIN tx_cross_view v ON v.id=s.id SET v.n=v.n+1 WHERE c.id=1"
                     8, "NATURAL JOIN tx_cross_natural_read r NATURAL JOIN tx_cross_natural_next s "
-                       + "NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1" ] do
+                       + "NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+                    9, "NATURAL JOIN tx_cross_natural_read r NATURAL JOIN tx_cross_view v "
+                       + "JOIN tx_cross_view_tail x ON x.k=c.id SET v.n=v.n+1 WHERE id=1"
+                    10, "NATURAL JOIN tx_cross_natural_read r NATURAL JOIN tx_cross_natural_next s "
+                        + "NATURAL JOIN tx_cross_view v JOIN tx_cross_view_tail x ON x.k=c.id "
+                        + "SET v.n=v.n+1 WHERE id=1" ] do
                   let owner, _ = handle (create (2 + index * 2) store) "BEGIN"
                   let owner, changed = handle owner "UPDATE tx_cross_view_target SET n=n+1 WHERE id=1"
                   Expect.equal changed (Affected 1UL) "owner changes the physical row"
@@ -1731,13 +1736,20 @@ let tests =
               match handle setup ambiguousTail |> snd with
               | Err(1052, _) -> ()
               | result -> failtestf "expected the later id source to make the bare filter ambiguous, got %A" result
+              let ambiguousNaturalTail =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                  + "UPDATE c NATURAL JOIN tx_cross_natural_read r NATURAL JOIN tx_cross_view v "
+                  + "JOIN tx_cross_view_link l ON l.id=c.id SET v.n=v.n+1 WHERE id=1"
+              match handle setup ambiguousNaturalTail |> snd with
+              | Err(1052, _) -> ()
+              | result -> failtestf "expected a later id source to break the three-way merged id, got %A" result
               let mergedColumn =
                   "WITH c AS (SELECT id FROM tx_cross_view_link) "
                   + "UPDATE c NATURAL JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
               Expect.equal (handle setup mergedColumn |> snd) (Affected 1UL)
                   "NATURAL JOIN merges the bare id filter"
               match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
-              | ResultSet(_, [ [ Some "19" ] ]) -> ()
+              | ResultSet(_, [ [ Some "23" ] ]) -> ()
               | result -> failtestf "expected the merged-column update, got %A" result
               Expect.equal (handle setup "UPDATE tx_cross_natural_read SET id=2 WHERE id=1" |> snd)
                   (Affected 1UL) "move the preceding natural source away from the view row"
@@ -1747,7 +1759,7 @@ let tests =
                   Expect.equal (handle setup statement |> snd) (Affected 0UL)
                       "a mismatched earlier natural key excludes the writable view row"
               match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
-              | ResultSet(_, [ [ Some "19" ] ]) -> ()
+              | ResultSet(_, [ [ Some "23" ] ]) -> ()
               | result -> failtestf "a mismatched natural key changed the view row: %A" result
               Expect.equal (handle setup "UPDATE tx_cross_natural_read SET id=1 WHERE id=2" |> snd)
                   (Affected 1UL) "restore the first natural source"
@@ -1759,10 +1771,10 @@ let tests =
                   Expect.equal (handle setup statement |> snd) (Affected 0UL)
                       "a mismatched key deeper in the natural chain excludes the view row"
               match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
-              | ResultSet(_, [ [ Some "19" ] ]) -> ()
+              | ResultSet(_, [ [ Some "23" ] ]) -> ()
               | result -> failtestf "a mismatched later natural key changed the view row: %A" result
               handle setup "CREATE TABLE tx_cross_natural_extra(id INT PRIMARY KEY,n INT)" |> ignore
-              handle setup "INSERT INTO tx_cross_natural_extra VALUES(1,19)" |> ignore
+              handle setup "INSERT INTO tx_cross_natural_extra VALUES(1,23)" |> ignore
               let laterSharedColumn =
                   "WITH c AS (SELECT id FROM tx_cross_view_link) "
                   + "UPDATE c NATURAL JOIN tx_cross_natural_extra r NATURAL JOIN tx_cross_view v "
