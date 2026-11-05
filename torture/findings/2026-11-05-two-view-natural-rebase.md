@@ -49,3 +49,20 @@ and table-function source column names before deciding whether a bare column
 has one owner. Unresolved source schemas still prevent the inference. The
 focused transaction test covers both the direct and CTE-first paths.
 The expanded oracle now matches 28 contended rebases.
+
+## Dependent read source between the views
+
+An intermediate dependent `LATERAL` projection exposed a third case. Its
+output alias `next_id` was known from the SELECT projection, but the ordinary
+source-column descriptor could not resolve that dependent source during write
+preparation. Fsdb again changed both rows, then failed COMMIT with 1205 after
+the two independent holders released them. A dependent `JSON_TABLE` source
+uses the same ownership path.
+
+The preclaim now falls back to declared projection names for derived and
+LATERAL sources, and to declared `JSON_TABLE` column names, when complete
+descriptors are unavailable. It still declines an ownership inference for
+unnamed projections. The Release oracle matches 49 UPDATE cases and 30
+contended rebases, including both dependent-source shapes. The focused
+transaction regression runs the direct, CTE, LATERAL, and JSON_TABLE writes
+with two independently held physical rows.

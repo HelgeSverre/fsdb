@@ -32629,10 +32629,25 @@ let transactionWriteTargets
             FromTable update.From
             :: (update.Joins |> List.collect (fun (join: Join) -> FromItem.leaves join.Table))
         let sourceColumns = lazy (
+            let projectedNames body =
+                let projections =
+                    match body with
+                    | PlainSelect select -> select.Projections
+                    | UnionSelect(first, _, _, _, _) -> first.Projections
+                let names = projections |> List.map (fun projection -> projection.Alias |> Option.orElse projection.SourceName)
+                if names.IsEmpty || (names |> List.exists Option.isNone) then None
+                else Some(List.choose id names)
             let inferredNames source =
                 let columns = selectSourceColumns store dbName source
-                if columns.IsEmpty || (columns |> List.exists Option.isNone) then None
-                else Some(columns |> List.choose id |> List.map _.Name)
+                if not columns.IsEmpty && (columns |> List.forall Option.isSome) then
+                    Some(columns |> List.choose id |> List.map _.Name)
+                else
+                    match source with
+                    | FromSubquery(body, _) | FromLateral(body, _) -> projectedNames body
+                    | FromJsonTable(_, _, columns, _) ->
+                        let names = JsonTableColumn.names columns
+                        if names.IsEmpty then None else Some names
+                    | _ -> None
             let columns = function
                 | FromTable source ->
                     let database = source.Database |> Option.defaultValue dbName
