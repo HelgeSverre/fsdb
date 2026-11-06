@@ -1675,8 +1675,9 @@ keeps decomposed accents in positional keys and removes the audited size-2
 short Boolean false positives; kana forms and query expansion remain open.
 The [kana-weight probe](torture/findings/2026-10-17-general-ci-kana-weights.md)
 also preserves assigned fullwidth and halfwidth kana weights; the two-column
-general-collation ngram corpus now has only four size-1 relevance differences,
-with sizes 2–10 matching all audited searches.
+general-collation ngram corpus now matches all audited searches at sizes 1–10.
+The four former size-1 relevance differences for `神` and `神` were closed by
+the [compatibility-ideograph weights](torture/findings/2026-10-17-general-ci-compatibility-ideographs.md).
 The [U+FF00–U+FFEF exact-weight audit](torture/findings/2026-11-06-fullwidth-halfwidth-general-weights.md)
 now matches all 240 singleton weights in each `utf8mb4_general_ci` and
 `utf8mb3_general_ci`; the U+FF00–U+FFFF legacy Unicode-collation tables now
@@ -2857,10 +2858,16 @@ implementation effort:
    refinement](torture/findings/2026-11-05-geographic-cross-track-reduced-length.md#contracted-azimuth-and-radian-native-refinement)
    resolves the zero-distance edge and lowered the residual near-hole distance
    count to eight of 189 at that revision, while all 100 seeded point-to-line distances matched.
-   A [current-head rerun and winding-role control](torture/findings/2026-11-06-geographic-polar-hole-current-head.md)
-   now measures five of 189 near-hole distance differences, 12 of 412 line
+   An [earlier rerun and winding-role control](torture/findings/2026-11-06-geographic-polar-hole-current-head.md)
+   measured five of 189 near-hole distance differences, 12 of 412 line
    relations, and one of 189 point relations. Switching all holes to the
    standalone-ring winding role regresses those relation counts and was reverted.
+   A current-head Release replay of the [geographic edge oracle](torture/findings/2026-11-06-geographic-residual-vertex-audit.md)
+   finds 11/448 line/polygon relation differences, with zero differences in
+   189 point relations, 189 near-hole point distances, 49 polar-corner points,
+   and 100 seeded point-to-line distances. The [300-ring geographic validity
+   corpus](torture/findings/2026-10-16-geographic-global-containment.md#validity-strategy-follow-up)
+   still has the same two long-edge disagreements, cases 76 and 92.
    Numerical and topology gaps remain open.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.

@@ -31,6 +31,9 @@ and none newly introduced.
 
 The expanded kana lane has zero mismatches across 1,134 searches at each
 of sizes 1 and 2. The halfwidth lane has zero mismatches across 378 searches
-at each size. The four residual reports are relevance-only differences for
-`神` and `神` at size 1; the corpus does not prove parity for other
+at each size. The four relevance-only differences for `神` and `神` at size 1
+remained after this kana change and were subsequently closed by the
+[compatibility-ideograph weight fix](2026-10-17-general-ci-compatibility-ideographs.md).
+A current-head replay matches all 387 maintained searches at each startup
+ngram size from 1 through 10. The corpus does not prove parity for other
 collation characters or search shapes.
