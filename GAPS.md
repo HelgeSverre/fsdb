@@ -2154,6 +2154,11 @@ The [nested-scope benchmark](benchmarks/results/2026-11-04-nested-exists-project
 exercises an intermediate outer-bound projection through two correlated
 levels. A full-binding-chain cache trial did not beat baseline variation and
 was reverted; this shape remains open.
+The [literal-limit `EXISTS` follow-up](benchmarks/results/2026-11-06-correlated-exists-limit-one.md)
+also uses the indexed membership path for `LIMIT 1`. In the matched 100-row
+ShortRun, fsdb took 0.92 ms versus 4.45 ms for `LIMIT 2`, which retains the
+general path. `LIMIT 0`, offsets, and expression limits retain ordinary
+evaluation; broader limited shapes remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

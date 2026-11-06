@@ -9224,12 +9224,20 @@ and private plainExistsProjection (projection: Projection) =
     | _ -> false
 
 and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
+    // Literal LIMIT 1 cannot change EXISTS membership. Keep other
+    // limit expressions on the ordinary path for their validation and errors.
+    let membershipLimit =
+        match select.Limit with
+        | None
+        | Some(Lit(VInt 1L)) -> true
+        | _ -> false
+
     let plainShape =
         select.Joins.IsEmpty
         && select.GroupBy.IsEmpty
         && select.Having.IsNone
         && select.OrderBy.IsEmpty
-        && select.Limit.IsNone
+        && membershipLimit
         && select.Offset.IsNone
         && select.Windows.IsEmpty
         && select.Ctes.IsEmpty

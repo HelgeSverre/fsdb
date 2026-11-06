@@ -669,6 +669,16 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedPhysicalExistsLimitOne() =
+        this.Query "SELECT u.id, EXISTS(SELECT 1 FROM orders c WHERE c.user_id = u.id LIMIT 1) FROM users u WHERE u.id <= 100"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedPhysicalExistsLimitTwo() =
+        this.Query "SELECT u.id, EXISTS(SELECT 1 FROM orders c WHERE c.user_id = u.id LIMIT 2) FROM users u WHERE u.id <= 100"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedPhysicalExistsColumn() =
         this.Query "SELECT u.id, EXISTS(SELECT c.id FROM orders c WHERE c.user_id = u.id) FROM users u WHERE u.id <= 100"
 

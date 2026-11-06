@@ -12830,6 +12830,38 @@ let tests =
                     | ResultSet([ "id"; "c" ], rows) -> Expect.equal rows [ [ Some "1"; Some "0" ]; [ Some "5"; Some "1" ] ] "user 5 has exactly one matching post, user 1 has none"
                     | other -> failtestf "expected a resultset, got %A" other
 
+                testCase "correlated EXISTS with LIMIT 1 retains indexed membership semantics"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE exists_outer (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE exists_inner (id INT PRIMARY KEY, outer_id INT, KEY ix_outer (outer_id))" |> ignore
+                    runDefault store "INSERT INTO exists_outer VALUES (1), (2), (3)" |> ignore
+                    runDefault store "INSERT INTO exists_inner VALUES (10, 1), (11, 1), (12, 3)" |> ignore
+
+                    let query suffix =
+                        match
+                            runDefault
+                                store
+                                ("SELECT o.id, EXISTS(SELECT i.id + 0 FROM exists_inner i WHERE i.outer_id = o.id "
+                                 + suffix
+                                 + ") AS found FROM exists_outer o ORDER BY o.id")
+                        with
+                        | ResultSet(_, rows) -> rows
+                        | other -> failtestf "expected EXISTS rows, got %A" other
+
+                    let unrestricted = query ""
+                    Expect.equal (query "LIMIT 1") unrestricted "positive literal limit preserves membership"
+                    Expect.equal (query "LIMIT 0") [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ] "zero limit yields false"
+                    Expect.equal (query "LIMIT 1 OFFSET 1") [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ] "offset excludes a single match"
+
+                    match
+                        runDefault
+                            store
+                            "SELECT EXISTS(SELECT i.missing FROM exists_inner i WHERE i.outer_id = o.id LIMIT 1) FROM exists_outer o"
+                    with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "expected unknown projection column, got %A" other
+
                 testCase "a correlated equality probes the inner secondary index"
                 <| fun _ ->
                     let mutable calls = 0
