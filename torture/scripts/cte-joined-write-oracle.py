@@ -104,6 +104,88 @@ def main():
                 )
                 execute(owner, "UPDATE a SET n=0 WHERE id=1")
 
+                execute(owner, "CREATE TABLE source_lock(id INT PRIMARY KEY,flag INT)")
+                execute(owner, "INSERT INTO source_lock VALUES(1,1)")
+                execute(
+                    owner,
+                    "CREATE VIEW source_lock_view AS SELECT a.id,a.n,s.flag FROM a JOIN source_lock s ON s.id=a.id",
+                )
+                execute(owner, "BEGIN")
+                assert execute(owner, "UPDATE a SET n=n+1 WHERE id=1") == 1
+                assert execute(owner, "UPDATE source_lock SET flag=0 WHERE id=1") == 1
+                execute(waiter, "BEGIN")
+                source_result = []
+                source_errors = []
+
+                def update_after_source_change():
+                    try:
+                        source_result.append(
+                            execute(
+                                waiter,
+                                "UPDATE source_lock_view SET n=n+1 WHERE id=1 AND flag=1",
+                            )
+                        )
+                    except pymysql.MySQLError as error:
+                        source_errors.append(error)
+
+                source_wait = threading.Thread(target=update_after_source_change)
+                source_wait.start()
+                time.sleep(0.2)
+                assert source_wait.is_alive(), "joined writer did not wait for target/source"
+                execute(owner, "COMMIT")
+                source_wait.join(timeout=5)
+                assert not source_wait.is_alive(), "joined writer did not resume"
+                assert not source_errors, source_errors
+                assert source_result == [0], source_result
+                execute(waiter, "COMMIT")
+                assert execute(owner, "SELECT id,n FROM a WHERE id=1") == ((1, 1),)
+                execute(owner, "UPDATE a SET n=0 WHERE id=1")
+                execute(owner, "UPDATE source_lock SET flag=1 WHERE id=1")
+                execute(owner, "BEGIN")
+                assert execute(owner, "UPDATE source_lock SET flag=0 WHERE id=1") == 1
+                execute(waiter, "BEGIN")
+                source_result.clear()
+                source_errors.clear()
+                source_wait = threading.Thread(target=update_after_source_change)
+                source_wait.start()
+                time.sleep(0.2)
+                source_only_waited = source_wait.is_alive()
+                execute(owner, "COMMIT")
+                source_wait.join(timeout=5)
+                assert not source_wait.is_alive(), "source-only joined writer did not finish"
+                assert not source_errors, source_errors
+                assert source_only_waited, "joined writer did not wait for source row"
+                assert source_result == [0], source_result
+                execute(waiter, "COMMIT")
+                execute(owner, "UPDATE source_lock SET flag=1 WHERE id=1")
+                execute(owner, "INSERT INTO source_lock VALUES(2,1)")
+                execute(owner, "BEGIN")
+                assert execute(owner, "UPDATE source_lock SET flag=0 WHERE id=1") == 1
+                execute(waiter, "BEGIN")
+                disjoint_result = []
+
+                def update_disjoint_source():
+                    disjoint_result.append(
+                        execute(
+                            waiter,
+                            "UPDATE source_lock_view SET n=n+1 WHERE id=2 AND flag=1",
+                        )
+                    )
+
+                disjoint_wait = threading.Thread(target=update_disjoint_source)
+                disjoint_wait.start()
+                disjoint_wait.join(timeout=1)
+                disjoint_source_waited = disjoint_wait.is_alive()
+                execute(owner, "COMMIT")
+                disjoint_wait.join(timeout=5)
+                assert not disjoint_wait.is_alive(), "disjoint joined writer did not finish"
+                assert not disjoint_source_waited, "disjoint joined writer waited for row 1"
+                assert disjoint_result == [1], disjoint_result
+                execute(waiter, "COMMIT")
+                assert execute(owner, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 1))
+                execute(owner, "UPDATE a SET n=0 WHERE id=2")
+                execute(owner, "UPDATE source_lock SET flag=1 WHERE id=1")
+
                 verify_wait(
                     owner,
                     waiter,
@@ -614,7 +696,7 @@ def main():
                     else:
                         raise AssertionError(f"duplicate grouped natural {direction} join was accepted")
                 print(
-                    "MySQL 8.4.11: CTE, derived, and joined-view writes (including mixed NATURAL and grouped natural outer joins) waited and committed"
+                    "MySQL 8.4.11: CTE, derived, and joined-view writes waited, rebased, and preserved disjoint source progress"
                 )
             except Exception:
                 print((root / "mysql.log").read_text())

@@ -2659,6 +2659,9 @@ implementation effort:
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.
+   A [joined-view UPDATE with a contended read source](torture/findings/2026-11-06-joined-view-read-source-wait.md)
+   now waits, rechecks the committed source value, and keeps an unrelated
+   keyed source row free to progress.
    Broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in

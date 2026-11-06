@@ -2917,9 +2917,24 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
             Executor.transactionWriteTargets transaction.Snapshot (registryFor session) dbName statement
             |> List.filter (fun (_, _, target) -> not target.RowIds.IsEmpty || not target.Keys.IsEmpty)
 
-        match targets with
-        | [] -> session
+        let readTargets =
+            Executor.transactionWriteReadTargets transaction.Snapshot (registryFor session) dbName statement
+            |> List.filter (fun (_, _, rows) -> not rows.IsEmpty)
+
+        match targets, readTargets with
+        | [], [] -> session
         | _ ->
+            readTargets
+            |> List.iter (fun (database, table, rows) ->
+                Storage.acquireTransactionReadTargets
+                    (lockWaitTimeout session)
+                    transaction.Snapshot
+                    database
+                    table
+                    ShareLock
+                    WaitForLocks
+                    rows
+                |> ignore)
             targets
             |> List.iter (fun (database, table, target) ->
                 Storage.acquireTransactionWriteTargets

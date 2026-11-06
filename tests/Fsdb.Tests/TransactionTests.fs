@@ -5396,6 +5396,75 @@ let tests =
               | ResultSet(_, []) -> ()
               | result -> failtestf "the physical row should be absent, got %A" result
 
+          testCase "joined view update rechecks a changed read source after waiting"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_source_target (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_source_lookup (id INT PRIMARY KEY, flag INT)" |> ignore
+              handle setup "INSERT INTO tx_source_target VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_source_lookup VALUES (1, 1)" |> ignore
+              handle setup
+                  "CREATE VIEW tx_source_view AS SELECT t.id,t.n,s.flag FROM tx_source_target t JOIN tx_source_lookup s ON s.id=t.id"
+              |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, changedTarget = handle owner "UPDATE tx_source_target SET n=n+1 WHERE id=1"
+              Expect.equal changedTarget (Affected 1UL) "the owner changes the target"
+              let owner, changedSource = handle owner "UPDATE tx_source_lookup SET flag=0 WHERE id=1"
+              Expect.equal changedSource (Affected 1UL) "the owner changes the read source"
+              let waiter, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+              let waiter, _ = handle waiter "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_source_view SET n=n+1 WHERE id=1 AND flag=1")
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the view writer resumes"
+              Expect.isTrue blocked "the view writer waits for the target or source"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 0UL) "the committed source no longer matches"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the view writer commits"
+              match handle setup "SELECT n FROM tx_source_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | actual -> failtestf "the target should have only the owner's update, got %A" actual
+
+              handle setup "UPDATE tx_source_lookup SET flag=1 WHERE id=1" |> ignore
+              let owner, _ = handle (create 4 store) "BEGIN"
+              let owner, changedSource = handle owner "UPDATE tx_source_lookup SET flag=0 WHERE id=1"
+              Expect.equal changedSource (Affected 1UL) "the owner holds only the source row"
+              let waiter, _ = handle (create 5 store) "SET innodb_lock_wait_timeout = 5"
+              let waiter, _ = handle waiter "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_source_view SET n=n+1 WHERE id=1 AND flag=1")
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the source owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the source-only waiter finishes"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.isTrue blocked (sprintf "the view writer waits for its joined source; result %A" result)
+              Expect.equal result (Affected 0UL) "the committed source no longer matches"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the source-only waiter commits"
+
+              handle setup "INSERT INTO tx_source_target VALUES (2, 0)" |> ignore
+              handle setup "INSERT INTO tx_source_lookup VALUES (2, 1)" |> ignore
+              let owner, _ = handle (create 6 store) "BEGIN"
+              let owner, changedSource = handle owner "UPDATE tx_source_lookup SET flag=1 WHERE id=1"
+              Expect.equal changedSource (Affected 1UL) "the owner holds row 1"
+              let waiter, _ = handle (create 7 store) "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_source_view SET n=n+1 WHERE id=2 AND flag=1")
+              let completed = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the disjoint source owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the disjoint writer finishes"
+              Expect.isTrue completed "row 2 does not wait for locked source row 1"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 1UL) "the disjoint writer updates row 2"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the disjoint writer commits"
+              match handle setup "SELECT id,n FROM tx_source_target ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ]) -> ()
+              | actual -> failtestf "the disjoint target row should be updated, got %A" actual
+
           testCase "JSON_TABLE-first view updates wait on the physical target"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
