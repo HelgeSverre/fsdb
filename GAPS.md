@@ -1486,6 +1486,9 @@ also preserves 193 distinct Unicode 5.2 implicit-weight scalars in
 collation keys and two-column ngram postings; the maintained range oracle
 checks natural, Boolean, and expansion searches across startup token sizes
 1–10. Unicode 9.0 keeps its separate expansion behavior.
+The [exact legacy-weight follow-up](torture/findings/2026-11-06-enclosed-alphanumeric-exact-weights.md)
+matches 3,069 singleton, adjacent-pair, mixed-ideograph, and padded
+byte comparisons across the three `utf8mb4` legacy collations.
 
 The [general Unicode letterlike-symbol audit](torture/findings/2026-10-17-general-ci-letterlike-weights.md)
 matches MySQL's U+2100–U+21FF primary-weight classes in two-column

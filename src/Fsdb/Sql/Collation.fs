@@ -1024,6 +1024,42 @@ let private legacySupplementaryEnclosedCjkWeights codepoint =
         [ 0x0347 ] @ split unicode52ParenthesizedIdeographWeights[codepoint - 0x1F240] @ [ 0x0348 ]
     else [ 0xFBC0 + (codepoint >>> 15); 0x8000 ||| (codepoint &&& 0x7FFF) ]
 
+// UCA 5.2 expands only the assigned enclosed alphanumerics. Later positions
+// retain their implicit weights, including the regional indicator letters.
+let private legacySupplementaryEnclosedAlphanumericWeights codepoint =
+    let ascii character = unicode52AsciiWeights[character - 0x20]
+    let letters text = text |> Seq.map (int >> ascii) |> Seq.toList
+    match codepoint with
+    | 0x1F100 -> [ ascii 0x30; ascii 0x2E ]
+    | value when value >= 0x1F101 && value <= 0x1F10A ->
+        [ ascii (0x30 + value - 0x1F101); 0x0234 ]
+    | value when value >= 0x1F110 && value <= 0x1F129 ->
+        [ 0x02FF; ascii (0x41 + value - 0x1F110); 0x0300 ]
+    | 0x1F12A -> [ 0x0347; ascii 0x53; 0x0348 ]
+    | 0x1F12B -> letters "C"
+    | 0x1F12C -> letters "R"
+    | 0x1F12D -> letters "CD"
+    | 0x1F12E -> letters "WZ"
+    | 0x1F131 -> letters "B"
+    | 0x1F13D -> letters "N"
+    | 0x1F13F | 0x1F15F | 0x1F17F | 0x1F18A -> letters "P"
+    | 0x1F142 -> letters "S"
+    | 0x1F146 -> letters "W"
+    | 0x1F14A -> letters "HV"
+    | 0x1F14B -> letters "MV"
+    | 0x1F14C -> letters "SD"
+    | 0x1F14D -> letters "SS"
+    | 0x1F14E -> letters "PPV"
+    | 0x1F157 -> letters "H"
+    | 0x1F179 -> letters "J"
+    | 0x1F17B -> letters "L"
+    | 0x1F17C -> letters "M"
+    | 0x1F18B -> letters "IC"
+    | 0x1F18C -> letters "PA"
+    | 0x1F18D -> letters "SA"
+    | 0x1F190 -> letters "DJ"
+    | _ -> [ 0xFBC0 + (codepoint >>> 15); 0x8000 ||| (codepoint &&& 0x7FFF) ]
+
 // MySQL 8.4.11's legacy UCA weights for Bopomofo extensions and CJK strokes.
 // UCA 4.0 predates the stroke block; UCA 5.2 assigns its first 36 entries.
 let private unicode40BopomofoExtensionWeights =
@@ -1471,6 +1507,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     let weights =
                         if name = "utf8mb4_unicode_520_ci" then
                             [ 0xFBC0 + (codepoint >>> 15); 0x8000 ||| (codepoint &&& 0x7FFF) ]
+                        else [ 0xFFFD ]
+                    for weight in weights do addWeight weight
+                | None when codepoint >= 0x1F100 && codepoint <= 0x1F1FF && name.StartsWith("utf8mb4_") ->
+                    let weights =
+                        if name = "utf8mb4_unicode_520_ci" then legacySupplementaryEnclosedAlphanumericWeights codepoint
                         else [ 0xFFFD ]
                     for weight in weights do addWeight weight
                 | None when codepoint >= 0x1F200 && codepoint <= 0x1F2FF && name.StartsWith("utf8mb4_") ->

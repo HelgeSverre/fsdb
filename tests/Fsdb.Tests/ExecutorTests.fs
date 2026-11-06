@@ -661,6 +661,13 @@ let tests =
                     let enclosedUnassigned = System.Char.ConvertFromUtf32 0x1F232
                     let parenthesizedIdeograph = System.Char.ConvertFromUtf32 0x1F240
                     let enclosedEnd = System.Char.ConvertFromUtf32 0x1F2FF
+                    let enclosedDigit = System.Char.ConvertFromUtf32 0x1F100
+                    let enclosedA = System.Char.ConvertFromUtf32 0x1F110
+                    let enclosedZ = System.Char.ConvertFromUtf32 0x1F129
+                    let enclosedAbbreviation = System.Char.ConvertFromUtf32 0x1F14E
+                    let enclosedZeroDash = System.Char.ConvertFromUtf32 0x1F101
+                    let enclosedHistorical = System.Char.ConvertFromUtf32 0x1F12E
+                    let regionalIndicator = System.Char.ConvertFromUtf32 0x1F1E6
                     let cases =
                         [ "\u3B00\u3B01", "utf8mb4_general_ci", "3B003B01"
                           "\u3B00\u3B01", "utf8mb4_unicode_ci", "FB80BB00FB80BB01"
@@ -769,6 +776,13 @@ let tests =
                           parenthesizedIdeograph, "utf8mb4_unicode_520_ci", "0347FB40E72C0348"
                           enclosedKana + enclosedEnd, "utf8mb4_unicode_ci", "FFFDFFFD"
                           enclosedKana + enclosedEnd, "utf8mb4_general_ci", "FFFDFFFD"
+                          enclosedDigit, "utf8mb4_unicode_520_ci", "12050281"
+                          enclosedA + enclosedZ, "utf8mb4_unicode_520_ci", "02FF120F030002FF14AD0300"
+                          enclosedAbbreviation, "utf8mb4_unicode_520_ci", "13B313B3147B"
+                          enclosedZeroDash, "utf8mb4_unicode_520_ci", "12050234"
+                          enclosedHistorical, "utf8mb4_unicode_520_ci", "148D14AD"
+                          regionalIndicator, "utf8mb4_unicode_520_ci", "FBC3F1E6"
+                          enclosedDigit + regionalIndicator, "utf8mb4_unicode_ci", "FFFDFFFD"
                           "\uF900", "utf8mb4_general_ci", "F900"
                           "\uF900", "utf8mb4_unicode_ci", "FB418C48"
                           "\uFA0E", "utf8mb3_unicode_ci", "FB41FA0E"
