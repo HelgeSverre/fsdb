@@ -9238,9 +9238,19 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | None | Some(Lit(VInt 0L)) | Some(Lit(VUInt 0UL)) -> true
         | _ -> false
 
+    // Grouping cannot change EXISTS membership when the projection is literal,
+    // there is no HAVING, and every group key is a validated inner column.
+    let groupedMembershipShape =
+        select.GroupBy.IsEmpty
+        || (select.Projections
+            |> List.forall (fun projection ->
+                match projection.Expression with
+                | Lit _ -> true
+                | _ -> false))
+
     let plainShape =
         select.Joins.IsEmpty
-        && select.GroupBy.IsEmpty
+        && groupedMembershipShape
         && select.Having.IsNone
         && (not select.Distinct || select.OrderBy.IsEmpty)
         && membershipLimit
@@ -9324,6 +9334,15 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                 sourceContext.Value
                 |> Option.exists (fun context -> validateExpressionInContext context expression |> Result.isOk)
             | _ -> false
+        let groupIsSafe expression =
+            let aliases = select.Projections |> List.choose (fun projection -> projection.Alias)
+            match expression, FromItem.tryQualifier source with
+            | QualifiedCol(qualifier, column), Some sourceQualifier ->
+                equalsIgnoreCase qualifier sourceQualifier && uniqueInnerColumn column
+            | Col column, _ ->
+                uniqueInnerColumn column
+                && not (aliases |> List.exists (equalsIgnoreCase column))
+            | _ -> false
         let bindingsAreSafe =
             let memo = currentStatementMemo ()
             if memo.InnerExistsProjections.ContainsKey select then true
@@ -9349,6 +9368,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                 else
                     let safe = (select.Projections |> List.forall projectionIsSafe)
                                && (select.OrderBy |> List.forall orderIsSafe)
+                               && (select.GroupBy |> List.forall groupIsSafe)
                     if safe then
                         if select.Projections |> List.forall (fun projection -> innerOnly projection.Expression) then
                             memo.InnerExistsProjections.[select] <- true

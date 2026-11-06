@@ -428,6 +428,15 @@ let tests =
                       runDefault store "SELECT o.id, EXISTS(SELECT DISTINCT i.id+0 FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o ORDER BY o.id")
               Expect.equal distinctResult result "DISTINCT preserves EXISTS membership"
               Expect.isLessThan distinctExamined 200L "DISTINCT EXISTS uses indexed membership"
+              for groupClause in [ "GROUP BY i.outer_id"; "GROUP BY outer_id LIMIT 1" ] do
+                  let groupedResult, groupedExamined =
+                      withExaminedRows (fun () ->
+                          runDefault store ("SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id " + groupClause + ") AS hit FROM exists_outer o ORDER BY o.id"))
+                  Expect.equal groupedResult result "grouped EXISTS preserves membership"
+                  Expect.isLessThan groupedExamined 200L "grouped EXISTS uses indexed membership"
+              match runDefault store "SELECT EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=1 GROUP BY i.missing)" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected unknown GROUP BY column in EXISTS, got %A" other
               let orderedResult, orderedExamined =
                   withExaminedRows (fun () ->
                       runDefault store "SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id ORDER BY i.id DESC) AS hit FROM exists_outer o ORDER BY o.id")

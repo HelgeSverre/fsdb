@@ -2218,7 +2218,11 @@ also uses indexed membership, including with `LIMIT 1` and uniquely owned
 bare inner-column keys; the 50-row control falls from 550 examined rows to
 fewer than 200. [Validated inner-only computed order keys](benchmarks/results/2026-11-06-correlated-exists-qualified-order.md#computed-inner-order-keys)
 also use the indexed path, including mixed arithmetic and built-in function
-keys. Alias-bound, grouped, and more complex source shapes remain open.
+keys. [Inner-column grouped membership](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md)
+now uses the indexed path when projections are literals and there is no
+`HAVING`; its 50-row control falls from 25,550 examined rows to fewer than
+200. Alias-bound, expression-grouped, and more complex source shapes remain
+open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell
