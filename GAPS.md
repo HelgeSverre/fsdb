@@ -2720,6 +2720,9 @@ implementation effort:
    two writable views](torture/findings/2026-11-06-mixed-natural-view-intervening-source.md#grouped-natural-keys-through-a-writable-first-view)
    now also matches through a writable first view. Other intervening
    sources, unmatched arrangements, and longer mixed join chains remain open.
+   [Grouped `HAVING` and `ROLLUP` derived read sources](torture/findings/2026-11-06-grouped-natural-view-read-source.md)
+   also leave an inner natural-joined physical target writable; the audited
+   right-outer forms remain read-only with MySQL's 1288.
    [CTE-first natural outer joins](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#cte-first-natural-outer-join-to-a-writable-view)
    to a writable view now wait and rebase, including one preceding ordinary
    read join and matched and unmatched left and right cases; duplicate `id`

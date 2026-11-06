@@ -20,7 +20,53 @@ let private setup () =
 let tests =
     testList
         "views"
-        [ testCase "a windowed NATURAL JOIN read source leaves the physical view target writable"
+        [ testCase "grouped HAVING and ROLLUP NATURAL read sources leave a physical target writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE grouped_natural_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE grouped_natural_source(id INT,flag INT)"
+                    "INSERT INTO grouped_natural_target VALUES(1,0),(2,0),(3,0)"
+                    "INSERT INTO grouped_natural_source VALUES(1,7),(1,8),(2,9),(3,-1)"
+                    "CREATE VIEW grouped_natural_having AS SELECT a.id,a.n,d.s FROM (SELECT id,SUM(flag) s FROM grouped_natural_source GROUP BY id HAVING s>0) d NATURAL JOIN grouped_natural_target a"
+                    "CREATE VIEW grouped_natural_rollup AS SELECT a.id,a.n,d.s FROM (SELECT id,SUM(flag) s FROM grouped_natural_source GROUP BY id WITH ROLLUP) d NATURAL JOIN grouped_natural_target a" ] do
+                  expectOk (run store sql) sql
+              for name, expected in
+                  [ "grouped_natural_having", [ [ Some "1"; Some "0"; Some "15" ]; [ Some "2"; Some "0"; Some "9" ] ]
+                    "grouped_natural_rollup", [ [ Some "1"; Some "0"; Some "15" ]; [ Some "2"; Some "0"; Some "9" ]; [ Some "3"; Some "0"; Some "-1" ] ] ] do
+                  Expect.equal
+                      (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{name}'"))
+                      [ [ Some "YES" ] ]
+                      (name + " is writable in MySQL 8.4.11")
+                  Expect.equal (rows store ($"SELECT id,n,s FROM {name} ORDER BY id")) expected (name + " rows")
+              Expect.equal
+                  (run store "UPDATE grouped_natural_having SET n=n+1 WHERE id=1")
+                  (Affected 1UL)
+                  "HAVING-derived source updates one physical row"
+              Expect.equal
+                  (run store "UPDATE grouped_natural_rollup SET n=n+1 WHERE id=2")
+                  (Affected 1UL)
+                  "ROLLUP-derived source updates one physical row"
+              Expect.equal
+                  (rows store "SELECT id,n FROM grouped_natural_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]
+                  "the natural key binds the physical targets"
+              for name, join in
+                  [ "grouped_natural_right", "NATURAL RIGHT JOIN"
+                    "grouped_explicit_right", "RIGHT JOIN" ] do
+                  let onClause = if join = "RIGHT JOIN" then " ON a.id=d.id" else ""
+                  let definition =
+                      $"CREATE VIEW {name} AS SELECT a.id,a.n,d.s FROM (SELECT id,SUM(flag) s FROM grouped_natural_source GROUP BY id HAVING s>0) d {join} grouped_natural_target a{onClause}"
+                  expectOk (run store definition) ("create " + name)
+                  Expect.equal
+                      (rows store ($"SELECT is_updatable FROM information_schema.views WHERE table_name='{name}'"))
+                      [ [ Some "NO" ] ]
+                      (name + " is read-only in MySQL 8.4.11")
+                  match run store ($"UPDATE {name} SET n=n+1 WHERE id=3") with
+                  | Err(1288, _) -> ()
+                  | other -> failtestf "%s should reject the update with 1288, got %A" name other
+
+          testCase "a windowed NATURAL JOIN read source leaves the physical view target writable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               for sql in
