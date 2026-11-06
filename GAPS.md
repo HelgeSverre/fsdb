@@ -1232,6 +1232,11 @@ rowset and one physical-target update in the audited MySQL and fsdb cases.
 An UPDATE through the same window-then-DISTINCT joined view also waits
 for a concurrent writer of its physical target, then rebases its increment
 after the first transaction commits in both fsdb and MySQL 8.4.11.
+[Dependent UNION CTE chains](torture/findings/2026-11-06-dependent-union-cte-view.md)
+also retain a writable joined target when both UNION branches read an
+earlier windowed or recursive CTE, including an ordered and limited UNION
+body. The audited rows, metadata, single target update, CHECK OPTION, and
+INSERT/DELETE refusals agree with MySQL 8.4.11.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
 now has a native MySQL contract and fsdb regression: duplicate derived rows

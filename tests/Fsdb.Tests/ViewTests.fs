@@ -363,6 +363,43 @@ let tests =
                   | other -> failtestf "expected joined-view DELETE refusal, got %A" other
                   Expect.equal (rows store "SELECT n FROM chained_cte_target WHERE id=1") [ [ Some "1" ] ] "rejection is atomic"
 
+          testCase "window and recursive UNION CTE chains keep a joined target writable"
+          <| fun _ ->
+              for ctes, expectedFlags in
+                  [ "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM chained_union_source), expanded AS (SELECT id,flag FROM ranked UNION ALL SELECT id,flag+10 FROM ranked)",
+                    [ "1"; "2"; "11"; "12" ]
+                    "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM chained_union_source), expanded AS (SELECT id,flag FROM ranked UNION ALL SELECT id,flag+10 FROM ranked ORDER BY flag DESC LIMIT 2)",
+                    [ "11"; "12" ]
+                    "WITH RECURSIVE numbers(id,flag) AS (SELECT id,flag FROM chained_union_source UNION ALL SELECT id,flag+1 FROM numbers WHERE flag<8), expanded AS (SELECT id,flag FROM numbers UNION ALL SELECT id,flag+10 FROM numbers)",
+                    [ "7"; "8"; "8"; "17"; "18"; "18" ] ] do
+                  let store = Fsdb.Storage.create ()
+                  for sql in
+                      [ "CREATE TABLE chained_union_target(id INT PRIMARY KEY,n INT)"
+                        "CREATE TABLE chained_union_source(id INT,flag INT)"
+                        "INSERT INTO chained_union_target VALUES(1,0),(2,0)"
+                        "INSERT INTO chained_union_source VALUES(1,7),(1,8)"
+                        $"CREATE VIEW chained_union_joined AS {ctes} SELECT t.id,t.n,expanded.flag FROM expanded JOIN chained_union_target t ON t.id=expanded.id WHERE t.n>=0 WITH CASCADED CHECK OPTION" ] do
+                      expectOk (run store sql) sql
+                  Expect.equal
+                      (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='chained_union_joined'")
+                      [ [ Some "YES" ] ]
+                      "the dependent UNION leaves the physical component writable"
+                  Expect.equal
+                      (rows store "SELECT flag FROM chained_union_joined ORDER BY flag")
+                      (expectedFlags |> List.map (fun flag -> [ Some flag ]))
+                      "both UNION branches reuse the preceding CTE"
+                  Expect.equal (run store "UPDATE chained_union_joined SET n=n+1 WHERE id=1") (Affected 1UL) "duplicate source rows update once"
+                  match run store "UPDATE chained_union_joined SET n=-1 WHERE id=1" with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+                  match run store "INSERT INTO chained_union_joined(id,n) VALUES(3,0)" with
+                  | Err(1471, _) -> ()
+                  | other -> failtestf "expected joined-view INSERT refusal, got %A" other
+                  match run store "DELETE FROM chained_union_joined WHERE id=1" with
+                  | Err(1395, _) -> ()
+                  | other -> failtestf "expected joined-view DELETE refusal, got %A" other
+                  Expect.equal (rows store "SELECT n FROM chained_union_target WHERE id=1") [ [ Some "1" ] ] "rejection is atomic"
+
           testCase "repeated dependent CTE references preserve one writable joined target"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

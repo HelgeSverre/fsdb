@@ -15,6 +15,9 @@ SHAPES = {
     "window-distinct CTE renamed": "WITH ranked(raw_id,raw_flag) AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) FROM b), filtered(id,flag) AS (SELECT DISTINCT raw_id,raw_flag FROM ranked) SELECT a.id,a.n,filtered.flag FROM filtered JOIN a ON a.id=filtered.id",
     "window-distinct CTE star": "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b), filtered AS (SELECT DISTINCT * FROM ranked) SELECT a.id,a.n,filtered.flag FROM filtered JOIN a ON a.id=filtered.id",
     "window-distinct CTE repeated": "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b), filtered AS (SELECT DISTINCT id,flag FROM ranked) SELECT a.id,a.n,f.flag FROM filtered f JOIN filtered g ON g.id=f.id AND g.flag=f.flag JOIN a ON a.id=f.id",
+    "window-union CTE chain": "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b), expanded AS (SELECT id,flag FROM ranked UNION ALL SELECT id,flag+10 FROM ranked) SELECT a.id,a.n,expanded.flag FROM expanded JOIN a ON a.id=expanded.id",
+    "window-union CTE ordered limited": "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b), expanded AS (SELECT id,flag FROM ranked UNION ALL SELECT id,flag+10 FROM ranked ORDER BY flag DESC LIMIT 2) SELECT a.id,a.n,expanded.flag FROM expanded JOIN a ON a.id=expanded.id",
+    "recursive-union CTE chain": "WITH RECURSIVE numbers(id,flag) AS (SELECT id,flag FROM b UNION ALL SELECT id,flag+1 FROM numbers WHERE flag<8), expanded AS (SELECT id,flag FROM numbers UNION ALL SELECT id,flag+10 FROM numbers) SELECT a.id,a.n,expanded.flag FROM expanded JOIN a ON a.id=expanded.id",
     "volatile CTE repeated": "WITH sampled AS (SELECT id,RAND() AS flag FROM b), filtered AS (SELECT id,flag FROM sampled) SELECT a.id,a.n,f.flag FROM filtered f JOIN filtered g ON g.id=f.id AND g.flag=f.flag JOIN a ON a.id=f.id",
     "union-all derived rows": "SELECT a.id,a.n,u.flag FROM (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) u JOIN a ON a.id=u.id",
     "union-distinct derived rows": "SELECT a.id,a.n,u.flag FROM (SELECT id,flag FROM b UNION DISTINCT SELECT id,aux AS flag FROM c) u JOIN a ON a.id=u.id",
@@ -140,6 +143,19 @@ def main():
                             (8,),
                             (9,),
                         )
+                    if name in (
+                        "window-union CTE chain",
+                        "window-union CTE ordered limited",
+                        "recursive-union CTE chain",
+                    ):
+                        expected_flags = {
+                            "window-union CTE chain": (1, 2, 11, 12),
+                            "window-union CTE ordered limited": (11, 12),
+                            "recursive-union CTE chain": (7, 8, 8, 17, 18, 18),
+                        }[name]
+                        assert run(connection, "SELECT flag FROM v ORDER BY flag") == tuple(
+                            (flag,) for flag in expected_flags
+                        ), name
                     assert run(connection, "UPDATE v SET n=n+1 WHERE id=1") == 1, name
                     assert run(connection, "SELECT id,n FROM a ORDER BY id") == (
                         (1, 1),
