@@ -1469,6 +1469,10 @@ now matches 1,280 Extension A plus U+3000 pairs across five legacy collations;
 the [complete U+3000–U+303F weight audit](torture/findings/2026-11-05-cjk-symbol-legacy-weights.md)
 also matches 1,147 singleton, paired, and padded exact-byte comparisons.
 Other mixed CJK punctuation blocks remain open.
+The [Supplemental Punctuation U+2E00–U+2E7F audit](torture/findings/2026-11-06-supplemental-punctuation-legacy-weights.md)
+now matches exact singleton and adjacent-pair weight bytes across the full
+block in three legacy `utf8mb4` collations. Its two-column ngram corpus
+matches 564 searches at each startup size 1–10 under those collations.
 The [complete Hiragana and Katakana exact-weight audit](torture/findings/2026-11-06-kana-exact-legacy-weights.md)
 now matches 3,835 singleton, adjacent, mixed-ideograph, and padded byte
 comparisons over U+3040–U+30FF in five legacy collations. Other CJK blocks
