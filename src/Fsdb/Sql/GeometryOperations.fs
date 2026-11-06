@@ -137,7 +137,9 @@ let private geographicSegmentAzimuthsFromRadians flattening latitude1 latitude2 
     let sin1, cos1 = sin latitude1, cos latitude1
     let sin2, cos2 = sin latitude2, cos latitude2
     let sinLongitude, cosLongitude = sin longitudeDelta, cos longitudeDelta
-    let cosineDistance = max -1.0 (min 1.0 (sin1 * sin2 + cos1 * cos2 * cosLongitude))
+    // Boost's optimized Andoyer inverse contracts this sum. Near a polar
+    // vertex the extra bit keeps a short, nonzero segment's azimuth intact.
+    let cosineDistance = max -1.0 (min 1.0 (Math.FusedMultiplyAdd(sin1, sin2, cos1 * cos2 * cosLongitude)))
     let angularDistance = acos cosineDistance
     let sineDistance = sin angularDistance
 

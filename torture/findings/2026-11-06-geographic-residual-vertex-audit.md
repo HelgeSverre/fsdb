@@ -152,3 +152,22 @@ line-relation differences from 12/412 to 13/412, and polar-corner differences
 from 1/49 to 3/49. The trial was reverted. A blanket role change is therefore
 incorrect; the remaining corner needs a closer look at the winding side
 calculation and its rounded azimuths.
+
+## Fused Andoyer side azimuth
+
+The `88 2.99999` trace isolated the hole's upper edge. Fsdb rounded the
+query-to-edge cosine sum to exactly 1, assigned the short query segment
+azimuth 0, and cancelled the two ring crossings. A Boost 1.84 side probe
+with MySQL's SRID 4326 angular unit produced cosine
+`0.99999999999999989`, azimuth `-1.57079623930712`, and the opposite side
+for that edge. Compiling the probe with floating-point contraction disabled
+reproduced fsdb's old azimuth and side. Fusing the sine product into the
+cosine sum in fsdb's Andoyer inverse matches the optimized Boost result.
+
+The full edge oracle now reports 0/189 near-hole point-relation mismatches
+and 4/189 near-hole point-distance mismatches. The remaining four polygon
+distances equal their corresponding hole-line distances and are segment
+distance residuals. Line relations remain at 12/412 mismatches; the 100
+seeded point-line distances, 49 polar-corner points, and four near-exterior
+controls still match. The focused near-polar regression now includes
+`88 2.99999`; 32 geometry and 33 geographic tests pass.
