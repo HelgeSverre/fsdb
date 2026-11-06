@@ -2504,6 +2504,13 @@ implementation effort:
    in an A/B/A run while client CPU stayed near two seconds. Row waits alone
    do not explain the high-fan-out ceiling; the next diagnostic needs
    server-side WAL, publication, and query-stage timing in that workload.
+   A temporary [server-stage follow-up](benchmarks/results/2026-11-06-external-multidb-write-profile.md#server-stage-follow-up)
+   found roughly 1,400 row waits in the wide-account interval versus over
+   8,000 in each hot interval, while cumulative durable acknowledgement
+   time rose to about 18 seconds versus about five seconds. The sampled
+   checkpoints cross phase boundaries and acknowledgement times overlap;
+   group-commit queue, fsync, and leader-drain stages need separation before
+   changing scheduling policy.
    The group-commit leader now drains successive batches iteratively. A
    continuously replenished queue previously grew one call frame per batch;
    the [focused regression and matched write check](benchmarks/results/2026-10-15-iterative-group-commit-drain.md)

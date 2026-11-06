@@ -8,6 +8,7 @@ import argparse
 import concurrent.futures
 import json
 import pathlib
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -217,6 +218,7 @@ def main():
     parser.add_argument("--hot-accounts", type=int, nargs="+", default=[8, 64])
     parser.add_argument("--rollback-every", type=int, default=7)
     parser.add_argument("--seed", type=int, default=204)
+    parser.add_argument("--server-log", type=pathlib.Path)
     args = parser.parse_args()
     if not CLI.exists():
         parser.error(f"build the Release CLI first: {CLI}")
@@ -260,6 +262,8 @@ def main():
             finally:
                 process.terminate()
                 process.wait(timeout=20)
+        if args.server_log:
+            shutil.copyfile(pathlib.Path(directory) / "server.log", args.server_log)
 
 
 if __name__ == "__main__":

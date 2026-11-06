@@ -38,3 +38,37 @@ the extra server work is in WAL, row-version publication, query execution,
 or another stage. The next useful profile should time those server stages
 in this separate-process workload before changing worker reservation or
 lock policy.
+
+## Server-stage follow-up
+
+A temporary counter trial timed publication including `Store.CommitLock` acquisition, the
+returned durable acknowledgement action, and every storage-row
+`Monitor.Wait`. It emitted cumulative snapshots every 512 acknowledgements
+to the separate server log. The probes were removed and the normal Release
+CLI was rebuilt after the run. The same 8/64/8 sequence passed all ledgers:
+
+| Hot accounts | Wall s | Client CPU s | Server CPU s |
+| ---: | ---: | ---: | ---: |
+| 8 | 9.885 | 2.317 | 33.19 |
+| 64 | 11.420 | 2.140 | 42.02 |
+| 8 | 9.822 | 2.216 | 25.29 |
+
+The nearest cumulative checkpoints to each phase end were:
+
+| Acknowledgements | Publication ms | Acknowledgement ms | Row waits | Row-wait ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 3,584, near first 8-account end | 27 | 5,262 | 8,355 | 433,830 |
+| 7,680, near 64-account end | 191 | 23,301 | 9,751 | 545,574 |
+| 11,264, near second 8-account end | 237 | 28,293 | 18,129 | 971,227 |
+
+These checkpoints cross phase boundaries by up to a few hundred operations;
+their differences are directional estimates, not exact per-phase totals.
+The wide-account interval adds roughly 1,400 row waits versus more than
+8,000 in either hot interval, but about 18 seconds of cumulative durable
+acknowledgement time versus about five seconds in the hot intervals. Those
+acknowledgement times overlap across workers and cannot be added to wall
+time. The counter wraps the group-commit action, so it combines queue wait,
+batch work, fsync, notification, and any leader drain after its own signal.
+The result directs the next profile to those group-commit sub-stages under
+the same external workload. It does not yet justify changing worker or WAL
+policy.
