@@ -9249,7 +9249,6 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         && select.Ctes.IsEmpty
         && select.Locking.IsEmpty
         && not (SelectStmt.hasDestination select)
-        && not select.Distinct
         && not select.CalculateFoundRows
         && not select.Rollup
 

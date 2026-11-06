@@ -423,6 +423,11 @@ let tests =
                   Expect.isTrue (rows |> List.mapi (fun index row -> row.[1] = Some(if index < 25 then "1" else "0")) |> List.forall id) "only the first 25 keys have matches"
               | other -> failtestf "expected correlated EXISTS rows, got %A" other
               Expect.isLessThan examined 200L "the indexed EXISTS path does not group or scan all inner rows"
+              let distinctResult, distinctExamined =
+                  withExaminedRows (fun () ->
+                      runDefault store "SELECT o.id, EXISTS(SELECT DISTINCT i.id+0 FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o ORDER BY o.id")
+              Expect.equal distinctResult result "DISTINCT preserves EXISTS membership"
+              Expect.isLessThan distinctExamined 200L "DISTINCT EXISTS uses indexed membership"
               for limitClause in [ "LIMIT 1 OFFSET 0"; "LIMIT 0, 1" ] do
                   let result, examined =
                       withExaminedRows (fun () ->
@@ -462,6 +467,9 @@ let tests =
               match runDefault store "SELECT EXISTS(SELECT 1/0 FROM exists_inner i WHERE i.outer_id=1)" with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected a true EXISTS without evaluating division, got %A" other
+              match runDefault store "SELECT EXISTS(SELECT DISTINCT 1/0 FROM exists_inner i WHERE i.outer_id=1)" with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected a true DISTINCT EXISTS without evaluating division, got %A" other
               Expect.equal
                   (runDefault store "SELECT o.id,EXISTS(SELECT o.id FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o WHERE o.id IN (1,50) ORDER BY o.id")
                   (ResultSet([ "id"; "hit" ], [ [ Some "1"; Some "1" ]; [ Some "50"; Some "0" ] ]))
@@ -473,6 +481,9 @@ let tests =
               match runDefault store "SELECT EXISTS(SELECT i.missing FROM exists_inner i WHERE i.outer_id=1)" with
               | Err(1054, _) -> ()
               | other -> failtestf "expected unknown EXISTS projection column, got %A" other
+              match runDefault store "SELECT EXISTS(SELECT DISTINCT i.missing FROM exists_inner i WHERE i.outer_id=1)" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected unknown DISTINCT EXISTS projection column, got %A" other
               match runDefault store "SELECT EXISTS(SELECT missing FROM exists_inner i WHERE i.outer_id=1)" with
               | Err(1054, _) -> ()
               | other -> failtestf "expected unknown bare EXISTS projection column, got %A" other

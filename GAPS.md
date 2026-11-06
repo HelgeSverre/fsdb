@@ -2188,6 +2188,10 @@ both `LIMIT 1 OFFSET 0` and `LIMIT 0, 1` now use the same indexed membership
 path, with result and examined-row controls. `LIMIT 0`, nonzero or expression
 offsets, and expression limits retain ordinary evaluation; broader limited
 shapes remain open.
+`SELECT DISTINCT` within the same plain correlated `EXISTS` shape now uses
+indexed membership too; focused controls cover results, unused expressions,
+unknown projected columns, and examined rows. Ordered, grouped, and more
+complex source shapes remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell
