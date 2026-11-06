@@ -2462,9 +2462,8 @@ implementation effort:
    also preserves the right side's merged key, contended view writes, and an
    unmatched physical read-target update.
    A [recursive CTE with two natural left joins to writable views](torture/findings/2026-11-06-recursive-cte-mixed-natural-view-update.md)
-   now matches MySQL. A mixed natural right-then-left chain instead returns
-   fsdb 1146 for the second existing view where MySQL updates both targets;
-   the oracle pins this open divergence.
+   and a mixed natural right-then-left chain now match MySQL, including an
+   independent holder on each physical target in the mixed case.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.

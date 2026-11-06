@@ -24554,7 +24554,8 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                         elif prior |> List.exists (fun earlier ->
                             (earlier.Kind <> InnerJoin && earlier.Kind <> CrossJoin
                              && earlier.Kind <> StraightJoin
-                             && earlier.Kind <> LeftJoin && earlier.Kind <> RightJoin)) then None
+                             && earlier.Kind <> LeftJoin && earlier.Kind <> RightJoin
+                             && earlier.Kind <> NaturalLeftJoin)) then None
                         else
                             let columnsBySource =
                                 FromItem.leaves preceding
@@ -24628,7 +24629,7 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                                     Assignments = update.Assignments |> List.map (fun assignment -> { assignment with Value = rewriteMerged assignment.Value }) }
                         { update with From = source; Joins = moved :: rest }
                 else update
-            | None when isPhysical source -> move (join :: prior) rest
+            | None when isPhysical source || isCte source -> move (join :: prior) rest
             | None -> update
         | ({ Table = FromTable source } as join) :: rest
             when join.Kind = InnerJoin || join.Kind = CrossJoin || join.Kind = StraightJoin

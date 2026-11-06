@@ -298,6 +298,9 @@ def main():
                     "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
                     "UPDATE c NATURAL LEFT JOIN va NATURAL LEFT JOIN vb_unique vb "
                     "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=2",
+                    "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
+                    "UPDATE c NATURAL RIGHT JOIN va NATURAL LEFT JOIN vb_unique vb "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE va.id=1",
                     "WITH c AS (SELECT id FROM link) UPDATE (c NATURAL JOIN va) "
                     "NATURAL JOIN vb_unique vb SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1",
                     "UPDATE va LEFT JOIN (link l JOIN vb USING(id)) USING(id) "
@@ -415,6 +418,9 @@ def main():
                     "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
                     "UPDATE c NATURAL JOIN va NATURAL JOIN vb_unique vb "
                     "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1",
+                    "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
+                    "UPDATE c NATURAL RIGHT JOIN va NATURAL LEFT JOIN vb_unique vb "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE va.id=1",
                     "UPDATE va JOIN LATERAL (SELECT va.link_id AS next_id) q ON TRUE "
                     "JOIN vb_unique vb ON vb.link_id=q.next_id "
                     "SET n=n+1,bonus=bonus+1 WHERE va.id=1",
@@ -440,22 +446,10 @@ def main():
                         query = f"SELECT id,n FROM {target} ORDER BY id"
                         expected_rows, actual_rows = (execute(connection, query) for connection in connections)
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
-                mixed_natural_outer_gap = (
-                    "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
-                    "UPDATE c NATURAL RIGHT JOIN va NATURAL LEFT JOIN vb_unique vb "
-                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE va.id=1"
-                )
-                expected = execute(mysql_connection, mixed_natural_outer_gap)
-                actual = execute(fsdb_connection, mixed_natural_outer_gap)
-                assert expected == 2, (mixed_natural_outer_gap, expected)
-                assert actual == ("error", (1146, "Table 'probe.vb_unique' doesn't exist")), (
-                    mixed_natural_outer_gap, actual
-                )
                 print(
                     f"MySQL 8.4.11: {len(cases)} two-view outer UPDATE cases, atomic CHECK OPTION, "
                     f"and {len(held_cases) + len(independently_held_cases)} contended rebases matched"
                 )
-                print("Open gap: recursive CTE with NATURAL RIGHT then LEFT JOIN returns fsdb 1146 versus MySQL 2 rows")
             finally:
                 if fsdb_connection:
                     fsdb_connection.close()
