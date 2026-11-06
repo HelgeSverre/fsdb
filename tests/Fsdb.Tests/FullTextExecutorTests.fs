@@ -390,6 +390,19 @@ let tests =
               Expect.equal (search "中。") [ "4" ] "the ordinary period does not match its vertical form"
               Expect.equal (search "中︒") [ "5" ] "the vertical period keeps its implicit UCA 4.0 weight"
 
+          testCase "Unicode 5.2 ngrams keep supplementary ideographic symbols distinct"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 1 store
+              run store "CREATE TABLE ideographic_symbols(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_unicode_520_ci,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO ideographic_symbols VALUES(1,'中𖿤文'),(2,'中𖿰文'),(3,'中𖿱文')" |> ignore
+              let search term =
+                  let sql = $"SELECT id FROM ideographic_symbols WHERE MATCH(body) AGAINST('{term}' IN NATURAL LANGUAGE MODE) ORDER BY id"
+                  ids (run store sql)
+              Expect.equal (search "𖿤") [ "1" ] "the assigned symbol retains its own implicit posting"
+              Expect.equal (search "𖿰") [ "2" ] "the next symbol retains its own posting"
+              Expect.equal (search "𖿱") [ "3" ] "adjacent symbols do not share a posting"
+
           testCase "Unicode 5.2 ngrams keep implicit enclosed alphanumerics distinct"
           <| fun _ ->
               let store = create ()

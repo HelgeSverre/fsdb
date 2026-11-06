@@ -379,6 +379,12 @@ let private foldUnicode520EnclosedImplicit value =
         |> Array.exists (fun (first, last) -> scalar >= first && scalar <= last)
     foldSupplementaryImplicit '\uE0BE' '\uD83C' 0x1F100 0xEA00 hasWeight value
 
+// UCA 5.2 keeps every ideographic symbol in this later supplementary block
+// distinct. ICU's replacement fallback otherwise merges their ngram keys.
+let private foldUnicode520IdeographicSymbols value =
+    foldSupplementaryImplicit '\uE0C4' '\uD81B' 0x16FE0 0xE700
+        (fun scalar -> scalar >= 0x16FE0 && scalar <= 0x16FFF) value
+
 // UCA 5.2 expands the two enclosed kana, but retains written primary
 // weights for the enclosed ideographs that ICU folds into ordinary Han.
 // This is an SQL comparison rule; MySQL's ngram keys follow the older fold.
@@ -1531,7 +1537,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
               |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
               |> foldLegacyExtendedCombiningMarks true
               |> foldLegacyUnicodeJamo |> foldSupplementaryKanaImplicit true
-              |> foldUnicode520EnclosedImplicit
+              |> foldUnicode520EnclosedImplicit |> foldUnicode520IdeographicSymbols
 
     let foldGeneral includeEqualityExceptions (value: string) =
         value.Replace("ß", "s").Replace("ẞ", "s")
@@ -1711,6 +1717,9 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                         let first = if name = "utf8mb4_unicode_520_ci" then 0x10D4 else 0x0DAF
                         addWeight (first + codepoint - 0x2FF0)
                     else addImplicit 0xFBC0 codepoint
+                | None when codepoint >= 0x16FE0 && codepoint <= 0x16FFF && name.StartsWith("utf8mb4_") ->
+                    if name = "utf8mb4_unicode_520_ci" then addImplicit 0xFBC0 codepoint
+                    else addWeight 0xFFFD
                 | None when codepoint >= 0x1F100 && codepoint <= 0x1F1FF && name.StartsWith("utf8mb4_") ->
                     let weights =
                         if name = "utf8mb4_unicode_520_ci" then legacySupplementaryEnclosedAlphanumericWeights codepoint

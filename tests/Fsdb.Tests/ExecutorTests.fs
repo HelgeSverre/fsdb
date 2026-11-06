@@ -652,6 +652,8 @@ let tests =
                     let extensionI = System.Char.ConvertFromUtf32 0x2EBF0
                     let extensionILast = System.Char.ConvertFromUtf32 0x2EE5F
                     let extensionG = System.Char.ConvertFromUtf32 0x30000
+                    let ideographicSymbol = System.Char.ConvertFromUtf32 0x16FE0
+                    let ideographicSymbolLast = System.Char.ConvertFromUtf32 0x16FFF
                     let compatibilityBmp = System.Char.ConvertFromUtf32 0x2F800
                     let compatibilitySupplementary = System.Char.ConvertFromUtf32 0x2F803
                     let compatibilityUnassigned = System.Char.ConvertFromUtf32 0x2FA1E
@@ -808,6 +810,9 @@ let tests =
                           extensionI + extensionILast, "utf8mb4_unicode_ci", "FFFDFFFD"
                           extensionI + extensionILast, "utf8mb4_unicode_520_ci", "FBC5EBF0FBC5EE5F"
                           extensionI + "a", "utf8mb4_unicode_520_ci", "FBC5EBF0120F"
+                          ideographicSymbol + ideographicSymbolLast, "utf8mb4_general_ci", "FFFDFFFD"
+                          ideographicSymbol + ideographicSymbolLast, "utf8mb4_unicode_ci", "FFFDFFFD"
+                          ideographicSymbol + ideographicSymbolLast, "utf8mb4_unicode_520_ci", "FBC2EFE0FBC2EFFF"
                           extensionG + "a", "utf8mb4_unicode_520_ci", "FBC68000120F"
                           compatibilityBmp, "utf8mb4_general_ci", "FFFD"
                           compatibilityBmp, "utf8mb4_unicode_520_ci", "FB40CE3D"

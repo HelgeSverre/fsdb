@@ -1476,6 +1476,10 @@ The [Supplemental Punctuation U+2E00–U+2E7F audit](torture/findings/2026-11-06
 now matches exact singleton and adjacent-pair weight bytes across the full
 block in three legacy `utf8mb4` collations. Its two-column ngram corpus
 matches 564 searches at each startup size 1–10 under those collations.
+The [supplementary U+16FE0–U+16FFF audit](torture/findings/2026-11-06-ideographic-symbols-legacy-weights.md)
+matches exact singleton and mixed-pair bytes across three legacy `utf8mb4`
+collations. Unicode 5.2 ngram postings now stay distinct; the audited
+two-column corpus matches 42 searches per size at sizes 1–10 in all three.
 The [complete Hiragana and Katakana exact-weight audit](torture/findings/2026-11-06-kana-exact-legacy-weights.md)
 now matches 3,835 singleton, adjacent, mixed-ideograph, and padded byte
 comparisons over U+3040–U+30FF in five legacy collations. Other CJK blocks
