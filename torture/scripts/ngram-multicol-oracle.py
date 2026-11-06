@@ -276,7 +276,24 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     actual_order = query(fsdb_connection, order_sql)
                     if actual_order != expected_order:
                         first = next(index for index, (expected, actual) in enumerate(zip(expected_order, actual_order)) if expected != actual)
-                        mismatches.append(("collation order", first, expected_order[first:first + 10], actual_order[first:first + 10]))
+                        rank = {row[0]: index for index, row in enumerate(expected_order)}
+                        actual_ranks = [rank[row[0]] for row in actual_order]
+                        seen = [0] * (len(actual_ranks) + 1)
+                        inversions = 0
+                        for count, value in enumerate(actual_ranks):
+                            index = value + 1
+                            preceding = 0
+                            while index:
+                                preceding += seen[index]
+                                index -= index & -index
+                            inversions += count - preceding
+                            index = value + 1
+                            while index < len(seen):
+                                seen[index] += 1
+                                index += index & -index
+                        displaced = sum(expected != actual for expected, actual in zip(expected_order, actual_order))
+                        mismatches.append(("collation order", first, displaced, inversions,
+                                           expected_order[first:first + 10], actual_order[first:first + 10]))
                         expected_id = expected_order[first][0]
                         actual_id = actual_order[first][0]
                         comparison_sql = f"SELECT _utf8mb4%s COLLATE {collation} < _utf8mb4%s COLLATE {collation}"

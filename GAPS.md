@@ -1542,6 +1542,9 @@ the SQL `<` predicate, and a forced indexed `body < '亁文'` range omits
 乾文 in fsdb. Chinese collation ordering, range predicates, and exact
 weight bytes remain open even where full-text
 membership and relevance agree.
+The 4,096-character Han ordering audit finds 3,721 displaced positions
+and 41,213 pairwise inversions, so this needs broader Chinese tailoring
+rather than a one-character correction.
 The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
 also matches MySQL's distinct U+2200–U+22FF primary weights in the same
 two-column ngram lane at token sizes 1–10.
