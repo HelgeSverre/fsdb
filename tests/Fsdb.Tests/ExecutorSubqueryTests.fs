@@ -434,8 +434,7 @@ let tests =
                       match result with
                       | ResultSet(_, rows) -> Expect.equal rows expected sql
                       | other -> failtestf "%s returned %A" sql other
-                      if not grouped then
-                          Expect.isLessThan examined 30L "ungrouped integer COUNT HAVING uses indexed equality counts"
+                      Expect.isLessThan examined 30L "constant-key integer COUNT HAVING uses indexed equality counts"
               for having, singleRowMatches in
                   [ "COUNT(*)>1", false; "COUNT(*)=1", true; "COUNT(*)<>1", false ] do
                   let sql =
@@ -537,6 +536,22 @@ let tests =
                           "zero-count HAVING preserves grouped or ungrouped membership"
                   | other -> failtestf "expected zero-count HAVING rows, got %A" other
                   Expect.isLessThan examined 200L "zero-count HAVING uses indexed count"
+              for having, matches in [ "COUNT(*)>19", true; "COUNT(*)=20", true
+                                       "20<=COUNT(*)", true; "COUNT(*)<>20", false ] do
+                  let sql =
+                      "SELECT o.id,EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id"
+                      + " GROUP BY i.outer_id HAVING " + having + ") AS hit FROM exists_outer o ORDER BY o.id"
+                  let thresholdResult, examined = withExaminedRows (fun () -> runDefault store sql)
+                  match thresholdResult with
+                  | ResultSet(_, rows) ->
+                      Expect.isTrue
+                          (rows
+                           |> List.mapi (fun index row ->
+                               row.[1] = Some(if index < 25 && matches then "1" else "0"))
+                           |> List.forall id)
+                          sql
+                  | other -> failtestf "%s returned %A" sql other
+                  Expect.isLessThan examined 200L "fixed grouping key uses indexed COUNT threshold"
               for projection in [ "i.id"; "i.outer_id"; "i.*"; "*"
                                   "i.outer_id IS NULL"; "i.outer_id IS NOT NULL"
                                   "i.outer_id <=> NULL"; "NOT (i.outer_id IS NULL)" ] do

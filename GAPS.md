@@ -2325,9 +2325,11 @@ and its `< 1`/`<= 0` equivalent forms also use the indexed count, preserving
 the difference between grouped and ungrouped empty sources. Ungrouped
 integer-literal comparisons on either side of `COUNT(*)` now use that same
 indexed count for audited zero-to-three-row sources, including `> 1`,
-`<= 2`, `= 2`, and `<> 3`. Grouped comparisons whose result can vary with
-group size retain ordinary evaluation; the pinned MySQL 8.4.11 oracle
-checks both constant and varying grouping keys. Other HAVING predicates
+`<= 2`, `= 2`, and `<> 3`. The same shortcut covers grouped comparisons
+when every grouping key is an integer inner column fixed by a correlated
+equality predicate. The 50-by-500 control stays below 200 examined rows
+for four such thresholds. Grouping by an unfixed key retains ordinary evaluation;
+the pinned MySQL 8.4.11 oracle checks both cases. Other HAVING predicates
 remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context

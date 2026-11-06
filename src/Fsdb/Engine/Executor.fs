@@ -9287,7 +9287,6 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
     let plainShape =
         select.Joins.IsEmpty
         && membershipHaving
-        && (select.GroupBy.IsEmpty || (countHaving |> Option.forall snd))
         && havingProjectionsAreSafe
         && (not select.Distinct || select.OrderBy.IsEmpty)
         && membershipLimit
@@ -9409,6 +9408,44 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                     match projection.Expression with
                     | Lit _ | Col _ | QualifiedCol _ | Star _ -> true
                     | expression -> groupIsSafe expression))
+        let groupedCountIsSafe () =
+            select.GroupBy.IsEmpty
+            || (countHaving |> Option.forall snd)
+            || (match FromItem.tryQualifier source with
+                | None -> false
+                | Some qualifier ->
+                    let probeSource = correlatedProbeSource qualifier sourceColumns.Value
+                    // Inspect the equality shape without evaluating its outer
+                    // expression. The indexed count below validates the full
+                    // predicate and stored comparison semantics.
+                    let boundColumn (inner: Expr) (bound: Expr) =
+                        match bound with
+                        | LiteralValue _ -> tryCorrelatedInnerColumn probeSource inner
+                        | _ when tryCorrelatedOuterScope probeSource bound |> Option.isSome ->
+                            tryCorrelatedInnerColumn probeSource inner
+                        | _ -> None
+                    let boundColumns =
+                        select.Where
+                        |> optionalConjuncts
+                        |> List.choose (function
+                            | BinOp(Eq, left, right) ->
+                                boundColumn left right
+                                |> Option.orElseWith (fun () -> boundColumn right left)
+                            | _ -> None)
+                    let boundInteger name =
+                        sourceColumns.Value
+                        |> List.exists (fun (column: ColumnDef) ->
+                            equalsIgnoreCase column.Name name
+                            && (match column.Type with
+                                | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
+                                | _ -> false)
+                            && (boundColumns |> List.exists (equalsIgnoreCase name)))
+                    select.GroupBy
+                    |> List.forall (function
+                        | QualifiedCol(groupQualifier, name) when equalsIgnoreCase groupQualifier qualifier ->
+                            boundInteger name
+                        | Col name when uniqueInnerColumn name -> boundInteger name
+                        | _ -> false))
         let bindingsAreSafe =
             let memo = currentStatementMemo ()
             if memo.InnerExistsProjections.ContainsKey select then true
@@ -9455,7 +9492,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                                     qualifiers
                             qualifiers.Add scopeQualifiers |> ignore
                     safe
-        if not groupedMembershipShape || not bindingsAreSafe then None
+        if not groupedMembershipShape || not bindingsAreSafe || not (groupedCountIsSafe ()) then None
         else
             tryCorrelatedEqualityCount outer source select.Where
             |> Option.map (fun count ->
