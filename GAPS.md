@@ -2472,7 +2472,12 @@ implementation effort:
    or already-materialized source. Correctness holds, but scale still diverges
    from MySQL past small data.
 
-2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements,
+2. Transaction scheduling. [Readers behind waiting writers under a global
+   read lock](torture/findings/2026-11-06-global-read-waiting-writer-gate.md)
+   now proceed as on MySQL while the writers remain blocked, including
+   independent databases; the shared statement-access monitor is still a
+   high-fan-out throughput target.
+   Indexed point/range UPDATE and DELETE statements,
    plus [ordered `LIMIT 1`–`8` UPDATE and DELETE re-selection after a contended
    first candidate stops matching, moves behind another candidate (including
    a descending secondary sort), or is

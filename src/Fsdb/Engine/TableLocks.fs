@@ -95,9 +95,10 @@ let private hasNoOwners (owners: HashSet<int>) = owners.Count = 0
 let private hasNoOtherOwner owner (owners: HashSet<int>) =
     hasNoOwners owners || (owners.Count = 1 && owners.Contains owner)
 
-let private readerGateOpen owner (state: TableState) =
-    hasNoOtherOwner owner state.WaitingWriters
-    && hasNoOtherOwner owner state.PrioritizedWriters
+let private readerGateOpen owner (manager: Manager) (state: TableState) =
+    not (hasNoOwners manager.GlobalReaders)
+    || (hasNoOtherOwner owner state.WaitingWriters
+        && hasNoOtherOwner owner state.PrioritizedWriters)
 
 let private globalWriteAvailable policy (manager: Manager) =
     match policy with
@@ -122,7 +123,7 @@ let private explicitlyAvailable policy owner mode (manager: Manager) (state: Tab
     | ReadAccess ->
         state.ExplicitWriter |> Option.forall ((=) owner)
         && hasNoOtherOwner owner state.StatementWriters
-        && readerGateOpen owner state
+        && readerGateOpen owner manager state
     | WriteAccess ->
         globalWriteAvailable policy manager
         && (state.ExplicitWriter |> Option.forall ((=) owner))
@@ -137,7 +138,7 @@ let private explicitAvailable policy owner mode (manager: Manager) key =
 
 let private statementAvailable policy owner mode (manager: Manager) (state: TableState) =
     match mode with
-    | ReadAccess -> state.ExplicitWriter.IsNone && readerGateOpen owner state
+    | ReadAccess -> state.ExplicitWriter.IsNone && readerGateOpen owner manager state
     | WriteAccess ->
         globalWriteAvailable policy manager
         && state.ExplicitWriter.IsNone

@@ -8685,6 +8685,60 @@ let tests =
 
               handle holder "ROLLBACK" |> ignore
 
+          testCase "independent databases retain explicit and global lock boundaries"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE DATABASE lock_scope_a"
+              let setup, _ = handle setup "CREATE DATABASE lock_scope_b"
+              let setup, _ = handle setup "CREATE TABLE lock_scope_a.t (id INT PRIMARY KEY, n INT)"
+              let setup, _ = handle setup "CREATE TABLE lock_scope_b.t (id INT PRIMARY KEY, n INT)"
+              let setup, _ = handle setup "INSERT INTO lock_scope_a.t VALUES (1, 0)"
+              let _, _ = handle setup "INSERT INTO lock_scope_b.t VALUES (1, 0)"
+              let holder, locked = handle (create 2 store) "LOCK TABLES lock_scope_a.t WRITE"
+              Expect.equal locked (Affected 0UL) "explicit lock acquired in the first database"
+              let waiting =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 3 store) "UPDATE lock_scope_a.t SET n=1 WHERE id=1")
+              try
+                  Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "same-database write waits"
+                  Expect.equal
+                      (handle (create 4 store) "UPDATE lock_scope_b.t SET n=1 WHERE id=1" |> snd)
+                      (Affected 1UL)
+                      "independent-database write proceeds"
+              finally
+                  handle holder "UNLOCK TABLES" |> ignore
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 2.0)) "blocked write resumes"
+              Expect.equal (waiting.Result |> snd) (Affected 1UL) "same-database write succeeds"
+
+              let globalHolder, locked = handle (create 5 store) "FLUSH TABLES WITH READ LOCK"
+              Expect.equal locked (Affected 0UL) "global read lock acquired"
+              let writeA =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 6 store) "UPDATE lock_scope_a.t SET n=2 WHERE id=1")
+              let writeB =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 7 store) "UPDATE lock_scope_b.t SET n=2 WHERE id=1")
+              try
+                  Expect.isFalse (writeA.Wait(TimeSpan.FromMilliseconds 100.0)) "first database waits for global lock"
+                  Expect.isFalse (writeB.Wait(TimeSpan.FromMilliseconds 100.0)) "second database waits for global lock"
+                  let reads =
+                      [ "lock_scope_a"; "lock_scope_b" ]
+                      |> List.mapi (fun index database ->
+                          database,
+                          System.Threading.Tasks.Task.Run(fun () ->
+                              handle (create (8 + index) store) ("SELECT n FROM " + database + ".t") |> snd))
+                  for database, read in reads do
+                      Expect.isTrue (read.Wait(TimeSpan.FromSeconds 2.0)) (database + " remains readable")
+                      match read.Result with
+                      | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                      | other -> failtestf "expected concurrent read in %s, got %A" database other
+              finally
+                  handle globalHolder "UNLOCK TABLES" |> ignore
+              for write in [ writeA; writeB ] do
+                  Expect.isTrue (write.Wait(TimeSpan.FromSeconds 2.0)) "global-lock waiter resumes"
+                  Expect.equal (write.Result |> snd) (Affected 1UL) "global-lock waiter succeeds"
+
           testCase "closing a session releases its global FLUSH read lock"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
