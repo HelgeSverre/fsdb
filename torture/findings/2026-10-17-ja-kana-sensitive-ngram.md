@@ -38,3 +38,15 @@ the oracle's natural, Boolean, and query-expansion searches. This covers
 individual characters in those ranges embedded in the oracle's two-column
 documents, not arbitrary mixed-character queries or all Japanese collation
 operations.
+
+## Current-head token-size sweep
+
+On the current Release CLI, the maintained 387-search two-column corpus
+matches native MySQL 8.4.11 at every startup ngram size from 1 through 10
+under `utf8mb4_ja_0900_as_cs_ks`. There are no membership or relevance
+differences in natural, Boolean, or query-expansion mode. This extends the
+same mixed CJK corpus from the earlier size-one and size-two check; the
+range-specific probes above retain their own size-one and size-two scope.
+
+Run `uv run --with pymysql torture/scripts/ngram-multicol-oracle.py
+--collation utf8mb4_ja_0900_as_cs_ks` after building the Release CLI.
