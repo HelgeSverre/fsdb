@@ -428,6 +428,19 @@ let tests =
                       runDefault store "SELECT o.id, EXISTS(SELECT DISTINCT i.id+0 FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o ORDER BY o.id")
               Expect.equal distinctResult result "DISTINCT preserves EXISTS membership"
               Expect.isLessThan distinctExamined 200L "DISTINCT EXISTS uses indexed membership"
+              let orderedResult, orderedExamined =
+                  withExaminedRows (fun () ->
+                      runDefault store "SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id ORDER BY i.id DESC) AS hit FROM exists_outer o ORDER BY o.id")
+              Expect.equal orderedResult result "ORDER BY does not change EXISTS membership"
+              Expect.isLessThan orderedExamined 200L "ordered EXISTS uses indexed membership"
+              let orderedLimitedResult, orderedLimitedExamined =
+                  withExaminedRows (fun () ->
+                      runDefault store "SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id ORDER BY i.id DESC LIMIT 1) AS hit FROM exists_outer o ORDER BY o.id")
+              Expect.equal orderedLimitedResult result "ORDER BY with LIMIT 1 preserves EXISTS membership"
+              Expect.isLessThan orderedLimitedExamined 200L "ordered limited EXISTS uses indexed membership"
+              match runDefault store "SELECT EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=1 ORDER BY i.missing)" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected unknown ORDER BY column in EXISTS, got %A" other
               for limitClause in [ "LIMIT 1 OFFSET 0"; "LIMIT 0, 1" ] do
                   let result, examined =
                       withExaminedRows (fun () ->

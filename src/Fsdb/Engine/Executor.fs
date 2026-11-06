@@ -9242,7 +9242,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         select.Joins.IsEmpty
         && select.GroupBy.IsEmpty
         && select.Having.IsNone
-        && select.OrderBy.IsEmpty
+        && (not select.Distinct || select.OrderBy.IsEmpty)
         && membershipLimit
         && membershipOffset
         && select.Windows.IsEmpty
@@ -9304,7 +9304,12 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                     sourceContext.Value
                     |> Option.exists (fun context -> validateExpressionInContext context expression |> Result.isOk)
                 | _ -> false
-        let projectionsAreSafe =
+        let orderIsSafe (expression, _) =
+            match expression, FromItem.tryQualifier source with
+            | QualifiedCol(qualifier, column), Some sourceQualifier
+                when equalsIgnoreCase qualifier sourceQualifier && uniqueInnerColumn column -> true
+            | _ -> false
+        let bindingsAreSafe =
             let memo = currentStatementMemo ()
             if memo.InnerExistsProjections.ContainsKey select then true
             else
@@ -9327,7 +9332,8 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                         |> Option.defaultValue false
                 if scopedSuccess then true
                 else
-                    let safe = select.Projections |> List.forall projectionIsSafe
+                    let safe = (select.Projections |> List.forall projectionIsSafe)
+                               && (select.OrderBy |> List.forall orderIsSafe)
                     if safe then
                         if select.Projections |> List.forall (fun projection -> innerOnly projection.Expression) then
                             memo.InnerExistsProjections.[select] <- true
@@ -9348,7 +9354,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                                     qualifiers
                             qualifiers.Add scopeQualifiers |> ignore
                     safe
-        if not projectionsAreSafe then None
+        if not bindingsAreSafe then None
         else
             tryCorrelatedEqualityCount outer source select.Where
             |> Option.map (fun count -> Ok(boolToValue (count > 0)))
