@@ -19315,6 +19315,12 @@ let tests =
                         match runDefault store sql with
                         | ResultSet(_, [ row ]) when row = expected -> ()
                         | result -> failtestf "expected MySQL geographic line-polygon topology for %s and %s, got %A" lineText polygonText result
+                    let polarLine = "ST_GeomFromText('LINESTRING(86 1.00001,88 1.00001)',4326)"
+                    let polarArea = "ST_GeomFromText('POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))',4326)"
+                    let polarSql = sprintf "SELECT ST_Intersects(%s,%s),ST_Disjoint(%s,%s),ST_Touches(%s,%s),ST_Distance(%s,%s)" polarLine polarArea polarLine polarArea polarLine polarArea polarLine polarArea
+                    match runDefault store polarSql with
+                    | ResultSet(_, [ [ Some "0"; Some "1"; Some "0"; Some "0" ] ]) -> ()
+                    | result -> failtestf "zero geographic distance can coexist with a disjoint relation: %A" result
 
                 testCase "geographic crossing requires an intersection at a near-hole edge"
                 <| fun _ ->

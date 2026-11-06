@@ -6648,7 +6648,7 @@ let private geometryPredicateFn functionName predicate =
             Some(geographicLineLineDistance referenceSystem firstLines secondLines = Some 0.0)
         | Some lines, _, _, Some areas
         | _, Some areas, Some lines, _ ->
-            Some(geographicLinePolygonDistance referenceSystem lines areas = Some 0.0)
+            Some((geographicLinePolygonTopology referenceSystem lines areas).Intersects)
         | _, Some firstAreas, _, Some secondAreas ->
             Some(geographicPolygonPolygonDistance referenceSystem firstAreas secondAreas = Some 0.0)
         | _ -> None

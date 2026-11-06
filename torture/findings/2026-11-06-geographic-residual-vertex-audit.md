@@ -273,3 +273,17 @@ and Release was rebuilt from unchanged production geometry code. The next
 implementation needs the geographic relation's ordered intersection events
 and segment intervals, rather than an endpoint classification plus a binary
 proper-crossing flag.
+
+## Zero-distance polar disjointness
+
+The 85° polar control has a zero MySQL and fsdb line/polygon distance, but
+MySQL's DE-9IM matrix is `FF1FF0212`: the geometries are disjoint. Fsdb
+previously inferred `ST_Intersects=1` and `ST_Touches=1` from distance zero.
+Line/polygon intersection and disjointness now use the same sampled contact
+result as the relation predicates, while retaining the distance check where
+contact is seen. This makes the polar control `Intersects=0`, `Disjoint=1`,
+`Touches=0`, with `Distance=0` on both engines. The full native oracle falls
+from 12 to 11 line-relation mismatches out of 412; its 0/189 point-relation,
+4/189 near-hole distance, 0/49 polar-corner, and 0/100 seeded point-line
+distance counts are unchanged. All 33 geographic and 22 geometry tests pass.
+The 11 near-hole line disagreements still require ordered boundary events.

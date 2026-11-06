@@ -931,7 +931,8 @@ let internal geographicLinePolygonDistance referenceSystem lines polygons =
     | _ -> Some(List.min distances)
 
 type internal GeographicLinePolygonTopology =
-    { Crosses: bool
+    { Intersects: bool
+      Crosses: bool
       Touches: bool
       LineWithinPolygon: bool }
 
@@ -988,13 +989,18 @@ let internal geographicLinePolygonTopology referenceSystem lines polygons =
     let hasOutside =
         positions
         |> List.exists (function GeographicPointPolygonPosition.Outside _ -> true | _ -> false)
-    let intersects = geographicLinePolygonDistance referenceSystem lines polygons = Some 0.0
+    let sampledContact =
+        positions
+        |> List.exists (function GeographicPointPolygonPosition.Outside _ -> false | _ -> true)
+    let intersects = sampledContact && geographicLinePolygonDistance referenceSystem lines polygons = Some 0.0
     if boundaryOnly then
-        { Crosses = false
+        { Intersects = true
+          Crosses = false
           Touches = true
           LineWithinPolygon = false }
     else
-        { Crosses = intersects && hasInterior && hasOutside
+        { Intersects = intersects
+          Crosses = intersects && hasInterior && hasOutside
           Touches = intersects && not hasInterior
           LineWithinPolygon = hasInterior && not hasOutside }
 
