@@ -9245,9 +9245,15 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | _ -> false
     let zero = function Lit(VInt 0L) | Lit(VUInt 0UL) -> true | _ -> false
     let one = function Lit(VInt 1L) | Lit(VUInt 1UL) -> true | _ -> false
+    let zeroCountHaving =
+        match select.Having with
+        | Some(BinOp(Eq, count, bound)) when countStar count && zero bound -> true
+        | Some(BinOp(Eq, bound, count)) when zero bound && countStar count -> true
+        | _ -> false
     let membershipHaving =
         match select.Having with
         | None -> true
+        | Some _ when zeroCountHaving -> true
         | Some(BinOp(Gt, count, bound)) when countStar count && zero bound -> true
         | Some(BinOp(Lt, bound, count)) when zero bound && countStar count -> true
         | Some(BinOp(Gte, count, bound)) when countStar count && one bound -> true
@@ -9437,7 +9443,11 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         if not groupedMembershipShape || not bindingsAreSafe then None
         else
             tryCorrelatedEqualityCount outer source select.Where
-            |> Option.map (fun count -> Ok(boolToValue (count > 0)))
+            |> Option.map (fun count ->
+                let exists =
+                    if zeroCountHaving then select.GroupBy.IsEmpty && count = 0
+                    else count > 0
+                Ok(boolToValue exists))
     | _ -> None
 
 /// Integer keys compare exactly under SQL `=`, so they can index a

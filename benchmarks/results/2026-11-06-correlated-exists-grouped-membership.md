@@ -95,9 +95,7 @@ indexed membership count when the source and grouping keys meet the existing
 eligibility rules. The equivalent `0 < COUNT(*)`, `COUNT(*) >= 1`, and
 `1 <= COUNT(*)` forms follow the same path. On the 50-by-500 fixture, each
 returns the same matched and unmatched values as plain `EXISTS` while
-examining fewer than 200 rows. `HAVING COUNT(*) = 0` remains on ordinary
-aggregate evaluation, examines more than 500 rows, and correctly returns a
-row for unmatched outer keys in the ungrouped form. Other HAVING predicates
+ examining fewer than 200 rows. Other HAVING predicates
 and nonliteral projections retain ordinary evaluation so their binding and
 aggregate behavior remain visible. Native MySQL 8.4.11 agrees on the
 audited results and prepared forms; all 90 correlated tests pass.
@@ -107,3 +105,14 @@ membership tests: `COUNT(*)` cannot be negative. Both now take the indexed
 path on the 50-by-500 fixture and examine fewer than 200 rows, with matched
 and unmatched outer keys. The native MySQL 8.4.11 oracle agrees on the
 results and prepared forms; all 90 correlated tests pass.
+
+## Zero COUNT HAVING membership
+
+The same guarded path now handles `COUNT(*) = 0` and `0 = COUNT(*)`.
+With no `GROUP BY`, an empty filtered source still produces one aggregate
+row, so `EXISTS` is true exactly when the indexed match count is zero.
+With safe grouping keys, an empty source produces no group, while every
+nonempty group has a positive count; `EXISTS` is always false. The
+50-by-500 fixture checks both shapes, matched and unmatched outer rows,
+and fewer than 200 examined rows. Native MySQL 8.4.11 agrees on the
+results and prepared statements; all 90 focused correlated tests pass.

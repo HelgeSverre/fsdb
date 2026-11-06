@@ -474,7 +474,21 @@ let tests =
               | ResultSet(_, rows) ->
                   Expect.isTrue (rows |> List.mapi (fun index row -> row.[1] = Some(if index < 25 then "0" else "1")) |> List.forall id) "zero-count HAVING reverses membership"
               | other -> failtestf "expected zero-count HAVING rows, got %A" other
-              Expect.isGreaterThan zeroCountExamined 500L "zero-count HAVING retains aggregate evaluation"
+              Expect.isLessThan zeroCountExamined 200L "zero-count HAVING uses indexed membership"
+              for havingClause in [ "HAVING 0=COUNT(*)"; "GROUP BY i.outer_id HAVING COUNT(*)=0" ] do
+                  let zeroResult, examined =
+                      withExaminedRows (fun () ->
+                          runDefault store ("SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id " + havingClause + ") AS hit FROM exists_outer o ORDER BY o.id"))
+                  match zeroResult with
+                  | ResultSet(_, rows) ->
+                      Expect.isTrue
+                          (rows
+                           |> List.mapi (fun index row ->
+                               row.[1] = Some(if havingClause.StartsWith("GROUP BY") then "0" elif index < 25 then "0" else "1"))
+                           |> List.forall id)
+                          "zero-count HAVING preserves grouped or ungrouped membership"
+                  | other -> failtestf "expected zero-count HAVING rows, got %A" other
+                  Expect.isLessThan examined 200L "zero-count HAVING uses indexed count"
               for projection in [ "i.id"; "i.outer_id"; "i.*"; "*"
                                   "i.outer_id IS NULL"; "i.outer_id IS NOT NULL"
                                   "i.outer_id <=> NULL"; "NOT (i.outer_id IS NULL)" ] do
