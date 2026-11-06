@@ -538,7 +538,7 @@ limited derived sources and limited or `TEMPTABLE` views use the exposed alias.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [hole-winding follow-up](torture/findings/2026-11-04-geographic-cross-track-trial.md#hole-ring-winding-follow-up) matches all 100 seeded point-to-line distances but retains nine point-distance mismatches across 189 near-hole points, one point relation mismatch, no mismatch across four near-exterior controls or 49 polar-corner points, and 12 line relation mismatches across 412 cases; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
+| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [contracted cross-track follow-up](torture/findings/2026-11-05-geographic-cross-track-reduced-length.md#contracted-azimuth-and-radian-native-refinement) matches all 100 seeded point-to-line distances but retains eight point-distance mismatches across 189 near-hole points, one point relation mismatch, no mismatch across four near-exterior controls or 49 polar-corner points, and 12 line relation mismatches across 412 cases; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
 
 The [geographic strategy follow-up](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
 found zero distance on both engines for its line mismatches,
@@ -559,11 +559,11 @@ pins both residual polar points under standalone and combined hole windings;
 using the standalone result for holes fixes one point but increases mismatches
 in the broader edge oracle, so that trial was reverted.
 The [cross-track reduced-length probe](torture/findings/2026-11-05-geographic-cross-track-reduced-length.md)
-reproduces one current distance mismatch with Boost 1.84, which matches MySQL.
-Both engines start at nearly the same candidate point, but fsdb's Andoyer
-reduced length changes the Newton step enough to miss Boost's zero-distance
-result. Endpoint projection and radians-only iteration trials did not change
-the edge oracle; the azimuth and differential inputs need closer comparison.
+reproduced a distance mismatch with Boost 1.84, which matches MySQL. The
+follow-up identified contracted Andoyer azimuth arithmetic and a radian-native
+cross-track inverse step as the joint cause of that zero-distance difference.
+Eight near-hole point distances still differ; broader edge and topology
+behavior remains to resolve.
 The expanded [near-hole distance oracle](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
 finds 34 point-to-polygon distance mismatches across 189 points. Reversing
 ring traversal globally or only for polygon distance does not reduce that
@@ -2570,8 +2570,10 @@ implementation effort:
    seeded point-to-line corpus remains at zero mismatches after longitude
    endpoint ordering. A [spherical-seed operation-order check](torture/findings/2026-11-04-geographic-cross-track-trial.md#spherical-seed-operation-order-check)
    left all residual counts unchanged. A [first-point and radian-path control](torture/findings/2026-11-04-geographic-cross-track-trial.md#first-newton-point-and-radian-path-control)
-   also found no gain; the next numerical probe needs Boost's internal
-   starting position and first Newton derivative for the mismatching edge.
+   also found no gain by itself. The [contracted azimuth and radian-native
+   refinement](torture/findings/2026-11-05-geographic-cross-track-reduced-length.md#contracted-azimuth-and-radian-native-refinement)
+   resolves the zero-distance edge and lowers the residual near-hole distance
+   count to eight of 189, while all 100 seeded point-to-line distances match.
    Numerical and topology gaps remain open.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.

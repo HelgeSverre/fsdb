@@ -145,14 +145,18 @@ let private geographicSegmentAzimuthsFromRadians flattening latitude1 latitude2 
             if abs cos2 < 1e-15 then
                 (if sin2 < 0.0 then Math.PI else 0.0), 0.0
             else
-                let angle = atan2 sinLongitude (cos1 * sin2 / cos2 - sin1 * cosLongitude)
+                // Boost's multiply/subtract contracts to one rounding step on
+                // our native oracle; the sign matters for nearly coincident points.
+                let denominator = Math.FusedMultiplyAdd(cos1, sin2 / cos2, -(sin1 * cosLongitude))
+                let angle = atan2 sinLongitude denominator
                 angle, flattening / 2.0 * cos1 * cos1 * sin (2.0 * angle)
 
         let secondAngle, secondAdjustment =
             if abs cos1 < 1e-15 then
                 (if sin1 < 0.0 then Math.PI else 0.0), 0.0
             else
-                let angle = atan2 sinLongitude (cos2 * sin1 / cos1 - sin2 * cosLongitude)
+                let denominator = Math.FusedMultiplyAdd(cos2, sin1 / cos1, -(sin2 * cosLongitude))
+                let angle = atan2 sinLongitude denominator
                 angle, flattening / 2.0 * cos2 * cos2 * sin (2.0 * angle)
 
         let clamp angle correction azimuth =
@@ -180,7 +184,7 @@ let private geographicSegmentAzimuths flattening (firstLatitude, firstLongitude)
 let private geographicSegmentAzimuth flattening first second =
     geographicSegmentAzimuths flattening first second |> fst
 
-let internal geographicPointAlong referenceSystem first second distance =
+let private geographicPointAlongRadians referenceSystem first second distance =
     match referenceSystem.SemiMajorAxis, referenceSystem.InverseFlattening with
     | Some semiMajorAxis, Some inverseFlattening ->
         let flattening = 1.0 / inverseFlattening
@@ -235,8 +239,12 @@ let internal geographicPointAlong referenceSystem first second distance =
                 cos sigma2 / abs (sin sigma2)
         let latitude = atan (tangentReducedLatitude / (1.0 - flattening))
         let latitude = if flipped then -latitude else latitude
-        latitude * 180.0 / Math.PI, longitude * 180.0 / Math.PI
+        latitude, longitude
     | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
+
+let internal geographicPointAlong referenceSystem first second distance =
+    let latitude, longitude = geographicPointAlongRadians referenceSystem first second distance
+    latitude * 180.0 / Math.PI, longitude * 180.0 / Math.PI
 
 let private geographicPointsAwayFrom flattening origin toward query =
     let segmentAzimuth = geographicSegmentAzimuth flattening origin toward
@@ -283,13 +291,15 @@ let private geographicCrossTrackDistance referenceSystem point start endpoint =
     let mutable iteration = 0
     let mutable keepGoing = true
     while keepGoing && iteration < 100 do
-        let onSegment = geographicPointAlong referenceSystem start endpoint position
+        let onLatitude, onLongitude = geographicPointAlongRadians referenceSystem start endpoint position
+        let onSegment = onLatitude * 180.0 / Math.PI, onLongitude * 180.0 / Math.PI
         let distance = geographicPointDistance referenceSystem onSegment point
-        let forward, reverse = geographicSegmentAzimuths flattening onSegment point
-        let towardEnd = geographicSegmentAzimuth flattening onSegment endpoint
+        let forward, reverse = geographicSegmentAzimuthsRadians flattening
+                                    (onLatitude, onLongitude) (la3, lo3)
+        let towardEnd = geographicSegmentAzimuthsRadians flattening
+                            (onLatitude, onLongitude) (la2, lo2) |> fst
         let angle = forward - towardEnd
-        let firstLatitude, _ = onSegment
-        let sinLat1, cosLat1 = sin (radians firstLatitude), cos (radians firstLatitude)
+        let sinLat1, cosLat1 = sin onLatitude, cos onLatitude
         let sinLat2, cosLat2 = sin la3, cos la3
         let oneMinus = 1.0 - flattening
         let sinBet1, unnormalizedCosBet1 = oneMinus * sinLat1, cosLat1

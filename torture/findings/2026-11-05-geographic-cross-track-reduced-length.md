@@ -61,3 +61,26 @@ The trial was reverted. Longitude-difference conversion alone does not
 explain the near-coincident inverse discrepancy; the next diagnostic should
 compare the first inverse's `A`, `B`, `U`, `V`, and `d/sin(d)` terms on identical
 radian inputs before changing cross-track behavior.
+
+## Contracted azimuth and radian-native refinement
+
+The term comparison found identical radian inputs and identical `sin`/`cos`
+values, but different `A` and `B` denominators. For the first trial point,
+Boost's C++ expression contracts each multiply/subtract into a fused
+operation: its first denominator is about `-1.6120703727340937e-10`.
+Fsdb's ordinary .NET arithmetic yielded about `-1.6120703383304402e-10`.
+Using `Math.FusedMultiplyAdd` for the two Andoyer azimuth denominators makes
+the isolated first inverse match Boost's forward azimuth
+`-1.7794583249471621` and reverse azimuth `-1.7794583242900639` on the
+same radian inputs. The corresponding unfused fsdb values were both about
+`-1.7794583206201624`.
+
+The fused change alone resolved `POINT(3 1.00001)` but introduced a
+near-hole distance mismatch at `POINT(72 2.99999)`, leaving the corpus at
+9/189. Carrying the cross-track trial point in radians through the inverse
+azimuth and differential-quantity step removed that new mismatch. The
+combined Release replay has 8/189 near-hole point-distance mismatches, down
+from 9; 12/412 line relations and 1/189 point relations still differ. All
+100 seeded point-to-line distances, 49 polar-corner point relations, and four
+near-exterior controls still match. A focused test pins the formerly
+divergent zero-distance MySQL result. Broader geographic parity remains open.
