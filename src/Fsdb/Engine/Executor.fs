@@ -785,6 +785,7 @@ type private StatementMemo =
       ScopedPhysicalProjections: Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>
       EqualityIndexMatches: Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
+      NullableHavingCountSelects: Dictionary<SelectStmt, SelectStmt>
       CountColumnPresence: Dictionary<SelectStmt, Dictionary<string * Expr, bool>>
       InnerExistsProjections: Dictionary<SelectStmt, bool>
       ScopedExistsProjections: Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>
@@ -832,6 +833,7 @@ let private freshStatementMemo () =
       ScopedPhysicalProjections = Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>(HashIdentity.Reference)
       EqualityIndexMatches = Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>(HashIdentity.Reference)
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
+      NullableHavingCountSelects = Dictionary<SelectStmt, SelectStmt>(HashIdentity.Reference)
       CountColumnPresence = Dictionary<SelectStmt, Dictionary<string * Expr, bool>>(HashIdentity.Reference)
       InnerExistsProjections = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
       ScopedExistsProjections = Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>(HashIdentity.Reference)
@@ -9311,10 +9313,36 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | None | Some(Lit(VInt 0L)) | Some(Lit(VUInt 0UL)) -> true
         | _ -> false
 
+    // A nullable COUNT needs the grouped COUNT(column) result, not the number
+    // of matching index entries. Limit this proof to an ungrouped physical
+    // source; grouped HAVING also needs a separate matched-row count to decide
+    // whether a group exists when every counted value is NULL.
+    let nullableCountArgument =
+        let rec firstCount = function
+            | FuncCall(name, [ QualifiedCol _ as argument ])
+                when equalsIgnoreCase name "COUNT" -> Some argument
+            | expression -> Expression.children expression |> List.tryPick firstCount
+        match select.From, select.Having |> Option.bind firstCount with
+        | Some(FromTable source), Some(QualifiedCol(qualifier, columnName) as argument)
+            when select.Joins.IsEmpty && select.GroupBy.IsEmpty
+                 && not (source.Database.IsNone
+                         && (currentCteScope () |> Map.containsKey (source.Table.ToLowerInvariant())))
+                 && equalsIgnoreCase qualifier (source.Alias |> Option.defaultValue source.Table) ->
+            physicalFastPathTable outer.Store outer.DbName source
+            |> Option.bind (fun (table: Table) ->
+                table.Columns
+                |> List.tryFind (fun (column: ColumnDef) ->
+                    equalsIgnoreCase column.Name columnName
+                    && column.Nullable
+                    && column.Generated.IsNone)
+                |> Option.map (fun _ -> argument))
+        | _ -> None
     let countRows = function
         | FuncCall(name, [ argument ]) ->
             equalsIgnoreCase name "COUNT"
-            && countArgumentAlwaysPresentForSelect outer.Store outer.DbName select argument
+            && (match nullableCountArgument with
+                | Some nullableArgument -> argument = nullableArgument
+                | None -> countArgumentAlwaysPresentForSelect outer.Store outer.DbName select argument)
             && Functions.isUnmodifiedBuiltinAggregate name outer.Registry
         | _ -> false
     let integerLiteral = function
@@ -9596,15 +9624,43 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                     safe
         if not groupedMembershipShape || not bindingsAreSafe || not (groupedCountIsSafe ()) then None
         else
-            tryCorrelatedEqualityCount outer source select.Where
-            |> Option.map (fun count ->
-                let exists =
-                    match countHaving with
-                    | Some(predicate, _) ->
-                        (select.GroupBy.IsEmpty || count > 0)
-                        && predicate count
-                    | None -> count > 0
-                Ok(boolToValue exists))
+            match nullableCountArgument with
+            | Some argument ->
+                let memo = (currentStatementMemo ()).NullableHavingCountSelects
+                let countSelect =
+                    match memo.TryGetValue select with
+                    | true, countSelect -> countSelect
+                    | false, _ ->
+                        let countSelect =
+                            { select with
+                                Projections =
+                                    [ { Expression = FuncCall("COUNT", [ argument ])
+                                        Alias = None
+                                        SourceName = None
+                                        BindingOrigin = None } ]
+                                Having = None }
+                        memo.[select] <- countSelect
+                        countSelect
+                tryDecorrelatedMatchCount outer countSelect
+                |> Option.bind (function
+                    | Ok count when count > int64 System.Int32.MaxValue -> None
+                    | result ->
+                        result
+                        |> Result.map (fun count ->
+                            countHaving
+                            |> Option.exists (fun (predicate, _) -> predicate (int count))
+                            |> boolToValue)
+                        |> Some)
+            | None ->
+                tryCorrelatedEqualityCount outer source select.Where
+                |> Option.map (fun count ->
+                    let exists =
+                        match countHaving with
+                        | Some(predicate, _) ->
+                            (select.GroupBy.IsEmpty || count > 0)
+                            && predicate count
+                        | None -> count > 0
+                    Ok(boolToValue exists))
     | _ -> None
 
 /// Integer and decimal keys compare exactly under SQL `=`, so they can index a

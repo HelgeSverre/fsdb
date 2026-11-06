@@ -600,6 +600,45 @@ let tests =
               | ResultSet([ "name" ], [ [ Some "bob" ] ]) -> ()
               | other -> failtestf "expected only bob (who has no post), got %A" other
 
+          testCase "nullable COUNT HAVING uses grouped keys and preserves the empty aggregate group"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE count_outer(id INT PRIMARY KEY)" |> ignore
+              runDefault store "CREATE TABLE count_inner(id INT PRIMARY KEY,outer_id INT,optional INT NULL,KEY ix_outer_id(outer_id))" |> ignore
+              runDefault store "INSERT INTO count_outer VALUES(0),(1),(2),(3)" |> ignore
+              runDefault store "INSERT INTO count_inner VALUES(1,1,NULL),(2,2,NULL),(3,2,5),(4,3,NULL),(5,3,NULL)" |> ignore
+              let sql =
+                  "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id HAVING COUNT(i.optional)=0) AS ungrouped_zero,"
+                  + "EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id GROUP BY i.outer_id HAVING COUNT(i.optional)=0) AS grouped_zero,"
+                  + "EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id HAVING COUNT(i.optional)>0) AS positive "
+                  + "FROM count_outer o ORDER BY o.id"
+              Expect.equal
+                  (runDefault store sql)
+                  (ResultSet(
+                      [ "id"; "ungrouped_zero"; "grouped_zero"; "positive" ],
+                      [ [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                        [ Some "1"; Some "1"; Some "1"; Some "0" ]
+                        [ Some "2"; Some "0"; Some "0"; Some "1" ]
+                        [ Some "3"; Some "1"; Some "1"; Some "0" ] ]))
+                  "pinned MySQL 8.4.11 nullable COUNT membership"
+              Expect.equal
+                  (runDefault store
+                      "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id HAVING COUNT(i.optional)=0 AND COUNT(*)>0) AS hit FROM count_outer o ORDER BY o.id")
+                  (ResultSet(
+                      [ "id"; "hit" ],
+                      [ [ Some "0"; Some "0" ]
+                        [ Some "1"; Some "1" ]
+                        [ Some "2"; Some "0" ]
+                        [ Some "3"; Some "1" ] ]))
+                  "mixed COUNT arguments retain separate matched-row and non-NULL counts"
+              let extra = [ 100 .. 299 ] |> List.map (sprintf "(%d)") |> String.concat ","
+              runDefault store ("INSERT INTO count_outer VALUES " + extra) |> ignore
+              let _, examined =
+                  withExaminedRows (fun () ->
+                      runDefault store
+                          "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id HAVING COUNT(i.optional)=0) FROM count_outer o")
+              Expect.isLessThan examined 400L "nullable COUNT HAVING groups the inner rows once"
+
           testCase "correlated EXISTS counts indexed matches for integer HAVING thresholds"
           <| fun _ ->
               let store = newStore ()
