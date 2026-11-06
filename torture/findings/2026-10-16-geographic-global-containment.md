@@ -147,6 +147,7 @@ uv run --with pymysql python torture/scripts/geographic-validity-oracle.py
 uv run --with pymysql python torture/scripts/geographic-validity-oracle.py --count 1000
 uv run --with pymysql python torture/scripts/geographic-validity-oracle.py --count 1000 --seed 9174
 uv run --with pymysql python torture/scripts/geographic-validity-oracle.py --count 1000 --seed 9175
+uv run --with pymysql python torture/scripts/geographic-validity-oracle.py --diagnose-segments
 ```
 
 ## Validity strategy follow-up
@@ -168,6 +169,26 @@ latitude 6.7° at longitude 90°. The interpolation functions agree with each
 other, but they do not explain Boost's validity decision for this long-edge
 case. For case 92, Boost reports the polygon valid; fsdb's sampled-arc test
 instead reports a crossing between adjacent segments 1 and 2.
+
+## SQL line-relation diagnostic
+
+The current-head `--diagnose-segments` oracle also constructs geographic
+`LINESTRING` values from every polygon edge and compares `ST_Intersects`,
+`ST_Crosses`, and `ST_Touches` for all six edge pairs. Five pairs in each ring
+agree. The disagreeing pair in each ring is exactly the pair identified by
+the validity probe:
+
+| Ring | Edges | MySQL `(intersects,crosses,touches)` | fsdb |
+| --- | --- | --- | --- |
+| 76 | 0,2 | `(1,1,0)` | `(0,0,0)` |
+| 92 | 1,2 | `(1,0,1)` | `(1,1,0)` |
+
+Thus the discrepancy is visible in public geographic line relations, not
+confined to polygon validity. Both paths use fsdb's sampled-arc proper crossing
+test. A correction should be validated against line topology as well as
+`ST_IsValid`, then checked for distance and polygon relations before it
+replaces that shared primitive. The oracle pins these two relation deltas on
+the default 300-ring corpus.
 
 A candidate that replaced sampled crossings with opposite azimuth-side signs
 fixed the two examples but introduced 37 false invalid results among the same

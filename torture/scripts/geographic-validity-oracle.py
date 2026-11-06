@@ -11,12 +11,17 @@ import socket
 import subprocess
 import tempfile
 import time
+from itertools import pairwise
 
 import pymysql
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 FSDB = REPO / "src/Fsdb.Cli/bin/Release/net10.0/Fsdb.Cli.dll"
 KNOWN_MISMATCHES = {76: (0, 1), 92: (1, 0)}
+KNOWN_RELATION_MISMATCHES = {
+    76: {(0, 2): ((1, 1, 0), (0, 0, 0))},
+    92: {(1, 2): ((1, 0, 1), (1, 1, 0))},
+}
 
 
 def connect(**options):
@@ -47,10 +52,29 @@ def polygon_wkts(count, seed):
         yield "POLYGON((" + ",".join(f"{lat:.8f} {lon:.8f}" for lat, lon in ring) + "))"
 
 
+def segment_relations(connection, wkt):
+    points = wkt.removeprefix("POLYGON((").removesuffix("))").split(",")
+    segments = [f"LINESTRING({start},{end})" for start, end in pairwise(points)]
+    results = []
+    for first in range(len(segments)):
+        for second in range(first + 1, len(segments)):
+            left = f"ST_GeomFromText('{segments[first]}',4326)"
+            right = f"ST_GeomFromText('{segments[second]}',4326)"
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT ST_Intersects(" + left + "," + right + "),"
+                    "ST_Crosses(" + left + "," + right + "),"
+                    "ST_Touches(" + left + "," + right + ")"
+                )
+                results.append((first, second, cursor.fetchone()))
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--count", type=int, default=300)
     parser.add_argument("--seed", type=int, default=9173)
+    parser.add_argument("--diagnose-segments", action="store_true")
     args = parser.parse_args()
     if args.count < 1:
         parser.error("--count must be positive")
@@ -109,6 +133,7 @@ def main():
                 fsdb_connection = connect(host="127.0.0.1", port=port)
 
                 mismatches = {}
+                relation_mismatches = {}
                 mysql_valid = 0
                 for case, wkt in enumerate(polygon_wkts(args.count, args.seed)):
                     sql = f"SELECT ST_IsValid(ST_GeomFromText('{wkt}',4326))"
@@ -121,6 +146,25 @@ def main():
                             f"case {case}: MySQL={expected} fsdb={actual} {wkt}",
                             flush=True,
                         )
+                        if args.diagnose_segments:
+                            mysql_relations = segment_relations(mysql_connection, wkt)
+                            fsdb_relations = segment_relations(fsdb_connection, wkt)
+                            differences = {}
+                            for mysql_relation, fsdb_relation in zip(
+                                mysql_relations, fsdb_relations
+                            ):
+                                first, second, expected_relation = mysql_relation
+                                _, _, actual_relation = fsdb_relation
+                                if expected_relation != actual_relation:
+                                    differences[first, second] = (
+                                        expected_relation,
+                                        actual_relation,
+                                    )
+                                print(
+                                    f"  edges {first},{second}: MySQL={expected_relation} fsdb={actual_relation}",
+                                    flush=True,
+                                )
+                            relation_mismatches[case] = differences
 
                 print(
                     f"MySQL {version}: seed={args.seed}, {args.count} rings, {mysql_valid} valid, mismatches={mismatches}"
@@ -130,6 +174,11 @@ def main():
                         "geographic validity baseline changed; investigate before updating it",
                         mismatches,
                     )
+                    if args.diagnose_segments:
+                        assert relation_mismatches == KNOWN_RELATION_MISMATCHES, (
+                            "geographic segment relations changed; investigate before updating them",
+                            relation_mismatches,
+                        )
             finally:
                 if fsdb_connection:
                     fsdb_connection.close()

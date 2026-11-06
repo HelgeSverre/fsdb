@@ -2914,7 +2914,11 @@ implementation effort:
    global point probes and 1,200 random, vertex, and antipodal probes matched
    MySQL 8.4.11. The same two global `ST_IsValid` disagreements remain in an
    expanded 3,000-ring, three-seed oracle sample; broader geographic polygon
-   validity still needs the Boost geographic intersection decision.
+   validity still needs the Boost geographic intersection decision. A
+   [segment-relation diagnostic](torture/findings/2026-10-16-geographic-global-containment.md#sql-line-relation-diagnostic)
+   confirms that the same two edge pairs also disagree in public geographic
+   `ST_Crosses`/`ST_Touches` results, so the shared line crossing primitive is
+   the next correction target.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)
    are covered for audited cases. [Point-to-polygon distance](torture/findings/2026-10-11-geographic-point-polygon-distance.md)
