@@ -1234,6 +1234,9 @@ trigger is created.
 can precede a writable physical target in an inner joined view. The
 audited UPDATE changes that target once, and cascaded CHECK OPTION
 rejection is atomic in both fsdb and MySQL 8.4.11.
+[Windowed `NATURAL JOIN` read sources](torture/findings/2026-11-06-window-natural-joined-view.md)
+also leave the physical target writable with either source order or a CTE
+input; duplicate joined rows still update that target once.
 A [dependent window-then-DISTINCT CTE chain](torture/findings/2026-11-06-dependent-window-distinct-cte-view.md)
 also remains a read source beside the writable physical target; its
 inferred CTE outputs and binding scope now survive the view rewrite.

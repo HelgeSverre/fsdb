@@ -11,6 +11,9 @@ SHAPES = {
     "duplicate derived rows": "SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id",
     "distinct derived rows": "SELECT a.id,a.n,d1.flag FROM (SELECT DISTINCT id,flag FROM b) d1 JOIN a ON a.id=d1.id",
     "window derived rows": "SELECT a.id,a.n,d1.flag FROM (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b) d1 JOIN a ON a.id=d1.id",
+    "window NATURAL source first": "SELECT a.id,a.n,d1.flag FROM (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b) d1 NATURAL JOIN a",
+    "window NATURAL target first": "SELECT a.id,a.n,d1.flag FROM a NATURAL JOIN (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b) d1",
+    "window CTE NATURAL target first": "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b) SELECT a.id,a.n,ranked.flag FROM a NATURAL JOIN ranked",
     "window-distinct CTE chain": "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b), filtered AS (SELECT DISTINCT id,flag FROM ranked) SELECT a.id,a.n,filtered.flag FROM filtered JOIN a ON a.id=filtered.id",
     "window-distinct CTE renamed": "WITH ranked(raw_id,raw_flag) AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) FROM b), filtered(id,flag) AS (SELECT DISTINCT raw_id,raw_flag FROM ranked) SELECT a.id,a.n,filtered.flag FROM filtered JOIN a ON a.id=filtered.id",
     "window-distinct CTE star": "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b), filtered AS (SELECT DISTINCT * FROM ranked) SELECT a.id,a.n,filtered.flag FROM filtered JOIN a ON a.id=filtered.id",
@@ -172,9 +175,9 @@ def main():
                             "window-union CTE ordered limited": (11, 12),
                             "recursive-union CTE chain": (7, 8, 8, 17, 18, 18),
                         }[name]
-                        assert run(connection, "SELECT flag FROM v ORDER BY flag") == tuple(
-                            (flag,) for flag in expected_flags
-                        ), name
+                        assert run(
+                            connection, "SELECT flag FROM v ORDER BY flag"
+                        ) == tuple((flag,) for flag in expected_flags), name
                     assert run(connection, "UPDATE v SET n=n+1 WHERE id=1") == 1, name
                     assert run(connection, "SELECT id,n FROM a ORDER BY id") == (
                         (1, 1),

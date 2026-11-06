@@ -20,7 +20,76 @@ let private setup () =
 let tests =
     testList
         "views"
-        [ testCase "a grouped join view is live and supports an outer filter"
+        [ testCase "a windowed NATURAL JOIN read source leaves the physical view target writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE window_natural_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE window_natural_source(id INT,flag INT)"
+                    "INSERT INTO window_natural_target VALUES(1,0),(2,0),(3,0)"
+                    "INSERT INTO window_natural_source VALUES(1,7),(1,8),(2,9)" ] do
+                  expectOk (run store sql) sql
+              let definition =
+                  "SELECT a.id,a.n,d.flag FROM (SELECT id,ROW_NUMBER() OVER(PARTITION BY id ORDER BY flag) flag FROM window_natural_source) d NATURAL JOIN window_natural_target a"
+              expectOk (run store ("CREATE VIEW window_natural_view AS " + definition)) "create writable view"
+              Expect.equal
+                  (rows store "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_NAME='window_natural_view'")
+                  [ [ Some "YES" ] ]
+                  "MySQL 8.4.11 updatable metadata"
+              Expect.equal
+                  (rows store "SELECT id,n,flag FROM window_natural_view ORDER BY id,flag")
+                  [ [ Some "1"; Some "0"; Some "1" ]; [ Some "1"; Some "0"; Some "2" ]; [ Some "2"; Some "0"; Some "1" ] ]
+                  "windowed duplicate rows"
+              expectOk (run store "UPDATE window_natural_view SET n=n+1 WHERE id=1") "update through NATURAL JOIN"
+              Expect.equal
+                  (rows store "SELECT id,n FROM window_natural_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ]
+                  "physical target updates once"
+              expectOk
+                  (run store ("CREATE VIEW window_natural_checked AS " + definition + " WHERE a.n>=0 WITH CASCADED CHECK OPTION"))
+                  "create checked view"
+              Expect.equal
+                  (rows store "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_NAME='window_natural_checked'")
+                  [ [ Some "YES" ] ]
+                  "checked view remains writable"
+              match run store "UPDATE window_natural_checked SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected MySQL CHECK OPTION rejection, got %A" other
+              Expect.equal
+                  (rows store "SELECT n FROM window_natural_target WHERE id=1")
+                  [ [ Some "1" ] ]
+                  "failed write is atomic"
+              for sql, code in
+                  [ "INSERT INTO window_natural_view(id,n) VALUES(4,0)", 1471
+                    "DELETE FROM window_natural_view WHERE id=1", 1395 ] do
+                  match run store sql with
+                  | Err(actual, _) when actual = code -> ()
+                  | other -> failtestf "expected MySQL error %d for %s, got %A" code sql other
+
+          testCase "windowed NATURAL JOIN view remains writable with target first or CTE input"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE natural_window_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE natural_window_source(id INT,flag INT)"
+                    "INSERT INTO natural_window_target VALUES(1,0),(2,0)"
+                    "INSERT INTO natural_window_source VALUES(1,7),(1,8)" ] do
+                  expectOk (run store sql) sql
+              for name, definition in
+                  [ "natural_window_reversed", "SELECT a.id,a.n,d.flag FROM natural_window_target a NATURAL JOIN (SELECT id,ROW_NUMBER() OVER(PARTITION BY id ORDER BY flag) flag FROM natural_window_source) d"
+                    "natural_window_cte", "WITH ranked AS (SELECT id,ROW_NUMBER() OVER(PARTITION BY id ORDER BY flag) flag FROM natural_window_source) SELECT a.id,a.n,ranked.flag FROM natural_window_target a NATURAL JOIN ranked" ] do
+                  expectOk (run store ("CREATE VIEW " + name + " AS " + definition)) name
+                  Expect.equal
+                      (rows store (sprintf "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_NAME='%s'" name))
+                      [ [ Some "YES" ] ]
+                      "pinned MySQL metadata"
+                  expectOk (run store ("UPDATE " + name + " SET n=n+1 WHERE id=1")) name
+              Expect.equal
+                  (rows store "SELECT id,n FROM natural_window_target ORDER BY id")
+                  [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ]
+                  "each joined view updates the target once"
+
+          testCase "a grouped join view is live and supports an outer filter"
           <| fun _ ->
               let store = setup ()
 
