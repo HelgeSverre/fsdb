@@ -1602,6 +1602,13 @@ let tests =
                             Expect.isFalse (col.Equals "生\u180e" "生") "Mongolian vowel separator remains weighted"
                             Expect.isFalse (col.Equals "\u180e" "\uE0A0\uE0A1") "literal marker cannot alias separator"
 
+                testCase "UCA 9 accent-insensitive collation ignores Mongolian vowel separator"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_0900_ai_ci" |> Option.get
+                    Expect.isTrue (col.Equals "生\u180e日" "生日") "U+180E has no primary weight"
+                    Expect.equal (col.KeyOf "\u180e") (col.KeyOf "") "equality keys ignore U+180E"
+                    Expect.equal (col.FullTextKeyOf "\u180e") (col.FullTextKeyOf "ﾞ") "ngram singleton marks share the empty primary weight"
+
                 testTheory "legacy Unicode collations keep Hangul Jamo distinct from syllables"
                     [ "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci" ]
                     <| fun name ->

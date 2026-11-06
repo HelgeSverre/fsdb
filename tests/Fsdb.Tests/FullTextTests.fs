@@ -186,6 +186,20 @@ let tests =
               Expect.equal (ids (naturalScores index "生\u180e日")) [ 6 ] "weighted separator has distinct ngrams"
               Expect.equal (ids (booleanScores index "生\u3000日")) [ 1; 2; 3; 4; 5 ] "Boolean lookup uses the same padded keys"
 
+          testCase "UCA 9 accent-insensitive size-one ngrams share ignorable mark postings"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_0900_ai_ci" |> Option.get
+              let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }
+              let index =
+                  buildIndexWithDocumentSettings rules collation
+                      [ 1, rules, [ "生\u180e日"; "蒙古分隔" ]
+                        2, rules, [ "生日"; "" ]
+                        3, rules, [ "ｶﾞｯｺｳ"; "" ]
+                        4, rules, [ "ガッコウ"; "" ] ]
+              let ids scores = scores |> Map.keys |> Seq.toList
+              Expect.equal (ids (naturalScores index "ｶﾞｯｺｳ")) [ 1; 3; 4 ] "halfwidth mark reaches the separator posting"
+              Expect.equal (ids (naturalScores index "生\u180e日")) [ 1; 2; 3 ] "separator query reaches the halfwidth mark posting"
+
           testCase "older Unicode Boolean ngrams do not compose Korean Jamo into short terms"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 5; Stopwords = StopwordPolicy.BuiltIn }

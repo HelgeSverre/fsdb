@@ -1525,8 +1525,9 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_general_ci" -> foldGeneral true value
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci" ->
+            // U+180E is ignorable in UCA 9; its distinct weight belongs to UCA 5.2 only.
             value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
-            |> foldUnicodeQuoteForms |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
+            |> foldUnicodeQuoteForms |> foldLegacyUnicodeJamo
             |> foldSupplementaryKanaImplicit false
         | "utf8mb4_unicode_520_ci" -> foldUnicode520 true value
         | "utf8mb4_unicode_ci" ->
