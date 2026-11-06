@@ -655,6 +655,12 @@ let tests =
                     let compatibilityBmp = System.Char.ConvertFromUtf32 0x2F800
                     let compatibilitySupplementary = System.Char.ConvertFromUtf32 0x2F803
                     let compatibilityUnassigned = System.Char.ConvertFromUtf32 0x2FA1E
+                    let enclosedKana = System.Char.ConvertFromUtf32 0x1F200
+                    let enclosedIdeograph = System.Char.ConvertFromUtf32 0x1F210
+                    let enclosedKanaSecond = System.Char.ConvertFromUtf32 0x1F213
+                    let enclosedUnassigned = System.Char.ConvertFromUtf32 0x1F232
+                    let parenthesizedIdeograph = System.Char.ConvertFromUtf32 0x1F240
+                    let enclosedEnd = System.Char.ConvertFromUtf32 0x1F2FF
                     let cases =
                         [ "\u3B00\u3B01", "utf8mb4_general_ci", "3B003B01"
                           "\u3B00\u3B01", "utf8mb4_unicode_ci", "FB80BB00FB80BB01"
@@ -757,6 +763,12 @@ let tests =
                           compatibilityBmp, "utf8mb4_unicode_520_ci", "FB40CE3D"
                           compatibilitySupplementary, "utf8mb4_unicode_520_ci", "FB848122"
                           compatibilityUnassigned, "utf8mb4_unicode_520_ci", "FBC5FA1E"
+                          enclosedKana, "utf8mb4_unicode_520_ci", "2B322B1A"
+                          enclosedIdeograph + enclosedKanaSecond, "utf8mb4_unicode_520_ci", "FB40E24B2B27"
+                          enclosedUnassigned + enclosedEnd, "utf8mb4_unicode_520_ci", "FBC3F232FBC3F2FF"
+                          parenthesizedIdeograph, "utf8mb4_unicode_520_ci", "0347FB40E72C0348"
+                          enclosedKana + enclosedEnd, "utf8mb4_unicode_ci", "FFFDFFFD"
+                          enclosedKana + enclosedEnd, "utf8mb4_general_ci", "FFFDFFFD"
                           "\uF900", "utf8mb4_general_ci", "F900"
                           "\uF900", "utf8mb4_unicode_ci", "FB418C48"
                           "\uFA0E", "utf8mb3_unicode_ci", "FB41FA0E"

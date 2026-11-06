@@ -1498,6 +1498,10 @@ checks at each ngram size 1–10.
 The [supplementary enclosed-CJK equality probe](torture/findings/2026-11-06-unicode-520-enclosed-cjk-supplementary-equality.md)
 corrects two enclosed-kana expansions and twelve written ideograph weights
 under `utf8mb4_unicode_520_ci`, while preserving the audited ngram keys.
+The [supplementary enclosed-CJK exact-weight audit](torture/findings/2026-11-06-supplementary-enclosed-cjk-exact-weights.md)
+now matches 3,069 singleton, adjacent-pair, mixed-ideograph, and padded
+byte comparisons over U+1F200–U+1F2FF across three `utf8mb4` legacy
+collations.
 A current-head rerun of the maintained two-column `utf8mb4_general_ci`
 corpus matches MySQL 8.4.11 in all 387 searches at each of sizes 1–5;
 the range-specific audits below retain their separate coverage boundaries.

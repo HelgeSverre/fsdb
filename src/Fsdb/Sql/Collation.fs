@@ -994,6 +994,36 @@ let private legacyKanbunWeights unicode520 codepoint =
     if encoded <= 0xFFFFu then [ int encoded ]
     else [ int (encoded >>> 16); int (encoded &&& 0xFFFFu) ]
 
+// UCA 5.2 assigned these enclosed ideographs before the remaining
+// U+1F200–U+1F2FF positions received their implicit weights.
+let private unicode52EnclosedIdeographWeights =
+    [|
+        0xFB40E24Bu; 0xFB40DB57u; 0xFB40D3CCu; 0x2B27u
+        0xFB40CE8Cu; 0xFB40D91Au; 0xFB4189E3u; 0xFB40D929u
+        0xFB40CEA4u; 0xFB40E620u; 0xFB40F121u; 0xFB40E599u
+        0xFB40D24Du; 0xFB40DF8Cu; 0xFB40D18Du; 0xFB40E5B0u
+        0xFB40D21Du; 0xFB40FD42u; 0xFB40F51Fu; 0xFB418CA9u
+        0xFB40D8F0u; 0xFB40D439u; 0xFB40EF14u; 0xFB40E295u
+        0xFB40E355u; 0xFB40CE00u; 0xFB40CE09u; 0xFB41904Au
+        0xFB40DDE6u; 0xFB40CE2Du; 0xFB40D3F3u; 0xFB40E307u
+        0xFB418D70u; 0xFB40E253u
+    |]
+
+let private unicode52ParenthesizedIdeographWeights =
+    [| 0xFB40E72Cu; 0xFB40CE09u; 0xFB40CE8Cu; 0xFB40DB89u; 0xFB40F0B9u
+       0xFB40E253u; 0xFB40F6D7u; 0xFB40D2DDu; 0xFB40E557u |]
+
+let private legacySupplementaryEnclosedCjkWeights codepoint =
+    let split encoded =
+        if encoded <= 0xFFFFu then [ int encoded ]
+        else [ int (encoded >>> 16); int (encoded &&& 0xFFFFu) ]
+    if codepoint = 0x1F200 then [ 0x2B32; 0x2B1A ]
+    elif codepoint >= 0x1F210 && codepoint <= 0x1F231 then
+        split unicode52EnclosedIdeographWeights[codepoint - 0x1F210]
+    elif codepoint >= 0x1F240 && codepoint <= 0x1F248 then
+        [ 0x0347 ] @ split unicode52ParenthesizedIdeographWeights[codepoint - 0x1F240] @ [ 0x0348 ]
+    else [ 0xFBC0 + (codepoint >>> 15); 0x8000 ||| (codepoint &&& 0x7FFF) ]
+
 // MySQL 8.4.11's legacy UCA weights for Bopomofo extensions and CJK strokes.
 // UCA 4.0 predates the stroke block; UCA 5.2 assigns its first 36 entries.
 let private unicode40BopomofoExtensionWeights =
@@ -1441,6 +1471,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     let weights =
                         if name = "utf8mb4_unicode_520_ci" then
                             [ 0xFBC0 + (codepoint >>> 15); 0x8000 ||| (codepoint &&& 0x7FFF) ]
+                        else [ 0xFFFD ]
+                    for weight in weights do addWeight weight
+                | None when codepoint >= 0x1F200 && codepoint <= 0x1F2FF && name.StartsWith("utf8mb4_") ->
+                    let weights =
+                        if name = "utf8mb4_unicode_520_ci" then legacySupplementaryEnclosedCjkWeights codepoint
                         else [ 0xFFFD ]
                     for weight in weights do addWeight weight
                 | None when codepoint >= 0x3000 && codepoint <= 0x303F ->
