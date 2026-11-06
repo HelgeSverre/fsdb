@@ -289,10 +289,11 @@ this audit.
 
 MySQL 8.4.11 waits for an uncommitted primary-key insert when a limited write
 orders by `id+0`, even when the inserted key sorts beyond the visible result
-frontier. With `LIMIT 1`, `2`, or `3`, an insert of either 0 or 100 blocks both
+frontier. With `LIMIT 1`–`4`, `8`, `16`, or `32`, an insert of either 0 or 100 blocks both
 UPDATE and DELETE. After commit, the write reselects the first `LIMIT` rows
 in expression order. The native oracle and focused transaction regression
-cover all 12 wait, affected-row, and final-row outcomes.
+cover all 28 wait, affected-row, and final-row outcomes. The larger limits
+extend the audit without an engine change.
 
 Fsdb previously recognized only direct indexed ORDER BY columns and completed
 the key-zero case before the insert committed. Unsupported filesort expressions

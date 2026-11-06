@@ -2832,7 +2832,7 @@ let tests =
 
           testCase "limited filesort write waits for pending inserts on either side of the frontier"
           <| fun _ ->
-              for limit in [ 1; 2; 3 ] do
+              for limit in [ 1; 2; 3; 4; 8; 16; 32 ] do
                   for verb in [ "UPDATE"; "DELETE" ] do
                     for insertedId in [ 0; 100 ] do
                       let store = Fsdb.Storage.create ()

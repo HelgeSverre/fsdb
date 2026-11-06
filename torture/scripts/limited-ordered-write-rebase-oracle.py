@@ -256,7 +256,7 @@ def main():
 
                 filesort_cases = 0
                 for limit, inserted_id, verb in itertools.product(
-                    (1, 2, 3), (0, 100), ("UPDATE", "DELETE")
+                    (1, 2, 3, 4, 8, 16, 32), (0, 100), ("UPDATE", "DELETE")
                 ):
                     waiter = connect(socket)
                     try:
