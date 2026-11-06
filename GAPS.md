@@ -1548,6 +1548,9 @@ including cross-equivalence between Kangxi radicals and NFKC Han forms.
 The [Kangxi exact-weight audit](torture/findings/2026-11-06-kangxi-radical-exact-weights.md)
 also matches 4,795 singleton, adjacent-pair, mixed-ideograph, and padded
 `WEIGHT_STRING` comparisons across five legacy collations over U+2F00–U+2FEF.
+The [CJK Radicals Supplement exact-weight audit](torture/findings/2026-11-06-cjk-radical-supplement-exact-weights.md)
+adds 2,560 matching byte comparisons across those five collations over
+U+2E80–U+2EFF, including the boundary pair into Kangxi Radicals.
 The [legacy Unicode collation probe](torture/findings/2026-10-17-unicode-520-ngram.md)
 now matches the audited spacing, format-control, and Korean Jamo ngram cases
 under both `utf8mb4_unicode_ci` and `utf8mb4_unicode_520_ci`. The full

@@ -48,6 +48,11 @@ def main():
         help="print every MySQL weight instead of only mismatch summaries",
     )
     parser.add_argument(
+        "--emit-fsharp-words",
+        action="store_true",
+        help="print four-byte singleton weights as an F# uint32 array",
+    )
+    parser.add_argument(
         "--char-width",
         type=int,
         help="compare WEIGHT_STRING(... AS CHAR(n)), including space padding",
@@ -195,6 +200,22 @@ def main():
                                 for point, weight in weights.items()
                             ],
                         )
+                    if args.emit_fsharp_words:
+                        if (
+                            args.pair_next
+                            or args.pair_with is not None
+                            or args.char_width is not None
+                        ):
+                            raise ValueError(
+                                "--emit-fsharp-words requires unmodified singleton weights"
+                            )
+                        if not all(len(weight) == 8 for weight in weights.values()):
+                            raise ValueError(
+                                "--emit-fsharp-words requires four-byte weights"
+                            )
+                        words = [f"0x{weight}u" for weight in weights.values()]
+                        for offset in range(0, len(words), 8):
+                            print("        " + "; ".join(words[offset : offset + 8]))
                     if not args.pair_next and args.pair_with is None:
                         print("nonliteral", nonliteral)
                     print("duplicate groups", duplicate_groups)

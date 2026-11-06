@@ -1188,6 +1188,41 @@ let private legacyParenthesizedHangulWeights unicode520 codepoint =
     if unicode520 then [ 0x02FF ] @ inner @ [ 0x0300 ]
     else [ 0x0288 ] @ inner @ [ 0x0289 ]
 
+// MySQL 8.4.11's shared UCA 4.0/5.2 primary weights for U+2E80–U+2EF3.
+// Most of these radical forms have no Unicode compatibility decomposition.
+let private cjkRadicalSupplementWeights =
+    [|
+        0xFB40CE36u; 0xFB40D382u; 0xFB40CE5Bu; 0xFB40CE5Au
+        0xFB40CE59u; 0xFB40CEBBu; 0xFB40D182u; 0xFB40D1E0u
+        0xFB40D200u; 0xFB40D202u; 0xFB40D35Cu; 0xFB40D369u
+        0xFB40DC0Fu; 0xFB40DC0Fu; 0xFB40DC22u; 0xFB40DC23u
+        0xFB40DC22u; 0xFB40DC23u; 0xFB40DDF3u; 0xFB40DE7Au
+        0xFB40DF51u; 0xFB40DF50u; 0xFB40DFC4u; 0xFB40DFC3u
+        0xFB40E24Cu; 0xFB40E535u; 0xFBC0AE9Au; 0xFB40E5E1u
+        0xFB40E5E5u; 0xFB40E708u; 0xFB40EB7Au; 0xFB40EBCDu
+        0xFB40EC11u; 0xFB40EC35u; 0xFB40EC3Au; 0xFB40F06Cu
+        0xFB40F22Bu; 0xFB40F22Bu; 0xFB40CE2Cu; 0xFB40F25Bu
+        0xFB40F2ADu; 0xFB40F38Bu; 0xFB40F58Bu; 0xFB40F6EEu
+        0xFB40F93Au; 0xFB40F93Bu; 0xFB40FAF9u; 0xFB40FCF9u
+        0xFB40FE9Fu; 0xFB40FF53u; 0xFB40FF52u; 0xFB40FF53u
+        0xFB40FF53u; 0xFB40FF52u; 0xFB40FF8Au; 0xFB40FF8Au
+        0xFB40FF8Bu; 0xFB418002u; 0xFB418080u; 0xFB41807Fu
+        0xFB418089u; 0xFB4181FCu; 0xFB418279u; 0xFB418279u
+        0xFB418279u; 0xFB41864Eu; 0xFB418864u; 0xFB418980u
+        0xFB41897Fu; 0xFB4189C1u; 0xFB4189D2u; 0xFB4189D2u
+        0xFB418BA0u; 0xFB418D1Du; 0xFB418DB3u; 0xFB418F66u
+        0xFB418FB6u; 0xFB418FB6u; 0xFB418FB6u; 0xFB419091u
+        0xFB419485u; 0xFB419577u; 0xFB419578u; 0xFB41957Fu
+        0xFB4195E8u; 0xFB41961Cu; 0xFB41961Du; 0xFB4196E8u
+        0xFB419752u; 0xFB4197E6u; 0xFB419875u; 0xFB4198CEu
+        0xFB4198DEu; 0xFB4198DFu; 0xFB4198E0u; 0xFB4198E0u
+        0xFB419963u; 0xFB419996u; 0xFB419A6Cu; 0xFB419AA8u
+        0xFB419B3Cu; 0xFB419C7Cu; 0xFB419E1Fu; 0xFB419E75u
+        0xFB419EA6u; 0xFB419EC4u; 0xFB419EFEu; 0xFB419F4Au
+        0xFB419F50u; 0xFB419F52u; 0xFB419F7Fu; 0xFB419F8Du
+        0xFB419F99u; 0xFB419F9Cu; 0xFB419F9Cu; 0xFB419F9Fu
+    |]
+
 let private enclosedIdeographWeights =
     [|
         0xFB40CE00u; 0xFB40CE8Cu; 0xFB40CE09u; 0xFB40D6DBu
@@ -1509,6 +1544,13 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                             [ 0xFBC0 + (codepoint >>> 15); 0x8000 ||| (codepoint &&& 0x7FFF) ]
                         else [ 0xFFFD ]
                     for weight in weights do addWeight weight
+                | None when codepoint >= 0x2E80 && codepoint <= 0x2EFF ->
+                    if general then addWeight codepoint
+                    elif codepoint <= 0x2EF3 then
+                        let encoded = cjkRadicalSupplementWeights[codepoint - 0x2E80]
+                        addWeight (int (encoded >>> 16))
+                        addWeight (int (encoded &&& 0xFFFFu))
+                    else addImplicit 0xFBC0 codepoint
                 // Assigned Kangxi radicals share their compatibility ideograph's
                 // implicit weight; the unassigned tail keeps its own code point.
                 | None when codepoint >= 0x2F00 && codepoint <= 0x2FEF ->
