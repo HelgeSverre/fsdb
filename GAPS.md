@@ -2542,6 +2542,14 @@ implementation effort:
    but sampled thread time includes blocked workers and inlined frames obscure
    the exact lock. The next check should time statement-access manager holds
    and waits separately from row locks and catalog publication.
+   [Direct statement-access counters](benchmarks/results/2026-11-06-statement-access-monitor-trial.md)
+   then found roughly 67–115 cumulative seconds waiting to enter the shared
+   manager monitor during the wide-account phase, versus zero measured
+   statement-level table-availability waits. Skipping waiting-writer
+   registration for immediately available statements preserved correctness
+   but did not separate throughput from baseline variation; it was reverted.
+   Per-database ordinary statement access remains a design target, subject
+   to explicit-table and global-read-lock semantics.
    The group-commit leader now drains successive batches iteratively. A
    continuously replenished queue previously grew one call frame per batch;
    the [focused regression and matched write check](benchmarks/results/2026-10-15-iterative-group-commit-drain.md)
