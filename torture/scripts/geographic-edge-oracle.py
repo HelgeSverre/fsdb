@@ -4,6 +4,7 @@ Build Fsdb.Cli in Release first. Requires native mysqld/mysqladmin and PyMySQL.
 The servers and data directories are disposable; only mismatches are printed.
 """
 
+import argparse
 import itertools
 import pathlib
 import random
@@ -177,6 +178,13 @@ def cases():
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--trace-first-line-mismatch",
+        action="store_true",
+        help="compare point predicates near the first mismatching line endpoint",
+    )
+    args = parser.parse_args()
     if not FSDB.exists():
         raise RuntimeError(f"Build the Release CLI first: {FSDB}")
     root = pathlib.Path(tempfile.mkdtemp(prefix="fsdb-spatial-edge-"))
@@ -252,6 +260,16 @@ def main():
             line, polygon, _, _ = mismatch
             shape = f"ST_GeomFromText('{line}',4326)"
             area = f"ST_GeomFromText('{polygon}',4326)"
+            if args.trace_first_line_mismatch and mismatch == mismatches[0]:
+                for label, connection in (("MySQL", mysql_connection), ("fsdb", fsdb_connection)):
+                    for fraction in (0, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 0.001):
+                        point = f"ST_LineInterpolatePoint({shape},{fraction})"
+                        with connection.cursor() as cursor:
+                            cursor.execute(
+                                f"SELECT ST_AsText({point}),ST_Within({point},{area}),"
+                                f"ST_Touches({point},{area})"
+                            )
+                            print("endpoint trace", label, fraction, cursor.fetchone())
             with mysql_connection.cursor() as cursor:
                 cursor.execute(
                     f"SELECT ST_Within(ST_StartPoint({shape}),{area}),"

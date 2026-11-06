@@ -381,3 +381,23 @@ The complete Release oracle now has **0/189 near-hole point-distance**,
 0/189 point-relation, 0/49 polar-corner, and 0/100 seeded point-line-distance
 mismatches. The 11/448 line/polygon relation residuals remain. All 33
 geographic and 22 geometry tests pass.
+
+## Endpoint point/line relation disagreement
+
+The first residual line, `LINESTRING(1 2.999,3 2.999)`, illustrates why
+sampling more points or discarding only the endpoint is insufficient. MySQL
+reports `ST_Within=1` for the line's start point and for interpolated points
+at fractions `10⁻⁹`, `10⁻⁸`, and `10⁻⁷`. Both MySQL and fsdb report those
+points as inside the polygon and report the point at fraction `10⁻⁶` outside.
+Yet MySQL reports `ST_Touches(line, polygon)=1` and
+`ST_Crosses(line, polygon)=0`. Its `ST_Intersection` is a short line from
+`(1, 2.999)` to approximately `(1.000000309934808, 2.99900000000118)`.
+Fsdb calls the complete line a crossing because it promotes those point
+predicates to line-interior evidence.
+
+All 11 current relation mismatches have the same direction: MySQL says
+touching and fsdb says crossing, with MySQL's intersection confined to a
+tiny arc next to an endpoint. The point predicate and line overlay strategy
+are numerically inconsistent at this scale. A line-level geographic
+intersection and interval classification is needed; a blanket endpoint
+exclusion or denser point grid has already regressed the broader oracle.
