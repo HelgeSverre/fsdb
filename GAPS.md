@@ -2544,10 +2544,12 @@ implementation effort:
    missing first-view row, a later matched or unmatched natural read tail,
    and a physical-row wait. A [four-writable-view chain across a derived read
    source](torture/findings/2026-11-06-mixed-natural-view-intervening-source.md#four-writable-views-across-a-derived-read-source)
-   now matches [106 value cases and 64 contended rebases](torture/findings/2026-11-06-mixed-natural-view-intervening-source.md#mixed-outer-join-matrix-and-dependent-source),
+   now matches [154 value cases and 65 contended rebases](torture/findings/2026-11-06-mixed-natural-view-intervening-source.md#parenthesized-first-operand-and-grouped-middle-operand),
    including all eight left/right combinations across three later views,
-   a dependent `JSON_TABLE`, four independent holders, and a right-preserved
-   final view. Other intervening
+   a dependent `JSON_TABLE`, four independent holders, a parenthesized first
+   operand, and a right-preserved final view. A
+   [grouped middle operand containing two writable views](torture/findings/2026-11-06-mixed-natural-view-intervening-source.md#parenthesized-first-operand-and-grouped-middle-operand)
+   still fails mutation binding. Other intervening
    sources, unmatched arrangements, and longer mixed join chains remain open.
    [CTE-first natural outer joins](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#cte-first-natural-outer-join-to-a-writable-view)
    to a writable view now wait and rebase, including one preceding ordinary

@@ -83,3 +83,32 @@ native MySQL 8.4.11 corpus now matches **106 UPDATE cases and 64 contended
 rebases**, with final base-table contents checked after each operation.
 Other source types, nested join groupings, and wider unmatched data remain
 open.
+
+## Parenthesized first operand and grouped middle operand
+
+Parenthesizing the first `c NATURAL LEFT JOIN va` operand matches MySQL across
+all eight later LEFT/RIGHT combinations and three row arrangements. The same
+matrix with a dependent `JSON_TABLE` read source also matches. A four-holder
+wait on the dependent form commits the same rebased values. The maintained
+MySQL 8.4.11 oracle now passes **154 UPDATE cases and 65 contended rebases**.
+
+A different grouping remains a concrete gap:
+
+```sql
+WITH c AS (SELECT id FROM link)
+UPDATE c NATURAL LEFT JOIN va
+JOIN (SELECT id AS bridge FROM link) r ON r.bridge=va.link_id
+NATURAL LEFT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc)
+NATURAL LEFT JOIN ve_unique ve
+SET va.n=va.n+1, vb.bonus=vb.bonus+1, vc.extra=vc.extra+1, ve.tail=ve.tail+1
+WHERE id=1;
+```
+
+MySQL updates four physical rows; fsdb returns 1052, `Column 'id' in field
+list is ambiguous`. The corresponding `SELECT id` over the same source works
+in both engines. The UPDATE view rewrite tracks merged keys for single join
+sources, but the grouped middle operand has no single qualifier. Extending
+that key tracking alone exposes a second limitation: nested writable views
+inside the group are not expanded, producing 1146 for `probe.vb_unique`.
+This needs a grouped-source view expansion and mutation binding change before
+the grouped matrix can enter the passing oracle.
