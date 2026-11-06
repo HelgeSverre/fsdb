@@ -113,3 +113,34 @@ This points to replay/index maintenance in the live WAL mirror as the next
 code path to profile or optimize. The counters were reverted and the normal
 Release binary rebuilt. The measurements do not support changing the
 queue-admission or worker-reservation policy.
+
+## Replay sub-stage and unchanged-key control
+
+A temporary replay trace split row-image resolution, mutation application,
+index maintenance, and row publication. It also counted identity fallbacks
+and process GC activity. The external 8/64/8 workload again passed every
+ledger, with 9.47, 11.34, and 9.49 seconds of wall time respectively. The
+nearest cumulative replay checkpoints were:
+
+| Replay calls | Resolve ms | Apply ms | Reindex ms | Publish ms | Identity fallbacks | Gen-0 GCs | Allocated GiB |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 6,656, near first hot end | 76 | 668 | 160 | 105 | 0 | 737 | 5.48 |
+| 13,312, near wide end | 333 | 2,565 | 597 | 197 | 0 | 1,652 | 12.35 |
+| 19,456, near second hot end | 400 | 3,048 | 699 | 232 | 0 | 2,516 | 18.86 |
+
+The approximate wide interval adds 1.90 seconds of mutation-application
+wall time, including 0.44 seconds in index maintenance; its resolution
+time adds 0.26 seconds. Identity fallback never ran. Allocations and GC
+counts also rose in every phase, with only a modestly higher count in the
+wide interval, so this trace does not establish GC as the cause. These
+stage times include possible thread preemption and are not CPU samples.
+
+A candidate skipped replay reindexing when all indexed source columns were
+unchanged. It preserved all ledgers, but a matched baseline/candidate/baseline
+64-account run measured wall times of 12.54/11.63/11.49 seconds and server
+CPU of 40.38/45.86/40.56 seconds. The candidate's wall time lies within
+baseline variation and its CPU cost is higher. It was reverted, as were
+all temporary counters, and the normal Release CLI was rebuilt. The
+unattributed replay work includes row-store mutation, while the
+larger server CPU difference also requires a method-resolved profile beyond
+the WAL mirror.

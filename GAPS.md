@@ -2518,6 +2518,12 @@ implementation effort:
    fsync and encoding also rose. Periodic checkpoints are approximate and
    worker waits overlap. Replay/index maintenance in the live WAL mirror is
    the next concrete optimization target.
+   A [replay sub-stage control](benchmarks/results/2026-11-06-external-multidb-write-profile.md#replay-sub-stage-and-unchanged-key-control)
+   found zero row-identity fallbacks and only part of the wide-account
+   replay increase in reindexing. Skipping reindex work for unchanged indexed
+   columns raised server CPU in a matched baseline/candidate/baseline run
+   without a wall-time gain, so the trial was reverted. Row-store mutation
+   and broader method-level server CPU remain to profile.
    The group-commit leader now drains successive batches iteratively. A
    continuously replenished queue previously grew one call frame per batch;
    the [focused regression and matched write check](benchmarks/results/2026-10-15-iterative-group-commit-drain.md)
