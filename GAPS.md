@@ -2423,6 +2423,9 @@ implementation effort:
    An [earlier `USING(id)` read edge](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#using-read-edge-before-the-natural-view-edge)
    now carries its merged logical key through inner, left, and right read
    joins, including a multi-target update when the final view is unmatched.
+   A [two-edge outer `USING` chain](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#using-read-edge-before-the-natural-view-edge)
+   also preserves the right side's merged key, contended view writes, and an
+   unmatched physical read-target update.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.

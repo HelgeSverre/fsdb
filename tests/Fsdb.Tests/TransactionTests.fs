@@ -2078,6 +2078,31 @@ let tests =
               match handle setup "SELECT tag FROM tx_cross_using_tail WHERE id=2" |> snd with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected the read-side update without a view match, got %A" result
+              handle setup "CREATE TABLE tx_cross_using_next(id INT PRIMARY KEY,flag INT)" |> ignore
+              handle setup "INSERT INTO tx_cross_using_next VALUES(1,0),(2,0)" |> ignore
+              let usingChain =
+                  "WITH c AS (SELECT id FROM tx_cross_view_link) UPDATE c "
+                  + "LEFT JOIN tx_cross_using_tail x USING(id) "
+                  + "RIGHT JOIN tx_cross_using_next y USING(id) "
+              let chainLeft = usingChain + "NATURAL LEFT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              let chainRight = usingChain + "NATURAL RIGHT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+              verifyNaturalOuterWait 86 87 chainLeft 47
+              verifyNaturalOuterWait 88 89 chainRight 49
+              Expect.equal (handle setup "DELETE FROM tx_cross_using_next WHERE id=1" |> snd)
+                  (Affected 1UL) "remove the matching row after the second USING edge"
+              Expect.equal (handle setup chainLeft |> snd) (Affected 0UL)
+                  "the final left edge cannot reach the view after the USING chain misses"
+              Expect.equal (handle setup chainRight |> snd) (Affected 1UL)
+                  "the final right edge preserves the view after the USING chain misses"
+              Expect.equal
+                  (handle setup (usingChain + "NATURAL LEFT JOIN tx_cross_view v SET y.flag=y.flag+1,v.n=v.n+1 WHERE id=2") |> snd)
+                  (Affected 1UL) "the preserved right-side USING key selects a physical read target"
+              match handle setup "SELECT flag FROM tx_cross_using_next WHERE id=2" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected the preserved USING source to update, got %A" result
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "50" ] ]) -> ()
+              | result -> failtestf "expected the unmatched USING chain to preserve the view once, got %A" result
               for direction in [ "LEFT"; "RIGHT" ] do
                   let duplicateGroup =
                       "WITH c AS (SELECT id FROM tx_cross_view_link) "

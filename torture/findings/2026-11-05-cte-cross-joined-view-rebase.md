@@ -210,5 +210,15 @@ group's expression; for a final natural right edge, they use the view's
 column. The multi-target control updates the `USING` read table when the
 view has no matching row, while leaving the view untouched. MySQL and fsdb
 both report one affected row. The focused transaction regression covers
-these bindings and physical-row waits. Longer `USING` chains and other
-mixed-name combinations remain to audit.
+these bindings and physical-row waits.
+
+A two-edge `LEFT JOIN ... USING(id)` then `RIGHT JOIN ... USING(id)` prefix
+also agrees with MySQL. The second join owns the merged `id` when it
+preserves an otherwise unmatched row. Both natural outer directions wait
+and rebase while matched; after the second source's matching row is deleted,
+the final left edge changes no view row and the final right edge preserves
+the view. A multi-target left-edge update then changes the second read
+source by its merged `id` while leaving the unmatched view alone. This
+shape was already supported by the logical-column rewrite and is now pinned
+by the native oracle and focused fsdb regression. Longer `USING` chains and
+other mixed-name combinations remain to audit.

@@ -557,6 +557,35 @@ def main():
                     "WITH c AS (SELECT 2 AS id) UPDATE c JOIN using_tail x USING(id) NATURAL LEFT JOIN v SET x.tag=x.tag+1,v.n=v.n+1 WHERE id=2",
                 ) == 1
                 assert execute(owner, "SELECT tag FROM using_tail WHERE id=2") == ((1,),)
+                execute(owner, "CREATE TABLE using_next(id INT PRIMARY KEY,flag INT)")
+                execute(owner, "INSERT INTO using_next VALUES(1,0),(2,0)")
+                using_chain = (
+                    "WITH c AS (SELECT id FROM link) UPDATE c "
+                    "LEFT JOIN using_tail x USING(id) RIGHT JOIN using_next y USING(id) "
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    using_chain + "NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 83),),
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    using_chain + "NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
+                    ((1, 85),),
+                )
+                execute(owner, "DELETE FROM using_next WHERE id=1")
+                assert execute(owner, using_chain + "NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1") == 0
+                assert execute(owner, using_chain + "NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1") == 1
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((86,),)
+                assert execute(
+                    owner,
+                    using_chain + "NATURAL LEFT JOIN v SET y.flag=y.flag+1,v.n=v.n+1 WHERE id=2",
+                ) == 1
+                assert execute(owner, "SELECT flag FROM using_next WHERE id=2") == ((1,),)
                 for direction in ("LEFT", "RIGHT"):
                     statement = (
                         "WITH c AS (SELECT id FROM link) "
