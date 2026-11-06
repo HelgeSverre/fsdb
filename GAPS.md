@@ -1499,6 +1499,8 @@ The [plane-two implicit-weight follow-up](torture/findings/2026-11-06-plane-two-
 now matches all 65,536 singleton and 65,535 internal adjacent-pair bytes
 under those three collations, preserving the CJK compatibility-ideograph
 mapping. Its two boundary ngram samples match 3,456 searches at sizes 1–3.
+The [full U+2FF00–U+2FFFF unassigned-tail corpus](torture/findings/2026-11-06-plane-two-unassigned-tail-ngram.md)
+also matches 46,080 searches at sizes 1–10 across the three legacy collations.
 The [Extension J and plane-three exact-weight audit](torture/findings/2026-11-06-extension-j-plane-three-legacy-weights.md)
 matches all 65,536 singletons and 65,535 internal adjacent pairs in
 U+30000–U+3FFFF under those three legacy collations. First, middle, and

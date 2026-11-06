@@ -20,7 +20,8 @@ subrange and the unassigned tail. The separate ngram key path did not change.
 Two 32-position boundary corpora, U+2EE50–U+2EE6F and U+2FA10–U+2FA2F,
 match MySQL in 3,456 two-column searches at sizes 1–3 across the three
 collations. The latter also matches 126 compatibility equality checks.
-Broader unassigned-tail ngram behavior and MeCab remain open.
+The [full U+2FF00–U+2FFFF unassigned-tail ngram audit](2026-11-06-plane-two-unassigned-tail-ngram.md)
+matches at sizes 1–10. Other unassigned ranges and MeCab remain open.
 
 Reproduce after building the Release CLI:
 
