@@ -428,7 +428,8 @@ let tests =
                       runDefault store "SELECT o.id, EXISTS(SELECT DISTINCT i.id+0 FROM exists_inner i WHERE i.outer_id=o.id) AS hit FROM exists_outer o ORDER BY o.id")
               Expect.equal distinctResult result "DISTINCT preserves EXISTS membership"
               Expect.isLessThan distinctExamined 200L "DISTINCT EXISTS uses indexed membership"
-              for groupClause in [ "GROUP BY i.outer_id"; "GROUP BY outer_id LIMIT 1" ] do
+              for groupClause in [ "GROUP BY i.outer_id"; "GROUP BY outer_id LIMIT 1"
+                                   "GROUP BY (i.outer_id IS NULL)"; "GROUP BY (outer_id IS NOT NULL) LIMIT 1" ] do
                   let groupedResult, groupedExamined =
                       withExaminedRows (fun () ->
                           runDefault store ("SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id " + groupClause + ") AS hit FROM exists_outer o ORDER BY o.id"))

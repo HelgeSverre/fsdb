@@ -9,7 +9,7 @@ that fixture after this change.
 The shortcut accepts grouping only when every projection is a literal,
 plain inner column, or inner-source star, there is no `HAVING`, and each
 grouping key resolves to a unique column of
-the single inner source. A bare key shadowed by a projection alias stays on
+the single inner source or a null check of one. A bare key shadowed by a projection alias stays on
 the ordinary path. Other limits, offsets, source shapes, and expressions
 retain their existing eligibility rules. These restrictions preserve
 binding errors and avoid skipping evaluation of grouping expressions.
@@ -24,3 +24,14 @@ improvement; no latency measurement is claimed.
 Run `dotnet run --project tests/Fsdb.Tests -c Release -- --filter-test-case
 'correlated' --no-spinner` and `uv run --with pymysql python
 torture/scripts/correlated-order-alias-oracle.py`.
+
+## Inner-column null-check grouping
+
+The indexed shortcut also accepts `GROUP BY (i.outer_id IS NULL)` and
+`GROUP BY (outer_id IS NOT NULL)` when the operand resolves uniquely to an
+inner column and does not bind to a projection alias. These checks cannot
+raise conversion errors or change whether a nonempty filtered source has a
+group. Both forms stay below 200 examined rows on the 50-by-500 fixture.
+The native MySQL 8.4.11 oracle confirms their results and prepared forms;
+all 90 correlated tests pass. Other computed group keys remain on the
+ordinary path.

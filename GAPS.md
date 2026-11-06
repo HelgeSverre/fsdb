@@ -2234,8 +2234,9 @@ keys. [Inner-column grouped membership](benchmarks/results/2026-11-06-correlated
 now uses the indexed path when projections are literals, plain inner
 columns, or stars and there is no `HAVING`; its 50-row control falls from
 25,550 examined rows to fewer than
-200. Alias-bound, expression-grouped, and more complex source shapes remain
-open.
+200. Inner-column `IS NULL` and `IS NOT NULL` grouping keys also retain the
+indexed path. Alias-bound, other expression-grouped, and more complex source
+shapes remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell
