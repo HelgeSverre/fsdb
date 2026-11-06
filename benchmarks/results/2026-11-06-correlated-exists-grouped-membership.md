@@ -86,3 +86,18 @@ than 500 rows. Duplicate aliases, names that collide with an inner column,
 and other expressions retain ordinary binding and evaluation. Native MySQL
 8.4.11 agrees on matched and unmatched results and prepared statements; all
 90 correlated tests pass. This is an examined-row result, not a latency claim.
+
+## Positive COUNT HAVING membership
+
+An `EXISTS` projection of literals with no `ORDER BY` and
+`HAVING COUNT(*) > 0` now uses the
+indexed membership count when the source and grouping keys meet the existing
+eligibility rules. The equivalent `0 < COUNT(*)`, `COUNT(*) >= 1`, and
+`1 <= COUNT(*)` forms follow the same path. On the 50-by-500 fixture, each
+returns the same matched and unmatched values as plain `EXISTS` while
+examining fewer than 200 rows. `HAVING COUNT(*) = 0` remains on ordinary
+aggregate evaluation, examines more than 500 rows, and correctly returns a
+row for unmatched outer keys in the ungrouped form. Other HAVING predicates
+and nonliteral projections retain ordinary evaluation so their binding and
+aggregate behavior remain visible. Native MySQL 8.4.11 agrees on the
+audited results and prepared forms; all 90 correlated tests pass.

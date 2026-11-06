@@ -2283,6 +2283,10 @@ Unique [projection aliases of safe inner-only grouping expressions](benchmarks/r
 also use indexed membership, with fewer than 200 examined rows; coercing
 aliases retain ordinary evaluation. Other expression-grouped and more complex source
 shapes remain open.
+[Positive `COUNT(*)` HAVING membership](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md#positive-count-having-membership)
+also uses the indexed path for literal projections and safe grouping keys;
+the zero-count HAVING control retains aggregate evaluation. Other HAVING
+predicates remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

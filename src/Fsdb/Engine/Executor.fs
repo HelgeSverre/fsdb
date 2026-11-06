@@ -9238,9 +9238,34 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | None | Some(Lit(VInt 0L)) | Some(Lit(VUInt 0UL)) -> true
         | _ -> false
 
+    let countStar = function
+        | FuncCall(name, [ Star None ]) ->
+            equalsIgnoreCase name "COUNT"
+            && Functions.isUnmodifiedBuiltinAggregate name outer.Registry
+        | _ -> false
+    let zero = function Lit(VInt 0L) | Lit(VUInt 0UL) -> true | _ -> false
+    let one = function Lit(VInt 1L) | Lit(VUInt 1UL) -> true | _ -> false
+    let membershipHaving =
+        match select.Having with
+        | None -> true
+        | Some(BinOp(Gt, count, bound)) when countStar count && zero bound -> true
+        | Some(BinOp(Lt, bound, count)) when zero bound && countStar count -> true
+        | Some(BinOp(Gte, count, bound)) when countStar count && one bound -> true
+        | Some(BinOp(Lte, bound, count)) when one bound && countStar count -> true
+        | _ -> false
+    // A literal projection cannot introduce aggregate/non-grouped binding errors
+    // that the membership shortcut would otherwise skip.
+    let havingProjectionsAreSafe =
+        select.Having.IsNone
+        || (select.OrderBy.IsEmpty
+            && (select.Projections
+                |> List.forall (fun projection ->
+                    match projection.Expression with Lit _ -> true | _ -> false)))
+
     let plainShape =
         select.Joins.IsEmpty
-        && select.Having.IsNone
+        && membershipHaving
+        && havingProjectionsAreSafe
         && (not select.Distinct || select.OrderBy.IsEmpty)
         && membershipLimit
         && membershipOffset
