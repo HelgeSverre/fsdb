@@ -1452,7 +1452,8 @@ at size 1. MeCab and other untested Unicode ranges remain open.
 The [exact Nüshu weight follow-up](torture/findings/2026-11-06-nushu-legacy-weights.md)
 matches all 400 singleton and 399 adjacent-pair bytes in three legacy
 `utf8mb4` collations; Unicode 4.0 ngrams match at sizes 1–3, and Unicode
-5.2 ngrams now match at sizes 1–3.
+5.2 ngrams now match at sizes 1–3. A [current-head Unicode 9.0 rerun](torture/findings/2026-11-06-cjk-current-head-ngram-rerun.md)
+also matches all 2,376 searches at each of sizes 2–3.
 The [Tangut ngram audit](torture/findings/2026-10-20-tangut-ngram-audit.md)
 finds no membership or relevance differences in 82,956 general-ci searches
 across the ideograph, Components, and sampled Supplement ranges at sizes 1–2;
@@ -1679,9 +1680,9 @@ The complete U+AC00–U+D7A3 syllabary has distinct literal MySQL weights.
 Additional U+AD00–U+ADFF, U+C100–U+C1FF, and U+D600–U+D6FF corpora each
 match 1,536 searches per size across the same ten token sizes.
 The [halfwidth voicing-mark probe](torture/findings/2026-10-17-general-ci-halfwidth-marks.md)
-keeps mark positions in `utf8mb4_general_ci` keys; the audited two-column
-ngram corpus now matches MySQL at token sizes 6–10, while smaller sizes retain
-other collation and relevance differences.
+keeps mark positions in `utf8mb4_general_ci` keys. Its original two-column
+corpus had smaller-size differences; the [current-head rerun](torture/findings/2026-11-06-cjk-current-head-ngram-rerun.md)
+matches all 387 searches at each size 1–10.
 The [format-control probe](torture/findings/2026-10-17-general-ci-format-controls.md)
 also keeps nine audited format/space characters distinct. The corpus now
 matches at token sizes 5–10; smaller sizes and broader collation behavior

@@ -1,5 +1,9 @@
 # `utf8mb4_general_ci` halfwidth voicing-mark ngrams
 
+**Current-head update:** The remaining mismatch counts below are historical.
+The [November 6 rerun](2026-11-06-cjk-current-head-ngram-rerun.md) finds zero
+differences in all 387 searches at each token size 1–10.
+
 Native MySQL 8.4.11 keeps halfwidth voicing marks in their written positions
 under `utf8mb4_general_ci`. It distinguishes `ﾟﾋ` from `ﾋﾟ`, `ﾊﾟ` from
 `ﾊ`, and `ﾊﾞ` from `ﾊﾟ`. Fsdb's ICU primary comparison previously equated
