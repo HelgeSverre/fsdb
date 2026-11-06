@@ -139,3 +139,16 @@ Combining that projection with SRS-radian entry coordinates also stayed at
 `3 1.00001` control. Both trials were reverted. The next attempt needs to
 match the spherical initial guess, direct point, and Andoyer inverse as one
 path, then verify the full edge grid before replacing any portion.
+
+## Hole-orientation containment trial
+
+The remaining `88 2.99999` polygon distance is zero because fsdb classifies
+the point as inside the combined polygon, while MySQL excludes it from the
+hole. A trial evaluated hole containment with the exterior-ring orientation
+instead of the corrected hole orientation. It fixed that one classification
+and reduced near-hole distance differences from 5/189 to 4/189. The complete
+oracle also showed point-relation differences rising from 1/189 to 3/189,
+line-relation differences from 12/412 to 13/412, and polar-corner differences
+from 1/49 to 3/49. The trial was reverted. A blanket role change is therefore
+incorrect; the remaining corner needs a closer look at the winding side
+calculation and its rounded azimuths.
