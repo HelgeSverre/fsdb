@@ -1509,6 +1509,15 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                             [ 0xFBC0 + (codepoint >>> 15); 0x8000 ||| (codepoint &&& 0x7FFF) ]
                         else [ 0xFFFD ]
                     for weight in weights do addWeight weight
+                // Assigned Kangxi radicals share their compatibility ideograph's
+                // implicit weight; the unassigned tail keeps its own code point.
+                | None when codepoint >= 0x2F00 && codepoint <= 0x2FEF ->
+                    if general then addWeight codepoint
+                    else
+                        let mapped = compatibilityTarget rune
+                        let target = if codepoint <= 0x2FD5 then mapped else codepoint
+                        let implicitLead = if codepoint <= 0x2FD5 then 0xFB40 else 0xFBC0
+                        addImplicit implicitLead target
                 | None when codepoint >= 0x1F100 && codepoint <= 0x1F1FF && name.StartsWith("utf8mb4_") ->
                     let weights =
                         if name = "utf8mb4_unicode_520_ci" then legacySupplementaryEnclosedAlphanumericWeights codepoint
