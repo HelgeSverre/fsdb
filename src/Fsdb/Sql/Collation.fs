@@ -946,17 +946,18 @@ let private legacyCompatibilityJamoWeights unicode520 codepoint =
     else
         [ int unicode40CompatibilityJamoWeights[codepoint - 0x3131] ]
 
+let private enclosedHangulBaseJamo =
+    [| 0x3131; 0x3134; 0x3137; 0x3139; 0x3141; 0x3142; 0x3145
+       0x3147; 0x3148; 0x314A; 0x314B; 0x314C; 0x314D; 0x314E |]
+
 // Enclosed Hangul letters reuse the corresponding compatibility-Jamo
 // primaries. Parenthesized forms add the vowel suffix; the last four are
 // independent legacy UCA sequences.
 let private legacyEnclosedHangulWeights unicode520 codepoint =
-    let baseJamo =
-        [| 0x3131; 0x3134; 0x3137; 0x3139; 0x3141; 0x3142; 0x3145
-           0x3147; 0x3148; 0x314A; 0x314B; 0x314C; 0x314D; 0x314E |]
     if codepoint <= 0x327B then
         let offset = codepoint - 0x3260
-        let weights = legacyCompatibilityJamoWeights unicode520 baseJamo[offset % baseJamo.Length]
-        if offset < baseJamo.Length then weights
+        let weights = legacyCompatibilityJamoWeights unicode520 enclosedHangulBaseJamo[offset % enclosedHangulBaseJamo.Length]
+        if offset < enclosedHangulBaseJamo.Length then weights
         else weights @ [ if unicode520 then 0x2A2E else 0x1DBE ]
     else
         match codepoint, unicode520 with
@@ -968,6 +969,26 @@ let private legacyEnclosedHangulWeights unicode520 codepoint =
         | 0x327E, true -> [ 0x29BB; 0x2A3B ]
         | 0x327F, false -> [ 0x0DC4 ]
         | _ -> [ 0x110D ]
+
+// Parenthesized Hangul Jamo share the enclosed-letter primaries but carry
+// distinct prefix and closing weights in the two legacy UCA versions.
+let private legacyParenthesizedHangulWeights unicode520 codepoint =
+    let inner =
+        if codepoint <= 0x321B then
+            let offset = codepoint - 0x3200
+            let primary = legacyCompatibilityJamoWeights unicode520 enclosedHangulBaseJamo[offset % enclosedHangulBaseJamo.Length]
+            if offset < enclosedHangulBaseJamo.Length then primary
+            else primary @ [ if unicode520 then 0x2A2E else 0x1DBE ]
+        else
+            match codepoint, unicode520 with
+            | 0x321C, false -> [ 0x1D6E; 0x1DCB ]
+            | 0x321C, true -> [ 0x29BC; 0x2A3B ]
+            | 0x321D, false -> [ 0x1D6D; 0x1DC6; 0x1D6E; 0x1DC2; 0x1E03 ]
+            | 0x321D, true -> [ 0x29BB; 0x2A36; 0x29BC; 0x2A32; 0x2A8F ]
+            | 0x321E, false -> [ 0x1D6D; 0x1DC6; 0x1D74; 0x1DCB ]
+            | _ -> [ 0x29BB; 0x2A36; 0x29C2; 0x2A3B ]
+    if unicode520 then [ 0x02FF ] @ inner @ [ 0x0300 ]
+    else [ 0x0288 ] @ inner @ [ 0x0289 ]
 
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
@@ -1155,6 +1176,13 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     if general then addWeight codepoint
                     else
                         for weight in legacyCompatibilityJamoWeights (name = "utf8mb4_unicode_520_ci") codepoint do
+                            addWeight weight
+                | None when codepoint >= 0x3200 && codepoint <= 0x321F ->
+                    if general then addWeight codepoint
+                    elif codepoint = 0x321F then
+                        for weight in [ 0xFBC0; 0xB21F ] do addWeight weight
+                    else
+                        for weight in legacyParenthesizedHangulWeights (name = "utf8mb4_unicode_520_ci") codepoint do
                             addWeight weight
                 | None when codepoint >= 0x3260 && codepoint <= 0x327F ->
                     if general then addWeight codepoint
