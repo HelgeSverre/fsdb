@@ -17,12 +17,16 @@ The general-collation run was split at U+1B200 to keep each disposable
 server's corpus bounded. These were the commands:
 
 ```sh
-python3 torture/scripts/ngram-multicol-oracle.py --legacy-range 1B170:1B200 --collation utf8mb4_general_ci 1 2 3
-python3 torture/scripts/ngram-multicol-oracle.py --legacy-range 1B200:1B300 --collation utf8mb4_general_ci 1 2 3
-python3 torture/scripts/ngram-multicol-oracle.py --legacy-range 1B170:1B300 --collation utf8mb4_unicode_520_ci 1
-python3 torture/scripts/ngram-multicol-oracle.py --legacy-range 1B170:1B300 --collation utf8mb4_0900_ai_ci 1
+uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py --legacy-range 1B170:1B200 --collation utf8mb4_general_ci 1 2 3
+uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py --legacy-range 1B200:1B300 --collation utf8mb4_general_ci 1 2 3
+uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py --legacy-range 1B170:1B300 --collation utf8mb4_unicode_520_ci 1
+uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py --legacy-range 1B170:1B300 --collation utf8mb4_0900_ai_ci 1
 ```
 
 This closes the sampled Nüshu ngram parity question at these token sizes and
 collations. It does not establish MeCab support, exact legacy weight bytes,
 or parity for other Unicode ranges and query shapes.
+
+The [later exact-weight follow-up](2026-11-06-nushu-legacy-weights.md) covers
+every position under three legacy collations and extends the sampled ngram
+checks to Unicode 4.0 sizes 1–3 and Unicode 5.2 sizes 2–3.

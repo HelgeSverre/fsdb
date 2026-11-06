@@ -1717,10 +1717,12 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                         let first = if name = "utf8mb4_unicode_520_ci" then 0x10D4 else 0x0DAF
                         addWeight (first + codepoint - 0x2FF0)
                     else addImplicit 0xFBC0 codepoint
-                // Legacy UCA 5.2 assigns implicit primaries to the later
-                // ideographic symbols, Tangut, Khitan Small Script, and the
-                // Tangut supplement blocks; older tables replace them.
-                | None when codepoint >= 0x16FE0 && codepoint <= 0x18DFF && name.StartsWith("utf8mb4_") ->
+                // Legacy UCA 5.2 assigns implicit primaries to Nüshu and
+                // the later ideographic symbol, Tangut, and Khitan blocks;
+                // older tables replace them.
+                | None when name.StartsWith("utf8mb4_")
+                            && ((codepoint >= 0x16FE0 && codepoint <= 0x18DFF)
+                                || (codepoint >= 0x1B170 && codepoint <= 0x1B2FF)) ->
                     if name = "utf8mb4_unicode_520_ci" then addImplicit 0xFBC0 codepoint
                     else addWeight 0xFFFD
                 | None when codepoint >= 0x1F100 && codepoint <= 0x1F1FF && name.StartsWith("utf8mb4_") ->

@@ -1449,6 +1449,10 @@ The [Nüshu U+1B170–U+1B2FF audit](torture/findings/2026-10-18-nushu-ngram-aud
 finds no two-column membership or relevance differences in 7,128 general-ci
 searches at token sizes 1–3 or 2,376 searches each for Unicode 5.2 and 9.0
 at size 1. MeCab and other untested Unicode ranges remain open.
+The [exact Nüshu weight follow-up](torture/findings/2026-11-06-nushu-legacy-weights.md)
+matches all 400 singleton and 399 adjacent-pair bytes in three legacy
+`utf8mb4` collations; Unicode 4.0 ngrams match at sizes 1–3, and Unicode
+5.2 ngrams now match at sizes 1–3.
 The [Tangut ngram audit](torture/findings/2026-10-20-tangut-ngram-audit.md)
 finds no membership or relevance differences in 82,956 general-ci searches
 across the ideograph, Components, and sampled Supplement ranges at sizes 1–2;

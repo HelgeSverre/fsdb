@@ -654,6 +654,8 @@ let tests =
                     let extensionG = System.Char.ConvertFromUtf32 0x30000
                     let ideographicSymbol = System.Char.ConvertFromUtf32 0x16FE0
                     let ideographicSymbolLast = System.Char.ConvertFromUtf32 0x16FFF
+                    let nushuFirst = System.Char.ConvertFromUtf32 0x1B170
+                    let nushuLast = System.Char.ConvertFromUtf32 0x1B2FF
                     let tangutFirst = System.Char.ConvertFromUtf32 0x17000
                     let tangutLast = System.Char.ConvertFromUtf32 0x187FF
                     let tangutComponentFirst = System.Char.ConvertFromUtf32 0x18800
@@ -823,6 +825,9 @@ let tests =
                           ideographicSymbol + ideographicSymbolLast, "utf8mb4_general_ci", "FFFDFFFD"
                           ideographicSymbol + ideographicSymbolLast, "utf8mb4_unicode_ci", "FFFDFFFD"
                           ideographicSymbol + ideographicSymbolLast, "utf8mb4_unicode_520_ci", "FBC2EFE0FBC2EFFF"
+                          nushuFirst + nushuLast, "utf8mb4_general_ci", "FFFDFFFD"
+                          nushuFirst + nushuLast, "utf8mb4_unicode_ci", "FFFDFFFD"
+                          nushuFirst + nushuLast + "a", "utf8mb4_unicode_520_ci", "FBC3B170FBC3B2FF120F"
                           ideographicSymbolLast + tangutFirst + tangutLast, "utf8mb4_general_ci", "FFFDFFFDFFFD"
                           ideographicSymbolLast + tangutFirst + tangutLast, "utf8mb4_unicode_ci", "FFFDFFFDFFFD"
                           ideographicSymbolLast + tangutFirst + tangutLast, "utf8mb4_unicode_520_ci", "FBC2EFFFFBC2F000FBC387FF"
