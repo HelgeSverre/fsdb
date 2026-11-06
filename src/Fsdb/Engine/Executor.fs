@@ -9267,6 +9267,13 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                 let predicate count = decimal count >= lower && decimal count <= upper
                 Some(predicate, upper < 1M || lower > upper)
             | _ -> None
+        | In(count, candidates) when countStar count ->
+            let bounds = candidates |> List.map integerLiteral
+            if bounds |> List.exists Option.isNone then None
+            else
+                let bounds = bounds |> List.choose id
+                let predicate count = bounds |> List.contains (decimal count)
+                Some(predicate, bounds |> List.forall (fun bound -> bound < 1M))
         | BinOp(And, left, right) ->
             match countHaving left, countHaving right with
             | Some(leftPredicate, leftGroupedSafe), Some(rightPredicate, rightGroupedSafe) ->

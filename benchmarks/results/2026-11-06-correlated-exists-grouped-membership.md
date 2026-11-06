@@ -114,6 +114,13 @@ grouped by the correlated integer key. The zero-to-three-row fixture and
 native MySQL 8.4.11 oracle cover inclusive bounds, negation, and empty
 grouped sources. Noninteger bounds retain ordinary evaluation.
 
+Integer-literal `COUNT(*) IN (...)` and `NOT IN (...)` also reuse the indexed
+count. On the 50-by-500 fixture, `IN (19,20,21)` drops from 550 examined
+rows to fewer than 200, both ungrouped and grouped by the correlated key.
+The zero-to-three-row fixture and native MySQL 8.4.11 oracle cover matching
+and nonmatching counts, negation, and empty grouped sources. Lists with
+noninteger members retain ordinary evaluation.
+
 ## Positive COUNT HAVING membership
 
 An `EXISTS` projection of literals with no `ORDER BY` and

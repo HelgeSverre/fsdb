@@ -454,7 +454,9 @@ let tests =
                         "COUNT(*)=0 OR COUNT(*)=3", (fun count -> count = 0 || count = 3)
                         "NOT (COUNT(*)<=1 OR COUNT(*)>=3)", (fun count -> not (count <= 1 || count >= 3))
                         "COUNT(*) BETWEEN 1 AND 2", (fun count -> count >= 1 && count <= 2)
-                        "COUNT(*) NOT BETWEEN 1 AND 2", (fun count -> not (count >= 1 && count <= 2)) ] do
+                        "COUNT(*) NOT BETWEEN 1 AND 2", (fun count -> not (count >= 1 && count <= 2))
+                        "COUNT(*) IN (0,2)", (fun count -> count = 0 || count = 2)
+                        "COUNT(*) NOT IN (0,2)", (fun count -> count <> 0 && count <> 2) ] do
                       let sql =
                           "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id"
                           + grouping + " HAVING " + having + ") AS hit FROM count_outer o ORDER BY o.id"
@@ -599,6 +601,13 @@ let tests =
                   let betweenResult, betweenExamined = withExaminedRows (fun () -> runDefault store betweenSql)
                   Expect.equal betweenResult combinedResult "BETWEEN COUNT bounds preserve membership"
                   Expect.isLessThan betweenExamined 200L "BETWEEN COUNT bounds use indexed counts"
+                  let inSql =
+                      "SELECT o.id,EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id"
+                      + grouping
+                      + " HAVING COUNT(*) IN (19,20,21)) AS hit FROM exists_outer o ORDER BY o.id"
+                  let inResult, inExamined = withExaminedRows (fun () -> runDefault store inSql)
+                  Expect.equal inResult combinedResult "IN COUNT bounds preserve membership"
+                  Expect.isLessThan inExamined 200L "IN COUNT bounds use indexed counts"
               for projection in [ "i.id"; "i.outer_id"; "i.*"; "*"
                                   "i.outer_id IS NULL"; "i.outer_id IS NOT NULL"
                                   "i.outer_id <=> NULL"; "NOT (i.outer_id IS NULL)" ] do
