@@ -9165,10 +9165,17 @@ and private runExpressionSubquery
         memo.[cacheKey] <- UnmemoizedSubquery
         execute (Some ctx)
 
-and private isPlainCountStarSelect (registry: Registry) (select: SelectStmt) =
+and private isPlainCountRowsSelect (registry: Registry) (select: SelectStmt) =
+    let countsEveryRow = function
+        | Star None -> true
+        | Lit value
+        | ConnectionLiteral(value, _) -> value <> VNull
+        | ApproximateLiteral _ -> true
+        | _ -> false
     match select.Projections with
-    | [ { Expression = FuncCall(name, [ Star None ]) } ] ->
+    | [ { Expression = FuncCall(name, [ argument ]) } ] ->
         name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
+        && countsEveryRow argument
         && Functions.isUnmodifiedBuiltinAggregate name registry
         && select.GroupBy.IsEmpty
         && select.Having.IsNone
@@ -9185,10 +9192,10 @@ and private isPlainCountStarSelect (registry: Registry) (select: SelectStmt) =
     | _ -> false
 
 and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
-    let countStar = isPlainCountStarSelect outer.Registry select
+    let countRows = isPlainCountRowsSelect outer.Registry select
 
     match select.From with
-    | Some(FromItem.Qualified qualifier as source) when countStar && select.Joins.IsEmpty ->
+    | Some(FromItem.Qualified qualifier as source) when countRows && select.Joins.IsEmpty ->
         match tryCorrelatedEqualityCount outer source select.Where with
         | Some count -> Some(Ok(VInt(int64 count)))
         | None ->
@@ -9717,7 +9724,7 @@ and private tryDecorrelatedMatchCount (outer: EvalContext) (select: SelectStmt) 
                     | false, _ -> Some(Ok 0L))
 
 and private tryDecorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
-    if isPlainCountStarSelect outer.Registry select && not select.Distinct then
+    if isPlainCountRowsSelect outer.Registry select && not select.Distinct then
         tryDecorrelatedMatchCount outer select |> Option.map (Result.map VInt)
     else
         None
@@ -21220,7 +21227,7 @@ and private runGroupedSelect
 
         match tryIndexOnlySimpleGroups () with
         | Some result -> result
-        | None when isPlainCountStarSelect registry select ->
+        | None when isPlainCountRowsSelect registry select ->
             let mutable count = 0L
             let mutable failure = None
             let mutable processed = 0

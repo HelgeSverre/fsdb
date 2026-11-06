@@ -2420,6 +2420,9 @@ matches for [multiple exact integer equality keys](torture/findings/2026-11-06-j
 once per statement. The pinned MySQL rows cover duplicate inner pairs, misses,
 and NULL keys; a 205-row outer control stays below 250 examined rows. Coercive
 and noninteger outer keys still use ordinary per-row comparison.
+[Non-NULL constant `COUNT` arguments](torture/findings/2026-11-06-correlated-constant-count.md)
+now share the grouped key path with `COUNT(*)`; `COUNT(NULL)` retains ordinary
+evaluation. The 204-row joined control stays below 400 examined rows.
 The same [key-tuple path now accepts eligible inner-join `ON` correlations](torture/findings/2026-11-06-correlated-inner-join-on-keys.md),
 including a tuple split between `ON` and `WHERE`; outer-join `ON` predicates
 retain their original semantics. The 205-row control stays below 250

@@ -46,6 +46,24 @@ let tests =
                         Expect.equal rows [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ]; [ Some "4"; Some "3" ] ] "NULL never equals a category key"
                     | other -> failtestf "expected parent counts, got %A" other
 
+                testCase "non-NULL constant COUNT uses joined keys while COUNT(NULL) stays zero"
+                <| fun _ ->
+                    let store = joinedStore ()
+                    let expected = runDefault store (countSql + " ORDER BY cat.id")
+                    for argument in [ "1"; "0"; "'x'" ] do
+                        let sql = countSql.Replace("COUNT(*)", "COUNT(" + argument + ")") + " ORDER BY cat.id"
+                        Expect.equal (runDefault store sql) expected ("COUNT(" + argument + ") counts every matched row")
+                    let nullSql = countSql.Replace("COUNT(*)", "COUNT(NULL)") + " ORDER BY cat.id"
+                    match runDefault store nullSql with
+                    | ResultSet(_, rows) ->
+                        Expect.equal (rows |> List.map List.last) [ Some "0"; Some "0"; Some "0"; Some "0" ] "COUNT(NULL) counts no rows"
+                    | other -> failtestf "expected NULL counts, got %A" other
+                    let values = [ 100 .. 299 ] |> List.map (sprintf "(%d, 'bulk', NULL)") |> String.concat ","
+                    runDefault store ("INSERT INTO cat VALUES " + values) |> ignore
+                    let sql = countSql.Replace("COUNT(*)", "COUNT(1)")
+                    let _, examined = withExaminedRows (fun () -> runDefault store sql)
+                    Expect.isLessThan examined 400L "COUNT(1) groups joined keys once instead of rescanning for outer rows"
+
                 testCase "the joined inner side is read once per statement rather than once per outer row"
                 <| fun _ ->
                     let store = joinedStore ()
