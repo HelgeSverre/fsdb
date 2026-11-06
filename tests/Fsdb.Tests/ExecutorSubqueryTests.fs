@@ -153,6 +153,28 @@ let tests =
                             "decimal and string outer keys compare numerically, row by row"
                     | other -> failtestf "expected coerced correlated counts, got %A" other ]
 
+          testCase "joined correlated decimal and unsigned keys compare exactly"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE numeric_outer (k DECIMAL(21,1))"
+                    "CREATE TABLE numeric_inner (k BIGINT UNSIGNED)"
+                    "CREATE TABLE numeric_marker (id INT PRIMARY KEY)"
+                    "INSERT INTO numeric_outer VALUES (-1.0),(9007199254740992.0),(9007199254740993.0),(18446744073709551615.0)"
+                    "INSERT INTO numeric_inner VALUES (9007199254740992),(9007199254740993),(18446744073709551615)"
+                    "INSERT INTO numeric_marker VALUES (1)" ] do
+                  runDefault store sql |> ignore
+              let query =
+                  "SELECT o.k,(SELECT COUNT(*) FROM numeric_inner i JOIN numeric_marker m ON m.id=1 WHERE i.k=o.k) c FROM numeric_outer o ORDER BY o.k"
+              Expect.equal
+                  (runDefault store query)
+                  (ResultSet([ "k"; "c" ], [ [ Some "-1.0"; Some "0" ]; [ Some "9007199254740992.0"; Some "1" ]; [ Some "9007199254740993.0"; Some "1" ]; [ Some "18446744073709551615.0"; Some "1" ] ]))
+                  "pinned MySQL 8.4.11 rows"
+              let extra = [ 100 .. 299 ] |> List.map (sprintf "(%d.0)") |> String.concat ","
+              runDefault store ("INSERT INTO numeric_outer VALUES " + extra) |> ignore
+              let _, examined = withExaminedRows (fun () -> runDefault store query)
+              Expect.isLessThan examined 250L "decimal outer misses share one grouped inner pass"
+
           testCase "numeric aggregate metadata retains binary numeric coercibility"
           <| fun _ ->
               Expect.equal

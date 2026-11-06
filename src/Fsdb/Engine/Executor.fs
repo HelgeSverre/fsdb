@@ -9533,12 +9533,13 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                 Ok(boolToValue exists))
     | _ -> None
 
-/// Integer keys compare exactly under SQL `=`, so they can index a
+/// Integer and decimal keys compare exactly under SQL `=`, so they can index a
 /// dictionary without consulting collations or numeric coercion.
-and private exactIntegerKey (value: Value) : decimal option =
+and private exactNumericKey (value: Value) : decimal option =
     match value with
     | VInt value -> Some(decimal value)
     | VUInt value -> Some(decimal value)
+    | VDecimal value -> Some value
     | _ -> None
 
 /// Predicates that evaluate without warnings or side effects, so running
@@ -9675,9 +9676,9 @@ and private decorrelatedKeyCounts (outer: EvalContext) (select: SelectStmt) : De
                                 match row.[outerKeys.Length] with
                                 | VInt _ when keys |> Array.exists ((=) VNull) -> true
                                 | VInt count ->
-                                    let integerKeys = keys |> Array.toList |> List.map exactIntegerKey
-                                    if integerKeys |> List.forall Option.isSome then
-                                        counts.[integerKeys |> List.choose id] <- count
+                                    let numericKeys = keys |> Array.toList |> List.map exactNumericKey
+                                    if numericKeys |> List.forall Option.isSome then
+                                        counts.[numericKeys |> List.choose id] <- count
                                         true
                                     else false
                                 | _ -> false)
@@ -9688,7 +9689,7 @@ and private decorrelatedKeyCounts (outer: EvalContext) (select: SelectStmt) : De
         memo.[select] <- counts
         counts
 
-/// The outer row's match count, or `None` when its key is not an integer and
+/// The outer row's match count, or `None` when its key is not exact numeric and
 /// must take the ordinary per-row path to keep SQL's coercion rules.
 and private tryDecorrelatedMatchCount (outer: EvalContext) (select: SelectStmt) : Result<int64, EvalError> option =
     decorrelatedKeyCounts outer select
@@ -9700,10 +9701,10 @@ and private tryDecorrelatedMatchCount (outer: EvalContext) (select: SelectStmt) 
             let keys = values |> List.choose (function Ok value -> Some value | _ -> None)
             if keys |> List.contains VNull then Some(Ok 0L)
             else
-                let integerKeys = keys |> List.map exactIntegerKey
-                if integerKeys |> List.exists Option.isNone then None
+                let numericKeys = keys |> List.map exactNumericKey
+                if numericKeys |> List.exists Option.isNone then None
                 else
-                    let key = integerKeys |> List.choose id
+                    let key = numericKeys |> List.choose id
                     match counts.Counts.TryGetValue key with
                     | true, count -> Some(Ok count)
                     | false, _ -> Some(Ok 0L))
