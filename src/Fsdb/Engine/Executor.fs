@@ -33342,7 +33342,29 @@ let transactionWriteReadTargets
                     join.Using |> List.map (fun key -> (left, key), (right, key)))
                 |> Option.defaultValue []
             | _ -> []
-        explicit @ usingKeys
+        let naturalKeys =
+            match joins with
+            | [ join ] when join.Kind = NaturalJoin ->
+                match join.Table with
+                | FromTable right ->
+                    match physicalFastPathTable store dbName first, physicalFastPathTable store dbName right with
+                    | Some leftTable, Some rightTable ->
+                        let rightColumns =
+                            rightTable.Columns
+                            |> Seq.map (fun column -> column.Name.ToLowerInvariant())
+                            |> Set.ofSeq
+                        let left = first.Alias |> Option.defaultValue first.Table
+                        let right = right.Alias |> Option.defaultValue right.Table
+                        leftTable.Columns
+                        |> Seq.choose (fun column ->
+                            if Set.contains (column.Name.ToLowerInvariant()) rightColumns then
+                                Some((left, column.Name), (right, column.Name))
+                            else None)
+                        |> Seq.toList
+                    | _ -> []
+                | _ -> []
+            | _ -> []
+        explicit @ usingKeys @ naturalKeys
     let boundFor qualifier equalities literals =
         equalities
         |> List.tryPick (fun ((leftOwner, leftColumn), (rightOwner, rightColumn)) ->
