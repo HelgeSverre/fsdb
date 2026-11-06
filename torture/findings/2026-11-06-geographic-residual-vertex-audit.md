@@ -309,3 +309,24 @@ equator. The point-relation and point-distance counts remain 0/189 and
 differences. All 33 geographic and 22 geometry tests pass. The planar
 fractions are candidates, not a complete ellipsoidal relation strategy;
 the two narrow misses and other segment orientations remain open.
+
+## Geographic boundary-fraction refinement
+
+The two remaining corner clips were not missing boundary events. Their
+interior interval lay a few millionths of the segment beyond the planar
+candidate fractions. For the equatorial 0.1° clip, MySQL and fsdb agree
+that the interpolated point at fraction 0.50001 is inside the polygon,
+while the point at 0.5 is outside. A longer 1° clip has the same shifted
+interval. The earlier planar fractions sampled before that interior sliver.
+
+Fsdb now bisects the coordinate-side change along its geographic
+interpolated line, checks that the event lies within the candidate boundary
+segment, and classifies the intervals between refined events. Wrapped
+longitude segments remain on the existing path until they have an
+unwrapped event frame. The expanded native oracle now reports **11/448
+line-relation mismatches**, all from the prior near-hole set; all 36 added
+corner cases match MySQL. Point relations remain 0/189, near-hole distances
+4/189, polar corners 0/49, and seeded point-line distances 0/100. Focused
+regressions pin both formerly missed clips; all 33 geographic and 22
+geometry tests pass. Ellipsoidal boundary intersections, including the
+remaining near-hole touch/cross distinctions, remain open.

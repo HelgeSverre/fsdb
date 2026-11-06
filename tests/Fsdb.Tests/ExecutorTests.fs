@@ -19327,6 +19327,13 @@ let tests =
                     match runDefault store cornerSql with
                     | ResultSet(_, [ [ Some "1"; Some "0"; Some "1" ] ]) -> ()
                     | result -> failtestf "a short geographic line can cross between fixed samples: %A" result
+                    for corner in [ "LINESTRING(-0.1 0.100001,0.100001 -0.1)"
+                                    "LINESTRING(-1 1.000001,1.000001 -1)" ] do
+                        let line = sprintf "ST_GeomFromText('%s',4326)" corner
+                        let sql = sprintf "SELECT ST_Crosses(%s,%s),ST_Touches(%s,%s),ST_Intersects(%s,%s)" line cornerArea line cornerArea line cornerArea
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1"; Some "0"; Some "1" ] ]) -> ()
+                        | result -> failtestf "refined geographic boundary events recover %s: %A" corner result
 
                 testCase "geographic crossing requires an intersection at a near-hole edge"
                 <| fun _ ->

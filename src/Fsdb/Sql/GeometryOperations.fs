@@ -981,31 +981,42 @@ let internal geographicLinePolygonTopology referenceSystem lines polygons =
                     else
                         geographicPointPolygonPosition referenceSystem point polygons)
                 |> Array.toList))
-    // Coordinate crossings nominate intervals; their geographic midpoints
-    // decide whether the geodesic line enters the polygon between fixed samples.
-    let planarCrossingFraction (ax, ay) (bx, by) (cx, cy) (dx, dy) =
-        let rx, ry = bx - ax, by - ay
+    // Refine coordinate-side crossings on the interpolated geographic line.
+    // Their intervals are candidates; midpoint classification decides contact.
+    let crossingFraction start endpoint length (cx, cy) (dx, dy) =
         let sx, sy = dx - cx, dy - cy
-        let denominator = rx * sy - ry * sx
-        if denominator = 0.0 then None
+        let side (px, py) = sx * (py - cy) - sy * (px - cx)
+        let firstSide, lastSide = side start, side endpoint
+        let _, startLongitude = start
+        let _, endLongitude = endpoint
+        // A wrapped longitude needs its own unwrapped coordinate frame.
+        if abs (endLongitude - startLongitude) > 180.0
+           || abs sy > 180.0
+           || firstSide * lastSide >= 0.0 then None
         else
-            let qx, qy = cx - ax, cy - ay
-            let along = (qx * sy - qy * sx) / denominator
-            let across = (qx * ry - qy * rx) / denominator
-            if along > 0.0 && along < 1.0 && across > 0.0 && across < 1.0 then Some along
-            else None
+            let mutable lower = 0.0
+            let mutable upper = 1.0
+            for _ in 1 .. 48 do
+                let middle = (lower + upper) / 2.0
+                let point = geographicPointAlong referenceSystem start endpoint (length * middle)
+                if (side point > 0.0) = (firstSide > 0.0) then lower <- middle
+                else upper <- middle
+            let fraction = (lower + upper) / 2.0
+            let px, py = geographicPointAlong referenceSystem start endpoint (length * fraction)
+            let along = ((px - cx) * sx + (py - cy) * sy) / (sx * sx + sy * sy)
+            if along > 0.0 && along < 1.0 then Some fraction else None
     let intervalPositions =
         lineSegments
         |> List.collect (fun (start, endpoint) ->
+            let length = geographicPointDistance referenceSystem start endpoint
             let fractions =
                 boundarySegments
                 |> List.choose (fun (boundaryStart, boundaryEnd) ->
-                    planarCrossingFraction start endpoint boundaryStart boundaryEnd)
+                    crossingFraction start endpoint length boundaryStart boundaryEnd)
                 |> List.sort
             if fractions.IsEmpty then []
             else
                 let cuts = 0.0 :: (fractions @ [ 1.0 ])
-                let length = geographicPointDistance referenceSystem start endpoint
                 cuts
                 |> List.pairwise
                 |> List.choose (fun (lower, upper) ->
