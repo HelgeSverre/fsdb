@@ -1545,6 +1545,11 @@ membership and relevance agree.
 The 4,096-character Han ordering audit finds 3,721 displaced positions
 and 41,213 pairwise inversions, so this needs broader Chinese tailoring
 rather than a one-character correction.
+The independent CLDR 30 pinyin sequence exactly reproduces MySQL's
+ranked Han order in three audited blocks (1,020, 4,092, and 4,088
+characters); a fourth 4,087-character block differs by one moved
+character. This is a candidate data source for a future production
+tailoring, with mixed-script ordering and key consistency still unverified.
 The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
 also matches MySQL's distinct U+2200–U+22FF primary weights in the same
 two-column ngram lane at token sizes 1–10.
