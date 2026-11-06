@@ -83,3 +83,8 @@ not establish parity for other documents or parser forms.
 
 Run `uv run --with pymysql torture/scripts/ngram-multicol-oracle.py
 --collation utf8mb4_0900_as_ci` after building the Release CLI.
+
+The case-sensitive `utf8mb4_0900_as_cs` control also matches all 387
+searches at every ngram size 1–10 in the same native oracle, with zero
+membership and relevance differences. Run the command above with
+`utf8mb4_0900_as_cs` to repeat that check.

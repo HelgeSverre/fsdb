@@ -101,3 +101,9 @@ row for unmatched outer keys in the ungrouped form. Other HAVING predicates
 and nonliteral projections retain ordinary evaluation so their binding and
 aggregate behavior remain visible. Native MySQL 8.4.11 agrees on the
 audited results and prepared forms; all 90 correlated tests pass.
+
+`COUNT(*) <> 0` and the reversed `0 != COUNT(*)` are also positive-count
+membership tests: `COUNT(*)` cannot be negative. Both now take the indexed
+path on the 50-by-500 fixture and examine fewer than 200 rows, with matched
+and unmatched outer keys. The native MySQL 8.4.11 oracle agrees on the
+results and prepared forms; all 90 correlated tests pass.

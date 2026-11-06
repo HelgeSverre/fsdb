@@ -9252,6 +9252,8 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | Some(BinOp(Lt, bound, count)) when zero bound && countStar count -> true
         | Some(BinOp(Gte, count, bound)) when countStar count && one bound -> true
         | Some(BinOp(Lte, bound, count)) when one bound && countStar count -> true
+        | Some(BinOp(Neq, count, bound)) when countStar count && zero bound -> true
+        | Some(BinOp(Neq, bound, count)) when zero bound && countStar count -> true
         | _ -> false
     // A literal projection cannot introduce aggregate/non-grouped binding errors
     // that the membership shortcut would otherwise skip.

@@ -55,6 +55,8 @@ cases = [
     ('SELECT o.v,EXISTS(SELECT NOT i.v AS group_key FROM ordering_scope i WHERE i.v=o.v GROUP BY group_key) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t1\n2\t1\n'),
     ('SELECT o.v,EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=o.v HAVING COUNT(*)>0) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t1\n2\t1\n'),
     ('SELECT o.v,EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=o.v+10 HAVING COUNT(*)>0) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t0\n2\t0\n'),
+    ('SELECT o.v,EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=o.v HAVING COUNT(*)<>0) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t1\n2\t1\n'),
+    ('SELECT o.v,EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=o.v+10 GROUP BY i.v HAVING 0!=COUNT(*)) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t0\n2\t0\n'),
     ('SELECT o.v,EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=o.v GROUP BY i.v HAVING COUNT(*)>0) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t1\n2\t1\n'),
     ('SELECT o.v,EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=o.v+10 GROUP BY i.v HAVING COUNT(*)>0) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t0\n2\t0\n'),
     ('SELECT o.v,EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=o.v HAVING 0<COUNT(*)) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t1\n2\t1\n'),

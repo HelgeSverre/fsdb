@@ -1528,8 +1528,9 @@ differences at ngram size 1 and 102 at size 2 under `utf8mb4_0900_ai_ci`.
 The corrected 0900 path now matches all 387 searches at sizes 1–4 and
 6–10. Removing a second misplaced legacy Jamo fold also resolves the size-5
 Boolean case, so the same 387-search corpus now matches MySQL at all ten
-ngram sizes. The supported `utf8mb4_0900_as_ci` collation also matches all
-387 searches at each size 1–10 in the maintained native oracle. Broader
+ngram sizes. The supported `utf8mb4_0900_as_ci` and
+`utf8mb4_0900_as_cs` collations also match all 387 searches at each size
+1–10 in the maintained native oracle. Broader
 UCA 9 corpora remain open.
 The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
 also matches MySQL's distinct U+2200–U+22FF primary weights in the same
@@ -2287,7 +2288,8 @@ aliases retain ordinary evaluation. Other expression-grouped and more complex so
 shapes remain open.
 [Positive `COUNT(*)` HAVING membership](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md#positive-count-having-membership)
 also uses the indexed path for literal projections and safe grouping keys;
-the zero-count HAVING control retains aggregate evaluation. Other HAVING
+`COUNT(*) <> 0` and `0 != COUNT(*)` now do too. The zero-count HAVING control
+retains aggregate evaluation. Other HAVING
 predicates remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context

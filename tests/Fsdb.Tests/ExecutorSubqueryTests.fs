@@ -460,7 +460,8 @@ let tests =
               for havingClause in
                   [ "HAVING COUNT(*)>0"; "HAVING 0<COUNT(*)"
                     "GROUP BY i.outer_id HAVING COUNT(*)>=1"
-                    "GROUP BY i.outer_id HAVING 1<=COUNT(*)" ] do
+                    "GROUP BY i.outer_id HAVING 1<=COUNT(*)"
+                    "HAVING COUNT(*)<>0"; "GROUP BY i.outer_id HAVING 0!=COUNT(*)" ] do
                   let havingResult, havingExamined =
                       withExaminedRows (fun () ->
                           runDefault store ("SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id " + havingClause + ") AS hit FROM exists_outer o ORDER BY o.id"))
