@@ -9336,14 +9336,25 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                     && column.Generated.IsNone)
                 |> Option.map (fun _ -> argument))
         | _ -> None
-    let countRows = function
+    let supportedCount = function
         | FuncCall(name, [ argument ]) ->
             equalsIgnoreCase name "COUNT"
-            && (match nullableCountArgument with
-                | Some nullableArgument -> argument = nullableArgument
-                | None -> countArgumentAlwaysPresentForSelect outer.Store outer.DbName select argument)
+            && (nullableCountArgument = Some argument
+                || countArgumentAlwaysPresentForSelect outer.Store outer.DbName select argument)
             && Functions.isUnmodifiedBuiltinAggregate name outer.Registry
         | _ -> false
+    let isNullableCount = function
+        | FuncCall(_, [ argument ]) -> nullableCountArgument = Some argument
+        | _ -> false
+    let countValue expression (matchedRows, nonNullRows) =
+        if isNullableCount expression then nonNullRows else matchedRows
+    let countHavingUsesMatchedRows =
+        select.Having
+        |> Option.exists (Expression.exists (function
+            | FuncCall(name, [ argument ]) ->
+                equalsIgnoreCase name "COUNT"
+                && countArgumentAlwaysPresentForSelect outer.Store outer.DbName select argument
+            | _ -> false))
     let integerLiteral = function
         | Lit(VInt value) -> Some(decimal value)
         | Lit(VUInt value) -> Some(decimal value)
@@ -9361,46 +9372,56 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
     let rec countHaving = function
         | Not expression ->
             countHaving expression
-            |> Option.map (fun (predicate, groupedSafe) -> (fun count -> not (predicate count)), groupedSafe)
-        | IsTrue count when countRows count -> Some((fun count -> count > 0), true)
-        | IsFalse count when countRows count -> Some((fun count -> count = 0), true)
-        | Between(count, lower, upper) when countRows count ->
+            |> Option.map (fun (predicate, groupedSafe) -> (fun counts -> not (predicate counts)), groupedSafe)
+        | IsTrue count when supportedCount count ->
+            Some((fun counts -> countValue count counts > 0), not (isNullableCount count))
+        | IsFalse count when supportedCount count ->
+            Some((fun counts -> countValue count counts = 0), not (isNullableCount count))
+        | Between(count, lower, upper) when supportedCount count ->
             match integerLiteral lower, integerLiteral upper with
             | Some lower, Some upper ->
-                let predicate count = decimal count >= lower && decimal count <= upper
-                Some(predicate, upper < 1M || lower > upper)
+                let predicate counts =
+                    let value = decimal (countValue count counts)
+                    value >= lower && value <= upper
+                Some(predicate, not (isNullableCount count) && (upper < 1M || lower > upper))
             | _ -> None
-        | In(count, candidates) when countRows count ->
+        | In(count, candidates) when supportedCount count ->
             let bounds = candidates |> List.map integerLiteral
             if bounds |> List.exists Option.isNone then None
             else
                 let bounds = bounds |> List.choose id
-                let predicate count = bounds |> List.contains (decimal count)
-                Some(predicate, bounds |> List.forall (fun bound -> bound < 1M))
+                let predicate counts = bounds |> List.contains (decimal (countValue count counts))
+                Some(predicate, not (isNullableCount count) && (bounds |> List.forall (fun bound -> bound < 1M)))
         | BinOp(And, left, right) ->
             match countHaving left, countHaving right with
             | Some(leftPredicate, leftGroupedSafe), Some(rightPredicate, rightGroupedSafe) ->
-                Some((fun count -> leftPredicate count && rightPredicate count), leftGroupedSafe && rightGroupedSafe)
+                Some((fun counts -> leftPredicate counts && rightPredicate counts), leftGroupedSafe && rightGroupedSafe)
             | _ -> None
         | BinOp(Or, left, right) ->
             match countHaving left, countHaving right with
             | Some(leftPredicate, leftGroupedSafe), Some(rightPredicate, rightGroupedSafe) ->
-                Some((fun count -> leftPredicate count || rightPredicate count), leftGroupedSafe && rightGroupedSafe)
+                Some((fun counts -> leftPredicate counts || rightPredicate counts), leftGroupedSafe && rightGroupedSafe)
             | _ -> None
-        | BinOp(operator, count, bound) when countRows count ->
+        | BinOp(operator, count, bound) when supportedCount count ->
             countComparison operator
             |> Option.bind (fun compare ->
                 integerLiteral bound
                 |> Option.map (fun bound ->
-                    let predicate count = compare (decimal count) bound
-                    predicate, (bound <= 1M && predicate 1 = predicate 2)))
-        | BinOp(operator, bound, count) when countRows count ->
+                    let predicate counts = compare (decimal (countValue count counts)) bound
+                    predicate,
+                    (not (isNullableCount count)
+                     && bound <= 1M
+                     && predicate (1, 1) = predicate (2, 2))))
+        | BinOp(operator, bound, count) when supportedCount count ->
             countComparison operator
             |> Option.bind (fun compare ->
                 integerLiteral bound
                 |> Option.map (fun bound ->
-                    let predicate count = compare bound (decimal count)
-                    predicate, (bound <= 1M && predicate 1 = predicate 2)))
+                    let predicate counts = compare bound (decimal (countValue count counts))
+                    predicate,
+                    (not (isNullableCount count)
+                     && bound <= 1M
+                     && predicate (1, 1) = predicate (2, 2))))
         | _ -> None
     let countHaving = select.Having |> Option.bind countHaving
     let membershipHaving = select.Having.IsNone || countHaving.IsSome
@@ -9641,11 +9662,13 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                                 Having = None }
                         memo.[select] <- countSelect
                         countSelect
-                let groupExists =
-                    if select.GroupBy.IsEmpty then Some true
-                    else tryCorrelatedEqualityCount outer source select.Where |> Option.map (fun count -> count > 0)
-                groupExists
-                |> Option.bind (fun groupExists ->
+                // Ungrouped HAVING needs no group-existence check. If it only
+                // references the nullable count, the matched count is unused.
+                let matchedRows =
+                    if select.GroupBy.IsEmpty && not countHavingUsesMatchedRows then Some 0
+                    else tryCorrelatedEqualityCount outer source select.Where
+                matchedRows
+                |> Option.bind (fun matchedRows ->
                     tryDecorrelatedMatchCount outer countSelect
                     |> Option.bind (function
                         | Ok count when count > int64 System.Int32.MaxValue -> None
@@ -9653,9 +9676,9 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                             result
                             |> Result.map (fun count ->
                                 boolToValue
-                                    (groupExists
+                                    ((select.GroupBy.IsEmpty || matchedRows > 0)
                                      && (countHaving
-                                         |> Option.exists (fun (predicate, _) -> predicate (int count)))))
+                                         |> Option.exists (fun (predicate, _) -> predicate (matchedRows, int count)))))
                             |> Some))
             | None ->
                 tryCorrelatedEqualityCount outer source select.Where
@@ -9664,7 +9687,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                         match countHaving with
                         | Some(predicate, _) ->
                             (select.GroupBy.IsEmpty || count > 0)
-                            && predicate count
+                            && predicate (count, count)
                         | None -> count > 0
                     Ok(boolToValue exists))
     | _ -> None

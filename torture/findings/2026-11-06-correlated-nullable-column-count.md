@@ -27,7 +27,10 @@ grouped query because no group exists. For a grouped query whose grouping keys
 are fixed by correlated equality, the indexed matched-row count proves group
 existence separately from the non-NULL count. The regression covers both,
 all-NULL matches, non-NULL matches, an unfixed grouping key, and mixed
-`COUNT(column)`/`COUNT(*)` predicates. Both 204-row controls stay below 400
+`COUNT(column)`/`COUNT(*)` predicates. Mixed `AND` and `OR` predicates now
+carry both counts through the statement-local plan; the pinned MySQL 8.4.11
+control distinguishes grouped and ungrouped empty input. The original and
+mixed 204-row controls stay below 400
 examined rows; before the ungrouped path it examined 1,229 rows and failed
-that budget. Unfixed grouping keys and mixed count arguments retain ordinary
-evaluation.
+that budget. Unfixed grouping keys and multiple nullable count arguments
+retain ordinary evaluation.

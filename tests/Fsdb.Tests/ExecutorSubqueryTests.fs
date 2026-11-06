@@ -633,6 +633,16 @@ let tests =
                   "mixed COUNT arguments retain separate matched-row and non-NULL counts"
               Expect.equal
                   (runDefault store
+                      "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id HAVING COUNT(i.optional)=0 OR COUNT(*)=0) AS ungrouped_hit,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id GROUP BY i.outer_id HAVING COUNT(i.optional)=0 OR COUNT(*)=0) AS grouped_hit FROM count_outer o ORDER BY o.id")
+                  (ResultSet(
+                      [ "id"; "ungrouped_hit"; "grouped_hit" ],
+                      [ [ Some "0"; Some "1"; Some "0" ]
+                        [ Some "1"; Some "1"; Some "1" ]
+                        [ Some "2"; Some "0"; Some "0" ]
+                        [ Some "3"; Some "1"; Some "1" ] ]))
+                  "MySQL 8.4.11 OR control distinguishes the empty aggregate group"
+              Expect.equal
+                  (runDefault store
                       "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id GROUP BY i.id HAVING COUNT(i.optional)=0) AS hit FROM count_outer o ORDER BY o.id")
                   (ResultSet(
                       [ "id"; "hit" ],
@@ -653,6 +663,14 @@ let tests =
                       runDefault store
                           "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id GROUP BY i.outer_id HAVING COUNT(i.optional)=0) FROM count_outer o")
               Expect.isLessThan groupedExamined 400L "fixed-key grouped nullable COUNT checks group presence by index"
+              for groupClause in [ ""; " GROUP BY i.outer_id" ] do
+                  for presentArgument in [ "*"; "i.id" ] do
+                      let query =
+                          "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id"
+                          + groupClause
+                          + " HAVING COUNT(i.optional)=0 AND COUNT(" + presentArgument + ")>0) FROM count_outer o"
+                      let _, mixedExamined = withExaminedRows (fun () -> runDefault store query)
+                      Expect.isLessThan mixedExamined 400L "mixed nullable and matched-row counts share planned work"
 
           testCase "correlated EXISTS counts indexed matches for integer HAVING thresholds"
           <| fun _ ->
