@@ -9557,8 +9557,8 @@ and private isPlainRowPredicate (expression: Expr) : bool =
     | Between(value, lower, upper) -> List.forall isPlainRowPredicate [ value; lower; upper ]
     | _ -> false
 
-/// Splits a subquery into top-level `outer.column = inner.column`
-/// conjuncts and a remainder that references only its own sources. Grouping
+/// Splits a subquery's WHERE and inner-join ON clauses into top-level
+/// `outer.column = inner.column` conjuncts and a local remainder. Grouping
 /// the remainder by the inner keys yields every outer row's match count.
 and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : (Expr list * SelectStmt) option =
     let isPlainBlock =
@@ -9576,8 +9576,8 @@ and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : 
         && select.From.IsSome
         && (select.Joins |> List.forall (fun join -> join.Using.IsEmpty && isPlainRowPredicate join.On))
 
-    match selectSubqueryScope outer.Store outer.DbName select, select.Where with
-    | Some scope, Some where when isPlainBlock ->
+    match selectSubqueryScope outer.Store outer.DbName select with
+    | Some scope when isPlainBlock ->
         let isInner (qualifier: string) = scope.Qualifiers.Contains(qualifier.ToLowerInvariant())
 
         let correlation =
@@ -9589,8 +9589,36 @@ and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : 
                 | _ -> None
             | _ -> None
 
-        let correlated, remainder =
-            conjuncts where |> List.partition (correlation >> Option.isSome)
+        let whereConjuncts = select.Where |> Option.toList |> List.collect conjuncts
+        let whereKeys, remainder =
+            whereConjuncts |> List.partition (correlation >> Option.isSome)
+        let initialQualifiers =
+            select.From
+            |> Option.bind FromItem.tryQualifier
+            |> Option.map (fun name -> Set.singleton (name.ToLowerInvariant()))
+            |> Option.defaultValue Set.empty
+        let joins, onKeys =
+            select.Joins
+            |> List.mapFold (fun available join ->
+                let available =
+                    join.Table
+                    |> FromItem.tryQualifier
+                    |> Option.map (fun name -> Set.add (name.ToLowerInvariant()) available)
+                    |> Option.defaultValue available
+                let eligibleOnKey expression =
+                    match correlation expression with
+                    | Some(_, QualifiedCol(qualifier, _)) -> Set.contains (qualifier.ToLowerInvariant()) available
+                    | _ -> false
+                let rewritten, keys =
+                    match join.Kind with
+                    | InnerJoin | StraightJoin when join.Using.IsEmpty ->
+                        let keys, local = conjuncts join.On |> List.partition eligibleOnKey
+                        { join with On = combineConjuncts local |> Option.defaultValue (Lit(VInt 1L)) }, keys
+                    | _ -> join, []
+                (rewritten, keys), available) initialQualifiers
+            |> fst
+            |> List.unzip
+        let correlated = whereKeys @ (onKeys |> List.concat)
 
         match correlated with
         | _ :: _ when remainder |> List.forall isPlainRowPredicate ->
@@ -9613,6 +9641,7 @@ and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : 
                 { select with
                     Projections = keyProjections @ [ countProjection ]
                     Distinct = false
+                    Joins = joins
                     Where = combineConjuncts remainder
                     GroupBy = innerKeys
                     OrderBy = [] }

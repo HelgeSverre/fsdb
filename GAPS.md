@@ -2392,6 +2392,10 @@ matches for [multiple exact integer equality keys](torture/findings/2026-11-06-j
 once per statement. The pinned MySQL rows cover duplicate inner pairs, misses,
 and NULL keys; a 205-row outer control stays below 250 examined rows. Coercive
 and noninteger outer keys still use ordinary per-row comparison.
+The same [key-tuple path now accepts eligible inner-join `ON` correlations](torture/findings/2026-11-06-correlated-inner-join-on-keys.md),
+including a tuple split between `ON` and `WHERE`; outer-join `ON` predicates
+retain their original semantics. The 205-row control stays below 250
+examined rows.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

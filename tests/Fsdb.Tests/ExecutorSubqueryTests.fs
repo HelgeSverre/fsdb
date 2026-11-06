@@ -79,6 +79,41 @@ let tests =
                     | other -> failtestf "expected pair counts, got %A" other
                     Expect.isLessThan bulkExamined 250L "200 misses do not rescan the joined inner side"
 
+                testCase "correlated equalities in inner JOIN ON share one pass"
+                <| fun _ ->
+                    let store = newStore ()
+                    for sql in
+                        [ "CREATE TABLE on_outer (a BIGINT UNSIGNED,b BIGINT UNSIGNED)"
+                          "CREATE TABLE on_inner (a BIGINT UNSIGNED,b BIGINT UNSIGNED)"
+                          "CREATE TABLE on_marker (id INT PRIMARY KEY)"
+                          "INSERT INTO on_outer VALUES(1,1),(1,2),(2,1),(2,2),(NULL,1)"
+                          "INSERT INTO on_inner VALUES(1,1),(1,1),(1,2),(2,1),(NULL,1)"
+                          "INSERT INTO on_marker VALUES(1)" ] do
+                        runDefault store sql |> ignore
+                    let sql = "SELECT o.a,o.b,(SELECT COUNT(*) FROM on_inner i JOIN on_marker m ON m.id=1 AND i.a=o.a AND i.b=o.b) c FROM on_outer o ORDER BY o.a IS NULL,o.a,o.b"
+                    let result, examined = withExaminedRows (fun () -> runDefault store sql)
+                    Expect.equal result (ResultSet([ "a"; "b"; "c" ], [ [ Some "1"; Some "1"; Some "2" ]; [ Some "1"; Some "2"; Some "1" ]; [ Some "2"; Some "1"; Some "1" ]; [ Some "2"; Some "2"; Some "0" ]; [ None; Some "1"; Some "0" ] ])) "pinned MySQL 8.4.11 rows"
+                    Expect.isLessThan examined 25L "the ON equality uses a statement-local pair key"
+                    Expect.equal
+                        (runDefault store "SELECT o.a,o.b FROM on_outer o WHERE EXISTS(SELECT 1 FROM on_inner i JOIN on_marker m ON m.id=1 AND i.a=o.a AND i.b=o.b) ORDER BY o.a,o.b")
+                        (ResultSet([ "a"; "b" ], [ [ Some "1"; Some "1" ]; [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ]))
+                        "ON-correlated EXISTS membership"
+                    Expect.equal
+                        (runDefault store "SELECT o.a,o.b,(SELECT COUNT(*) FROM on_inner i JOIN on_marker m ON m.id=1 AND i.a=o.a WHERE i.b=o.b) c FROM on_outer o ORDER BY o.a IS NULL,o.a,o.b")
+                        result
+                        "WHERE and ON keys combine into one tuple"
+                    Expect.equal
+                        (runDefault store "SELECT o.a,o.b,(SELECT COUNT(*) FROM on_inner i LEFT JOIN on_marker m ON m.id=1 AND i.a=o.a AND i.b=o.b) c FROM on_outer o ORDER BY o.a IS NULL,o.a,o.b")
+                        (ResultSet([ "a"; "b"; "c" ], [ [ Some "1"; Some "1"; Some "5" ]; [ Some "1"; Some "2"; Some "5" ]; [ Some "2"; Some "1"; Some "5" ]; [ Some "2"; Some "2"; Some "5" ]; [ None; Some "1"; Some "5" ] ]))
+                        "LEFT JOIN ON correlation cannot filter preserved inner rows"
+                    match runDefault store "SELECT (SELECT COUNT(*) FROM on_inner i JOIN on_marker m ON future.a=o.a JOIN on_inner future ON future.a=i.a) FROM on_outer o" with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "a future JOIN alias is unavailable in an earlier ON clause, got %A" other
+                    let extra = [ 100 .. 299 ] |> List.map (sprintf "(%d,1)") |> String.concat ","
+                    runDefault store ("INSERT INTO on_outer VALUES " + extra) |> ignore
+                    let _, bulkExamined = withExaminedRows (fun () -> runDefault store sql)
+                    Expect.isLessThan bulkExamined 250L "ON correlation does not rescan for 200 misses"
+
                 testCase "EXISTS and NOT EXISTS over a join follow the same keys"
                 <| fun _ ->
                     let existsSql negate =
