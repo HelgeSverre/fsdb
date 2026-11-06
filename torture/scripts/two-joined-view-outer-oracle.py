@@ -190,6 +190,16 @@ def main():
                     expected, actual = (execute(connection, sql) for connection in connections)
                     assert actual == expected and not isinstance(expected, tuple), (sql, expected, actual)
                 cases = [
+                    "UPDATE link l NATURAL LEFT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc) "
+                    "SET vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE l.id=1",
+                    "UPDATE link l NATURAL LEFT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc) "
+                    "SET vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE l.id=2",
+                    "UPDATE link l NATURAL LEFT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc) "
+                    "SET vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE l.id=3",
+                    "UPDATE link l NATURAL RIGHT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc) "
+                    "SET vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE vb.id=3",
+                    "UPDATE link l NATURAL LEFT JOIN (vb_unique vb NATURAL RIGHT JOIN vc_unique vc) "
+                    "SET vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE l.id=2",
                     "WITH c AS (SELECT id FROM link) UPDATE c "
                     "JOIN LATERAL (SELECT c.id AS link_id) q ON TRUE "
                     "JOIN va ON q.link_id=va.link_id SET va.n=va.n+1 WHERE c.id=1",
@@ -645,6 +655,11 @@ def main():
                 )
                 independent_view_cases.append(
                     ([("a", 1), ("b", 1), ("d", 1), ("e", 1)], four_view_dependent)
+                )
+                independent_view_cases.append(
+                    ([("b", 1), ("d", 1)],
+                     "UPDATE link l NATURAL LEFT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc) "
+                     "SET vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE l.id=1")
                 )
                 for held_rows, sql in independent_view_cases:
                     expected = independently_held_update(

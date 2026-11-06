@@ -1149,6 +1149,21 @@ let tests =
               Expect.equal (rows store "SELECT id,n FROM three_view_b ORDER BY id") [ [ Some "1"; Some "31" ]; [ Some "3"; Some "41" ] ] "second view target"
               Expect.equal (rows store "SELECT id,n FROM three_view_c ORDER BY id") [ [ Some "1"; Some "51" ]; [ Some "2"; Some "60" ]; [ Some "3"; Some "71" ] ] "third view target"
 
+              for rowId, affected in [ 1, 2UL; 2, 0UL; 3, 2UL ] do
+                  let sql =
+                      "UPDATE three_view_link l NATURAL LEFT JOIN "
+                      + "(three_vb vb NATURAL LEFT JOIN three_vc vc) "
+                      + "SET vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE l.id=" + string rowId
+                  Expect.equal (run store sql) (Affected affected) "a grouped writable right operand updates matched physical rows"
+              Expect.equal
+                  (rows store "SELECT id,n FROM three_view_b ORDER BY id")
+                  [ [ Some "1"; Some "32" ]; [ Some "3"; Some "42" ] ]
+                  "the nested second view writes only matched rows"
+              Expect.equal
+                  (rows store "SELECT id,n FROM three_view_c ORDER BY id")
+                  [ [ Some "1"; Some "52" ]; [ Some "2"; Some "60" ]; [ Some "3"; Some "72" ] ]
+                  "the nested third view writes only matched rows"
+
           testCase "grouped outer UPDATE source retains two writable joined views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -24617,6 +24617,23 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
     let conjunction = function
         | [] -> Lit(VInt 1L)
         | first :: rest -> rest |> List.fold (fun soFar next -> BinOp(And, soFar, next)) first
+    let writesView (source: TableRef) (view: UpdatableView) =
+        let qualifier = source.Alias |> Option.defaultValue source.Table
+        update.Assignments
+        |> List.exists (fun assignment ->
+            match assignment.Table with
+            | Some owner -> equalsIgnoreCase owner qualifier
+            | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
+    let precedingSource prior =
+        match prior with
+        | [] -> FromTable update.From
+        | earlier -> FromJoinGroup(FromTable update.From, List.rev earlier)
+    let reverseOuterJoin = function
+        | LeftJoin -> RightJoin
+        | RightJoin -> LeftJoin
+        | NaturalLeftJoin -> NaturalRightJoin
+        | NaturalRightJoin -> NaturalLeftJoin
+        | kind -> kind
 
     let rec move (prior: Join list) (remaining: Join list) =
         match remaining with
@@ -24627,24 +24644,9 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->
                 let qualifier = source.Alias |> Option.defaultValue source.Table
-                let writesView =
-                    update.Assignments
-                    |> List.exists (fun assignment ->
-                        match assignment.Table with
-                        | Some owner -> equalsIgnoreCase owner qualifier
-                        | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
-                if writesView then
-                    let preceding =
-                        match prior with
-                        | [] -> FromTable update.From
-                        | earlier -> FromJoinGroup(FromTable update.From, List.rev earlier)
-                    let reversedKind =
-                        match join.Kind with
-                        | LeftJoin -> RightJoin
-                        | RightJoin -> LeftJoin
-                        | NaturalLeftJoin -> NaturalRightJoin
-                        | NaturalRightJoin -> NaturalLeftJoin
-                        | kind -> kind
+                if writesView source view then
+                    let preceding = precedingSource prior
+                    let reversedKind = reverseOuterJoin join.Kind
                     let groupedNatural =
                         (join.Kind = NaturalLeftJoin || join.Kind = NaturalRightJoin)
                         && not prior.IsEmpty
@@ -24737,14 +24739,7 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
             | Some view ->
                 let qualifier = source.Alias |> Option.defaultValue source.Table
-                let writesView =
-                    update.Assignments
-                    |> List.exists (fun assignment ->
-                        match assignment.Table with
-                        | Some owner -> equalsIgnoreCase owner qualifier
-                        | None -> Map.containsKey (assignment.Column.ToLowerInvariant()) view.Targets)
-
-                if not writesView then
+                if not (writesView source view) then
                     move (join :: prior) rest
                 else
                     // Keep the old first source before its prior joins, so
@@ -24890,6 +24885,22 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             // assigned view, so that the first view can expand before the
             // second one without losing the outer-join boundary.
             move (join :: prior) rest
+        | ({ Table = FromJoinGroup(FromTable source, innerJoins) } as join) :: rest
+            when join.Kind = LeftJoin || join.Kind = RightJoin
+                 || join.Kind = NaturalLeftJoin || join.Kind = NaturalRightJoin ->
+            let viewDatabase = source.Database |> Option.defaultValue defaultDatabase
+            match if isCte source then None else tryUpdatableView store viewDatabase source.Table with
+            | Some view ->
+                if writesView source view then
+                    // A LEFT join to the whole group is a RIGHT join from the
+                    // group to the preceding source. Keep the group's inner
+                    // joins together before reversing that outer edge.
+                    let preceding = precedingSource prior
+                    let reversedKind = reverseOuterJoin join.Kind
+                    let moved = { join with Kind = reversedKind; Table = preceding }
+                    { update with From = source; Joins = innerJoins @ (moved :: rest) }
+                else move (join :: prior) rest
+            | None -> move (join :: prior) rest
         | ({ Table = FromJoinGroup _ } as join) :: rest
             when join.Kind = InnerJoin || join.Kind = CrossJoin || join.Kind = StraightJoin
                  || join.Kind = LeftJoin || join.Kind = RightJoin ->

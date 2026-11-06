@@ -112,3 +112,22 @@ that key tracking alone exposes a second limitation: nested writable views
 inside the group are not expanded, producing 1146 for `probe.vb_unique`.
 This needs a grouped-source view expansion and mutation binding change before
 the grouped matrix can enter the passing oracle.
+
+## Physical source before a grouped pair of writable views
+
+A reduced native probe separated group expansion from merged-key binding.
+`UPDATE (vb_unique vb NATURAL LEFT JOIN vc_unique vc)` already worked.
+`UPDATE link l NATURAL LEFT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc)`
+failed with 1146 because neither nested view was expanded. Moving the
+group's first assigned view to the front, retaining its inner joins, and
+reversing the outer join against the preceding source lets the existing
+view expansion handle both targets.
+
+The maintained MySQL 8.4.11 oracle now passes **159 UPDATE cases and 66
+contended rebases**. The five added value cases cover matched rows, a
+left-only row, a right-preserved grouped row, and a right-preserved inner
+view. A two-holder check confirms the grouped write waits for both physical
+targets and commits the same rebased values. The focused three-view regression checks affected counts and both
+physical tables. The view-first grouped form above still returns 1052 in
+fsdb: the grouped natural keys need mutation binding across the first
+view's expansion.
