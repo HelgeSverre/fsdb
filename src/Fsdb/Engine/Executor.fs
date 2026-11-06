@@ -9348,6 +9348,8 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                 | _ -> false
             let rec safeBoolean = function
                 | IsNull value | IsNotNull value -> safeColumn value
+                | BinOp(NullSafeEq, value, Lit VNull)
+                | BinOp(NullSafeEq, Lit VNull, value) -> safeColumn value
                 | Not value -> safeBoolean value
                 | BinOp((And | Or), left, right) -> safeBoolean left && safeBoolean right
                 | _ -> false

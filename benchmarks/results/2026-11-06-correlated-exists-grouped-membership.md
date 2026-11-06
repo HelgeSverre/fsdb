@@ -48,3 +48,13 @@ all 90 correlated tests pass. `GROUP BY NOT i.outer_id` remains on the
 ordinary path because Boolean coercion of a raw column can warn; its
 examined-row control verifies that it does not enter this shortcut. Other
 computed keys remain open.
+
+## Null-safe equality to NULL
+
+The same indexed membership path now accepts `GROUP BY (i.outer_id <=> NULL)`
+and its reversed-operand form, including Boolean combinations with the
+existing null checks. The grouping expression reads a uniquely bound inner
+column and cannot raise a conversion warning. The 50-by-500 regression
+matches ungrouped membership while examining fewer than 200 rows for each
+form. Native MySQL 8.4.11 agrees on the results and prepared statements.
+Other computed grouping expressions remain on the ordinary path.

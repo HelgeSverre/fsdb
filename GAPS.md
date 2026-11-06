@@ -2260,6 +2260,9 @@ columns, or stars and there is no `HAVING`; its 50-row control falls from
 25,550 examined rows to fewer than
 200. Inner-column `IS NULL` and `IS NOT NULL` grouping keys also retain the
 indexed path, as do [Boolean combinations of those checks](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md#boolean-combinations-of-null-checks).
+The [null-safe equality to NULL form](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md#null-safe-equality-to-null)
+also uses indexed membership, including reversed operands and Boolean
+combinations, with fewer than 200 examined rows on the 50-by-500 control.
 Alias-bound, other expression-grouped, and more complex source
 shapes remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)

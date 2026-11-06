@@ -431,6 +431,9 @@ let tests =
               for groupClause in [ "GROUP BY i.outer_id"; "GROUP BY outer_id LIMIT 1"
                                    "GROUP BY (i.outer_id IS NULL)"; "GROUP BY (outer_id IS NOT NULL) LIMIT 1"
                                    "GROUP BY NOT (i.outer_id IS NULL)"
+                                   "GROUP BY (i.outer_id <=> NULL)"
+                                   "GROUP BY (NULL <=> outer_id) LIMIT 1"
+                                   "GROUP BY NOT (i.outer_id <=> NULL) OR (i.id IS NOT NULL)"
                                    "GROUP BY (i.outer_id IS NULL) OR (i.id IS NOT NULL)"
                                    "GROUP BY (i.outer_id IS NOT NULL) AND NOT (i.id IS NULL) LIMIT 1" ] do
                   let groupedResult, groupedExamined =
