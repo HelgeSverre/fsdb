@@ -34,6 +34,10 @@ the UPDATE's join order. The read-source planner applies the same view-moving
 rewrite as write-target planning before claiming rows, so this form waits and
 rebases as well.
 
+The same source-row wait also holds with autocommit enabled. fsdb routes a
+joined-view UPDATE through an implicit transaction, and its post-wait result
+matches MySQL's zero affected rows without an explicit `BEGIN` on the writer.
+
 Evidence: `uv run --with pymysql torture/scripts/cte-joined-write-oracle.py`
 and the Expecto case `joined view update rechecks a changed read source after
 waiting`.

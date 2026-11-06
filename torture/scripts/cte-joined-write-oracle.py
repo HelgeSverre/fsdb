@@ -259,6 +259,22 @@ def main():
                 assert execute(owner, "SELECT n FROM a WHERE id=1") == ((0,),)
                 execute(owner, "UPDATE source_lock SET flag=1 WHERE id=1")
 
+                execute(owner, "BEGIN")
+                assert execute(owner, "UPDATE source_lock SET flag=0 WHERE id=1") == 1
+                source_result.clear()
+                source_errors.clear()
+                source_wait = threading.Thread(target=update_after_source_change)
+                source_wait.start()
+                time.sleep(0.2)
+                assert source_wait.is_alive(), "autocommit view writer did not wait for source"
+                execute(owner, "COMMIT")
+                source_wait.join(timeout=5)
+                assert not source_wait.is_alive(), "autocommit view writer did not resume"
+                assert not source_errors, source_errors
+                assert source_result == [0], source_result
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((0,),)
+                execute(owner, "UPDATE source_lock SET flag=1 WHERE id=1")
+
                 verify_wait(
                     owner,
                     waiter,

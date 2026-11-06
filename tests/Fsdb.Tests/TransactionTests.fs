@@ -5517,6 +5517,21 @@ let tests =
               Expect.equal result (Affected 0UL) "the committed source no longer matches the read-first join"
               Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the read-first writer commits"
 
+              handle setup "UPDATE tx_source_lookup SET flag=1 WHERE id=1" |> ignore
+              let owner, _ = handle (create 14 store) "BEGIN"
+              let owner, changedSource = handle owner "UPDATE tx_source_lookup SET flag=0 WHERE id=1"
+              Expect.equal changedSource (Affected 1UL) "the owner holds the autocommit writer's source"
+              let waiter = create 15 store
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_source_view SET n=n+1 WHERE id=1 AND flag=1")
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the autocommit source owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the autocommit view writer finishes"
+              let _, result = waiting.GetAwaiter().GetResult()
+              Expect.isTrue blocked (sprintf "the autocommit writer waits for its source; result %A" result)
+              Expect.equal result (Affected 0UL) "the autocommit writer sees the committed predicate"
+
           testCase "JSON_TABLE-first view updates wait on the physical target"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
