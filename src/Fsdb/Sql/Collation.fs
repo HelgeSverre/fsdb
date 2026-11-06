@@ -1718,8 +1718,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                         addWeight (first + codepoint - 0x2FF0)
                     else addImplicit 0xFBC0 codepoint
                 // Legacy UCA 5.2 assigns implicit primaries to the later
-                // ideographic symbols, Tangut, Components, and the later
-                // Supplement span; older tables replace them.
+                // ideographic symbols, Tangut, Khitan Small Script, and the
+                // Tangut supplement blocks; older tables replace them.
                 | None when codepoint >= 0x16FE0 && codepoint <= 0x18DFF && name.StartsWith("utf8mb4_") ->
                     if name = "utf8mb4_unicode_520_ci" then addImplicit 0xFBC0 codepoint
                     else addWeight 0xFFFD

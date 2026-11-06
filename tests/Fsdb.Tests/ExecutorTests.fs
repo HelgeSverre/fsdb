@@ -658,9 +658,12 @@ let tests =
                     let tangutLast = System.Char.ConvertFromUtf32 0x187FF
                     let tangutComponentFirst = System.Char.ConvertFromUtf32 0x18800
                     let tangutComponentLast = System.Char.ConvertFromUtf32 0x18AFF
-                    let tangutReservedFirst = System.Char.ConvertFromUtf32 0x18B00
+                    let khitanFirst = System.Char.ConvertFromUtf32 0x18B00
+                    let khitanLast = System.Char.ConvertFromUtf32 0x18CFF
                     let tangutSupplementFirst = System.Char.ConvertFromUtf32 0x18D00
-                    let tangutSpanLast = System.Char.ConvertFromUtf32 0x18DFF
+                    let tangutSupplementLast = System.Char.ConvertFromUtf32 0x18D7F
+                    let tangutComponentsSupplementFirst = System.Char.ConvertFromUtf32 0x18D80
+                    let tangutComponentsSupplementLast = System.Char.ConvertFromUtf32 0x18DFF
                     let compatibilityBmp = System.Char.ConvertFromUtf32 0x2F800
                     let compatibilitySupplementary = System.Char.ConvertFromUtf32 0x2F803
                     let compatibilityUnassigned = System.Char.ConvertFromUtf32 0x2FA1E
@@ -824,8 +827,10 @@ let tests =
                           ideographicSymbolLast + tangutFirst + tangutLast, "utf8mb4_unicode_ci", "FFFDFFFDFFFD"
                           ideographicSymbolLast + tangutFirst + tangutLast, "utf8mb4_unicode_520_ci", "FBC2EFFFFBC2F000FBC387FF"
                           tangutLast + tangutComponentFirst, "utf8mb4_general_ci", "FFFDFFFD"
-                          tangutComponentLast + tangutReservedFirst + tangutSupplementFirst + tangutSpanLast,
-                              "utf8mb4_unicode_520_ci", "FBC38AFFFBC38B00FBC38D00FBC38DFF"
+                          tangutComponentLast + khitanFirst + khitanLast + tangutSupplementFirst + tangutComponentsSupplementLast,
+                              "utf8mb4_unicode_520_ci", "FBC38AFFFBC38B00FBC38CFFFBC38D00FBC38DFF"
+                          tangutSupplementLast + tangutComponentsSupplementFirst,
+                              "utf8mb4_unicode_520_ci", "FBC38D7FFBC38D80"
                           extensionG + "a", "utf8mb4_unicode_520_ci", "FBC68000120F"
                           compatibilityBmp, "utf8mb4_general_ci", "FFFD"
                           compatibilityBmp, "utf8mb4_unicode_520_ci", "FB40CE3D"

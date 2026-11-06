@@ -1459,7 +1459,8 @@ The [Tangut exact-weight follow-up](torture/findings/2026-11-06-tangut-legacy-we
 matches all 6,144 singleton and 6,143 internal adjacent-pair bytes under
 three legacy `utf8mb4` collations; the U+16FFF/U+17000 boundary is pinned.
 The same audit also matches all 1,536 singleton and 1,535 adjacent-pair
-bytes from U+18800–U+18DFF, including Tangut Components and Supplement.
+bytes from U+18800–U+18DFF, including Tangut Components, Khitan Small Script,
+Tangut Supplement, and Tangut Components Supplement.
 The [Khitan Small Script ngram audit](torture/findings/2026-10-20-khitan-ngram-audit.md)
 finds no two-column membership or relevance differences across the printable
 U+18B00–U+18CFF scalars under general and legacy Unicode collations at token

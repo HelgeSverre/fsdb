@@ -20,6 +20,9 @@ The block-wide lanes total 11,304 searches. The second page has fewer
 searches because the harness excludes non-printable scalars. The other
 collations and token size 3 were sampled on the first page only. The
 harness did not check standalone equality or exact `WEIGHT_STRING()` bytes.
+The [later exact-weight audit](2026-11-06-tangut-legacy-weights.md#tangut-components-khitan-small-script-and-supplements)
+checks all U+18B00–U+18CFF singleton and adjacent-pair bytes in three legacy
+`utf8mb4` collations.
 
 After building `Fsdb.Cli` in Release mode, reproduce each block-wide lane
 with both pages and both collations:
@@ -37,5 +40,5 @@ uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py \
 
 This audit narrows the CJK ngram question for the reported block, collations,
 token sizes, and search modes. MeCab, other token sizes, full-block coverage
-under the other collations, exact legacy weight bytes, and other query shapes
+under the other collations, standalone equality, and other query shapes
 remain open.
