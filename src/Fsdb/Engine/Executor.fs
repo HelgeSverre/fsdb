@@ -9258,6 +9258,9 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
     // Across multiple groups, a total count is valid only when every
     // positive group size gives the same HAVING result.
     let rec countHaving = function
+        | Not expression ->
+            countHaving expression
+            |> Option.map (fun (predicate, groupedSafe) -> (fun count -> not (predicate count)), groupedSafe)
         | BinOp(And, left, right) ->
             match countHaving left, countHaving right with
             | Some(leftPredicate, leftGroupedSafe), Some(rightPredicate, rightGroupedSafe) ->

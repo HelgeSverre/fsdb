@@ -451,7 +451,8 @@ let tests =
                   let grouping = if grouped then " GROUP BY i.outer_id" else ""
                   for having, predicate in
                       [ "COUNT(*)>1 AND COUNT(*)<3", (fun count -> count > 1 && count < 3)
-                        "COUNT(*)=0 OR COUNT(*)=3", (fun count -> count = 0 || count = 3) ] do
+                        "COUNT(*)=0 OR COUNT(*)=3", (fun count -> count = 0 || count = 3)
+                        "NOT (COUNT(*)<=1 OR COUNT(*)>=3)", (fun count -> not (count <= 1 || count >= 3)) ] do
                       let sql =
                           "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id"
                           + grouping + " HAVING " + having + ") AS hit FROM count_outer o ORDER BY o.id"
@@ -581,6 +582,14 @@ let tests =
                       "the combined COUNT bounds preserve membership"
               | other -> failtestf "expected combined COUNT HAVING rows, got %A" other
               Expect.isLessThan combinedExamined 200L "combined COUNT bounds use indexed counts"
+              for grouping in [ ""; " GROUP BY i.outer_id" ] do
+                  let negatedSql =
+                      "SELECT o.id,EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id"
+                      + grouping
+                      + " HAVING NOT (COUNT(*)<=19 OR COUNT(*)>=21)) AS hit FROM exists_outer o ORDER BY o.id"
+                  let negatedResult, negatedExamined = withExaminedRows (fun () -> runDefault store negatedSql)
+                  Expect.equal negatedResult combinedResult "negated COUNT bounds preserve membership"
+                  Expect.isLessThan negatedExamined 200L "negated COUNT bounds use indexed counts"
               for projection in [ "i.id"; "i.outer_id"; "i.*"; "*"
                                   "i.outer_id IS NULL"; "i.outer_id IS NOT NULL"
                                   "i.outer_id <=> NULL"; "NOT (i.outer_id IS NULL)" ] do

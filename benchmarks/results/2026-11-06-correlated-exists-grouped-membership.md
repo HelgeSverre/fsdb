@@ -99,6 +99,14 @@ grouped shortcut remains conservative: each leaf must independently have a
 constant truth value for positive group sizes. The pinned MySQL 8.4.11 oracle
 confirms ordinary and prepared results.
 
+The same guarded path now accepts `NOT` around eligible comparisons and
+`AND`/`OR` combinations. On the 50-by-500 fixture,
+`NOT (COUNT(*) <= 19 OR COUNT(*) >= 21)` previously examined 550 rows;
+the indexed count examines fewer than 200, with or without grouping by the
+correlated integer key. A zero-to-three-row fixture and the MySQL 8.4.11
+oracle check the negated truth table, including empty grouped sources. This
+is an examined-row result, not a latency measurement.
+
 ## Positive COUNT HAVING membership
 
 An `EXISTS` projection of literals with no `ORDER BY` and
