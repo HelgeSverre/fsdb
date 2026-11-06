@@ -1,9 +1,9 @@
-# Preview operations
+# Operations
 
 FSDB's WAL-backed mode is opt-in (`fsdb --data-dir PATH`). The data directory
 contains the catalog, user accounts, WAL, and snapshots. Treat it as a single
 unit, restrict write access to the FSDB process account, and keep a separate
-copy before upgrades. The preview format has recovery tests, but no supported
+copy before upgrades. The storage format has recovery tests, but no supported
 online backup or cross-version migration guarantee yet.
 
 ## Back up and restore
@@ -29,7 +29,7 @@ Record the current FSDB version and back up the stopped data directory. Copy
 it to a staging directory, then start the proposed version against that copy.
 Run application reads and writes, stop it cleanly, and reopen it with the same
 version to exercise replay and checkpoint loading. Promote only after those
-checks succeed. Do not open the original directory with a new preview version
+checks succeed. Do not open the original directory with a new version
 until the staging restore has passed; downgrade compatibility is not promised.
 
 ## Performance gate

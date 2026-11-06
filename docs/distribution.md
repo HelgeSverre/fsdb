@@ -2,10 +2,10 @@
 
 `src/Fsdb/Fsdb.fsproj` produces the `Fsdb` NuGet library for .NET 10.
 `src/Fsdb.Cli/Fsdb.Cli.fsproj` produces the server executable and is not part
-of the library package. `0.1.0-preview.1` was the first published release;
-the current source targets `0.1.0-preview.50`. Its public embedding entry point is `Fsdb.Db`.
-This is a prerelease interface: package consumers should expect API changes
-before a stable release.
+of the library package. `0.1.0-preview.1` was the first published preview;
+the current source targets the first stable package, `0.1.0`. Its public
+embedding entry point is `Fsdb.Db`. Later minor versions may evolve the API
+and storage format; test a copy of durable data before upgrading.
 
 Run `just check` and `just package-check` before releasing. The package check
 builds both `.nupkg` and `.snupkg`, then restores
@@ -39,5 +39,5 @@ verifies package consumption, and packs from that commit. It then exchanges a
 GitHub OIDC token for a short-lived NuGet key and pushes the package and symbol
 package. No long-lived NuGet key is stored in the repository or GitHub Actions.
 
-NuGet package versions cannot be reused after publication. Advance the preview
-number in the library, CLI, and package consumer before tagging a later release.
+NuGet package versions cannot be reused after publication. Advance the version
+in the library, CLI, and package consumer before tagging a later release.

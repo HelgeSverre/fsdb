@@ -8,5 +8,5 @@ fsdb's source tree.
 
 Run `just package-check` from the repository root to build the current package
 and restore this example from an isolated local package cache. After the
-matching preview version is published, `dotnet run --project
+matching version is published, `dotnet run --project
 examples/PackageConsumer` also works with normal NuGet sources.

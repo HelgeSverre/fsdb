@@ -628,8 +628,8 @@ replication, lives in [GAPS.md](GAPS.md). The
 
 `--data-dir` stores two files, both binary (no JSON). Durable mode uses POSIX
 `fsync` through libc on Unix and the managed durable file flush on Windows.
-For stopped-directory backups, restore checks, and preview upgrade procedure,
-see [preview operations](docs/operations.md).
+For stopped-directory backups, restore checks, and upgrade procedure,
+see [operations](docs/operations.md).
 
 The data directory is a trusted input with the same authority as the server
 process. CRC-32 detects torn or accidentally corrupted records; it does not
@@ -691,7 +691,7 @@ thresholds with `wal_rotate_bytes` and `wal_rotate_entries`.
 
 ## Embedding & extensibility
 
-`Fsdb` is also built as a .NET 10 library package. Preview releases are
+`Fsdb` is also built as a .NET 10 library package. Releases are
 [published on nuget.org](https://www.nuget.org/packages/Fsdb/).
 Run `just package-check` to pack the current source
 and exercise it through the package-only F# example with an isolated NuGet
