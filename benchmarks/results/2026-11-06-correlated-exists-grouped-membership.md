@@ -6,8 +6,8 @@ correlated inner key returned the correct membership values but examined
 25,550 rows. The indexed membership path examines fewer than 200 rows on
 that fixture after this change.
 
-The shortcut accepts grouping only when every projection is a literal,
-plain inner column, or inner-source star, there is no `HAVING`, and each
+The initial shortcut accepted grouping when every projection was a literal,
+plain inner column, or inner-source star, there was no `HAVING`, and each
 grouping key resolves to a unique column of
 the single inner source or a null check of one. A bare key shadowed by a projection alias stays on
 the ordinary path. Other limits, offsets, source shapes, and expressions
@@ -58,3 +58,18 @@ column and cannot raise a conversion warning. The 50-by-500 regression
 matches ungrouped membership while examining fewer than 200 rows for each
 form. Native MySQL 8.4.11 agrees on the results and prepared statements.
 Other computed grouping expressions remain on the ordinary path.
+
+## Null-check projections over grouped EXISTS
+
+Grouped `EXISTS` now uses the same validated inner-column null-check grammar
+for its projection as for its grouping key: `IS NULL`, `IS NOT NULL`,
+`<=> NULL`, and Boolean `NOT`/`AND`/`OR` combinations. These projections
+cannot raise a conversion warning, and `EXISTS` needs only the group’s
+presence. The 50-by-500 indexed fixture stays below 200 examined rows for
+each audited form, including matched and unmatched outer keys. A coercing
+`NOT inner_column` projection stays above 500 examined rows on the ordinary
+path; an unknown projected column retains error 1054.
+
+Native MySQL 8.4.11 agrees on the audited results and prepared forms. All
+90 correlated tests pass. No latency claim is made from the examined-row
+counter alone.

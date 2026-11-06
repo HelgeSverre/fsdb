@@ -2262,7 +2262,8 @@ fewer than 200. [Validated inner-only computed order keys](benchmarks/results/20
 also use the indexed path, including mixed arithmetic and built-in function
 keys. [Inner-column grouped membership](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md)
 now uses the indexed path when projections are literals, plain inner
-columns, or stars and there is no `HAVING`; its 50-row control falls from
+columns, stars, or [validated null-check expressions](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md#null-check-projections-over-grouped-exists)
+and there is no `HAVING`; its 50-row control falls from
 25,550 examined rows to fewer than
 200. Inner-column `IS NULL` and `IS NOT NULL` grouping keys also retain the
 indexed path, as do [Boolean combinations of those checks](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md#boolean-combinations-of-null-checks).

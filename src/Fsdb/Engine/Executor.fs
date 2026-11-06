@@ -9238,20 +9238,8 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | None | Some(Lit(VInt 0L)) | Some(Lit(VUInt 0UL)) -> true
         | _ -> false
 
-    // Grouping cannot change EXISTS membership when projections only read
-    // columns, there is no HAVING, and every group key is a validated inner
-    // column or an error-free Boolean combination of inner null checks.
-    let groupedMembershipShape =
-        select.GroupBy.IsEmpty
-        || (select.Projections
-            |> List.forall (fun projection ->
-                match projection.Expression with
-                | Lit _ | Col _ | QualifiedCol _ | Star _ -> true
-                | _ -> false))
-
     let plainShape =
         select.Joins.IsEmpty
-        && groupedMembershipShape
         && select.Having.IsNone
         && (not select.Distinct || select.OrderBy.IsEmpty)
         && membershipLimit
@@ -9354,6 +9342,16 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                 | BinOp((And | Or), left, right) -> safeBoolean left && safeBoolean right
                 | _ -> false
             safeColumn expression || safeBoolean expression
+        // A pure inner-column null check is as safe to discard from an EXISTS
+        // projection as it is from a grouping key. Reuse the same binding and
+        // warning checks instead of maintaining a second expression list.
+        let groupedMembershipShape =
+            select.GroupBy.IsEmpty
+            || (select.Projections
+                |> List.forall (fun projection ->
+                    match projection.Expression with
+                    | Lit _ | Col _ | QualifiedCol _ | Star _ -> true
+                    | expression -> groupIsSafe expression))
         let bindingsAreSafe =
             let memo = currentStatementMemo ()
             if memo.InnerExistsProjections.ContainsKey select then true
@@ -9400,7 +9398,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                                     qualifiers
                             qualifiers.Add scopeQualifiers |> ignore
                     safe
-        if not bindingsAreSafe then None
+        if not groupedMembershipShape || not bindingsAreSafe then None
         else
             tryCorrelatedEqualityCount outer source select.Where
             |> Option.map (fun count -> Ok(boolToValue (count > 0)))

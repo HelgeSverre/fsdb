@@ -446,12 +446,22 @@ let tests =
                       runDefault store "SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id GROUP BY NOT i.outer_id) AS hit FROM exists_outer o ORDER BY o.id")
               Expect.equal coercedResult result "raw-column Boolean coercion preserves membership"
               Expect.isGreaterThan coercedExamined 500L "coercing a raw column retains normal evaluation"
-              for projection in [ "i.id"; "i.outer_id"; "i.*"; "*" ] do
+              for projection in [ "i.id"; "i.outer_id"; "i.*"; "*"
+                                  "i.outer_id IS NULL"; "i.outer_id IS NOT NULL"
+                                  "i.outer_id <=> NULL"; "NOT (i.outer_id IS NULL)" ] do
                   let projectedResult, projectedExamined =
                       withExaminedRows (fun () ->
                           runDefault store ("SELECT o.id, EXISTS(SELECT " + projection + " FROM exists_inner i WHERE i.outer_id=o.id GROUP BY i.outer_id) AS hit FROM exists_outer o ORDER BY o.id"))
                   Expect.equal projectedResult result "grouped EXISTS ignores a plain inner projection"
                   Expect.isLessThan projectedExamined 200L "grouped projected EXISTS uses indexed membership"
+              let coercedProjection, coercedProjectionExamined =
+                  withExaminedRows (fun () ->
+                      runDefault store "SELECT o.id, EXISTS(SELECT NOT i.outer_id FROM exists_inner i WHERE i.outer_id=o.id GROUP BY i.outer_id) AS hit FROM exists_outer o ORDER BY o.id")
+              Expect.equal coercedProjection result "a coercing grouped projection preserves membership"
+              Expect.isGreaterThan coercedProjectionExamined 500L "coercing grouped projections retain normal evaluation"
+              match runDefault store "SELECT EXISTS(SELECT i.missing IS NULL FROM exists_inner i WHERE i.outer_id=1 GROUP BY i.outer_id)" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected unknown grouped EXISTS projection column, got %A" other
               match runDefault store "SELECT EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=1 GROUP BY i.missing)" with
               | Err(1054, _) -> ()
               | other -> failtestf "expected unknown GROUP BY column in EXISTS, got %A" other
