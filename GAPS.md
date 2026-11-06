@@ -1648,8 +1648,11 @@ now keep hiragana and katakana postings separate under
 `utf8mb4_ja_0900_as_cs_ks`; the maintained 387-search two-column corpus
 matches MySQL at all startup token sizes 1–10 after accounting for
 compatibility ideograph weight classes. The range-specific probes retain
-their size-one and size-two scope. Broader
-Japanese collation and parser behavior remains open.
+their size-one and size-two scope. The [complete U+3040–U+30FF kana order
+audit](torture/findings/2026-11-06-japanese-kana-order-and-weights.md) matches
+11,520 searches plus ordering and indexed ranges at sizes 1–10; all 192
+audited exact `WEIGHT_STRING` bytes still differ. Broader Japanese collation
+and parser behavior remains open.
 
 The [Boolean query Unicode character-table gap](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md)
 is closed for audited cases: Boolean word and phrase boundaries now use

@@ -124,12 +124,11 @@ let private substringExpansions =
       "ĳ", "ij"
       "Ĳ", "IJ" ]
 
-let private foldKanaVariants (value: string) =
+let private normalizeHalfwidthKana (value: string) =
     let isHalfwidthKana (c: char) = c >= '\uFF61' && c <= '\uFF9F'
-    let isHiragana (c: char) = c >= '\u3041' && c <= '\u3096'
     let mutable first = 0
 
-    while first < value.Length && not (isHalfwidthKana value.[first] || isHiragana value.[first]) do
+    while first < value.Length && not (isHalfwidthKana value.[first]) do
         first <- first + 1
 
     if first = value.Length then
@@ -147,27 +146,37 @@ let private foldKanaVariants (value: string) =
                     index <- index + 1
 
                 result.Append(value.Substring(start, index - start).Normalize(NormalizationForm.FormKC)) |> ignore
-            elif isHiragana value.[index] then
-                result.Append(char (int value.[index] + 0x60)) |> ignore
-                index <- index + 1
             else
                 result.Append(value.[index]) |> ignore
                 index <- index + 1
 
         result.ToString()
 
+let private foldKanaVariants (value: string) =
+    let value = normalizeHalfwidthKana value
+    let isHiragana (c: char) = c >= '\u3041' && c <= '\u3096'
+    if not (value |> Seq.exists isHiragana) then value
+    else
+        value.ToCharArray()
+        |> Array.map (fun c -> if isHiragana c then char (int c + 0x60) else c)
+        |> String
+
+let private normalizeJapaneseKana (value: string) =
+    let value = normalizeHalfwidthKana value
+    if value.Contains('\u3099') || value.Contains('\u309A') then
+        value.Normalize(NormalizationForm.FormC)
+    else value
+
 // ICU's Japanese sort key merges kana scripts even for MySQL's `_ks` variant.
-// Compose dakuten first so both spellings of a voiced hiragana receive one key.
-let private markJapaneseHiragana (value: string) =
-    let value =
-        if value.Contains('\u3099') || value.Contains('\u309A') then
-            value.Normalize(NormalizationForm.FormC)
-        else value
+// Full-text keys retain a separate marker for katakana while sort order uses
+// the unmarked base key followed by a script-level tie-break.
+let private markJapaneseKatakana (value: string) =
+    let value = normalizeJapaneseKana value
     let marker = '\uE0B8'
-    let isHiragana (c: char) =
-        (c >= '\u3041' && c <= '\u3096') || c = '\u309D' || c = '\u309E'
+    let isKatakana (c: char) =
+        (c >= '\u30A1' && c <= '\u30FA') || c = '\u30FD' || c = '\u30FE'
     let mutable first = 0
-    while first < value.Length && not (isHiragana value.[first] || value.[first] = marker) do
+    while first < value.Length && not (isKatakana value.[first] || value.[first] = marker) do
         first <- first + 1
 
     if first = value.Length then value
@@ -177,7 +186,7 @@ let private markJapaneseHiragana (value: string) =
         for index in first .. value.Length - 1 do
             let c = value.[index]
             result.Append(c) |> ignore
-            if isHiragana c || c = marker then result.Append(marker) |> ignore
+            if isKatakana c || c = marker then result.Append(marker) |> ignore
         result.ToString()
 
 // MySQL 8.4 Japanese UCA weights distinguish most compatibility ideographs
@@ -1546,7 +1555,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
 
     let foldText (value: string) =
         match name with
-        | "utf8mb4_ja_0900_as_cs_ks" -> value |> markJapaneseHiragana |> foldJapaneseCompatibility
+        | "utf8mb4_ja_0900_as_cs_ks" -> value |> markJapaneseKatakana |> foldJapaneseCompatibility
         | "utf8mb4_general_ci" -> foldGeneral true value
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci" ->
@@ -1565,6 +1574,18 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                   |> foldKanaVariants |> foldSmallKana |> foldUnicodeQuoteForms
                   |> foldLegacyUnicodeJamo
         | _ -> value
+
+    let japaneseKanaKey (value: string) =
+        let value = normalizeJapaneseKana value
+        let script =
+            value
+            |> Seq.choose (fun c ->
+                if (c >= '\u3041' && c <= '\u3096') || c = '\u309D' || c = '\u309E' then Some 0uy
+                elif (c >= '\u30A1' && c <= '\u30FA') || c = '\u30FD' || c = '\u30FE' then Some 1uy
+                else None)
+            |> Seq.toArray
+        let baseKey = ci.GetSortKey(foldJapaneseCompatibility value, spec.Fold).KeyData
+        Array.append baseKey script
 
     let primaryText (s: string) = s |> foldText |> trim
     let fullTextKeyText (s: string) =
@@ -1843,6 +1864,16 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     addImplicit lead codepoint
             if supported then Some(bytes.ToArray()) else None
 
+    let comparePrimary (a: string) (b: string) : int =
+        if String.Equals(a, b, StringComparison.Ordinal) then
+            0
+        elif spec.ByteOrder then
+            compareBinary a b
+        elif name = "utf8mb4_ja_0900_as_cs_ks" then
+            (japaneseKanaKey (trim a)).AsSpan().SequenceCompareTo((japaneseKanaKey (trim b)).AsSpan())
+        else
+            ci.Compare(primaryText a, primaryText b, spec.Fold)
+
     let compareFull (a: string) (b: string) : int =
         if String.Equals(a, b, StringComparison.Ordinal) then
             0
@@ -1852,7 +1883,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             // first (MySQL-verified), same tie-break as the ICU branch.
             if c <> 0 then c else countTrailingSpaces b - countTrailingSpaces a
         else
-            let primary = ci.Compare(primaryText a, primaryText b, spec.Fold)
+            let primary = comparePrimary a b
 
             if primary <> 0 then
                 primary
@@ -1866,14 +1897,6 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 else
                     0
 
-    let comparePrimary (a: string) (b: string) : int =
-        if String.Equals(a, b, StringComparison.Ordinal) then
-            0
-        elif spec.ByteOrder then
-            compareBinary a b
-        else
-            ci.Compare(primaryText a, primaryText b, spec.Fold)
-
     { Name = name
       Compare = compareFull
       ComparePrimary = comparePrimary
@@ -1882,6 +1905,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         fun s ->
             if spec.ByteOrder then
                 "B" + Convert.ToHexString(binaryBytes s)
+            elif name = "utf8mb4_ja_0900_as_cs_ks" then
+                Convert.ToHexString(japaneseKanaKey (trim s))
             else
                 Convert.ToHexString(ci.GetSortKey(primaryText s, spec.Fold).KeyData)
       FullTextKeyOf =
@@ -1901,11 +1926,15 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         fun s ->
             if spec.ByteOrder then
                 hash (binaryBytes s)
+            elif name = "utf8mb4_ja_0900_as_cs_ks" then
+                hash (japaneseKanaKey (trim s))
             else
                 ci.GetHashCode(primaryText s, spec.Fold)
       CharEquals =
         if spec.ByteOrder then
             fun a b -> binaryBytes (string a) = binaryBytes (string b)
+        elif name = "utf8mb4_ja_0900_as_cs_ks" then
+            fun a b -> comparePrimary (string a) (string b) = 0
         else
             fun a b -> ci.Compare(primaryText (string a), primaryText (string b), spec.Fold) = 0
       IsPrefix =

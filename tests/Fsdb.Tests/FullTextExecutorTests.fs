@@ -646,6 +646,20 @@ let tests =
               Expect.equal (search "コ") [ "2" ] "katakana posting remains separate"
               Expect.equal (search "カ") [ "3"; "4" ] "unvoiced width forms share a posting"
 
+          testCase "Japanese kana-sensitive order and indexed range follow MySQL script and voicing levels"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE japanese_order_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_ja_0900_as_cs_ks,KEY ix_body(body(20)))" |> ignore
+              run store "INSERT INTO japanese_order_docs VALUES(1,'ゝ文'),(2,'ヽ文'),(3,'ゞ文'),(4,'ヾ文'),(5,'あ文'),(6,'ア文')" |> ignore
+              Expect.equal
+                  (ids (run store "SELECT id FROM japanese_order_docs ORDER BY body,id"))
+                  [ "1"; "2"; "3"; "4"; "5"; "6" ]
+                  "pinned MySQL 8.4.11 kana order"
+              Expect.equal
+                  (ids (run store "SELECT id FROM japanese_order_docs FORCE INDEX(ix_body) WHERE body < 'ヽ文' ORDER BY id"))
+                  [ "1" ]
+                  "indexed range uses the same collation order"
+
           testCase "Japanese kana-sensitive ngrams distinguish compatibility ideographs"
           <| fun _ ->
               let store = create ()

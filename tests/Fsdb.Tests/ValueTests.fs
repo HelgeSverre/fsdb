@@ -1903,6 +1903,8 @@ let tests =
                 testCase "Japanese kana-sensitive collation distinguishes hiragana from katakana"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_ja_0900_as_cs_ks" |> Option.get
+                    for left, right in [ "あ文", "ア文"; "ゝ文", "ヽ文"; "ゞ文", "ヾ文" ] do
+                        Expect.isLessThan (col.Compare left right) 0 (left + " sorts before " + right + " in MySQL 8.4.11")
                     for left, right in [ "こ", "コ"; "は", "ハ"; "ぱ", "パ" ] do
                         Expect.isFalse (col.Equals left right) (left + " differs from " + right)
                         Expect.notEqual (col.KeyOf left) (col.KeyOf right) "ngram keys retain kana script"
