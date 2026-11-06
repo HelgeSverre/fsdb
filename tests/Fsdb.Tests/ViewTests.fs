@@ -2327,6 +2327,30 @@ let tests =
               expectOk (update ()) "authorized update through derived join"
               Expect.equal (rows store "SELECT n FROM derived_grant_target") [ [ Some "11" ] ] "authorized update reaches the physical target"
 
+          testCase "outer joins to aggregate derived sources make views non-updatable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE outer_derived_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE outer_derived_source(id INT,flag INT)"
+                    "INSERT INTO outer_derived_target VALUES(1,0)"
+                    "INSERT INTO outer_derived_source VALUES(1,7),(1,8)" ] do
+                  expectOk (run store sql) sql
+              for join in [ "LEFT"; "RIGHT" ] do
+                  let viewName = "outer_derived_" + join.ToLowerInvariant ()
+                  let sql =
+                      "CREATE VIEW " + viewName + " AS SELECT a.id,a.n,d.flag FROM "
+                      + "(SELECT id,SUM(flag) flag FROM outer_derived_source GROUP BY id) d "
+                      + join + " JOIN outer_derived_target a ON a.id=d.id"
+                  expectOk (run store sql) sql
+                  Expect.equal
+                      (rows store ("SELECT is_updatable FROM information_schema.views WHERE table_name='" + viewName + "'"))
+                      [ [ Some "NO" ] ] "MySQL marks the outer-joined derived view non-updatable"
+                  match run store ("UPDATE " + viewName + " SET n=n+1 WHERE id=1") with
+                  | Err(1288, _) -> ()
+                  | other -> failtestf "expected non-updatable view error, got %A" other
+              Expect.equal (rows store "SELECT n FROM outer_derived_target") [ [ Some "0" ] ] "rejected updates leave the target unchanged"
+
           testCase "derived-first USING join views update their physical component"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

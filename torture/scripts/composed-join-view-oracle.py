@@ -129,6 +129,25 @@ def main():
                 ]:
                     run(connection, sql)
 
+                for join in ("LEFT", "RIGHT"):
+                    definition = (
+                        "SELECT a.id,a.n,d1.flag FROM "
+                        "(SELECT id,SUM(flag) flag FROM b GROUP BY id) d1 "
+                        f"{join} JOIN a ON a.id=d1.id"
+                    )
+                    run(connection, "CREATE VIEW outer_derived AS " + definition)
+                    assert run(
+                        connection,
+                        "SELECT IS_UPDATABLE FROM information_schema.VIEWS "
+                        "WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='outer_derived'",
+                    ) == (("NO",),), join
+                    assert_error(
+                        connection,
+                        "UPDATE outer_derived SET n=n+1 WHERE id=1",
+                        1288,
+                    )
+                    run(connection, "DROP VIEW outer_derived")
+
                 for name, definition in SHAPES.items():
                     run(connection, "UPDATE a SET n=0")
                     run(connection, "CREATE VIEW v AS " + definition)
