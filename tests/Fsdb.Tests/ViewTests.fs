@@ -424,6 +424,29 @@ let tests =
               | other -> failtestf "expected CHECK OPTION rejection, got %A" other
               Expect.equal (rows store "SELECT n FROM repeated_cte_target WHERE id=1") [ [ Some "1" ] ] "rejection is atomic"
 
+          testCase "EXCEPT and INTERSECT CTE chain keeps a joined target writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE set_view_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE set_view_source(id INT,flag INT)"
+                    "CREATE TABLE set_view_excluded(id INT,flag INT)"
+                    "INSERT INTO set_view_target VALUES(1,0),(2,0)"
+                    "INSERT INTO set_view_source VALUES(1,7),(1,8),(2,9)"
+                    "INSERT INTO set_view_excluded VALUES(1,8)"
+                    "CREATE VIEW set_view_joined AS WITH chosen AS (SELECT id,flag FROM set_view_source EXCEPT SELECT id,flag FROM set_view_excluded), matched AS (SELECT id,flag FROM chosen INTERSECT SELECT id,flag FROM set_view_source) SELECT t.id,t.n,matched.flag FROM matched JOIN set_view_target t ON t.id=matched.id WHERE t.n>=0 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='set_view_joined'")
+                  [ [ Some "YES" ] ]
+                  "the set-operation read side leaves the physical target writable"
+              Expect.equal (rows store "SELECT id,n,flag FROM set_view_joined ORDER BY id") [ [ Some "1"; Some "0"; Some "7" ]; [ Some "2"; Some "0"; Some "9" ] ] "the chained CTEs bind their rows"
+              Expect.equal (run store "UPDATE set_view_joined SET n=3 WHERE id=1") (Affected 1UL) "the target changes once"
+              match run store "UPDATE set_view_joined SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT id,n FROM set_view_target ORDER BY id") [ [ Some "1"; Some "3" ]; [ Some "2"; Some "0" ] ] "rejection is atomic"
+
           testCase "volatile repeated CTE references share one joined read source"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

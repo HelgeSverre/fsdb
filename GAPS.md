@@ -1237,6 +1237,10 @@ also retain a writable joined target when both UNION branches read an
 earlier windowed or recursive CTE, including an ordered and limited UNION
 body. The audited rows, metadata, single target update, CHECK OPTION, and
 INSERT/DELETE refusals agree with MySQL 8.4.11.
+A [chained `EXCEPT`/`INTERSECT` CTE read side](torture/findings/2026-11-06-set-operation-joined-view.md)
+also leaves its joined physical target writable. The audited rows,
+`IS_UPDATABLE`, UPDATE, and cascaded CHECK OPTION agree with MySQL 8.4.11;
+other set-operation compositions and layered security contexts remain open.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
 now has a native MySQL contract and fsdb regression: duplicate derived rows
