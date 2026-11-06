@@ -379,6 +379,16 @@ let private foldUnicode520EnclosedImplicit value =
         |> Array.exists (fun (first, last) -> scalar >= first && scalar <= last)
     foldSupplementaryImplicit '\uE0BE' '\uD83C' 0x1F100 0xEA00 hasWeight value
 
+// UCA 5.2 expands the two enclosed kana, but retains written primary
+// weights for the enclosed ideographs that ICU folds into ordinary Han.
+// This is an SQL comparison rule; MySQL's ngram keys follow the older fold.
+let private foldUnicode520EnclosedCjkEquality (value: string) =
+    let hasWeight scalar =
+        (scalar >= 0x1F232 && scalar <= 0x1F23B)
+        || scalar = 0x1F250 || scalar = 0x1F251
+    value.Replace("🈀", "ほか").Replace("🈓", "デ")
+    |> foldSupplementaryImplicit '\uE0BF' '\uD83C' 0x1F200 0xEB00 hasWeight
+
 // MySQL's UCA 4.0 and 5.2 tables retain implicit primary weights for marks
 // assigned later. UCA 4.0 gives all of U+1DC0–U+1DFF distinct weights; 5.2
 // assigns some explicit or ignorable weights instead. UCA 4.0 also keeps
@@ -1181,6 +1191,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
     let foldUnicode520 includeEnclosed (value: string) =
         let value = value |> foldLegacySpace |> foldCjkPunctuationForms true
         let value = if includeEnclosed then foldLegacyEnclosedCjk true value else value
+        let value = if includeEnclosed then foldUnicode520EnclosedCjkEquality value else value
         value |> foldUnicode520LetterlikeForms |> foldLegacyBopomofoForms
               |> foldKanaVariants |> foldSmallKana |> foldUnicodeQuoteForms
               |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks

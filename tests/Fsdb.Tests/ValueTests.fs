@@ -1632,6 +1632,17 @@ let tests =
                     Expect.notEqual (col.FullTextKeyOf "℁") (col.FullTextKeyOf "⅍") "ngram keys are distinct"
                     Expect.isFalse (col.Equals "⅍" "\uE041\uE34D") "literal marker cannot alias the sign"
 
+                testCase "Unicode 5.2 enclosed CJK SQL equality follows written weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_520_ci" |> Option.get
+                    for written, expanded in [ "🈀", "ほか"; "🈓", "デ" ] do
+                        Expect.isTrue (col.Equals written expanded) "enclosed kana expands"
+                        Expect.equal (col.KeyOf written) (col.KeyOf expanded) "equality index keys agree"
+                    for written, expanded in [ "🈲", "禁"; "🈳", "空"; "🉐", "得"; "🉑", "可" ] do
+                        Expect.isFalse (col.Equals written expanded) "enclosed ideograph remains distinct"
+                        Expect.notEqual (col.KeyOf written) (col.KeyOf expanded) "index keys remain distinct"
+                    Expect.isFalse (col.Equals "🈲" "\uE0BF\uEB32") "literal marker cannot alias an enclosed ideograph"
+
                 testCase "utf8mb4_general_ci shares the supplementary fallback weight"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
