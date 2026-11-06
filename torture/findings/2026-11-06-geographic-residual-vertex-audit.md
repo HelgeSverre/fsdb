@@ -401,3 +401,12 @@ tiny arc next to an endpoint. The point predicate and line overlay strategy
 are numerically inconsistent at this scale. A line-level geographic
 intersection and interval classification is needed; a blanket endpoint
 exclusion or denser point grid has already regressed the broader oracle.
+
+The native Boost 1.84 relation probe now covers all nine distinct line and
+latitude shapes behind the eleven mismatches (the first two also occur with
+the hole winding reversed). Each returns `F01FF0212`, `Crosses=0`,
+`Touches=1`, and `Intersects=1`, matching MySQL 8.4.11. Its 85° polar
+control returns `FF1FF0212` and remains disjoint. The common relation
+matrix confirms that the residual is in line/polygon relation construction,
+not in the point predicates or the distance calculation. The production
+topology logic is unchanged by this probe expansion.

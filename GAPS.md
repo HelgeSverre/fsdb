@@ -2695,6 +2695,9 @@ implementation effort:
    but did not separate throughput from baseline variation; it was reverted.
    Per-database ordinary statement access remains a design target, subject
    to explicit-table and global-read-lock semantics.
+   A [current-head 8/64/8 replay](benchmarks/results/2026-11-06-current-multidb-write-check.md)
+   verified all 412 commits per database and measured 9.05/10.18/9.65 seconds;
+   the wide-account phase remains within the earlier baseline variation.
    The group-commit leader now drains successive batches iteratively. A
    continuously replenished queue previously grew one call frame per batch;
    the [focused regression and matched write check](benchmarks/results/2026-10-15-iterative-group-commit-drain.md)
