@@ -2345,7 +2345,10 @@ indexed count for audited zero-to-three-row sources, including `> 1`,
 when every grouping key is an integer inner column fixed by a correlated
 equality predicate. The 50-by-500 control stays below 200 examined rows
 for four such thresholds. Grouping by an unfixed key retains ordinary evaluation;
-the pinned MySQL 8.4.11 oracle checks both cases. Other HAVING predicates
+the pinned MySQL 8.4.11 oracle checks both cases. [AND/OR combinations of
+integer `COUNT(*)` comparisons](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md#combined-count-bounds)
+now use the indexed count when each leaf is eligible, including zero-count
+ungrouped results and conservative grouped eligibility. Other HAVING predicates
 remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context

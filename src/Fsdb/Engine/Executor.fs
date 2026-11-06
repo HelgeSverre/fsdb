@@ -9257,16 +9257,25 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | _ -> None
     // Across multiple groups, a total count is valid only when every
     // positive group size gives the same HAVING result.
-    let countHaving =
-        match select.Having with
-        | Some(BinOp(operator, count, bound)) when countStar count ->
+    let rec countHaving = function
+        | BinOp(And, left, right) ->
+            match countHaving left, countHaving right with
+            | Some(leftPredicate, leftGroupedSafe), Some(rightPredicate, rightGroupedSafe) ->
+                Some((fun count -> leftPredicate count && rightPredicate count), leftGroupedSafe && rightGroupedSafe)
+            | _ -> None
+        | BinOp(Or, left, right) ->
+            match countHaving left, countHaving right with
+            | Some(leftPredicate, leftGroupedSafe), Some(rightPredicate, rightGroupedSafe) ->
+                Some((fun count -> leftPredicate count || rightPredicate count), leftGroupedSafe && rightGroupedSafe)
+            | _ -> None
+        | BinOp(operator, count, bound) when countStar count ->
             countComparison operator
             |> Option.bind (fun compare ->
                 integerLiteral bound
                 |> Option.map (fun bound ->
                     let predicate count = compare (decimal count) bound
                     predicate, (bound <= 1M && predicate 1 = predicate 2)))
-        | Some(BinOp(operator, bound, count)) when countStar count ->
+        | BinOp(operator, bound, count) when countStar count ->
             countComparison operator
             |> Option.bind (fun compare ->
                 integerLiteral bound
@@ -9274,6 +9283,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                     let predicate count = compare bound (decimal count)
                     predicate, (bound <= 1M && predicate 1 = predicate 2)))
         | _ -> None
+    let countHaving = select.Having |> Option.bind countHaving
     let membershipHaving = select.Having.IsNone || countHaving.IsSome
     // A literal projection cannot introduce aggregate/non-grouped binding errors
     // that the membership shortcut would otherwise skip.

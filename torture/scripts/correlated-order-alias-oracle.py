@@ -96,6 +96,17 @@ for grouped in (False, True):
         values = [int((not grouped or count > 0) and predicate(count)) for count in range(4)]
         expected = 'id\thit\n' + ''.join(f'{row}\t{value}\n' for row, value in enumerate(values))
         cases.append((sql, expected))
+    for having, predicate in (
+        ('COUNT(*)>1 AND COUNT(*)<3', lambda count: 1 < count < 3),
+        ('COUNT(*)=0 OR COUNT(*)=3', lambda count: count in (0, 3)),
+    ):
+        sql = (
+            'SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id'
+            + grouping + ' HAVING ' + having + ') AS hit FROM count_outer o ORDER BY o.id'
+        )
+        values = [int((not grouped or count > 0) and predicate(count)) for count in range(4)]
+        expected = 'id\thit\n' + ''.join(f'{row}\t{value}\n' for row, value in enumerate(values))
+        cases.append((sql, expected))
 for having, single_row_matches in (
     ('COUNT(*)>1', False),
     ('COUNT(*)=1', True),

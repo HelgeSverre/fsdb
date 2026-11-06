@@ -447,6 +447,22 @@ let tests =
                   match runDefault store sql with
                   | ResultSet(_, rows) -> Expect.equal rows expected sql
                   | other -> failtestf "%s returned %A" sql other
+              for grouped in [ false; true ] do
+                  let grouping = if grouped then " GROUP BY i.outer_id" else ""
+                  for having, predicate in
+                      [ "COUNT(*)>1 AND COUNT(*)<3", (fun count -> count > 1 && count < 3)
+                        "COUNT(*)=0 OR COUNT(*)=3", (fun count -> count = 0 || count = 3) ] do
+                      let sql =
+                          "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id"
+                          + grouping + " HAVING " + having + ") AS hit FROM count_outer o ORDER BY o.id"
+                      let expected =
+                          [ 0..3 ]
+                          |> List.map (fun count ->
+                              [ Some(string count)
+                                Some(if (not grouped || count > 0) && predicate count then "1" else "0") ])
+                      match runDefault store sql with
+                      | ResultSet(_, rows) -> Expect.equal rows expected sql
+                      | other -> failtestf "%s returned %A" sql other
 
           testCase "correlated EXISTS uses a complete inner equality key"
           <| fun _ ->
@@ -552,6 +568,19 @@ let tests =
                           sql
                   | other -> failtestf "%s returned %A" sql other
                   Expect.isLessThan examined 200L "fixed grouping key uses indexed COUNT threshold"
+              let combinedSql =
+                  "SELECT o.id,EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id"
+                  + " HAVING COUNT(*)>19 AND COUNT(*)<21) AS hit FROM exists_outer o ORDER BY o.id"
+              let combinedResult, combinedExamined = withExaminedRows (fun () -> runDefault store combinedSql)
+              match combinedResult with
+              | ResultSet(_, rows) ->
+                  Expect.isTrue
+                      (rows
+                       |> List.mapi (fun index row -> row.[1] = Some(if index < 25 then "1" else "0"))
+                       |> List.forall id)
+                      "the combined COUNT bounds preserve membership"
+              | other -> failtestf "expected combined COUNT HAVING rows, got %A" other
+              Expect.isLessThan combinedExamined 200L "combined COUNT bounds use indexed counts"
               for projection in [ "i.id"; "i.outer_id"; "i.*"; "*"
                                   "i.outer_id IS NULL"; "i.outer_id IS NOT NULL"
                                   "i.outer_id <=> NULL"; "NOT (i.outer_id IS NULL)" ] do

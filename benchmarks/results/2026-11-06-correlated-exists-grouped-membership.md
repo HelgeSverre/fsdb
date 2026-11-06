@@ -87,6 +87,18 @@ and other expressions retain ordinary binding and evaluation. Native MySQL
 8.4.11 agrees on matched and unmatched results and prepared statements; all
 90 correlated tests pass. This is an examined-row result, not a latency claim.
 
+## Combined COUNT bounds
+
+The indexed count path now accepts `AND` and `OR` combinations when every
+leaf compares the built-in `COUNT(*)` with an integer literal. On the
+50-outer-row, 500-inner-row fixture, `COUNT(*) > 19 AND COUNT(*) < 21`
+previously examined 550 rows; the indexed path stays below 200 while
+returning the same membership values. A four-key fixture checks both
+connectives for zero through three matches, with and without grouping. The
+grouped shortcut remains conservative: each leaf must independently have a
+constant truth value for positive group sizes. The pinned MySQL 8.4.11 oracle
+confirms ordinary and prepared results.
+
 ## Positive COUNT HAVING membership
 
 An `EXISTS` projection of literals with no `ORDER BY` and
