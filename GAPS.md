@@ -2467,9 +2467,12 @@ implementation effort:
    [natural read source after the writable view](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#natural-read-source-after-the-writable-view)
    now retains the shared key across two- and three-edge natural prefixes,
    including physical-row waits, rebasing, mismatched-key exclusion, and
-   ambiguity from a subsequent ordinary join. Natural joins after an
-   intervening ordinary source, other outer joins, and other mixed outer-join prefixes
-   remain open. [CTE-first natural outer joins](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#cte-first-natural-outer-join-to-a-writable-view)
+   ambiguity from a subsequent ordinary join. [Two writable views around an
+   intervening derived read source](torture/findings/2026-11-06-mixed-natural-view-intervening-source.md)
+   now match MySQL for recursive-CTE first natural left and right prefixes,
+   final natural left joins, and independent physical-row waits. Other
+   intervening sources, unmatched rows, and longer mixed join chains remain
+   open. [CTE-first natural outer joins](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#cte-first-natural-outer-join-to-a-writable-view)
    to a writable view now wait and rebase, including one preceding ordinary
    read join and matched and unmatched left and right cases; duplicate `id`
    columns in that read group return MySQL's 1052. [Earlier left and right

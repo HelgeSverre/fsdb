@@ -301,6 +301,16 @@ def main():
                     "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
                     "UPDATE c NATURAL RIGHT JOIN va NATURAL LEFT JOIN vb_unique vb "
                     "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE va.id=1",
+                    "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
+                    "UPDATE c NATURAL LEFT JOIN va "
+                    "JOIN (SELECT id AS bridge FROM link) l ON l.bridge=va.link_id "
+                    "NATURAL LEFT JOIN vb_unique vb "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=1",
+                    "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
+                    "UPDATE c NATURAL RIGHT JOIN va "
+                    "JOIN (SELECT id AS bridge FROM link) l ON l.bridge=va.link_id "
+                    "NATURAL LEFT JOIN vb_unique vb "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=1",
                     "WITH c AS (SELECT id FROM link) UPDATE (c NATURAL JOIN va) "
                     "NATURAL JOIN vb_unique vb SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1",
                     "UPDATE va LEFT JOIN (link l JOIN vb USING(id)) USING(id) "
@@ -421,6 +431,16 @@ def main():
                     "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
                     "UPDATE c NATURAL RIGHT JOIN va NATURAL LEFT JOIN vb_unique vb "
                     "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE va.id=1",
+                    "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
+                    "UPDATE c NATURAL LEFT JOIN va "
+                    "JOIN (SELECT id AS bridge FROM link) l ON l.bridge=va.link_id "
+                    "NATURAL LEFT JOIN vb_unique vb "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=1",
+                    "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
+                    "UPDATE c NATURAL RIGHT JOIN va "
+                    "JOIN (SELECT id AS bridge FROM link) l ON l.bridge=va.link_id "
+                    "NATURAL LEFT JOIN vb_unique vb "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=1",
                     "UPDATE va JOIN LATERAL (SELECT va.link_id AS next_id) q ON TRUE "
                     "JOIN vb_unique vb ON vb.link_id=q.next_id "
                     "SET n=n+1,bonus=bonus+1 WHERE va.id=1",
