@@ -2349,6 +2349,10 @@ shape within one statement. Two interleaved checked in-process comparisons
 completed 8.7% and 10.0% more two-scope queries than unchanged code. The
 server ShortRun was noisier; other expression shapes and deeper correlation
 still require per-row work.
+An [A/B/A/B deeper-scope cache trial](benchmarks/results/2026-11-06-three-scope-qualified-cache-trial.md)
+processed 3,112/3,325/3,163/3,139 queries in adjacent 12-second runs
+for baseline/candidate/baseline/candidate. The candidate passed the
+binding test but its gain did not repeat, so it was reverted.
 The [three-scope filtered-literal follow-up](benchmarks/results/2026-11-05-three-scope-literal-scalar.md)
 avoids materializing a middle source-free `SELECT 1 WHERE (SELECT ...)` and
 reuses its successful binding validation within a statement. The matched
