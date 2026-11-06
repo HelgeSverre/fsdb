@@ -75,6 +75,41 @@ cases = [
     ('SELECT EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=1 ORDER BY i.missing+1)', (1054, '42S22')),
 ]
 
+cases.extend([
+    ('CREATE TABLE count_outer(id INT PRIMARY KEY);INSERT INTO count_outer VALUES(0),(1),(2),(3)', ''),
+    ('CREATE TABLE count_inner(id INT PRIMARY KEY,outer_id INT,KEY ix_outer_id(outer_id));INSERT INTO count_inner VALUES(1,1),(2,2),(3,2),(4,3),(5,3),(6,3)', ''),
+])
+for grouped in (False, True):
+    grouping = ' GROUP BY i.outer_id' if grouped else ''
+    for having, predicate in (
+        ('COUNT(*)>1', lambda count: count > 1),
+        ('2<=COUNT(*)', lambda count: 2 <= count),
+        ('COUNT(*)=2', lambda count: count == 2),
+        ('3<>COUNT(*)', lambda count: 3 != count),
+        ('COUNT(*)<2', lambda count: count < 2),
+        ('1>=COUNT(*)', lambda count: 1 >= count),
+    ):
+        sql = (
+            'SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id'
+            + grouping + ' HAVING ' + having + ') AS hit FROM count_outer o ORDER BY o.id'
+        )
+        values = [int((not grouped or count > 0) and predicate(count)) for count in range(4)]
+        expected = 'id\thit\n' + ''.join(f'{row}\t{value}\n' for row, value in enumerate(values))
+        cases.append((sql, expected))
+for having, single_row_matches in (
+    ('COUNT(*)>1', False),
+    ('COUNT(*)=1', True),
+    ('COUNT(*)<>1', False),
+):
+    sql = (
+        'SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id'
+        + ' GROUP BY i.id HAVING ' + having + ') AS hit FROM count_outer o ORDER BY o.id'
+    )
+    expected = 'id\thit\n' + ''.join(
+        f'{row}\t{int(row > 0 and single_row_matches)}\n' for row in range(4)
+    )
+    cases.append((sql, expected))
+
 prepared_cases = [
     ("PREPARE scoped_order FROM '" + sql.replace("'", "''") + "'", expected if isinstance(expected, tuple) else "")
     for sql, expected in cases

@@ -2322,8 +2322,13 @@ shapes remain open.
 also uses the indexed path for literal projections and safe grouping keys;
 `COUNT(*) <> 0` and `0 != COUNT(*)` now do too. The zero-count HAVING control
 and its `< 1`/`<= 0` equivalent forms also use the indexed count, preserving
-the difference between grouped and ungrouped empty sources. Other HAVING
-predicates remain open.
+the difference between grouped and ungrouped empty sources. Ungrouped
+integer-literal comparisons on either side of `COUNT(*)` now use that same
+indexed count for audited zero-to-three-row sources, including `> 1`,
+`<= 2`, `= 2`, and `<> 3`. Grouped comparisons whose result can vary with
+group size retain ordinary evaluation; the pinned MySQL 8.4.11 oracle
+checks both constant and varying grouping keys. Other HAVING predicates
+remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

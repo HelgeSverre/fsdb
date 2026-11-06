@@ -9243,28 +9243,38 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
             equalsIgnoreCase name "COUNT"
             && Functions.isUnmodifiedBuiltinAggregate name outer.Registry
         | _ -> false
-    let zero = function Lit(VInt 0L) | Lit(VUInt 0UL) -> true | _ -> false
-    let one = function Lit(VInt 1L) | Lit(VUInt 1UL) -> true | _ -> false
-    let zeroCountHaving =
+    let integerLiteral = function
+        | Lit(VInt value) -> Some(decimal value)
+        | Lit(VUInt value) -> Some(decimal value)
+        | _ -> None
+    let countComparison = function
+        | Eq -> Some(fun (left: decimal) right -> left = right)
+        | Neq -> Some(fun (left: decimal) right -> left <> right)
+        | Lt -> Some(fun (left: decimal) right -> left < right)
+        | Lte -> Some(fun (left: decimal) right -> left <= right)
+        | Gt -> Some(fun (left: decimal) right -> left > right)
+        | Gte -> Some(fun (left: decimal) right -> left >= right)
+        | _ -> None
+    // Across multiple groups, a total count is valid only when every
+    // positive group size gives the same HAVING result.
+    let countHaving =
         match select.Having with
-        | Some(BinOp(Eq, count, bound)) when countStar count && zero bound -> true
-        | Some(BinOp(Eq, bound, count)) when zero bound && countStar count -> true
-        | Some(BinOp(Lt, count, bound)) when countStar count && one bound -> true
-        | Some(BinOp(Gt, bound, count)) when one bound && countStar count -> true
-        | Some(BinOp(Lte, count, bound)) when countStar count && zero bound -> true
-        | Some(BinOp(Gte, bound, count)) when zero bound && countStar count -> true
-        | _ -> false
-    let membershipHaving =
-        match select.Having with
-        | None -> true
-        | Some _ when zeroCountHaving -> true
-        | Some(BinOp(Gt, count, bound)) when countStar count && zero bound -> true
-        | Some(BinOp(Lt, bound, count)) when zero bound && countStar count -> true
-        | Some(BinOp(Gte, count, bound)) when countStar count && one bound -> true
-        | Some(BinOp(Lte, bound, count)) when one bound && countStar count -> true
-        | Some(BinOp(Neq, count, bound)) when countStar count && zero bound -> true
-        | Some(BinOp(Neq, bound, count)) when zero bound && countStar count -> true
-        | _ -> false
+        | Some(BinOp(operator, count, bound)) when countStar count ->
+            countComparison operator
+            |> Option.bind (fun compare ->
+                integerLiteral bound
+                |> Option.map (fun bound ->
+                    let predicate count = compare (decimal count) bound
+                    predicate, (bound <= 1M && predicate 1 = predicate 2)))
+        | Some(BinOp(operator, bound, count)) when countStar count ->
+            countComparison operator
+            |> Option.bind (fun compare ->
+                integerLiteral bound
+                |> Option.map (fun bound ->
+                    let predicate count = compare bound (decimal count)
+                    predicate, (bound <= 1M && predicate 1 = predicate 2)))
+        | _ -> None
+    let membershipHaving = select.Having.IsNone || countHaving.IsSome
     // A literal projection cannot introduce aggregate/non-grouped binding errors
     // that the membership shortcut would otherwise skip.
     let havingProjectionsAreSafe =
@@ -9277,6 +9287,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
     let plainShape =
         select.Joins.IsEmpty
         && membershipHaving
+        && (select.GroupBy.IsEmpty || (countHaving |> Option.forall snd))
         && havingProjectionsAreSafe
         && (not select.Distinct || select.OrderBy.IsEmpty)
         && membershipLimit
@@ -9449,8 +9460,11 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
             tryCorrelatedEqualityCount outer source select.Where
             |> Option.map (fun count ->
                 let exists =
-                    if zeroCountHaving then select.GroupBy.IsEmpty && count = 0
-                    else count > 0
+                    match countHaving with
+                    | Some(predicate, _) ->
+                        (select.GroupBy.IsEmpty || count > 0)
+                        && predicate count
+                    | None -> count > 0
                 Ok(boolToValue exists))
     | _ -> None
 

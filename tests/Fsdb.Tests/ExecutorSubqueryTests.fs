@@ -406,6 +406,49 @@ let tests =
               | ResultSet([ "name" ], [ [ Some "bob" ] ]) -> ()
               | other -> failtestf "expected only bob (who has no post), got %A" other
 
+          testCase "correlated EXISTS counts indexed matches for integer HAVING thresholds"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE count_outer(id INT PRIMARY KEY)" |> ignore
+              runDefault store "CREATE TABLE count_inner(id INT PRIMARY KEY,outer_id INT,KEY ix_outer_id(outer_id))" |> ignore
+              runDefault store "INSERT INTO count_outer VALUES(0),(1),(2),(3)" |> ignore
+              runDefault store "INSERT INTO count_inner VALUES(1,1),(2,2),(3,2),(4,3),(5,3),(6,3)" |> ignore
+              for grouped in [ false; true ] do
+                  let groupClause = if grouped then " GROUP BY i.outer_id" else ""
+                  for having, predicate in
+                      [ "COUNT(*)>1", (fun count -> count > 1)
+                        "2<=COUNT(*)", (fun count -> 2 <= count)
+                        "COUNT(*)=2", (fun count -> count = 2)
+                        "3<>COUNT(*)", (fun count -> count <> 3)
+                        "COUNT(*)<2", (fun count -> count < 2)
+                        "1>=COUNT(*)", (fun count -> 1 >= count) ] do
+                      let sql =
+                          "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id"
+                          + groupClause + " HAVING " + having + ") AS hit FROM count_outer o ORDER BY o.id"
+                      let result, examined = withExaminedRows (fun () -> runDefault store sql)
+                      let expected =
+                          [ 0..3 ]
+                          |> List.map (fun count ->
+                              [ Some(string count)
+                                Some(if (not grouped || count > 0) && predicate count then "1" else "0") ])
+                      match result with
+                      | ResultSet(_, rows) -> Expect.equal rows expected sql
+                      | other -> failtestf "%s returned %A" sql other
+                      if not grouped then
+                          Expect.isLessThan examined 30L "ungrouped integer COUNT HAVING uses indexed equality counts"
+              for having, singleRowMatches in
+                  [ "COUNT(*)>1", false; "COUNT(*)=1", true; "COUNT(*)<>1", false ] do
+                  let sql =
+                      "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id"
+                      + " GROUP BY i.id HAVING " + having + ") AS hit FROM count_outer o ORDER BY o.id"
+                  let expected =
+                      [ 0..3 ]
+                      |> List.map (fun count ->
+                          [ Some(string count); Some(if count > 0 && singleRowMatches then "1" else "0") ])
+                  match runDefault store sql with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | other -> failtestf "%s returned %A" sql other
+
           testCase "correlated EXISTS uses a complete inner equality key"
           <| fun _ ->
               let store = newStore ()
