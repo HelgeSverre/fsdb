@@ -2511,6 +2511,13 @@ implementation effort:
    checkpoints cross phase boundaries and acknowledgement times overlap;
    group-commit queue, fsync, and leader-drain stages need separation before
    changing scheduling policy.
+   A [group-commit and WAL batch follow-up](benchmarks/results/2026-11-06-external-multidb-write-profile.md#group-commit-and-wal-batch-follow-up)
+   found queue admission negligible in the same external A/B/A workload.
+   The wide-account interval added about 4.3 seconds of active batch work,
+   with replica application the largest measured sub-stage increase;
+   fsync and encoding also rose. Periodic checkpoints are approximate and
+   worker waits overlap. Replay/index maintenance in the live WAL mirror is
+   the next concrete optimization target.
    The group-commit leader now drains successive batches iteratively. A
    continuously replenished queue previously grew one call frame per batch;
    the [focused regression and matched write check](benchmarks/results/2026-10-15-iterative-group-commit-drain.md)

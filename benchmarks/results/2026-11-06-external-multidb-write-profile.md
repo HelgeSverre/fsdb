@@ -72,3 +72,44 @@ batch work, fsync, notification, and any leader drain after its own signal.
 The result directs the next profile to those group-commit sub-stages under
 the same external workload. It does not yet justify changing worker or WAL
 policy.
+
+## Group-commit and WAL batch follow-up
+
+Temporary counters in the group-commit queue and WAL batch writer split the
+previous acknowledgement interval into queue admission, active batch work,
+leader and follower completion, file open, encoding/write, fsync, replica
+application, and rotation. The same external 8/64/8 workload again passed
+every ledger. Wall time was 9.32, 10.84, and 9.37 seconds; client CPU was
+2.21, 2.04, and 2.08 seconds; server CPU was 29.91, 40.93, and 23.30 seconds.
+
+Periodic group-commit snapshots near the three phase ends were:
+
+| Completed actions | Batches | Admission ms | Batch work ms | Leader ms | Follower ms |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 4,096 | 3,773 | 1.69 | 2,361 | 2,393 | 3,154 |
+| 7,680 | 6,454 | 3.35 | 6,673 | 6,760 | 21,066 |
+| 11,264 | 9,775 | 4.36 | 8,740 | 8,848 | 23,875 |
+
+The wide interval added about 4.3 seconds of active batch work and
+17.9 seconds of overlapping follower wait, compared with about 2.4 and
+2.1 seconds of active work in the two hot intervals. Admission remained
+below five milliseconds cumulatively. Wide-account writes also formed
+larger batches, so the extra work cannot be explained by more batches alone.
+
+WAL snapshots closest in event count to the same boundaries give these
+approximate stage increments:
+
+| Interval | Encode/write ms | Fsync ms | Replica apply ms | File open ms |
+| --- | ---: | ---: | ---: | ---: |
+| First 8-account | 150 | 929 | 1,219 | 0.4 |
+| 64-account | 360 | 1,206 | 2,637 | 6.3 |
+| Second 8-account | 198 | 1,027 | 778 | 0.2 |
+
+The WAL checkpoints differ from the group-commit checkpoints and each
+straddles a phase boundary by some operations. Timings are sums of stage
+wall time, and follower waits overlap. The largest measured increase is
+replica application of committed row events; fsync and encoding also rise.
+This points to replay/index maintenance in the live WAL mirror as the next
+code path to profile or optimize. The counters were reverted and the normal
+Release binary rebuilt. The measurements do not support changing the
+queue-admission or worker-reservation policy.
