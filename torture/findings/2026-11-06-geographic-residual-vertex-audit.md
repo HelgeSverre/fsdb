@@ -212,3 +212,23 @@ the same counts in every lane. The trial was reverted because it increased
 the number of sampled positions without closing any counted gap. The line
 relation work should use the Boost geographic segment strategy rather than
 assuming that a denser point grid resolves these cases.
+
+## Current-head first-step and isolated spherical formula
+
+Temporary instrumentation on `a160d577` confirms the 71° distance case
+diverges before Newton refinement. For `POINT(71.00001 1.00001)` against
+the hole edge from `(71 1)` to `(73 1)`, fsdb's spherical projection seeds
+the along-track position at `1.1149777346692951` m and its first direct
+point yields `0.35667920777372397` m. The pinned Boost 1.84 probe with
+MySQL's SRID 4326 angular unit seeds at `1.111190703481076` m and its first
+direct point yields MySQL's `0.3691980556077172` m. The instrumentation
+was removed after the trace.
+
+An isolated trial replaced only fsdb's spherical cross-track distance with
+Boost's comparable-haversine calculation. It kept the existing projection,
+direct point, and Newton steps. The full oracle still had 12/412 line
+relations and 4/189 near-hole distances mismatching, with the same four
+distance values; the 100 seeded point-line cases still matched. This trial
+was reverted. The earlier combined projection trial and this isolated
+formula trial both leave the first direct point and inverse calculation as
+the next arithmetic comparison.
