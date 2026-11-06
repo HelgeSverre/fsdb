@@ -1437,7 +1437,9 @@ comparisons over U+3040–U+30FF in five legacy collations. Other CJK blocks
 and mixed-script weight combinations remain open.
 The [Bopomofo U+3100–U+312F exact-weight audit](torture/findings/2026-11-06-bopomofo-exact-legacy-weights.md)
 now matches 955 such byte comparisons across five legacy collations.
-U+3130–U+318F and other mixed CJK blocks remain open.
+The [Hangul Compatibility Jamo U+3130–U+318F audit](torture/findings/2026-11-06-compatibility-jamo-exact-legacy-weights.md)
+adds 1,915 exact-byte matches across the same collations. Other CJK blocks
+and mixed-script compositions remain open.
 The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
 likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
 plus 1,464 legacy Unicode searches over its later part at size 1.
