@@ -176,7 +176,7 @@ def scores_agree(expected, actual):
 
 def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None,
            collation_override=None, legacy_term_range=None, weight_checks=False,
-           mixed_checks=False):
+           mixed_checks=False, order_checks=False):
     prefix = '中' * (size - 1)
     if legacy_radicals:
         legacy_chars = LEGACY_RADICALS
@@ -268,6 +268,13 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                 mismatches = []
                 equality_checks = 0
                 weight_count = 0
+                if order_checks:
+                    order_sql = "SELECT id FROM docs ORDER BY body,id"
+                    expected_order = query(mysql_connection, order_sql)
+                    actual_order = query(fsdb_connection, order_sql)
+                    if actual_order != expected_order:
+                        first = next(index for index, (expected, actual) in enumerate(zip(expected_order, actual_order)) if expected != actual)
+                        mismatches.append(("collation order", first, expected_order[first:first + 10], actual_order[first:first + 10]))
                 if legacy_range is not None:
                     equality_sql = (
                         f"SELECT _utf8mb4%s COLLATE {collation} "
@@ -338,17 +345,19 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                             mismatches.append((mode, term, "relevance", expected_scores, actual_scores))
                 equality_mismatches = sum(item[0] == "legacy equality" for item in mismatches)
                 weight_mismatches = sum(item[0] == "legacy weight" for item in mismatches)
-                search_mismatches = len(mismatches) - equality_mismatches - weight_mismatches
+                order_mismatches = sum(item[0] == "collation order" for item in mismatches)
+                search_mismatches = len(mismatches) - equality_mismatches - weight_mismatches - order_mismatches
                 print(
                     f"size {size}: {len(modes) * len(terms)} ngram queries, "
                     f"{equality_checks} legacy equalities; {search_mismatches} search and "
                     f"{equality_mismatches} equality mismatches"
                     + (f"; {weight_count} weights, {weight_mismatches} mismatches" if weight_checks else "")
+                    + (f"; {order_mismatches} order mismatches" if order_checks else "")
                 )
                 search_kinds = Counter(
                     (item[0], "relevance" if len(item) == 5 else "membership")
                     for item in mismatches
-                    if item[0] not in ("legacy equality", "legacy weight")
+                    if item[0] not in ("legacy equality", "legacy weight", "collation order")
                 )
                 for (mode, kind), count in sorted(search_kinds.items()):
                     print(f"  {mode} {kind}: {count}")
@@ -385,8 +394,9 @@ if __name__ == "__main__":
     corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
     parser.add_argument("--legacy-term-range", help="search only this subrange of --legacy-range while indexing the whole range")
     parser.add_argument("--weight-checks", action="store_true", help="compare exact WEIGHT_STRING bytes for --legacy-range")
+    parser.add_argument("--order-checks", action="store_true", help="compare document ordering under the selected collation")
     parser.add_argument("--mixed-checks", action="store_true", help="compare compatibility forms wrapped with ASCII or Han")
-    parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_0900_as_ci", "utf8mb4_ja_0900_as_cs_ks", "utf8mb4_0900_as_cs"))
+    parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_0900_as_ci", "utf8mb4_ja_0900_as_cs_ks", "utf8mb4_0900_as_cs", "utf8mb4_zh_0900_as_cs"))
     args = parser.parse_args()
     legacy_range = None
     if args.legacy_range:
@@ -414,4 +424,4 @@ if __name__ == "__main__":
     sizes = args.sizes or list(range(1, 11))
     raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals,
                                      legacy_range, args.collation, legacy_term_range,
-                                     args.weight_checks, args.mixed_checks) for size in sizes) else 0)
+                                     args.weight_checks, args.mixed_checks, args.order_checks) for size in sizes) else 0)

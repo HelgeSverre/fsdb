@@ -1532,6 +1532,14 @@ ngram sizes. The supported `utf8mb4_0900_as_ci` and
 `utf8mb4_0900_as_cs` collations also match all 387 searches at each size
 1–10 in the maintained native oracle. Broader
 UCA 9 corpora remain open.
+The [Chinese 0900 collation probe](torture/findings/2026-11-06-zh-0900-han-order.md)
+finds that `utf8mb4_zh_0900_as_cs` matches the 387-search two-column
+ngram corpus at each token size 1–10, but its Han ordering is not fully
+compatible: among U+4E00–U+4EFF, MySQL sorts 乾 (U+4E7E) before 亁
+(U+4E81), while fsdb places it later. All 64 sampled U+4E00–U+4E3F
+`WEIGHT_STRING` byte sequences differ as well. Chinese collation ordering,
+range predicates, and exact weight bytes remain open even where full-text
+membership and relevance agree.
 The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
 also matches MySQL's distinct U+2200–U+22FF primary weights in the same
 two-column ngram lane at token sizes 1–10.
