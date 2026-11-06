@@ -1624,6 +1624,14 @@ let tests =
                         Expect.equal (col.KeyOf enclosed) (col.KeyOf expanded) "equality index keys agree"
                         Expect.equal (col.HashOf enclosed) (col.HashOf expanded) "equality hash keys agree"
 
+                testCase "Unicode 5.2 distinguishes the two account-of signs"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_520_ci" |> Option.get
+                    Expect.isFalse (col.Equals "℁" "⅍") "MySQL keeps the written signs distinct"
+                    Expect.notEqual (col.KeyOf "℁") (col.KeyOf "⅍") "index keys are distinct"
+                    Expect.notEqual (col.FullTextKeyOf "℁") (col.FullTextKeyOf "⅍") "ngram keys are distinct"
+                    Expect.isFalse (col.Equals "⅍" "\uE041\uE34D") "literal marker cannot alias the sign"
+
                 testCase "utf8mb4_general_ci shares the supplementary fallback weight"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get

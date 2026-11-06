@@ -284,6 +284,8 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                         extra_pairs = [(chr(0x31F0 + offset), char) for offset, char in enumerate(kana)]
                         extra_pairs += [("ゟ", "より"), ("ヿ", "コト"), ("ㄍ", "ㆣ"),
                                         ("ㄮ", "ㄜ"), ("ㆻ", "ㄍ")]
+                    elif legacy_range == (0x2100, 0x2200):
+                        extra_pairs = [("℁", "⅍")]
                     elif legacy_range == (0xFA00, 0xFB00):
                         extra_pairs = [("郞", "郞"), ("並", "並"),
                                        ("逸", "逸"), ("艹", "艹")]

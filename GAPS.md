@@ -1484,6 +1484,10 @@ The [general Unicode letterlike-symbol audit](torture/findings/2026-10-17-genera
 matches MySQL's U+2100–U+21FF primary-weight classes in two-column
 ngram searches at token sizes 1–10. Broader collation and parser behavior
 remains open.
+The [Unicode 5.2 account-of-sign probe](torture/findings/2026-11-06-unicode-520-account-of-ngram.md)
+separates `℁` from `⅍` in SQL equality and ngram postings; its U+2100–U+21FF
+two-column lane now matches MySQL across 1,512 searches and 106 equality
+checks at each ngram size 1–10.
 A current-head rerun of the maintained two-column `utf8mb4_general_ci`
 corpus matches MySQL 8.4.11 in all 387 searches at each of sizes 1–5;
 the range-specific audits below retain their separate coverage boundaries.

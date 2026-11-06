@@ -607,6 +607,19 @@ let private foldLegacyLetterlikeForms (value: string) =
             else result.Append(c) |> ignore
         result.ToString()
 
+// ICU gives U+214D the same primary key as U+2101, while MySQL's UCA 5.2
+// keeps them distinct in both SQL comparison and ngram postings.
+let private foldUnicode520LetterlikeForms (value: string) =
+    if not (value.Contains('\u214D') || value.Contains('\uE041')) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            match c with
+            | '\uE041' -> result.Append("\uE041\uE041") |> ignore
+            | '\u214D' -> result.Append("\uE041\uE34D") |> ignore
+            | _ -> result.Append(c) |> ignore
+        result.ToString()
+
 // UCA 4.0 expands kana ligatures and folds the small katakana extension
 // before ordinary kana and accent folding.
 let private foldLegacyKanaForms (value: string) =
@@ -1168,7 +1181,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
     let foldUnicode520 includeEnclosed (value: string) =
         let value = value |> foldLegacySpace |> foldCjkPunctuationForms true
         let value = if includeEnclosed then foldLegacyEnclosedCjk true value else value
-        value |> foldLegacyBopomofoForms
+        value |> foldUnicode520LetterlikeForms |> foldLegacyBopomofoForms
               |> foldKanaVariants |> foldSmallKana |> foldUnicodeQuoteForms
               |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
               |> foldLegacyExtendedCombiningMarks true
