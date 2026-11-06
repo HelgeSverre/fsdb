@@ -12830,7 +12830,7 @@ let tests =
                     | ResultSet([ "id"; "c" ], rows) -> Expect.equal rows [ [ Some "1"; Some "0" ]; [ Some "5"; Some "1" ] ] "user 5 has exactly one matching post, user 1 has none"
                     | other -> failtestf "expected a resultset, got %A" other
 
-                testCase "correlated EXISTS with LIMIT 1 retains indexed membership semantics"
+                testCase "correlated EXISTS with a positive literal LIMIT retains indexed membership semantics"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE exists_outer (id INT PRIMARY KEY)" |> ignore
@@ -12851,6 +12851,8 @@ let tests =
 
                     let unrestricted = query ""
                     Expect.equal (query "LIMIT 1") unrestricted "positive literal limit preserves membership"
+                    Expect.equal (query "LIMIT 2") unrestricted "larger literal limit preserves membership"
+                    Expect.equal (query "LIMIT 18446744073709551615") unrestricted "unsigned literal limit preserves membership"
                     Expect.equal (query "LIMIT 0") [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ] "zero limit yields false"
                     Expect.equal (query "LIMIT 1 OFFSET 1") [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ] "offset excludes a single match"
 
