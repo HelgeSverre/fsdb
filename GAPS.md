@@ -2672,7 +2672,8 @@ implementation effort:
    single inner `USING(id)` or physical `NATURAL JOIN` edge in the view now
    narrows its source-row claim without delaying a disjoint keyed update.
    Key bounds also propagate through two inner joins to narrow a read source
-   beyond an intermediate table, including `USING(id)` on the first edge.
+   beyond an intermediate table, including `USING(id)` or a physical
+   `NATURAL JOIN` on the first edge.
    Broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in

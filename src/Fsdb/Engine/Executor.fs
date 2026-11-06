@@ -33344,7 +33344,7 @@ let transactionWriteReadTargets
             | _ -> []
         let naturalKeys =
             match joins with
-            | [ join ] when join.Kind = NaturalJoin ->
+            | join :: _ when join.Kind = NaturalJoin ->
                 match join.Table with
                 | FromTable right ->
                     match physicalFastPathTable store dbName first, physicalFastPathTable store dbName right with
