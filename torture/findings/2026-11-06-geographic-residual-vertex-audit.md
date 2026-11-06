@@ -330,3 +330,14 @@ corner cases match MySQL. Point relations remain 0/189, near-hole distances
 regressions pin both formerly missed clips; all 33 geographic and 22
 geometry tests pass. Ellipsoidal boundary intersections, including the
 remaining near-hole touch/cross distinctions, remain open.
+
+## Endpoint-exclusion and midpoint trial
+
+On the expanded 448-case oracle, a temporary trial excluded line endpoints
+from interior evidence and classified every segment midpoint, including
+segments without detected boundary events. It increased line-relation
+mismatches from 11 to 69. MySQL's intersections can contain very short
+interior portions adjacent to an endpoint; the midpoint does not detect
+those portions. The trial was reverted. Any endpoint treatment needs an
+ordered geographic intersection event and interval classification that can
+distinguish a boundary-only endpoint from a short adjacent interior arc.
