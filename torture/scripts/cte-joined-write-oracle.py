@@ -529,6 +529,34 @@ def main():
                 assert execute(owner, mixed_prefix + "NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1") == 0
                 assert execute(owner, mixed_prefix + "NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1") == 1
                 assert execute(owner, "SELECT n FROM a WHERE id=1") == ((74,),)
+                execute(owner, "CREATE TABLE using_tail(id INT PRIMARY KEY,tag INT)")
+                execute(owner, "INSERT INTO using_tail VALUES(1,0),(2,0)")
+                for prefix, expected in (
+                    ("JOIN", ((1, 76),)),
+                    ("LEFT JOIN", ((1, 78),)),
+                    ("RIGHT JOIN", ((1, 80),)),
+                ):
+                    verify_wait(
+                        owner,
+                        waiter,
+                        "UPDATE a SET n=n+1 WHERE id=1",
+                        f"WITH c AS (SELECT id FROM link) UPDATE c {prefix} using_tail x USING(id) NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=1",
+                        expected,
+                    )
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT 3 AS id) UPDATE c LEFT JOIN using_tail x USING(id) NATURAL LEFT JOIN v SET v.n=v.n+1 WHERE id=3",
+                ) == 0
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT 3 AS id) UPDATE c LEFT JOIN using_tail x USING(id) NATURAL RIGHT JOIN v SET v.n=v.n+1 WHERE id=1",
+                ) == 1
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((81,),)
+                assert execute(
+                    owner,
+                    "WITH c AS (SELECT 2 AS id) UPDATE c JOIN using_tail x USING(id) NATURAL LEFT JOIN v SET x.tag=x.tag+1,v.n=v.n+1 WHERE id=2",
+                ) == 1
+                assert execute(owner, "SELECT tag FROM using_tail WHERE id=2") == ((1,),)
                 for direction in ("LEFT", "RIGHT"):
                     statement = (
                         "WITH c AS (SELECT id FROM link) "

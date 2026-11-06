@@ -24540,35 +24540,48 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                         elif prior |> List.exists (fun earlier ->
                             (earlier.Kind <> InnerJoin && earlier.Kind <> CrossJoin
                              && earlier.Kind <> StraightJoin
-                             && earlier.Kind <> LeftJoin && earlier.Kind <> RightJoin)
-                            || not earlier.Using.IsEmpty) then None
+                             && earlier.Kind <> LeftJoin && earlier.Kind <> RightJoin)) then None
                         else
-                            let sources =
-                                FromTable update.From :: (List.rev prior |> List.map _.Table)
-                            let names =
-                                sources
-                                |> List.collect (fun item ->
-                                    let owner = FromItem.tryQualifier item |> Option.defaultValue ""
-                                    sourceNames item |> List.map (fun name -> name.ToLowerInvariant(), owner))
+                            let columnsBySource =
+                                FromItem.leaves preceding
+                                |> List.choose (fun item ->
+                                    FromItem.tryQualifier item
+                                    |> Option.map (fun owner -> owner.ToLowerInvariant(), sourceNames item))
+                                |> Map.ofList
+                            let logical =
+                                FromItem.logicalColumns
+                                    (fun owner -> Map.tryFind (owner.ToLowerInvariant()) columnsBySource |> Option.defaultValue [])
+                                    preceding
                             let viewNames = view.OrderedColumns |> List.map _.ToLowerInvariant() |> Set.ofList
-                            let ambiguous =
-                                names
-                                |> List.countBy fst
-                                |> List.exists (fun (name, count) -> count > 1 && Set.contains name viewNames)
-                            // Keep the view first so join binding reports the group's
-                            // ambiguous column before the unresolved CTE table.
-                            if ambiguous then Some []
-                            else
-                                let owners = names |> Map.ofList
-                                view.OrderedColumns
-                                |> List.choose (fun name ->
-                                    Map.tryFind (name.ToLowerInvariant()) owners
-                                    |> Option.map (fun owner -> name, owner))
-                                |> Some
+                            match logical with
+                            | Error _ -> Some []
+                            | Ok columns ->
+                                let ambiguous =
+                                    columns
+                                    |> List.countBy (fun column -> column.Name.ToLowerInvariant())
+                                    |> List.exists (fun (name, count) -> count > 1 && Set.contains name viewNames)
+                                // Keep the view first so join binding reports errors in
+                                // the preceding group before an unresolved CTE lookup.
+                                if ambiguous then Some []
+                                else
+                                    let owners =
+                                        columns
+                                        |> List.map (fun column -> column.Name.ToLowerInvariant(), column.Expression)
+                                        |> Map.ofList
+                                    view.OrderedColumns
+                                    |> List.choose (fun name ->
+                                        Map.tryFind (name.ToLowerInvariant()) owners
+                                        |> Option.map (fun expression -> name, expression))
+                                    |> Some
                     match groupedKeys with
                     | None -> update
                     | Some groupedKeys ->
-                        let merged = groupedKeys |> List.map (fun (name, _) -> name.ToLowerInvariant()) |> Set.ofList
+                        let merged =
+                            groupedKeys
+                            |> List.map (fun (name, expression) ->
+                                name.ToLowerInvariant(),
+                                (if join.Kind = NaturalLeftJoin then expression else QualifiedCol(qualifier, name)))
+                            |> Map.ofList
                         let laterNames =
                             rest
                             |> List.collect (fun later -> FromItem.leaves later.Table |> List.collect sourceNames)
@@ -24576,14 +24589,13 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
                             |> Set.ofList
                         let rewriteMerged =
                             rewriteExprWith (function
-                                | Col name when Set.contains (name.ToLowerInvariant()) merged
-                                                && not (Set.contains (name.ToLowerInvariant()) laterNames) ->
-                                    Some(QualifiedCol(qualifier, name))
+                                | Col name when not (Set.contains (name.ToLowerInvariant()) laterNames) ->
+                                    Map.tryFind (name.ToLowerInvariant()) merged
                                 | _ -> None)
                         let conditions =
                             groupedKeys
-                            |> List.map (fun (name, owner) ->
-                                BinOp(Eq, QualifiedCol(qualifier, name), QualifiedCol(owner, name)))
+                            |> List.map (fun (name, expression) ->
+                                BinOp(Eq, QualifiedCol(qualifier, name), expression))
                             |> conjunction
                         let moved =
                             { join with

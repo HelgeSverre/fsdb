@@ -2050,6 +2050,34 @@ let tests =
               match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
               | ResultSet(_, [ [ Some "38" ] ]) -> ()
               | result -> failtestf "expected the mixed outer-prefix view update, got %A" result
+              handle setup "CREATE TABLE tx_cross_using_tail(id INT PRIMARY KEY,tag INT)" |> ignore
+              handle setup "INSERT INTO tx_cross_using_tail VALUES(1,0),(2,0)" |> ignore
+              for prefix, ownerId, waiterId, expected in
+                  [ "JOIN", 80, 81, 40
+                    "LEFT JOIN", 82, 83, 42
+                    "RIGHT JOIN", 84, 85, 44 ] do
+                  let usingPrefix =
+                      "WITH c AS (SELECT id FROM tx_cross_view_link) "
+                      + $"UPDATE c {prefix} tx_cross_using_tail x USING(id) "
+                      + "NATURAL LEFT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1"
+                  verifyNaturalOuterWait ownerId waiterId usingPrefix expected
+              Expect.equal
+                  (handle setup "WITH c AS (SELECT 3 AS id) UPDATE c LEFT JOIN tx_cross_using_tail x USING(id) NATURAL LEFT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=3" |> snd)
+                  (Affected 0UL) "an unmatched USING prefix does not update the view on the left"
+              Expect.equal
+                  (handle setup "WITH c AS (SELECT 3 AS id) UPDATE c LEFT JOIN tx_cross_using_tail x USING(id) NATURAL RIGHT JOIN tx_cross_view v SET v.n=v.n+1 WHERE id=1" |> snd)
+                  (Affected 1UL) "the final right join preserves the view after an unmatched USING prefix"
+              match handle setup "SELECT n FROM tx_cross_view_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "45" ] ]) -> ()
+              | result -> failtestf "expected the USING-prefix view update, got %A" result
+              let updateReadSide =
+                  "WITH c AS (SELECT 2 AS id) UPDATE c JOIN tx_cross_using_tail x USING(id) "
+                  + "NATURAL LEFT JOIN tx_cross_view v SET x.tag=x.tag+1,v.n=v.n+1 WHERE id=2"
+              Expect.equal (handle setup updateReadSide |> snd) (Affected 1UL)
+                  "the preserved read side remains writable when the view has no match"
+              match handle setup "SELECT tag FROM tx_cross_using_tail WHERE id=2" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected the read-side update without a view match, got %A" result
               for direction in [ "LEFT"; "RIGHT" ] do
                   let duplicateGroup =
                       "WITH c AS (SELECT id FROM tx_cross_view_link) "

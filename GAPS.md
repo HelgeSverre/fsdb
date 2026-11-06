@@ -2420,6 +2420,9 @@ implementation effort:
    arrangements and longer outer-join chains remain to audit. One
    [two-edge mixed `LEFT`/`RIGHT` read prefix](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#earlier-outer-read-join)
    now matches MySQL's waits, rebasing, and unmatched final view preservation.
+   An [earlier `USING(id)` read edge](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#using-read-edge-before-the-natural-view-edge)
+   now carries its merged logical key through inner, left, and right read
+   joins, including a multi-target update when the final view is unmatched.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.

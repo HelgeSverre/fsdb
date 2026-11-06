@@ -192,5 +192,23 @@ deleted, the natural left edge changes no row and the natural right edge
 updates the preserved view row. The two read sources both expose `k`; their
 duplicate, unrelated name does not make the view's natural key ambiguous.
 This case passed the native oracle and the focused fsdb transaction test.
-Longer chains beyond this audited shape, `USING` edges, and broader
-multi-match behavior remain to audit.
+Longer chains beyond this audited shape and broader multi-match behavior
+remain to audit.
+
+## USING read edge before the natural view edge
+
+MySQL 8.4.11 also waits and rebases when the earlier read join merges `id`
+with `USING(id)`. The native oracle covers inner, left, and right read joins
+before a final natural left join, plus unmatched left and preserved-right
+outcomes. Fsdb now asks the join group's logical-column resolver for each
+shared key. That resolver retains the expression selected by `USING` and by
+outer-join direction, rather than counting each physical source column as a
+separate ambiguous name.
+
+For a final natural left edge, bare merged references use the preceding
+group's expression; for a final natural right edge, they use the view's
+column. The multi-target control updates the `USING` read table when the
+view has no matching row, while leaving the view untouched. MySQL and fsdb
+both report one affected row. The focused transaction regression covers
+these bindings and physical-row waits. Longer `USING` chains and other
+mixed-name combinations remain to audit.
