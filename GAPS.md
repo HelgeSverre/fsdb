@@ -1582,6 +1582,10 @@ The [enclosed-CJK and square-unit probe](torture/findings/2026-10-17-general-ci-
 preserves MySQL's literal U+3200–U+33FF weights. Its expanded two-column lane
 now matches 3,066 searches at each of ngram sizes 1 and 2; broader CJK and
 full-text behavior remains to audit.
+The [Unicode 5.2 enclosed-CJK equality probe](torture/findings/2026-11-06-unicode-520-enclosed-cjk-equality-ngram.md)
+corrected the oracle's collation selection and closed 198 equality differences
+per ngram size. The `utf8mb4_unicode_520_ci` U+3200–U+33FF lane now matches
+3,066 searches and 502 equality checks at each ngram size 1–10.
 The [enclosed-alphanumeric probe](torture/findings/2026-10-17-general-ci-enclosed-alphanumerics.md)
 preserves U+2460–U+24FF written weights while retaining MySQL's circled-letter
 case pairs; its expanded ngram lane matches at sizes 1 and 2.

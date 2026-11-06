@@ -49,7 +49,7 @@ let internal customStopwords (collation: Collation) words =
     StopwordPolicy.Custom
         { CollationName = collation.Name
           Words = words
-          Keys = words |> Seq.map collation.KeyOf |> Set.ofSeq }
+          Keys = words |> Seq.map collation.FullTextKeyOf |> Set.ofSeq }
 
 let internal customStopwordContents words = words.CollationName, Set.toList words.Words
 
@@ -226,7 +226,7 @@ let private tokenWith (collation: Collation) (text: string) =
         if collation.Name = "utf8mb4_unicode_ci" || collation.Name = "utf8mb4_general_ci" then text
         else foldedText
     { Text = foldedText
-      Key = collation.KeyOf keyText }
+      Key = collation.FullTextKeyOf keyText }
 
 let private tokensWith tokenizer collation text =
     rawTokensWith tokenizer text |> Array.map (tokenWith collation)
@@ -235,7 +235,7 @@ let private runeLength (text: string) = text.EnumerateRunes() |> Seq.length
 
 let private customStopwordMatcher words =
     let collation = Collation.tryFind words.CollationName |> Option.get
-    fun text -> Set.contains (collation.KeyOf text) words.Keys
+    fun text -> Set.contains (collation.FullTextKeyOf text) words.Keys
 
 let private isStopword policy (text: string) =
     match policy with
@@ -294,7 +294,7 @@ let private prefixKeys (collation: Collation) (token: Token) =
     let mutable length = 0
     [| for rune in token.Text.EnumerateRunes() do
            length <- length + rune.Utf16SequenceLength
-           collation.KeyOf(token.Text.Substring(0, length)) |]
+           collation.FullTextKeyOf(token.Text.Substring(0, length)) |]
     |> Array.distinct
 
 let private removePosting id key postings =
@@ -532,7 +532,7 @@ let private exactPhraseMatches collation (doc: Token[]) (words: Token[]) =
                 |> Array.indexed
                 |> Array.forall (fun (offset, word) ->
                     let token = doc.[start + offset]
-                    let key = if foldDocument then collation.KeyOf(token.Text.ToLowerInvariant()) else token.Key
+                    let key = if foldDocument then collation.FullTextKeyOf(token.Text.ToLowerInvariant()) else token.Key
                     key = word.Key)))
 
 let private phraseCandidates (view: ReadView<'id>) (words: Token[]) =

@@ -266,8 +266,8 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                 equality_checks = 0
                 if legacy_range is not None:
                     equality_sql = (
-                        "SELECT _utf8mb4%s COLLATE utf8mb4_unicode_ci "
-                        "= _utf8mb4%s COLLATE utf8mb4_unicode_ci"
+                        f"SELECT _utf8mb4%s COLLATE {collation} "
+                        f"= _utf8mb4%s COLLATE {collation}"
                     )
                     for char in legacy_chars:
                         expanded = unicodedata.normalize("NFKC", char)
@@ -308,7 +308,13 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                         actual_scores = scored_result(fsdb_connection, term, mode)
                         if not scores_agree(expected_scores, actual_scores):
                             mismatches.append((mode, term, "relevance", expected_scores, actual_scores))
-                print(f"size {size}: {len(modes) * len(terms)} ngram queries, {equality_checks} legacy equalities; {len(mismatches)} mismatches")
+                equality_mismatches = sum(item[0] == "legacy equality" for item in mismatches)
+                search_mismatches = len(mismatches) - equality_mismatches
+                print(
+                    f"size {size}: {len(modes) * len(terms)} ngram queries, "
+                    f"{equality_checks} legacy equalities; {search_mismatches} search and "
+                    f"{equality_mismatches} equality mismatches"
+                )
                 for mismatch in mismatches[:40]:
                     print(mismatch)
                 if len(mismatches) > 40:

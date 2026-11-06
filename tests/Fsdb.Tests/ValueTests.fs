@@ -1616,6 +1616,14 @@ let tests =
                         Expect.isFalse (col.Equals "ᆯ" "ㄹ") "trailing and leading consonants differ"
                         Expect.isFalse (col.Equals "ᄒ" "\uE0B0\uE512") "literal marker cannot alias a Jamo key"
 
+                testCase "Unicode 5.2 enclosed CJK equality shares index and hash keys"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_520_ci" |> Option.get
+                    for enclosed, expanded in [ "\u3200", "(ᄀ)"; "\u3244", "問" ] do
+                        Expect.isTrue (col.Equals enclosed expanded) (enclosed + " equals its expansion")
+                        Expect.equal (col.KeyOf enclosed) (col.KeyOf expanded) "equality index keys agree"
+                        Expect.equal (col.HashOf enclosed) (col.HashOf expanded) "equality hash keys agree"
+
                 testCase "utf8mb4_general_ci shares the supplementary fallback weight"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get

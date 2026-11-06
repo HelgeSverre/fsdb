@@ -37,6 +37,9 @@ type Collation =
       /// A canonical index key: `Equals a b` iff `KeyOf a = KeyOf b` — the
       /// unique index and its point lookups both key on this.
       KeyOf: string -> string
+      /// Full-text token key. Some legacy UCA compatibility expansions used
+      /// by SQL equality are deliberately absent from MySQL's ngram tokens.
+      FullTextKeyOf: string -> string
       /// Sort weights without PAD SPACE normalization. `WEIGHT_STRING()`
       /// exposes these bytes, so trailing spaces remain observable.
       WeightOf: string -> byte[]
@@ -551,14 +554,15 @@ let private foldGeneralSyntheticWeights (value: string) =
 
 // MySQL's legacy UCA keeps some enclosed Korean/ideograph forms distinct,
 // while expanding enclosed kana and square unit forms that ICU keeps apart.
-let private foldLegacyEnclosedCjk (value: string) =
+let private foldLegacyEnclosedCjk unicode520 (value: string) =
     let isDistinct c =
         (c >= '\u320E' && c <= '\u321F')
-        || (c >= '\u3244' && c <= '\u324F')
+        || (c >= (if unicode520 then '\u3248' else '\u3244') && c <= '\u324F')
         || (c >= '\u326E' && c <= '\u327E')
         || c = '\u32FF'
     let isExpansion c =
         (c >= '\u3200' && c <= '\u320D')
+        || (unicode520 && c >= '\u3244' && c <= '\u3247')
         || (c >= '\u3260' && c <= '\u326D')
         || (c >= '\u32D0' && c <= '\u32FE')
         || (c >= '\u3300' && c <= '\u3357')
@@ -1152,6 +1156,16 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | Some value, Some prefix -> value.AsSpan().StartsWith(prefix.AsSpan())
         | _ -> value.StartsWith(prefix, StringComparison.Ordinal)
 
+    let foldUnicode520 includeEnclosed (value: string) =
+        let value = value |> foldLegacySpace |> foldCjkPunctuationForms true
+        let value = if includeEnclosed then foldLegacyEnclosedCjk true value else value
+        value |> foldLegacyBopomofoForms
+              |> foldKanaVariants |> foldSmallKana |> foldUnicodeQuoteForms
+              |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
+              |> foldLegacyExtendedCombiningMarks true
+              |> foldLegacyUnicodeJamo |> foldSupplementaryKanaImplicit true
+              |> foldUnicode520EnclosedImplicit
+
     let foldText (value: string) =
         match name with
         | "utf8mb4_ja_0900_as_cs_ks" -> value |> markJapaneseHiragana |> foldJapaneseCompatibility
@@ -1164,15 +1178,9 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
             |> foldUnicodeQuoteForms |> foldUnicode520MongolianSeparator |> foldLegacyUnicodeJamo
             |> foldSupplementaryKanaImplicit false
-        | "utf8mb4_unicode_520_ci" ->
-            value |> foldLegacySpace |> foldCjkPunctuationForms true |> foldLegacyBopomofoForms
-            |> foldKanaVariants |> foldSmallKana |> foldUnicodeQuoteForms
-            |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
-            |> foldLegacyExtendedCombiningMarks true
-            |> foldLegacyUnicodeJamo |> foldSupplementaryKanaImplicit true
-            |> foldUnicode520EnclosedImplicit
+        | "utf8mb4_unicode_520_ci" -> foldUnicode520 true value
         | "utf8mb4_unicode_ci" ->
-            value |> foldLegacySpace |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk |> foldLegacyLetterlikeForms
+            value |> foldLegacySpace |> foldCjkPunctuationForms false |> foldLegacyEnclosedCjk false |> foldLegacyLetterlikeForms
                   |> foldLegacyKanaForms |> foldLegacyBopomofoForms
                   |> foldLegacyCompatibilityIdeographs
                   |> foldLegacySupplementary
@@ -1182,6 +1190,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | _ -> value
 
     let primaryText (s: string) = s |> foldText |> trim
+    let fullTextKeyText (s: string) =
+        if name = "utf8mb4_unicode_520_ci" then
+            // MySQL's ngram index keeps the older token equivalence classes.
+            foldUnicode520 false s |> trim
+        else primaryText s
     let substringFold =
         if spec.Fold.HasFlag CompareOptions.IgnoreCase then
             CompareOptions.IgnoreCase
@@ -1400,6 +1413,12 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 "B" + Convert.ToHexString(binaryBytes s)
             else
                 Convert.ToHexString(ci.GetSortKey(primaryText s, spec.Fold).KeyData)
+      FullTextKeyOf =
+        fun s ->
+            if spec.ByteOrder then
+                "B" + Convert.ToHexString(binaryBytes s)
+            else
+                Convert.ToHexString(ci.GetSortKey(fullTextKeyText s, spec.Fold).KeyData)
       WeightOf =
         fun s ->
             if spec.ByteOrder then
