@@ -18,7 +18,6 @@ import unicodedata
 
 import pymysql
 
-
 REPO = pathlib.Path(__file__).resolve().parents[2]
 FSDB = REPO / "src/Fsdb.Cli/bin/Release/net10.0/Fsdb.Cli.dll"
 
@@ -121,10 +120,12 @@ def setup(connection, size, documents=DOCUMENTS, collation=None):
     column_collation = f" COLLATE {collation}" if collation else ""
     for sql in [
         "CREATE DATABASE probe", "USE probe",
-        "CREATE TABLE docs(id INT PRIMARY KEY,"
-        f"body TEXT{column_collation},"
-        f"title TEXT{column_collation},"
-        "FULLTEXT KEY ft(body,title) WITH PARSER ngram)",
+        (
+            "CREATE TABLE docs(id INT PRIMARY KEY,"
+            f"body TEXT{column_collation},"
+            f"title TEXT{column_collation},"
+            "FULLTEXT KEY ft(body,title) WITH PARSER ngram)"
+        ),
     ]:
         query(connection, sql)
     for index, (body, title) in enumerate(documents, 1):
@@ -173,7 +174,7 @@ def scores_agree(expected, actual):
 
 
 def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None,
-           collation_override=None, legacy_term_range=None):
+           collation_override=None, legacy_term_range=None, weight_checks=False):
     prefix = '中' * (size - 1)
     if legacy_radicals:
         legacy_chars = LEGACY_RADICALS
@@ -264,6 +265,7 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
 
                 mismatches = []
                 equality_checks = 0
+                weight_count = 0
                 if legacy_range is not None:
                     equality_sql = (
                         f"SELECT _utf8mb4%s COLLATE {collation} "
@@ -289,8 +291,8 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     elif legacy_range == (0xFA00, 0xFB00):
                         extra_pairs = [("郞", "郞"), ("並", "並"),
                                        ("逸", "逸"), ("艹", "艹")]
-                    elif legacy_range == (0x2F800, 0x2F900):
-                        extra_pairs = [("丽", "丸"), ("丽", "𠀀"), ("丽", "😀"),
+                    elif legacy_range in ((0x2F800, 0x2F900), (0x2F800, 0x2FA20)):
+                        extra_pairs = [("𢌱", "𢌱"), ("𥪧", "𥪧"), ("丽", "丸"), ("丽", "𠀀"), ("丽", "😀"),
                                        ("丽", "\U00010000"), ("丽", "\U0001D11E"),
                                        ("丽", "\U000E0100"), ("丽", "\U0010FFFD"),
                                        ("丽", "丽"), ("丽", "並")]
@@ -300,6 +302,14 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                         actual = query(fsdb_connection, equality_sql, (left, right))
                         if actual != expected:
                             mismatches.append(("legacy equality", left, right, expected, actual))
+                    if weight_checks:
+                        weight_sql = f"SELECT HEX(WEIGHT_STRING(_utf8mb4%s COLLATE {collation}))"
+                        for char in legacy_chars:
+                            weight_count += 1
+                            expected = query(mysql_connection, weight_sql, (char,))
+                            actual = query(fsdb_connection, weight_sql, (char,))
+                            if actual != expected:
+                                mismatches.append(("legacy weight", char, expected, actual))
                 for mode in modes:
                     for term in terms:
                         expected = result(mysql_connection, term, mode)
@@ -311,11 +321,13 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                         if not scores_agree(expected_scores, actual_scores):
                             mismatches.append((mode, term, "relevance", expected_scores, actual_scores))
                 equality_mismatches = sum(item[0] == "legacy equality" for item in mismatches)
-                search_mismatches = len(mismatches) - equality_mismatches
+                weight_mismatches = sum(item[0] == "legacy weight" for item in mismatches)
+                search_mismatches = len(mismatches) - equality_mismatches - weight_mismatches
                 print(
                     f"size {size}: {len(modes) * len(terms)} ngram queries, "
                     f"{equality_checks} legacy equalities; {search_mismatches} search and "
                     f"{equality_mismatches} equality mismatches"
+                    + (f"; {weight_count} weights, {weight_mismatches} mismatches" if weight_checks else "")
                 )
                 for mismatch in mismatches[:40]:
                     print(mismatch)
@@ -334,6 +346,7 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     subprocess.run(
                         ["mysqladmin", "--no-defaults", f"--socket={mysql_socket}", "-uroot", "shutdown"],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        check=False,
                     )
                     mysql.wait(timeout=20)
 
@@ -348,6 +361,7 @@ if __name__ == "__main__":
     corpus.add_argument("--legacy-radicals", action="store_true")
     corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
     parser.add_argument("--legacy-term-range", help="search only this subrange of --legacy-range while indexing the whole range")
+    parser.add_argument("--weight-checks", action="store_true", help="compare exact WEIGHT_STRING bytes for --legacy-range")
     parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_ja_0900_as_cs_ks", "utf8mb4_0900_as_cs"))
     args = parser.parse_args()
     legacy_range = None
@@ -369,6 +383,9 @@ if __name__ == "__main__":
                 raise ValueError
         except ValueError:
             parser.error("--legacy-term-range must be a subrange of --legacy-range")
+    if args.weight_checks and legacy_range is None:
+        parser.error("--weight-checks requires --legacy-range")
     sizes = args.sizes or list(range(1, 11))
     raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals,
-                                     legacy_range, args.collation, legacy_term_range) for size in sizes) else 0)
+                                     legacy_range, args.collation, legacy_term_range,
+                                     args.weight_checks) for size in sizes) else 0)

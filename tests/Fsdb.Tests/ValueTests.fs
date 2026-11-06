@@ -1643,6 +1643,18 @@ let tests =
                         Expect.notEqual (col.KeyOf written) (col.KeyOf expanded) "index keys remain distinct"
                     Expect.isFalse (col.Equals "🈲" "\uE0BF\uEB32") "literal marker cannot alias an enclosed ideograph"
 
+                testCase "Unicode 5.2 supplementary compatibility comparisons preserve weight classes"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_520_ci" |> Option.get
+                    for written, expanded in [ "𠄢", "𠄢"; "𢌱", "𢌱"; "𣲼", "𣲼"; "𥪧", "𥪧" ] do
+                        Expect.isFalse (col.Equals written expanded) "written form differs from its NFKC base"
+                        Expect.notEqual (col.KeyOf written) (col.KeyOf expanded) "index keys preserve the distinction"
+                    Expect.isTrue (col.Equals "𢌱" "𢌱") "two forms with one MySQL weight compare equal"
+                    Expect.equal (col.HashOf "𢌱") (col.HashOf "𢌱") "equal forms share hash keys"
+                    Expect.isTrue (col.Equals "𥪧" "𥪧") "later forms with one MySQL weight compare equal"
+                    Expect.equal (col.KeyOf "𥪧") (col.KeyOf "𥪧") "later forms share index keys"
+                    Expect.isFalse (col.Equals "𠄢" "\uE0C3\uE903") "literal marker cannot alias a generated key"
+
                 testCase "utf8mb4_general_ci shares the supplementary fallback weight"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get

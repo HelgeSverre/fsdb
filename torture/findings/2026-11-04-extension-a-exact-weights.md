@@ -106,6 +106,16 @@ pairs under each, and 544 compatibility-plus-ASCII pairs under UCA 5.2 match
 native MySQL exactly. The regression pins BMP-mapped, supplementary-mapped,
 and unassigned examples.
 
+The exact bytes were already correct, but SQL equality still followed ICU's
+NFKC folding for the 105 written forms whose targets are supplementary
+ideographs. MySQL keeps those forms distinct from their targets; two pairs
+of written forms with the same target compare equal to each other. The
+`utf8mb4_unicode_520_ci` comparison key now preserves those classes across
+the full block while leaving ngram token keys unchanged. The expanded
+two-column oracle found zero search, equality, or exact-weight mismatches at
+all ten ngram sizes: each size checked 3,252 searches, 553 equalities,
+and 542 weights. Mixed-text equality cases are not covered by this follow-up.
+
 The equivalent `utf8mb3_general_ci` and `utf8mb3_unicode_ci` collations use
 the same BMP weights. The oracle now selects the matching charset introducer
 and compared all 55,164 adjacent pairs across the two ranges and both

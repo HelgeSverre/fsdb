@@ -389,6 +389,43 @@ let private foldUnicode520EnclosedCjkEquality (value: string) =
     value.Replace("🈀", "ほか").Replace("🈓", "デ")
     |> foldSupplementaryImplicit '\uE0BF' '\uD83C' 0x1F200 0xEB00 hasWeight
 
+// UCA 5.2 keeps the supplementary compatibility ideographs with supplementary
+// NFKC targets distinct from those targets. Forms with the same target share
+// one comparison weight (for example U+2F891 and U+2F892).
+let private unicode520SupplementaryCompatibilityKeys =
+    let forms =
+        [| 0x2F800 .. 0x2FA1F |]
+        |> Array.choose (fun scalar ->
+            let target = Char.ConvertFromUtf32(scalar).Normalize(NormalizationForm.FormKC)
+            if target.Length = 2 && Char.IsSurrogatePair(target, 0) then
+                Some(scalar, Char.ConvertToUtf32(target, 0))
+            else None)
+    let byTarget =
+        forms |> Array.map snd |> Array.distinct |> Array.sort
+        |> Array.mapi (fun index target -> target, char (0xE900 + index))
+        |> Map.ofArray
+    forms |> Array.map (fun (scalar, target) -> scalar, byTarget.[target]) |> Map.ofArray
+
+let private foldUnicode520SupplementaryCompatibilityEquality (value: string) =
+    let marker = '\uE0C3'
+    if not (value.Contains marker || value.Contains '\uD87E') then value
+    else
+        let result = StringBuilder(value.Length)
+        let mutable index = 0
+        while index < value.Length do
+            let c = value.[index]
+            if c = marker then result.Append(marker).Append(marker) |> ignore
+            elif c = '\uD87E' && index + 1 < value.Length
+                 && Char.IsLowSurrogate value.[index + 1] then
+                let scalar = Char.ConvertToUtf32(c, value.[index + 1])
+                match Map.tryFind scalar unicode520SupplementaryCompatibilityKeys with
+                | Some key -> result.Append(marker).Append(key) |> ignore
+                | None -> result.Append(c).Append(value.[index + 1]) |> ignore
+                index <- index + 1
+            else result.Append(c) |> ignore
+            index <- index + 1
+        result.ToString()
+
 // MySQL's UCA 4.0 and 5.2 tables retain implicit primary weights for marks
 // assigned later. UCA 4.0 gives all of U+1DC0–U+1DFF distinct weights; 5.2
 // assigns some explicit or ignorable weights instead. UCA 4.0 also keeps
@@ -1192,6 +1229,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         let value = value |> foldLegacySpace |> foldCjkPunctuationForms true
         let value = if includeEnclosed then foldLegacyEnclosedCjk true value else value
         let value = if includeEnclosed then foldUnicode520EnclosedCjkEquality value else value
+        let value = if includeEnclosed then foldUnicode520SupplementaryCompatibilityEquality value else value
         value |> foldUnicode520LetterlikeForms |> foldLegacyBopomofoForms
               |> foldKanaVariants |> foldSmallKana |> foldUnicodeQuoteForms
               |> foldUnicode520MongolianSeparator |> foldUnicode520CombiningHalfMarks
