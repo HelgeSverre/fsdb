@@ -1634,11 +1634,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             let mutable supported = true
             for rune in s.EnumerateRunes() do
                 let codepoint = rune.Value
-                // MySQL's legacy tables keep plane-three implicit weights
-                // past Extension J, including its unassigned tail.
+                // MySQL's legacy tables keep implicit weights through the
+                // unassigned tails of planes two and three. The compatibility
+                // ideographs have their own mapping below.
                 let supplementaryIdeograph =
-                    (codepoint >= 0x20000 && codepoint <= 0x2EE5F)
-                    || (codepoint >= 0x30000 && codepoint <= 0x3FFFF)
+                    codepoint >= 0x20000 && codepoint <= 0x3FFFF
                 let supplementaryCompatibility = codepoint >= 0x2F800 && codepoint <= 0x2FA1F
                 let bmpCompatibility = codepoint >= 0xF900 && codepoint <= 0xFAFF
                 // UCA 4.0/5.2 assigns ideographs through these boundaries;

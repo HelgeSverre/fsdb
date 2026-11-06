@@ -651,6 +651,12 @@ let tests =
                     let extensionB = System.Char.ConvertFromUtf32 0x20000
                     let extensionI = System.Char.ConvertFromUtf32 0x2EBF0
                     let extensionILast = System.Char.ConvertFromUtf32 0x2EE5F
+                    let afterExtensionI = System.Char.ConvertFromUtf32 0x2EE60
+                    let beforeCompatibility = System.Char.ConvertFromUtf32 0x2F7FF
+                    let compatibilityFirst = System.Char.ConvertFromUtf32 0x2F800
+                    let compatibilityLast = System.Char.ConvertFromUtf32 0x2FA1F
+                    let afterCompatibility = System.Char.ConvertFromUtf32 0x2FA20
+                    let planeTwoLast = System.Char.ConvertFromUtf32 0x2FFFF
                     let extensionG = System.Char.ConvertFromUtf32 0x30000
                     let extensionHLast = System.Char.ConvertFromUtf32 0x323AF
                     let extensionJFirst = System.Char.ConvertFromUtf32 0x323B0
@@ -835,6 +841,11 @@ let tests =
                           extensionJFirst + extensionJLast, "utf8mb4_general_ci", "FFFDFFFD"
                           extensionJFirst + extensionJLast, "utf8mb4_unicode_ci", "FFFDFFFD"
                           extensionHLast + extensionJFirst + extensionJLast, "utf8mb4_unicode_520_ci", "FBC6A3AFFBC6A3B0FBC6B47F"
+                          extensionILast + afterExtensionI, "utf8mb4_general_ci", "FFFDFFFD"
+                          extensionILast + afterExtensionI, "utf8mb4_unicode_520_ci", "FBC5EE5FFBC5EE60"
+                          beforeCompatibility + compatibilityFirst, "utf8mb4_unicode_520_ci", "FBC5F7FFFB40CE3D"
+                          compatibilityLast + afterCompatibility, "utf8mb4_unicode_520_ci", "FBC5FA1FFBC5FA20"
+                          planeTwoLast, "utf8mb4_unicode_520_ci", "FBC5FFFF"
                           extensionJLast + afterExtensionJ, "utf8mb4_general_ci", "FFFDFFFD"
                           extensionJLast + afterExtensionJ, "utf8mb4_unicode_520_ci", "FBC6B47FFBC6B480"
                           planeThreeLast, "utf8mb4_unicode_520_ci", "FBC7FFFF"
