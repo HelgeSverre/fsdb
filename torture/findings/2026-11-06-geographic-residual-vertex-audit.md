@@ -367,3 +367,17 @@ near-hole count to two, introducing `88 1.00001` again, and was reverted.
 The remaining point-distance case needs a first-point/Newton trace on this
 new coordinate path. The line-relation differences still require ordered
 geographic boundary events.
+
+## Reduced-length operation order
+
+The last `72 1.00001` trace had the same first direct-point distance as
+Boost, but its reduced length changed the first Newton update. Boost groups
+the two multiplicative terms before subtracting them; fsdb multiplied each
+term left to right. Those nearly equal terms cancel at this point. Matching
+Boost's grouping lets the iteration reach MySQL's 0.3302323744957476 m
+minimum. The regression pins the primitive segment distance.
+
+The complete Release oracle now has **0/189 near-hole point-distance**,
+0/189 point-relation, 0/49 polar-corner, and 0/100 seeded point-line-distance
+mismatches. The 11/448 line/polygon relation residuals remain. All 33
+geographic and 22 geometry tests pass.

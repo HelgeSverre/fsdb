@@ -338,8 +338,11 @@ let private geographicCrossTrackDistance referenceSystem point start endpoint =
         let ep2 = eccentricity / (oneMinus * oneMinus)
         let dn1 = sqrt (1.0 + ep2 * sinBet1 * sinBet1)
         let dn2 = sqrt (1.0 + ep2 * sinBet2 * sinBet2)
+        // Keep Boost's grouping: the nearly equal terms can cancel to a
+        // sub-metre reduced length near a geodesic endpoint.
         let reduced =
-            (dn2 * cosSig1 * sinSig2 - dn1 * sinSig1 * cosSig2 - cosSig1 * cosSig2 * j12) * minor
+            (dn2 * (cosSig1 * sinSig2) - dn1 * (sinSig1 * cosSig2)
+             - cosSig1 * cosSig2 * j12) * minor
         let scale =
             let cosSigma = cosSig1 * cosSig2 + sinSig1 * sinSig2
             let t = ep2 * (cosBet1 - cosBet2) * (cosBet1 + cosBet2) / (dn1 + dn2)
