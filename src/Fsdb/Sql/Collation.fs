@@ -869,6 +869,39 @@ let private legacyKanaWeights unicode520 codepoint =
     elif encoded <= 0xFFFFu then [ int encoded ]
     else [ int (encoded >>> 16); int (encoded &&& 0xFFFFu) ]
 
+// MySQL 8.4.11's legacy UCA weights for U+3105–U+312D. The surrounding
+// unassigned Bopomofo positions use the legacy implicit two-weight form.
+let private unicode40BopomofoWeights =
+    [|
+        0x1E82u; 0x1E83u; 0x1E84u; 0x1E85u; 0x1E87u; 0x1E88u; 0x1E89u; 0x1E8Au
+        0x1E8Bu; 0x1E8Cu; 0x1E8Fu; 0x1E90u; 0x1E91u; 0x1E92u; 0x1E94u; 0x1E95u
+        0x1E96u; 0x1E97u; 0x1E98u; 0x1E99u; 0x1E9Au; 0x1E9Bu; 0x1E9Cu; 0x1E9Eu
+        0x1E9Fu; 0x1EA1u; 0x1EA2u; 0x1EA3u; 0x1EA4u; 0x1EA5u; 0x1EA6u; 0x1EA7u
+        0x1EA9u; 0x1EADu; 0x1EAEu; 0x1EAFu; 0x1EB0u; 0x1E86u; 0x1E8Du; 0x1E93u
+        0xFBC0B12Du
+    |]
+
+let private unicode52BopomofoWeights =
+    [|
+        0x2B45u; 0x2B46u; 0x2B47u; 0x2B48u; 0x2B4Au; 0x2B4Bu; 0x2B4Cu; 0x2B4Du
+        0x2B4Eu; 0x2B4Fu; 0x2B52u; 0x2B53u; 0x2B54u; 0x2B55u; 0x2B57u; 0x2B58u
+        0x2B59u; 0x2B5Au; 0x2B5Bu; 0x2B5Cu; 0x2B5Du; 0x2B5Eu; 0x2B5Fu; 0x2B61u
+        0x2B62u; 0x2B64u; 0x2B65u; 0x2B66u; 0x2B67u; 0x2B68u; 0x2B69u; 0x2B6Au
+        0x2B6Cu; 0x2B70u; 0x2B71u; 0x2B72u; 0x2B73u; 0x2B49u; 0x2B50u; 0x2B56u
+        0x2B74u
+    |]
+
+let private legacyBopomofoWeights unicode520 codepoint =
+    let encoded =
+        if codepoint < 0x3105 || codepoint >= 0x312E then
+            0xFBC08000u + uint32 codepoint
+        elif unicode520 then
+            unicode52BopomofoWeights[codepoint - 0x3105]
+        else
+            unicode40BopomofoWeights[codepoint - 0x3105]
+    if encoded <= 0xFFFFu then [ int encoded ]
+    else [ int (encoded >>> 16); int (encoded &&& 0xFFFFu) ]
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) =
@@ -1045,6 +1078,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     if general then addWeight codepoint
                     else
                         for weight in legacyKanaWeights (name = "utf8mb4_unicode_520_ci") codepoint do
+                            addWeight weight
+                | None when codepoint >= 0x3100 && codepoint <= 0x312F ->
+                    if general then addWeight codepoint
+                    else
+                        for weight in legacyBopomofoWeights (name = "utf8mb4_unicode_520_ci") codepoint do
                             addWeight weight
                 | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =
