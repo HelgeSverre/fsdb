@@ -2535,9 +2535,12 @@ implementation effort:
    intervening sources](torture/findings/2026-11-06-mixed-natural-view-intervening-source.md#dependent-json_table-and-right-preserved-final-view)
    also preserve the final view through `NATURAL RIGHT JOIN`, including a
    missing first-view row, a later matched or unmatched natural read tail,
-   and a physical-row wait. Other intervening sources, unmatched
-   arrangements, and longer mixed join chains remain
-   open. [CTE-first natural outer joins](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#cte-first-natural-outer-join-to-a-writable-view)
+   and a physical-row wait. A [four-writable-view chain across a derived read
+   source](torture/findings/2026-11-06-mixed-natural-view-intervening-source.md#four-writable-views-across-a-derived-read-source)
+   now matches 79 value cases and 59 contended rebases, including four
+   independent holders and a right-preserved final view. Other intervening
+   sources, unmatched arrangements, and longer mixed join chains remain open.
+   [CTE-first natural outer joins](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#cte-first-natural-outer-join-to-a-writable-view)
    to a writable view now wait and rebase, including one preceding ordinary
    read join and matched and unmatched left and right cases; duplicate `id`
    columns in that read group return MySQL's 1052. [Earlier left and right

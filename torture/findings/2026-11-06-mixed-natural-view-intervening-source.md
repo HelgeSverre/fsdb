@@ -51,3 +51,19 @@ MySQL for both the preserved second-view row at `id=3` and a tail-only
 row at `id=1`. The latter has no writable view row after the intervening
 dependent source. The maintained corpus now passes 73 two-view UPDATE
 cases and 40 contended rebases against MySQL 8.4.11.
+
+## Four writable views across a derived read source
+
+The maintained oracle now joins a CTE to `va`, a derived read
+source, `vb_unique`, `vc_unique`, and `ve_unique`. The four views write to
+independent physical tables. MySQL and fsdb agree on a fully matched row,
+a row missing the second and fourth views, and a final `NATURAL RIGHT JOIN`
+that preserves a fourth-view row after earlier sources miss. Row counts
+and all four base tables are compared after every UPDATE.
+
+The fully matched form also waits and rebases when any one of its four
+physical targets is held, and when four independent transactions hold the
+targets simultaneously. The expanded native MySQL 8.4.11 oracle passes
+**79 UPDATE cases and 59 contended rebases**. This extends verified view
+rewrite and write scheduling to four targets; other mixed join shapes and
+unmatched arrangements remain open.

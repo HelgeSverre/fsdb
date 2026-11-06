@@ -43,6 +43,17 @@ def six_source_update(row_id):
     )
 
 
+def four_view_update(row_id, final_join="LEFT"):
+    return (
+        "WITH c AS (SELECT id FROM link) UPDATE c NATURAL LEFT JOIN va "
+        "JOIN (SELECT id AS bridge FROM link) r ON r.bridge=va.link_id "
+        "NATURAL LEFT JOIN vb_unique vb NATURAL LEFT JOIN vc_unique vc "
+        f"NATURAL {final_join} JOIN ve_unique ve "
+        "SET va.n=va.n+1,vb.bonus=vb.bonus+1,vc.extra=vc.extra+1,ve.tail=ve.tail+1 "
+        f"WHERE id={row_id}"
+    )
+
+
 def start_waiting_update(waiter, sql):
     outcome = {}
 
@@ -71,7 +82,7 @@ def contended_update(owner, waiter_options, held_rows, sql):
         assert execute(owner, "COMMIT") == 0
         thread.join(5)
         assert not thread.is_alive(), (sql, outcome)
-        assert outcome["affected"] in (1, 2, 3) and outcome["commit"] == 0, (sql, outcome)
+        assert outcome["affected"] in (1, 2, 3, 4) and outcome["commit"] == 0, (sql, outcome)
         return waited, outcome["affected"]
     finally:
         waiter.close()
@@ -142,10 +153,12 @@ def main():
                     "CREATE TABLE a(id INT PRIMARY KEY,n INT)",
                     "CREATE TABLE b(id INT PRIMARY KEY,n INT)",
                     "CREATE TABLE d(id INT PRIMARY KEY,n INT)",
+                    "CREATE TABLE e(id INT PRIMARY KEY,n INT)",
                     "CREATE TABLE link(id INT PRIMARY KEY)",
                     "INSERT INTO a VALUES(1,10),(2,20)",
                     "INSERT INTO b VALUES(1,30),(3,40)",
                     "INSERT INTO d VALUES(1,50),(2,60),(3,70)",
+                    "INSERT INTO e VALUES(1,80),(3,90)",
                     "INSERT INTO link VALUES(1),(2),(3)",
                     "CREATE VIEW va AS SELECT t.id,t.n,l.id AS link_id FROM a t JOIN link l ON t.id=l.id",
                     "CREATE VIEW vb AS SELECT t.id,t.n,l.id AS link_id FROM b t JOIN link l ON t.id=l.id",
@@ -153,6 +166,8 @@ def main():
                     "FROM b t JOIN link l ON t.id=l.id",
                     "CREATE VIEW vc_unique AS SELECT t.id,t.n AS extra,l.id AS link_id "
                     "FROM d t JOIN link l ON t.id=l.id",
+                    "CREATE VIEW ve_unique AS SELECT t.id,t.n AS tail,l.id AS link_id "
+                    "FROM e t JOIN link l ON t.id=l.id",
                     "CREATE VIEW read_counts AS SELECT id,COUNT(*) AS hits FROM link GROUP BY id",
                     "CREATE VIEW va_complex AS SELECT t.id,t.n,q.link_id FROM a t "
                     "JOIN (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) r ON t.id=r.id "
@@ -393,11 +408,14 @@ def main():
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE id=3",
                     "UPDATE va LEFT JOIN (link l JOIN vb USING(missing_key)) USING(id) "
                     "SET va.n=va.n+1 WHERE va.id=1",
+                    four_view_update(1),
+                    four_view_update(2),
+                    four_view_update(3, "RIGHT"),
                 ]
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)
                     assert actual == expected, (sql, expected, actual)
-                    for table in ("a", "b", "d"):
+                    for table in ("a", "b", "d", "e"):
                         query = f"SELECT id,n FROM {table} ORDER BY id"
                         expected, actual = (execute(connection, query) for connection in connections)
                         assert actual == expected, (sql, query, expected, actual)
@@ -417,7 +435,7 @@ def main():
                 assert actual == expected and expected[0] == "error" and expected[1][0] == 1369, (
                     rejected, expected, actual
                 )
-                for table in ("a", "b", "d"):
+                for table in ("a", "b", "d", "e"):
                     query = f"SELECT id,n FROM {table} ORDER BY id"
                     expected, actual = (execute(connection, query) for connection in connections)
                     assert actual == expected, (rejected, query, expected, actual)
@@ -514,11 +532,15 @@ def main():
                     ([("b", 3), ("d", 3)], three_view_right_only),
                 ):
                     held_cases.append((held_rows, sql))
+                four_view_matched = four_view_update(1)
+                for target in ("a", "b", "d", "e"):
+                    held_cases.append(([(target, 1)], four_view_matched))
+                held_cases.append(([("a", 1), ("b", 1), ("d", 1), ("e", 1)], four_view_matched))
                 for held_rows, sql in held_cases:
                     expected = contended_update(mysql_connection, {"unix_socket": mysql_socket}, held_rows, sql)
                     actual = contended_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, held_rows, sql)
                     assert expected == actual and expected[0], (sql, expected, actual)
-                    for target in ("a", "b", "d"):
+                    for target in ("a", "b", "d", "e"):
                         query = f"SELECT id,n FROM {target} ORDER BY id"
                         expected_rows, actual_rows = (execute(connection, query) for connection in connections)
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
@@ -578,12 +600,15 @@ def main():
                         query = f"SELECT id,n FROM {target} ORDER BY id"
                         expected_rows, actual_rows = (execute(connection, query) for connection in connections)
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
-                three_view_independent = [
+                independent_view_cases = [
                     ([("a", 1), ("b", 1), ("d", 1)], three_view_matched),
                     ([("a", 2), ("d", 2)], three_view_left_only),
                     ([("b", 3), ("d", 3)], three_view_right_only),
                 ]
-                for held_rows, sql in three_view_independent:
+                independent_view_cases.append(
+                    ([("a", 1), ("b", 1), ("d", 1), ("e", 1)], four_view_matched)
+                )
+                for held_rows, sql in independent_view_cases:
                     expected = independently_held_update(
                         mysql_connection, {"unix_socket": mysql_socket}, held_rows, sql
                     )
@@ -591,13 +616,13 @@ def main():
                         fsdb_connection, {"host": "127.0.0.1", "port": port}, held_rows, sql
                     )
                     assert actual == expected == len(held_rows), (sql, expected, actual)
-                    for target in ("a", "b", "d"):
+                    for target in ("a", "b", "d", "e"):
                         query = f"SELECT id,n FROM {target} ORDER BY id"
                         expected_rows, actual_rows = (execute(connection, query) for connection in connections)
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
                 print(
                     f"MySQL 8.4.11: {len(cases)} joined-view outer UPDATE cases, atomic CHECK OPTION, "
-                    f"and {len(held_cases) + len(independently_held_cases) + len(three_view_independent)} contended rebases matched"
+                    f"and {len(held_cases) + len(independently_held_cases) + len(independent_view_cases)} contended rebases matched"
                 )
             finally:
                 if fsdb_connection:
