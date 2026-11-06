@@ -2270,7 +2270,9 @@ indexed path, as do [Boolean combinations of those checks](benchmarks/results/20
 The [null-safe equality to NULL form](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md#null-safe-equality-to-null)
 also uses indexed membership, including reversed operands and Boolean
 combinations, with fewer than 200 examined rows on the 50-by-500 control.
-Alias-bound, other expression-grouped, and more complex source
+Unique [projection aliases of safe inner-only grouping expressions](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md#projection-aliases-as-grouping-keys)
+also use indexed membership, with fewer than 200 examined rows; coercing
+aliases retain ordinary evaluation. Other expression-grouped and more complex source
 shapes remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context

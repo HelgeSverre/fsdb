@@ -9325,6 +9325,15 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
             | _ -> false
         let groupIsSafe expression =
             let aliases = select.Projections |> List.choose (fun projection -> projection.Alias)
+            let groupExpression =
+                match expression with
+                | Col name when not (uniqueInnerColumn name) ->
+                    select.Projections
+                    |> List.filter (fun projection -> projection.Alias |> Option.exists (equalsIgnoreCase name))
+                    |> function
+                        | [ projection ] -> projection.Expression
+                        | _ -> expression
+                | _ -> expression
             let safeColumn = function
                 | QualifiedCol(qualifier, column) ->
                     FromItem.tryQualifier source
@@ -9341,7 +9350,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                 | Not value -> safeBoolean value
                 | BinOp((And | Or), left, right) -> safeBoolean left && safeBoolean right
                 | _ -> false
-            safeColumn expression || safeBoolean expression
+            safeColumn groupExpression || safeBoolean groupExpression
         // A pure inner-column null check is as safe to discard from an EXISTS
         // projection as it is from a grouping key. Reuse the same binding and
         // warning checks instead of maintaining a second expression list.

@@ -73,3 +73,16 @@ path; an unknown projected column retains error 1054.
 Native MySQL 8.4.11 agrees on the audited results and prepared forms. All
 90 correlated tests pass. No latency claim is made from the examined-row
 counter alone.
+
+## Projection aliases as grouping keys
+
+`GROUP BY group_key` now uses indexed membership when exactly one projection
+defines `group_key`, no inner column has that name, and the projection
+expression is an inner column or one of the validated null-check forms above.
+The 50-by-500 fixture examines fewer than 200 rows for both
+`i.outer_id AS group_key` and `i.outer_id IS NULL AS group_key`. A coercing
+`NOT i.outer_id AS group_key` remains on the ordinary path and examines more
+than 500 rows. Duplicate aliases, names that collide with an inner column,
+and other expressions retain ordinary binding and evaluation. Native MySQL
+8.4.11 agrees on matched and unmatched results and prepared statements; all
+90 correlated tests pass. This is an examined-row result, not a latency claim.

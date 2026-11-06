@@ -446,6 +446,17 @@ let tests =
                       runDefault store "SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id GROUP BY NOT i.outer_id) AS hit FROM exists_outer o ORDER BY o.id")
               Expect.equal coercedResult result "raw-column Boolean coercion preserves membership"
               Expect.isGreaterThan coercedExamined 500L "coercing a raw column retains normal evaluation"
+              for projection in [ "i.outer_id AS group_key"; "i.outer_id IS NULL AS group_key" ] do
+                  let aliasedResult, aliasedExamined =
+                      withExaminedRows (fun () ->
+                          runDefault store ("SELECT o.id, EXISTS(SELECT " + projection + " FROM exists_inner i WHERE i.outer_id=o.id GROUP BY group_key) AS hit FROM exists_outer o ORDER BY o.id"))
+                  Expect.equal aliasedResult result "a safe projection alias preserves grouped EXISTS membership"
+                  Expect.isLessThan aliasedExamined 200L "an inner-only grouping alias uses indexed membership"
+              let coercingAlias, coercingAliasExamined =
+                  withExaminedRows (fun () ->
+                      runDefault store "SELECT o.id, EXISTS(SELECT NOT i.outer_id AS group_key FROM exists_inner i WHERE i.outer_id=o.id GROUP BY group_key) AS hit FROM exists_outer o ORDER BY o.id")
+              Expect.equal coercingAlias result "a coercing grouping alias preserves membership"
+              Expect.isGreaterThan coercingAliasExamined 500L "a coercing grouping alias retains normal evaluation"
               for projection in [ "i.id"; "i.outer_id"; "i.*"; "*"
                                   "i.outer_id IS NULL"; "i.outer_id IS NOT NULL"
                                   "i.outer_id <=> NULL"; "NOT (i.outer_id IS NULL)" ] do
