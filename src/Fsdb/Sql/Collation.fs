@@ -1333,6 +1333,24 @@ let private legacyCjkCompatibilityFormWeights unicode520 codepoint =
     let primary = weights[codepoint - 0xFE30]
     if codepoint = 0xFE30 then [ primary; primary ] else [ primary ]
 
+// U+FE53, U+FE67, and U+FE6C–U+FE6F are implicit in both legacy UCA tables.
+// Zero marks those entries; all other values are MySQL 8.4.11 primaries.
+let private legacyCjkSmallForm40 =
+    [| 0x022F; 0x0237; 0x025D; 0; 0x023A; 0x023D; 0x0255; 0x0251
+       0x0228; 0x0288; 0x0289; 0x028C; 0x028D; 0x02B8; 0x02B9; 0x02D2
+       0x02CF; 0x02C8; 0x0428; 0x0221; 0x042C; 0x042E; 0x042D; 0
+       0x02CE; 0x0E0F; 0x02D3; 0x02C7; 0; 0; 0; 0 |]
+
+let private legacyCjkSmallForm52 =
+    [| 0x0234; 0x0240; 0x0281; 0; 0x0243; 0x0247; 0x0273; 0x026E
+       0x022C; 0x02FF; 0x0300; 0x0303; 0x0304; 0x0347; 0x0348; 0x0362
+       0x035F; 0x0357; 0x0550; 0x0223; 0x0554; 0x0556; 0x0555; 0
+       0x035E; 0x11E1; 0x0363; 0x0356; 0; 0; 0; 0 |]
+
+let private legacyCjkSmallFormWeight unicode520 codepoint =
+    let weights = if unicode520 then legacyCjkSmallForm52 else legacyCjkSmallForm40
+    weights[codepoint - 0xFE50]
+
 let private legacySquaredCjkExceptionWeights unicode520 codepoint =
     match codepoint, unicode520 with
     | 0x3382, false -> [ 0x10F8; 0x0E33 ]
@@ -1659,6 +1677,12 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     else
                         for weight in legacyCjkCompatibilityFormWeights (name = "utf8mb4_unicode_520_ci") codepoint do
                             addWeight weight
+                | None when codepoint >= 0xFE50 && codepoint <= 0xFE6F ->
+                    if general then addWeight codepoint
+                    else
+                        let weight = legacyCjkSmallFormWeight (name = "utf8mb4_unicode_520_ci") codepoint
+                        if weight = 0 then addImplicit 0xFBC0 codepoint
+                        else addWeight weight
                 | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =
                         let uppercase =
