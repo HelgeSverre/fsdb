@@ -32,3 +32,13 @@ Run `uv run --with pymysql python
 torture/scripts/general-ci-range-weight-oracle.py 31a0 3200 --collation
 utf8mb4_unicode_520_ci --compare-fsdb` after building the Release CLI.
 Other CJK blocks and mixed-script compositions remain open.
+
+## Adjacent Kanbun block
+
+The adjacent U+3190–U+319F block had 16 exact-weight mismatches under each
+legacy Unicode collation. MySQL gives its first two marks different UCA 4.0
+and 5.2 weights, and the remaining 14 annotated ideographs share their
+measured implicit weights across those versions. Fsdb now emits those
+weights while general collations retain the written code points. The same
+five-collation oracle compares all 16 singletons, adjacent pairs,
+ideograph-mixed strings, and `CHAR(4)` strings: 320 further exact-byte checks.

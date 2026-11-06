@@ -977,6 +977,23 @@ let private legacyBopomofoWeights unicode520 codepoint =
     if encoded <= 0xFFFFu then [ int encoded ]
     else [ int (encoded >>> 16); int (encoded &&& 0xFFFFu) ]
 
+// The Kanbun marks have UCA-version-specific weights; the annotated
+// ideographs use the same legacy implicit weights in both versions.
+let private legacyKanbunIdeographWeights =
+    [| 0xFB40CE00u; 0xFB40CE8Cu; 0xFB40CE09u; 0xFB40D6DBu
+       0xFB40CE0Au; 0xFB40CE2Du; 0xFB40CE0Bu; 0xFB40F532u
+       0xFB40CE59u; 0xFB40CE19u; 0xFB40CE01u; 0xFB40D929u
+       0xFB40D730u; 0xFB40CEBAu |]
+
+let private legacyKanbunWeights unicode520 codepoint =
+    let encoded =
+        match codepoint with
+        | 0x3190 -> if unicode520 then 0x110Bu else 0x0DC2u
+        | 0x3191 -> if unicode520 then 0x110Cu else 0x0DC3u
+        | _ -> legacyKanbunIdeographWeights[codepoint - 0x3192]
+    if encoded <= 0xFFFFu then [ int encoded ]
+    else [ int (encoded >>> 16); int (encoded &&& 0xFFFFu) ]
+
 // MySQL 8.4.11's legacy UCA weights for Bopomofo extensions and CJK strokes.
 // UCA 4.0 predates the stroke block; UCA 5.2 assigns its first 36 entries.
 let private unicode40BopomofoExtensionWeights =
@@ -1445,6 +1462,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     if general then addWeight codepoint
                     else
                         for weight in legacyCompatibilityJamoWeights (name = "utf8mb4_unicode_520_ci") codepoint do
+                            addWeight weight
+                | None when codepoint >= 0x3190 && codepoint <= 0x319F ->
+                    if general then addWeight codepoint
+                    else
+                        for weight in legacyKanbunWeights (name = "utf8mb4_unicode_520_ci") codepoint do
                             addWeight weight
                 | None when codepoint >= 0x31A0 && codepoint <= 0x31FF ->
                     if general then addWeight codepoint
