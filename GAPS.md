@@ -1152,8 +1152,9 @@ now also matches MySQL for 76 UPDATE cases, including LEFT/RIGHT joins with matc
 missing view rows, shared internal aliases, grouped lateral read sources,
 atomic `CHECK OPTION` rejection, a
 [three-view grouped-source case](torture/findings/2026-10-18-two-joined-view-outer-writes.md#third-writable-view-after-a-grouped-source),
-and 45 contended rebases, including a three-target write whose physical
-rows are held by separate transactions. The
+and 53 contended rebases, including a three-target write whose physical
+rows are held by separate transactions and one-sided two-target writes
+held by independent owners. The
 [two-view NATURAL JOIN follow-up](torture/findings/2026-11-05-two-view-natural-rebase.md)
 claims both physical targets for uniquely owned bare assignments before a
 contended rebase, including a CTE read source ahead of both views and dependent

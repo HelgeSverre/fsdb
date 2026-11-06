@@ -251,7 +251,10 @@ counts and physical rows. Five added contention cases hold each of the
 three physical targets separately, all three in one transaction, and all
 three under independent owners. In each case the joined UPDATE waits for
 the owners, then commits the same three rebased rows as MySQL. The maintained
-contention matrix now has 45 cases. More three-view join associations and
-lock-order combinations remain open.
+contention matrix now has 45 cases. A one-sided follow-up holds each
+existing pair of targets separately and together under one owner, then
+holds each pair under independent owners. The left-only and right-only
+rows wait and rebase as MySQL does. The matrix now has 53 contended cases.
+More three-view join associations and lock-order combinations remain open.
 
 Wider outer-join trees and nested security layers remain untested here.

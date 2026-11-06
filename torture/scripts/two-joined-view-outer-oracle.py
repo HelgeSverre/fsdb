@@ -77,57 +77,30 @@ def contended_update(owner, waiter_options, held_rows, sql):
         waiter.close()
 
 
-def independently_held_update(first_owner, connection_options, sql):
-    second_owner = connect(**connection_options)
+def independently_held_update(first_owner, connection_options, held_rows, sql):
+    assert len(held_rows) >= 2
+    other_owners = [connect(**connection_options) for _ in held_rows[1:]]
     waiter = connect(**connection_options)
     try:
-        assert execute(second_owner, "USE probe") == 0
-        assert execute(waiter, "USE probe") == 0
-        assert execute(first_owner, "BEGIN") == 0
-        assert execute(first_owner, "UPDATE a SET n=n+10 WHERE id=1") == 1
-        assert execute(second_owner, "BEGIN") == 0
-        assert execute(second_owner, "UPDATE b SET n=n+10 WHERE id=1") == 1
-        assert execute(waiter, "BEGIN") == 0
-
-        thread, outcome = start_waiting_update(waiter, sql)
-        thread.join(0.2)
-        assert thread.is_alive(), ("joined UPDATE did not wait for the first holder", sql, outcome)
-        assert execute(first_owner, "COMMIT") == 0
-        thread.join(0.2)
-        assert thread.is_alive(), "joined UPDATE completed while the second holder was active"
-        assert execute(second_owner, "COMMIT") == 0
-        thread.join(5)
-        assert not thread.is_alive(), (sql, outcome)
-        assert outcome == {"affected": 2, "commit": 0}, (sql, outcome)
-        return outcome["affected"]
-    finally:
-        second_owner.close()
-        waiter.close()
-
-
-def three_independently_held_update(first_owner, connection_options, sql):
-    second_owner = connect(**connection_options)
-    third_owner = connect(**connection_options)
-    waiter = connect(**connection_options)
-    try:
-        for connection in (second_owner, third_owner, waiter):
+        for connection in (*other_owners, waiter):
             assert execute(connection, "USE probe") == 0
-        for connection, table in ((first_owner, "a"), (second_owner, "b"), (third_owner, "d")):
+        owners = [first_owner, *other_owners]
+        for connection, (table, row_id) in zip(owners, held_rows, strict=True):
             assert execute(connection, "BEGIN") == 0
-            assert execute(connection, f"UPDATE {table} SET n=n+10 WHERE id=1") == 1
+            assert execute(connection, f"UPDATE {table} SET n=n+10 WHERE id={row_id}") == 1
         assert execute(waiter, "BEGIN") == 0
         thread, outcome = start_waiting_update(waiter, sql)
-        for owner in (first_owner, second_owner, third_owner):
+        for owner in owners:
             thread.join(0.2)
-            assert thread.is_alive(), ("three-view UPDATE finished before all holders committed", outcome)
+            assert thread.is_alive(), ("joined UPDATE finished before all holders committed", sql, outcome)
             assert execute(owner, "COMMIT") == 0
         thread.join(5)
         assert not thread.is_alive(), (sql, outcome)
-        assert outcome == {"affected": 3, "commit": 0}, (sql, outcome)
+        assert outcome == {"affected": len(held_rows), "commit": 0}, (sql, outcome)
         return outcome["affected"]
     finally:
-        second_owner.close()
-        third_owner.close()
+        for owner in other_owners:
+            owner.close()
         waiter.close()
 
 
@@ -527,6 +500,20 @@ def main():
                 for target in ("a", "b", "d"):
                     held_cases.append(([(target, 1)], three_view_matched))
                 held_cases.append(([("a", 1), ("b", 1), ("d", 1)], three_view_matched))
+                three_view_left_only = three_view_matched.replace("WHERE id=1", "WHERE id=2")
+                three_view_right_only = three_view_matched.replace(
+                    "NATURAL LEFT JOIN vb_unique vb NATURAL LEFT JOIN vc_unique vc",
+                    "NATURAL RIGHT JOIN vb_unique vb NATURAL RIGHT JOIN vc_unique vc",
+                ).replace("WHERE id=1", "WHERE id=3")
+                for held_rows, sql in (
+                    ([("a", 2)], three_view_left_only),
+                    ([("d", 2)], three_view_left_only),
+                    ([("a", 2), ("d", 2)], three_view_left_only),
+                    ([("b", 3)], three_view_right_only),
+                    ([("d", 3)], three_view_right_only),
+                    ([("b", 3), ("d", 3)], three_view_right_only),
+                ):
+                    held_cases.append((held_rows, sql))
                 for held_rows, sql in held_cases:
                     expected = contended_update(mysql_connection, {"unix_socket": mysql_socket}, held_rows, sql)
                     actual = contended_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, held_rows, sql)
@@ -583,27 +570,34 @@ def main():
                     "SET va.n=va.n+1,vb.n=vb.n+1 WHERE va.id=1",
                 ]
                 for sql in independently_held_cases:
-                    expected = independently_held_update(mysql_connection, {"unix_socket": mysql_socket}, sql)
-                    actual = independently_held_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, sql)
+                    held_rows = [("a", 1), ("b", 1)]
+                    expected = independently_held_update(mysql_connection, {"unix_socket": mysql_socket}, held_rows, sql)
+                    actual = independently_held_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, held_rows, sql)
                     assert actual == expected == 2, (sql, expected, actual)
                     for target in ("a", "b"):
                         query = f"SELECT id,n FROM {target} ORDER BY id"
                         expected_rows, actual_rows = (execute(connection, query) for connection in connections)
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
-                expected = three_independently_held_update(
-                    mysql_connection, {"unix_socket": mysql_socket}, three_view_matched
-                )
-                actual = three_independently_held_update(
-                    fsdb_connection, {"host": "127.0.0.1", "port": port}, three_view_matched
-                )
-                assert actual == expected == 3, (three_view_matched, expected, actual)
-                for target in ("a", "b", "d"):
-                    query = f"SELECT id,n FROM {target} ORDER BY id"
-                    expected_rows, actual_rows = (execute(connection, query) for connection in connections)
-                    assert actual_rows == expected_rows, (three_view_matched, query, expected_rows, actual_rows)
+                three_view_independent = [
+                    ([("a", 1), ("b", 1), ("d", 1)], three_view_matched),
+                    ([("a", 2), ("d", 2)], three_view_left_only),
+                    ([("b", 3), ("d", 3)], three_view_right_only),
+                ]
+                for held_rows, sql in three_view_independent:
+                    expected = independently_held_update(
+                        mysql_connection, {"unix_socket": mysql_socket}, held_rows, sql
+                    )
+                    actual = independently_held_update(
+                        fsdb_connection, {"host": "127.0.0.1", "port": port}, held_rows, sql
+                    )
+                    assert actual == expected == len(held_rows), (sql, expected, actual)
+                    for target in ("a", "b", "d"):
+                        query = f"SELECT id,n FROM {target} ORDER BY id"
+                        expected_rows, actual_rows = (execute(connection, query) for connection in connections)
+                        assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
                 print(
                     f"MySQL 8.4.11: {len(cases)} joined-view outer UPDATE cases, atomic CHECK OPTION, "
-                    f"and {len(held_cases) + len(independently_held_cases) + 1} contended rebases matched"
+                    f"and {len(held_cases) + len(independently_held_cases) + len(three_view_independent)} contended rebases matched"
                 )
             finally:
                 if fsdb_connection:
