@@ -234,4 +234,20 @@ dotnet build src/Fsdb.Cli -c Release
 uv run --with pymysql python torture/scripts/two-joined-view-outer-oracle.py
 ```
 
+## Third writable view after a grouped source
+
+A CTE-first UPDATE with a read-side derived join and three assigned joined
+views reached the physical mutation path with `vc_unique` still unresolved.
+MySQL changed three base rows; fsdb returned 1146 for the third view. After
+the first two view expansions, the rewrite had grouped the preceding sources
+under a RIGHT join. The source-order walk stopped at that group before
+reaching the third view. It now carries an already grouped ordinary join
+operand into the prefix, preserving its association while moving the next
+writable view to the front.
+
+The oracle covers matched and one-sided rows under `NATURAL LEFT` and
+`NATURAL RIGHT` joins. All 76 UPDATE cases now match MySQL 8.4.11 in affected
+counts and physical rows, along with 40 contended rebases. More three-view
+join associations and contended three-target writes remain open.
+
 Wider outer-join trees and nested security layers remain untested here.

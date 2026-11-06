@@ -142,14 +142,18 @@ def main():
                     "CREATE DATABASE probe", "USE probe",
                     "CREATE TABLE a(id INT PRIMARY KEY,n INT)",
                     "CREATE TABLE b(id INT PRIMARY KEY,n INT)",
+                    "CREATE TABLE d(id INT PRIMARY KEY,n INT)",
                     "CREATE TABLE link(id INT PRIMARY KEY)",
                     "INSERT INTO a VALUES(1,10),(2,20)",
                     "INSERT INTO b VALUES(1,30),(3,40)",
+                    "INSERT INTO d VALUES(1,50),(2,60),(3,70)",
                     "INSERT INTO link VALUES(1),(2),(3)",
                     "CREATE VIEW va AS SELECT t.id,t.n,l.id AS link_id FROM a t JOIN link l ON t.id=l.id",
                     "CREATE VIEW vb AS SELECT t.id,t.n,l.id AS link_id FROM b t JOIN link l ON t.id=l.id",
                     "CREATE VIEW vb_unique AS SELECT t.id,t.n AS bonus,l.id AS link_id "
                     "FROM b t JOIN link l ON t.id=l.id",
+                    "CREATE VIEW vc_unique AS SELECT t.id,t.n AS extra,l.id AS link_id "
+                    "FROM d t JOIN link l ON t.id=l.id",
                     "CREATE VIEW read_counts AS SELECT id,COUNT(*) AS hits FROM link GROUP BY id",
                     "CREATE VIEW va_complex AS SELECT t.id,t.n,q.link_id FROM a t "
                     "JOIN (SELECT id,COUNT(*) AS hits FROM link GROUP BY id) r ON t.id=r.id "
@@ -366,6 +370,18 @@ def main():
                     "ON j.bridge=va.link_id NATURAL RIGHT JOIN vb_unique vb "
                     "NATURAL RIGHT JOIN (SELECT 1 AS id) tail "
                     "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL LEFT JOIN va "
+                    "JOIN (SELECT id AS bridge FROM link) r ON r.bridge=va.link_id "
+                    "NATURAL LEFT JOIN vb_unique vb NATURAL LEFT JOIN vc_unique vc "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE id=1",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL LEFT JOIN va "
+                    "JOIN (SELECT id AS bridge FROM link) r ON r.bridge=va.link_id "
+                    "NATURAL LEFT JOIN vb_unique vb NATURAL LEFT JOIN vc_unique vc "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE id=2",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL LEFT JOIN va "
+                    "JOIN (SELECT id AS bridge FROM link) r ON r.bridge=va.link_id "
+                    "NATURAL RIGHT JOIN vb_unique vb NATURAL RIGHT JOIN vc_unique vc "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE id=3",
                     "WITH c AS (SELECT id FROM link) UPDATE (c NATURAL JOIN va) "
                     "NATURAL JOIN vb_unique vb SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1",
                     "UPDATE va LEFT JOIN (link l JOIN vb USING(id)) USING(id) "
@@ -382,7 +398,7 @@ def main():
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)
                     assert actual == expected, (sql, expected, actual)
-                    for table in ("a", "b"):
+                    for table in ("a", "b", "d"):
                         query = f"SELECT id,n FROM {table} ORDER BY id"
                         expected, actual = (execute(connection, query) for connection in connections)
                         assert actual == expected, (sql, query, expected, actual)
@@ -402,7 +418,7 @@ def main():
                 assert actual == expected and expected[0] == "error" and expected[1][0] == 1369, (
                     rejected, expected, actual
                 )
-                for table in ("a", "b"):
+                for table in ("a", "b", "d"):
                     query = f"SELECT id,n FROM {table} ORDER BY id"
                     expected, actual = (execute(connection, query) for connection in connections)
                     assert actual == expected, (rejected, query, expected, actual)
@@ -540,7 +556,7 @@ def main():
                         expected_rows, actual_rows = (execute(connection, query) for connection in connections)
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
                 print(
-                    f"MySQL 8.4.11: {len(cases)} two-view outer UPDATE cases, atomic CHECK OPTION, "
+                    f"MySQL 8.4.11: {len(cases)} joined-view outer UPDATE cases, atomic CHECK OPTION, "
                     f"and {len(held_cases) + len(independently_held_cases)} contended rebases matched"
                 )
             finally:

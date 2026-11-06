@@ -24836,6 +24836,13 @@ let private writableViewFirst (store: Store) (defaultDatabase: string) (update: 
             // assigned view, so that the first view can expand before the
             // second one without losing the outer-join boundary.
             move (join :: prior) rest
+        | ({ Table = FromJoinGroup _ } as join) :: rest
+            when join.Kind = InnerJoin || join.Kind = CrossJoin || join.Kind = StraightJoin
+                 || join.Kind = LeftJoin || join.Kind = RightJoin ->
+            // An earlier view rewrite can group its preserved sources.
+            // Keep that group intact while bringing a later writable view
+            // to the front for the next expansion pass.
+            move (join :: prior) rest
         | _ -> update
 
     // Move a later assigned view while CTE names are still available. The

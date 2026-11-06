@@ -1120,6 +1120,35 @@ let tests =
                   [ [ Some "1"; Some "34" ]; [ Some "3"; Some "40" ] ]
                   "outer-joined writes reach only matching second-target rows"
 
+          testCase "grouped source before three writable joined views"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE three_view_a(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE three_view_b(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE three_view_c(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE three_view_link(id INT PRIMARY KEY)"
+                    "INSERT INTO three_view_a VALUES(1,10),(2,20)"
+                    "INSERT INTO three_view_b VALUES(1,30),(3,40)"
+                    "INSERT INTO three_view_c VALUES(1,50),(2,60),(3,70)"
+                    "INSERT INTO three_view_link VALUES(1),(2),(3)"
+                    "CREATE VIEW three_va AS SELECT t.id,t.n,l.id AS link_id FROM three_view_a t JOIN three_view_link l ON t.id=l.id"
+                    "CREATE VIEW three_vb AS SELECT t.id,t.n AS bonus,l.id AS link_id FROM three_view_b t JOIN three_view_link l ON t.id=l.id"
+                    "CREATE VIEW three_vc AS SELECT t.id,t.n AS extra,l.id AS link_id FROM three_view_c t JOIN three_view_link l ON t.id=l.id" ] do
+                  expectOk (run store sql) sql
+              let prefix =
+                  "WITH c AS (SELECT id FROM three_view_link) UPDATE c NATURAL LEFT JOIN three_va va "
+                  + "JOIN (SELECT id AS bridge FROM three_view_link) r ON r.bridge=va.link_id "
+              let assignments = "SET va.n=va.n+1,vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 "
+              for tail, expected in
+                  [ "NATURAL LEFT JOIN three_vb vb NATURAL LEFT JOIN three_vc vc ", 3UL
+                    "NATURAL RIGHT JOIN three_vb vb NATURAL RIGHT JOIN three_vc vc ", 2UL ] do
+                  let id = if expected = 3UL then 1 else 3
+                  Expect.equal (run store (prefix + tail + assignments + "WHERE id=" + string id)) (Affected expected) "all existing view targets update"
+              Expect.equal (rows store "SELECT id,n FROM three_view_a ORDER BY id") [ [ Some "1"; Some "11" ]; [ Some "2"; Some "20" ] ] "first view target"
+              Expect.equal (rows store "SELECT id,n FROM three_view_b ORDER BY id") [ [ Some "1"; Some "31" ]; [ Some "3"; Some "41" ] ] "second view target"
+              Expect.equal (rows store "SELECT id,n FROM three_view_c ORDER BY id") [ [ Some "1"; Some "51" ]; [ Some "2"; Some "60" ]; [ Some "3"; Some "71" ] ] "third view target"
+
           testCase "grouped outer UPDATE source retains two writable joined views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -1148,9 +1148,11 @@ aliases, writable physical target aliases, or independent derived read-source
 aliases match; [dependent `LATERAL` and `JSON_TABLE` read aliases](torture/findings/2026-10-15-nested-joined-view-mutation-source.md#two-writable-views-with-shared-internal-aliases)
 also remain scoped across both writable views in audited two-target UPDATEs.
 The [joined-view source oracle](torture/findings/2026-10-18-two-joined-view-outer-writes.md)
-now also matches MySQL for 49 UPDATE cases, including LEFT/RIGHT joins with matched or
+now also matches MySQL for 76 UPDATE cases, including LEFT/RIGHT joins with matched or
 missing view rows, shared internal aliases, grouped lateral read sources,
-atomic `CHECK OPTION` rejection, and 30 contended rebases. The
+atomic `CHECK OPTION` rejection, a
+[three-view grouped-source case](torture/findings/2026-10-18-two-joined-view-outer-writes.md#third-writable-view-after-a-grouped-source),
+and 40 contended rebases. The
 [two-view NATURAL JOIN follow-up](torture/findings/2026-11-05-two-view-natural-rebase.md)
 claims both physical targets for uniquely owned bare assignments before a
 contended rebase, including a CTE read source ahead of both views and dependent
