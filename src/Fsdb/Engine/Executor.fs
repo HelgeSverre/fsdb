@@ -9314,9 +9314,8 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | _ -> false
 
     // A nullable COUNT needs the grouped COUNT(column) result, not the number
-    // of matching index entries. Limit this proof to an ungrouped physical
-    // source; grouped HAVING also needs a separate matched-row count to decide
-    // whether a group exists when every counted value is NULL.
+    // of matching index entries. Grouped HAVING additionally needs the matched
+    // row count to decide whether a group exists when every value is NULL.
     let nullableCountArgument =
         let rec firstCount = function
             | FuncCall(name, [ QualifiedCol _ as argument ])
@@ -9324,7 +9323,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
             | expression -> Expression.children expression |> List.tryPick firstCount
         match select.From, select.Having |> Option.bind firstCount with
         | Some(FromTable source), Some(QualifiedCol(qualifier, columnName) as argument)
-            when select.Joins.IsEmpty && select.GroupBy.IsEmpty
+            when select.Joins.IsEmpty
                  && not (source.Database.IsNone
                          && (currentCteScope () |> Map.containsKey (source.Table.ToLowerInvariant())))
                  && equalsIgnoreCase qualifier (source.Alias |> Option.defaultValue source.Table) ->
@@ -9540,7 +9539,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                     | expression -> groupIsSafe expression))
         let groupedCountIsSafe () =
             select.GroupBy.IsEmpty
-            || (countHaving |> Option.forall snd)
+            || (nullableCountArgument.IsNone && (countHaving |> Option.forall snd))
             || (match FromItem.tryQualifier source with
                 | None -> false
                 | Some qualifier ->
@@ -9638,19 +9637,26 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                                         Alias = None
                                         SourceName = None
                                         BindingOrigin = None } ]
+                                GroupBy = []
                                 Having = None }
                         memo.[select] <- countSelect
                         countSelect
-                tryDecorrelatedMatchCount outer countSelect
-                |> Option.bind (function
-                    | Ok count when count > int64 System.Int32.MaxValue -> None
-                    | result ->
-                        result
-                        |> Result.map (fun count ->
-                            countHaving
-                            |> Option.exists (fun (predicate, _) -> predicate (int count))
-                            |> boolToValue)
-                        |> Some)
+                let groupExists =
+                    if select.GroupBy.IsEmpty then Some true
+                    else tryCorrelatedEqualityCount outer source select.Where |> Option.map (fun count -> count > 0)
+                groupExists
+                |> Option.bind (fun groupExists ->
+                    tryDecorrelatedMatchCount outer countSelect
+                    |> Option.bind (function
+                        | Ok count when count > int64 System.Int32.MaxValue -> None
+                        | result ->
+                            result
+                            |> Result.map (fun count ->
+                                boolToValue
+                                    (groupExists
+                                     && (countHaving
+                                         |> Option.exists (fun (predicate, _) -> predicate (int count)))))
+                            |> Some))
             | None ->
                 tryCorrelatedEqualityCount outer source select.Where
                 |> Option.map (fun count ->

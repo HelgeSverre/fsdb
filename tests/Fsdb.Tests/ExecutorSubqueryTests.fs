@@ -631,6 +631,16 @@ let tests =
                         [ Some "2"; Some "0" ]
                         [ Some "3"; Some "1" ] ]))
                   "mixed COUNT arguments retain separate matched-row and non-NULL counts"
+              Expect.equal
+                  (runDefault store
+                      "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id GROUP BY i.id HAVING COUNT(i.optional)=0) AS hit FROM count_outer o ORDER BY o.id")
+                  (ResultSet(
+                      [ "id"; "hit" ],
+                      [ [ Some "0"; Some "0" ]
+                        [ Some "1"; Some "1" ]
+                        [ Some "2"; Some "1" ]
+                        [ Some "3"; Some "1" ] ]))
+                  "an unfixed grouping key retains per-group HAVING semantics"
               let extra = [ 100 .. 299 ] |> List.map (sprintf "(%d)") |> String.concat ","
               runDefault store ("INSERT INTO count_outer VALUES " + extra) |> ignore
               let _, examined =
@@ -638,6 +648,11 @@ let tests =
                       runDefault store
                           "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id HAVING COUNT(i.optional)=0) FROM count_outer o")
               Expect.isLessThan examined 400L "nullable COUNT HAVING groups the inner rows once"
+              let _, groupedExamined =
+                  withExaminedRows (fun () ->
+                      runDefault store
+                          "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id GROUP BY i.outer_id HAVING COUNT(i.optional)=0) FROM count_outer o")
+              Expect.isLessThan groupedExamined 400L "fixed-key grouped nullable COUNT checks group presence by index"
 
           testCase "correlated EXISTS counts indexed matches for integer HAVING thresholds"
           <| fun _ ->

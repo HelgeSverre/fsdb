@@ -19,13 +19,15 @@ rows without evaluating the column. This nullable path evaluates the column
 once per grouped inner row. Coercive outer keys and unstable expressions
 continue through the ordinary path.
 
-Ungrouped `EXISTS` with `HAVING COUNT(nullable_column)` now reuses the same
+`EXISTS` with `HAVING COUNT(nullable_column)` now reuses the same
 statement-local grouped count for a single physical inner source and exact
 numeric equality key. Pinned MySQL 8.4.11 returns true for an empty input
-under `HAVING COUNT(column)=0`, but false for the corresponding grouped query
-because no group exists. The regression covers both, all-NULL matches,
-non-NULL matches, and mixed `COUNT(column)`/`COUNT(*)` predicates. A 204-row
-ungrouped control stays below 400 examined rows; before this path it examined
-1,229 rows and failed that budget. Grouped nullable HAVING and mixed count
-arguments retain the ordinary execution path until both row membership and
-non-NULL counts can be represented together.
+under ungrouped `HAVING COUNT(column)=0`, but false for the corresponding
+grouped query because no group exists. For a grouped query whose grouping keys
+are fixed by correlated equality, the indexed matched-row count proves group
+existence separately from the non-NULL count. The regression covers both,
+all-NULL matches, non-NULL matches, an unfixed grouping key, and mixed
+`COUNT(column)`/`COUNT(*)` predicates. Both 204-row controls stay below 400
+examined rows; before the ungrouped path it examined 1,229 rows and failed
+that budget. Unfixed grouping keys and mixed count arguments retain ordinary
+evaluation.

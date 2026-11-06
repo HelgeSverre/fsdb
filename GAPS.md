@@ -2436,8 +2436,10 @@ correlation keys, preserving NULL counts. The 204-row joined control stays below
 400 examined rows. Ungrouped `EXISTS ... HAVING COUNT(nullable_column)` now
 reuses that grouped count for eligible single-table exact numeric correlations.
 The pinned MySQL 8.4.11 control distinguishes empty input from a nonempty
-all-NULL group; grouped HAVING and mixed `COUNT` arguments retain ordinary
-evaluation. The 204-row ungrouped control stays below 400 examined rows.
+all-NULL group. Grouped HAVING also uses this path when every grouping key is
+fixed by the correlated equality and an indexed matched-row count establishes
+group existence; grouping by an unfixed key and mixed `COUNT` arguments retain
+ordinary evaluation. Both 204-row controls stay below 400 examined rows.
 A [statement-scoped proof cache](benchmarks/results/2026-11-06-count-column-presence-cache.md)
 avoids repeating the physical-column and join-nullability check for each
 outer row; interleaved CPU-time checks show a lower primary-key overhead
