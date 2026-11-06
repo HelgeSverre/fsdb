@@ -1528,7 +1528,9 @@ differences at ngram size 1 and 102 at size 2 under `utf8mb4_0900_ai_ci`.
 The corrected 0900 path now matches all 387 searches at sizes 1–4 and
 6–10. Removing a second misplaced legacy Jamo fold also resolves the size-5
 Boolean case, so the same 387-search corpus now matches MySQL at all ten
-ngram sizes. Broader accent-insensitive corpora remain open.
+ngram sizes. The supported `utf8mb4_0900_as_ci` collation also matches all
+387 searches at each size 1–10 in the maintained native oracle. Broader
+UCA 9 corpora remain open.
 The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
 also matches MySQL's distinct U+2200–U+22FF primary weights in the same
 two-column ngram lane at token sizes 1–10.

@@ -71,3 +71,15 @@ size from 1 through 10** under `utf8mb4_0900_ai_ci`, including membership
 and relevance in all three search modes. Focused Jamo and U+180E regressions,
 18 filtered full-text tests, and 93 filtered collation tests pass. This proves
 parity for this two-column corpus; other CJK and parser shapes remain open.
+
+## Accent-sensitive, case-insensitive control
+
+The same native MySQL 8.4.11 oracle now accepts `utf8mb4_0900_as_ci`, another
+supported UCA 9 collation. Its two-column corpus matches MySQL in all 387
+searches at each ngram size 1–10: zero membership and relevance differences
+in natural, Boolean, and query-expansion modes. This checks the UCA 9 path
+with accent sensitivity as well as the accent-insensitive case above; it does
+not establish parity for other documents or parser forms.
+
+Run `uv run --with pymysql torture/scripts/ngram-multicol-oracle.py
+--collation utf8mb4_0900_as_ci` after building the Release CLI.
