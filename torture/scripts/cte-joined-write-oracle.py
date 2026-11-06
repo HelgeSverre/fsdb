@@ -339,9 +339,15 @@ def main():
                 assert execute(owner, "SELECT n FROM second_target WHERE id=2") == ((1,),)
                 execute(owner, "UPDATE a SET n=0 WHERE id=2")
 
+                execute(owner, "CREATE TABLE source_link(id INT PRIMARY KEY)")
+                execute(owner, "INSERT INTO source_link VALUES(1),(2)")
                 for view_name, join_sql in (
                     ("using_source_view", "JOIN source_lock s USING(id)"),
                     ("natural_source_view", "NATURAL JOIN source_lock s"),
+                    (
+                        "chained_source_view",
+                        "JOIN source_link l ON l.id=a.id JOIN source_lock s ON s.id=l.id",
+                    ),
                 ):
                     execute(
                         owner,

@@ -33366,19 +33366,28 @@ let transactionWriteReadTargets
             | _ -> []
         explicit @ usingKeys @ naturalKeys
     let boundFor qualifier equalities literals =
-        equalities
-        |> List.tryPick (fun ((leftOwner, leftColumn), (rightOwner, rightColumn)) ->
-            let sourceSide =
-                if equalsIgnoreCase leftOwner qualifier then Some(leftColumn, rightOwner, rightColumn)
-                elif equalsIgnoreCase rightOwner qualifier then Some(rightColumn, leftOwner, leftColumn)
-                else None
-            sourceSide
-            |> Option.bind (fun (column, otherOwner, otherColumn) ->
-                literals
-                |> List.tryPick (fun (owner, name, value) ->
-                    if equalsIgnoreCase owner otherOwner && equalsIgnoreCase name otherColumn then
-                        Some(BinOp(Eq, QualifiedCol(qualifier, column), value))
-                    else None)))
+        let rec reachable (seen: Set<string * string>) (pending: (string * string) list) =
+            match pending with
+            | [] -> None
+            | (owner, column) :: rest ->
+                let key = owner.ToLowerInvariant(), column.ToLowerInvariant()
+                if Set.contains key seen then reachable seen rest
+                elif equalsIgnoreCase owner qualifier then Some column
+                else
+                    let neighbors =
+                        equalities
+                        |> List.choose (fun (left, right) ->
+                            if equalsIgnoreCase (fst left) owner && equalsIgnoreCase (snd left) column then Some right
+                            elif equalsIgnoreCase (fst right) owner && equalsIgnoreCase (snd right) column then Some left
+                            else None)
+                    reachable (Set.add key seen) (neighbors @ rest)
+
+        literals
+        |> List.tryPick (fun (owner, column, value) ->
+            if equalsIgnoreCase owner qualifier then None
+            else
+                reachable Set.empty [ owner, column ]
+                |> Option.map (fun targetColumn -> BinOp(Eq, QualifiedCol(qualifier, targetColumn), value)))
     match statement with
     | Update original ->
         let update = writableViewFirst store dbName original

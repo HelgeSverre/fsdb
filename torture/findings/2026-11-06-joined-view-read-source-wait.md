@@ -51,10 +51,19 @@ candidate planner now carries the merged key across a single inner `USING`
 edge. Longer merged-key chains retain conservative claims until their key
 ownership is validated.
 
+A single physical `NATURAL JOIN` has the same behavior. The candidate planner
+derives its shared columns from the two physical tables and carries a literal
+target key to the read source. For a view with two explicit inner equality
+joins, it follows the connected key through the intermediate table. MySQL and
+fsdb both wait on a matching held source row, recheck after commit, and allow
+a disjoint row to proceed. Chains containing outer or grouped joins still
+need separate ownership and null-preservation checks.
+
 The same source-row wait also holds with autocommit enabled. fsdb routes a
 joined-view UPDATE through an implicit transaction, and its post-wait result
 matches MySQL's zero affected rows without an explicit `BEGIN` on the writer.
 
-Evidence: `uv run --with pymysql torture/scripts/cte-joined-write-oracle.py`
-and the Expecto case `joined view update rechecks a changed read source after
-waiting`.
+Evidence: `uv run --with pymysql python torture/scripts/cte-joined-write-oracle.py`
+and the Expecto cases `joined view update rechecks a changed read source after
+waiting`, `NATURAL joined view locks only its keyed read-source row`, and
+`joined view propagates read-source key through two inner joins`.
