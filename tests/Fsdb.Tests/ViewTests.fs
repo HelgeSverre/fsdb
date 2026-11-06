@@ -329,6 +329,36 @@ let tests =
               | other -> failtestf "expected CHECK OPTION rejection, got %A" other
               Expect.equal (rows store "SELECT n FROM window_derived_target WHERE id=1") [ [ Some "1" ] ] "rejection is atomic"
 
+          testCase "window and DISTINCT CTE chain keeps a joined target writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE chained_cte_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE chained_cte_source(id INT,flag INT)"
+                    "INSERT INTO chained_cte_target VALUES(1,0),(2,0)"
+                    "INSERT INTO chained_cte_source VALUES(1,7),(1,8)"
+                    "CREATE VIEW chained_cte_joined AS WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM chained_cte_source), filtered AS (SELECT DISTINCT id,flag FROM ranked) SELECT t.id,t.n,filtered.flag FROM filtered JOIN chained_cte_target t ON t.id=filtered.id WHERE t.n>=0 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='chained_cte_joined'")
+                  [ [ Some "YES" ] ]
+                  "the CTE chain preserves writable target metadata"
+              Expect.equal
+                  (rows store "SELECT flag FROM chained_cte_joined ORDER BY flag")
+                  [ [ Some "1" ]; [ Some "2" ] ]
+                  "the CTE chain preserves window results"
+              Expect.equal (run store "UPDATE chained_cte_joined SET n=n+1 WHERE id=1") (Affected 1UL) "the target changes once"
+              match run store "UPDATE chained_cte_joined SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+              match run store "INSERT INTO chained_cte_joined(id,n) VALUES(3,0)" with
+              | Err(1471, _) -> ()
+              | other -> failtestf "expected joined-view INSERT refusal, got %A" other
+              match run store "DELETE FROM chained_cte_joined WHERE id=1" with
+              | Err(1395, _) -> ()
+              | other -> failtestf "expected joined-view DELETE refusal, got %A" other
+              Expect.equal (rows store "SELECT n FROM chained_cte_target WHERE id=1") [ [ Some "1" ] ] "rejection is atomic"
+
           testCase "dependent lateral UNION source keeps a joined target writable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

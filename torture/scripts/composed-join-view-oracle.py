@@ -11,6 +11,7 @@ SHAPES = {
     "duplicate derived rows": "SELECT a.id,a.n,d1.flag FROM (SELECT id,flag FROM b LIMIT 100) d1 JOIN a ON a.id=d1.id",
     "distinct derived rows": "SELECT a.id,a.n,d1.flag FROM (SELECT DISTINCT id,flag FROM b) d1 JOIN a ON a.id=d1.id",
     "window derived rows": "SELECT a.id,a.n,d1.flag FROM (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b) d1 JOIN a ON a.id=d1.id",
+    "window-distinct CTE chain": "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b), filtered AS (SELECT DISTINCT id,flag FROM ranked) SELECT a.id,a.n,filtered.flag FROM filtered JOIN a ON a.id=filtered.id",
     "union-all derived rows": "SELECT a.id,a.n,u.flag FROM (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) u JOIN a ON a.id=u.id",
     "union-distinct derived rows": "SELECT a.id,a.n,u.flag FROM (SELECT id,flag FROM b UNION DISTINCT SELECT id,aux AS flag FROM c) u JOIN a ON a.id=u.id",
     "union-all CTE rows": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",

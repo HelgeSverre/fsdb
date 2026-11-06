@@ -1849,39 +1849,44 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
     let referencedCtes =
         select.Ctes |> List.filter (fun cte -> referencesCte cte.CteName)
     let hasRecursiveCte = select.Ctes |> List.exists _.Recursive
-
-    let recursiveNames =
-        if not hasRecursiveCte then Map.empty
-        else
+    let hasDependentCte =
+        select.Ctes
+        |> List.mapi (fun index cte ->
             select.Ctes
-            |> List.fold (fun known cte ->
-                let first =
-                    match cte.Body with
-                    | PlainSelect body
-                    | UnionSelect(body, _, _, _, _) -> body
-                let names =
-                    if not cte.CteColumns.IsEmpty then Some cte.CteColumns
-                    else
-                        expandedProjections known first
-                        |> Option.bind (fun projections ->
-                            let names = projections |> List.map projectionName
-                            if names |> List.exists Option.isNone then None
-                            else Some(List.choose id names))
-                match names with
-                | Some names
-                    when not names.IsEmpty
-                         && (names |> List.map _.ToLowerInvariant() |> Set.ofList).Count = names.Length ->
-                    Map.add (cte.CteName.ToLowerInvariant()) names known
-                | _ -> known) Map.empty
+            |> List.take index
+            |> List.exists (fun earlier -> queryReferences earlier.CteName cte.Body))
+        |> List.exists id
 
-    let recursiveSources =
+    let cteOutputNames =
+        select.Ctes
+        |> List.fold (fun known cte ->
+            let first =
+                match cte.Body with
+                | PlainSelect body
+                | UnionSelect(body, _, _, _, _) -> body
+            let names =
+                if not cte.CteColumns.IsEmpty then Some cte.CteColumns
+                else
+                    expandedProjections known first
+                    |> Option.bind (fun projections ->
+                        let names = projections |> List.map projectionName
+                        if names |> List.exists Option.isNone then None
+                        else Some(List.choose id names))
+            match names with
+            | Some names
+                when not names.IsEmpty
+                     && (names |> List.map _.ToLowerInvariant() |> Set.ofList).Count = names.Length ->
+                Map.add (cte.CteName.ToLowerInvariant()) names known
+            | _ -> known) Map.empty
+
+    let wrappedSources =
         referencedCtes
         |> List.choose (fun cte ->
-            recursiveNames
+            cteOutputNames
             |> Map.tryFind (cte.CteName.ToLowerInvariant())
             |> Option.map (fun names -> cte.CteName.ToLowerInvariant(), names))
 
-    let wrapRecursiveSources namesByCte =
+    let wrapCteSources namesByCte =
         let rec expand activeNames rewriteExpressions = function
             | FromTable table as source
                 when table.Database.IsNone && Map.containsKey (table.Table.ToLowerInvariant()) activeNames ->
@@ -1984,9 +1989,9 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             Joins = select.Joins |> List.map (fun join -> { join with Table = expand namesByCte true join.Table })
             Ctes = [] }
 
-    // Wrapping a recursive CTE moves its binding into each derived source.
+    // Wrapping a CTE moves its binding scope into each derived source.
     // Companion queries may read the exposed columns or re-read an inferable
-    // recursive binding, including through local CTEs with scoped names.
+    // binding, including through local CTEs with scoped names.
     let rec needsCteScope = function
         | FromTable table ->
             table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) cteNames
@@ -2022,7 +2027,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         | FromTable table ->
             table.Database.IsSome
             || not (Set.contains (table.Table.ToLowerInvariant()) cteNames)
-            || Map.containsKey (table.Table.ToLowerInvariant()) recursiveNames
+            || Map.containsKey (table.Table.ToLowerInvariant()) cteOutputNames
         | FromJoinGroup(first, joins) ->
             canWrapNestedSource first
             && (joins |> List.forall (_.Table >> canWrapNestedSource))
@@ -2057,7 +2062,7 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
                 |> List.exists (canWrapNestedSelect >> not))
             (Select body))
 
-    let recursiveCompanionSource = function
+    let wrappableCompanionSource = function
         | FromTable _ -> true
         | FromSubquery(query, _) -> canWrapNestedQuery query
         | FromLateral(PlainSelect body, _) -> canWrapNestedSelect body
@@ -2065,13 +2070,15 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
         | FromJsonTable(source, _, _, _) -> Expression.collectSubqueries source |> List.isEmpty
         | _ -> false
 
-    if hasRecursiveCte
+    // A dependent CTE cannot be inlined alone. Keep its earlier bindings in
+    // the derived wrapper, just as a recursive CTE keeps its own scope.
+    if (hasRecursiveCte || hasDependentCte)
        && not referencedCtes.IsEmpty
-       && recursiveSources.Length = referencedCtes.Length
+       && wrappedSources.Length = referencedCtes.Length
        && cteNames.Count = select.Ctes.Length
-       && (sources |> List.forall recursiveCompanionSource)
+       && (sources |> List.forall wrappableCompanionSource)
        && (select.From |> Option.isSome) then
-        wrapRecursiveSources (Map.ofList recursiveSources)
+        wrapCteSources (Map.ofList wrappedSources)
     elif select.Ctes.IsEmpty
        || cteNames.Count <> select.Ctes.Length
        || (sources |> List.exists (function FromTable _ -> false | _ -> true))
