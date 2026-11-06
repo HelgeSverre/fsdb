@@ -45,3 +45,9 @@ right-preserved writable row. The oracle checks both a matching `id=3` read
 row and a missing read row; `WHERE id=3` still binds to the preserved view's
 merged key and updates its physical row. The maintained value corpus now
 passes 71 two-view UPDATE cases against MySQL 8.4.11.
+
+A final `NATURAL RIGHT JOIN` to a read-only derived source also matches
+MySQL for both the preserved second-view row at `id=3` and a tail-only
+row at `id=1`. The latter has no writable view row after the intervening
+dependent source. The maintained corpus now passes 73 two-view UPDATE
+cases and 40 contended rebases against MySQL 8.4.11.
