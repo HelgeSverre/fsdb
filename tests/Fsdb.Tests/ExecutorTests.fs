@@ -19437,6 +19437,9 @@ let tests =
                           "ST_Distance(ST_GeomFromText('POINT(2.5 1.00001)',4326),ST_GeomFromText('LINESTRING(1 1,3 1)',4326))", 2.168963456525661, 0.01
                           "ST_Distance(ST_GeomFromText('POINT(3 1.00001)',4326),ST_GeomFromText('LINESTRING(3 1,3 3)',4326))", 0.0, 0.000000001
                           "ST_Distance(ST_GeomFromText('POINT(86.00001 1.00001)',4326),ST_GeomFromText('LINESTRING(86 1,88 1)',4326))", 0.0, 0.000000001
+                          "ST_Distance(ST_GeomFromText('POINT(71.00001 1.00001)',4326),ST_GeomFromText('LINESTRING(71 1,73 1)',4326))", 0.3691980556077172, 0.000001
+                          "ST_Distance(ST_GeomFromText('POINT(71.00001 2.99999)',4326),ST_GeomFromText('LINESTRING(73 3,71 3)',4326))", 0.3691980556077172, 0.000001
+                          "ST_Distance(ST_GeomFromText('POINT(88 1.00001)',4326),ST_GeomFromText('LINESTRING(86 1,88 1)',4326))", 0.09535991608716497, 0.000001
                           "ST_Distance(ST_GeomFromText('POINT(19.137255381 -154.411051972)',4326),ST_GeomFromText('LINESTRING(20.914019769 -151.996558329,16.414606136 -157.532343566)',4326))", 11467.670267413752, 0.01
                           "ST_Distance(ST_GeomFromText('POINT(57.483429302 -136.870890788)',4326),ST_GeomFromText('LINESTRING(58.826935156 -132.179573559,57.265371549 -141.583629170)',4326))", 71050.4664908598, 0.01
                           "ST_Distance(ST_GeomFromText('POINT(0 150)',4326),ST_GeomFromText('LINESTRING(10 20,10 150)',4326))", 1105843.247087976, 0.01 ]

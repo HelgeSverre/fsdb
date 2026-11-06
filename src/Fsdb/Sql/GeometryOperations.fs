@@ -191,14 +191,16 @@ let private geographicSegmentAzimuths flattening (firstLatitude, firstLongitude)
 let private geographicSegmentAzimuth flattening first second =
     geographicSegmentAzimuths flattening first second |> fst
 
-let private geographicPointAlongRadians referenceSystem first second distance =
+// The cross-track strategy already holds SRS-radian coordinates; keep them
+// through azimuth and direct-point calculation to match MySQL's arithmetic.
+let private geographicPointAlongRadianEndpoints referenceSystem first second distance =
     match referenceSystem.SemiMajorAxis, referenceSystem.InverseFlattening with
     | Some semiMajorAxis, Some inverseFlattening ->
         let flattening = 1.0 / inverseFlattening
         let firstLatitude, firstLongitude = first
-        let azimuth = geographicSegmentAzimuth flattening first second
+        let azimuth = geographicSegmentAzimuthsRadians flattening first second |> fst
         let latitude1, azimuth12, flipped =
-            let latitude = radians firstLatitude
+            let latitude = firstLatitude
             if azimuth > Math.PI / 2.0 then -latitude, Math.PI - azimuth, true
             elif azimuth < -Math.PI / 2.0 then -latitude, -Math.PI - azimuth, true
             else latitude, azimuth, false
@@ -232,7 +234,7 @@ let private geographicPointAlongRadians referenceSystem first second distance =
         let longitudeDelta =
             atan2 (sinDelta * sinAzimuth) (cosReduced * cosDelta - sinReduced * sinDelta * cosAzimuth)
             - c1 * deltaSigma
-        let longitude = radians firstLongitude + longitudeDelta
+        let longitude = firstLongitude + longitudeDelta
         let longitude =
             if longitude > Math.PI then longitude - 2.0 * Math.PI
             elif longitude <= -Math.PI then longitude + 2.0 * Math.PI
@@ -248,6 +250,12 @@ let private geographicPointAlongRadians referenceSystem first second distance =
         let latitude = if flipped then -latitude else latitude
         latitude, longitude
     | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
+
+// Public point-along callers supply degrees but consume a radian result.
+let private geographicPointAlongRadians referenceSystem (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) distance =
+    geographicPointAlongRadianEndpoints referenceSystem
+        (radians firstLatitude, radians firstLongitude)
+        (radians secondLatitude, radians secondLongitude) distance
 
 let internal geographicPointAlong referenceSystem first second distance =
     let latitude, longitude = geographicPointAlongRadians referenceSystem first second distance
@@ -269,9 +277,9 @@ let private geographicCrossTrackDistance referenceSystem point start endpoint =
     let lat1, lon1 = start
     let lat2, lon2 = endpoint
     let lat3, lon3 = point
-    let la1, lo1 = radians lat1, radians lon1
-    let la2, lo2 = radians lat2, radians lon2
-    let la3, lo3 = radians lat3, radians lon3
+    let la1, lo1 = mysqlRadians lat1, mysqlRadians lon1
+    let la2, lo2 = mysqlRadians lat2, mysqlRadians lon2
+    let la3, lo3 = mysqlRadians lat3, mysqlRadians lon3
     let sphericalDistance firstLat firstLon secondLat secondLon =
         let h = sin ((secondLat - firstLat) / 2.0) ** 2.0
                 + cos firstLat * cos secondLat * sin ((secondLon - firstLon) / 2.0) ** 2.0
@@ -298,10 +306,11 @@ let private geographicCrossTrackDistance referenceSystem point start endpoint =
     let mutable iteration = 0
     let mutable keepGoing = true
     while keepGoing && iteration < 100 do
-        let onLatitude, onLongitude = geographicPointAlongRadians referenceSystem start endpoint position
+        let onLatitude, onLongitude =
+            geographicPointAlongRadianEndpoints referenceSystem (la1, lo1) (la2, lo2) position
         let distance = geographicPointDistanceRadians referenceSystem
                            (onLatitude, onLongitude)
-                           (mysqlRadians lat3, mysqlRadians lon3)
+                           (la3, lo3)
         let forward, reverse = geographicSegmentAzimuthsRadians flattening
                                     (onLatitude, onLongitude) (la3, lo3)
         let towardEnd = geographicSegmentAzimuthsRadians flattening

@@ -341,3 +341,29 @@ interior portions adjacent to an endpoint; the midpoint does not detect
 those portions. The trial was reverted. Any endpoint treatment needs an
 ordered geographic intersection event and interval classification that can
 distinguish a boundary-only endpoint from a short adjacent interior arc.
+
+## Radian-native segment endpoints
+
+The cross-track Newton loop previously converted its segment endpoints with
+the generic radians-per-degree constant, then recalculated the Thomas direct
+azimuth from degree coordinates on every iteration. MySQL supplies both the
+inverse and direct strategies with coordinates already converted by SRID
+4326's angular unit. Fsdb now passes those SRS-radian endpoints through a
+radian-native direct helper. The existing public degree-coordinate path uses
+the same helper through a wrapper.
+
+The complete Release edge oracle falls from four to **one** near-hole
+point-distance mismatch across 189 points. Both `71.00001` corner points,
+`72 2.99999`, and `88 1.00001` now match MySQL. The sole remaining case is
+`72 1.00001`: MySQL returns 0.3302323744957476 m and fsdb returns
+0.34371391572221144 m; both match their respective hole-line distances.
+The 448 line relations still have 11 differences; 189 point relations, 49
+polar-corner points, and 100 seeded point-line distances have none. All 33
+geographic and 22 geometry tests pass.
+
+A further trial substituted Boost's comparable-haversine cross-track and
+spherical-direct seed into this radian-native path. It increased the
+near-hole count to two, introducing `88 1.00001` again, and was reverted.
+The remaining point-distance case needs a first-point/Newton trace on this
+new coordinate path. The line-relation differences still require ordered
+geographic boundary events.
