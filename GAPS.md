@@ -2498,6 +2498,12 @@ implementation effort:
    reservation did not materially improve the same shape and was reverted;
    the shared client/server process still prevents attribution of pending
    work to the server alone.
+   A [separate-process durable profile](benchmarks/results/2026-11-06-external-multidb-write-profile.md)
+   keeps the client and fsdb server apart: at 8 databases × 16 writers,
+   widening the hot account set from 8 to 64 raised server CPU and wall time
+   in an A/B/A run while client CPU stayed near two seconds. Row waits alone
+   do not explain the high-fan-out ceiling; the next diagnostic needs
+   server-side WAL, publication, and query-stage timing in that workload.
    The group-commit leader now drains successive batches iteratively. A
    continuously replenished queue previously grew one call frame per batch;
    the [focused regression and matched write check](benchmarks/results/2026-10-15-iterative-group-commit-drain.md)
