@@ -990,6 +990,41 @@ let private legacyParenthesizedHangulWeights unicode520 codepoint =
     if unicode520 then [ 0x02FF ] @ inner @ [ 0x0300 ]
     else [ 0x0288 ] @ inner @ [ 0x0289 ]
 
+let private enclosedIdeographWeights =
+    [|
+        0xFB40CE00u; 0xFB40CE8Cu; 0xFB40CE09u; 0xFB40D6DBu
+        0xFB40CE94u; 0xFB40D16Du; 0xFB40CE03u; 0xFB40D16Bu
+        0xFB40CE5Du; 0xFB40D341u; 0xFB40E708u; 0xFB40F06Bu
+        0xFB40EC34u; 0xFB40E728u; 0xFB4191D1u; 0xFB40D71Fu
+        0xFB40E5E5u; 0xFB40E82Au; 0xFB40E709u; 0xFB40F93Eu
+        0xFB40D40Du; 0xFB40F279u; 0xFB418CA1u; 0xFB40F95Du
+        0xFB40D2B4u; 0xFB40CEE3u; 0xFB40D47Cu; 0xFB40DB66u
+        0xFB40F6E3u; 0xFB40CF01u; 0xFB418CC7u; 0xFB40D354u
+        0xFB40F96Du; 0xFB40CF11u; 0xFB4181EAu; 0xFB4181F3u
+    |]
+
+let private legacyEnclosedCjkWeights unicode520 codepoint =
+    if codepoint <= 0x3243 then
+        let ideograph = enclosedIdeographWeights[codepoint - 0x3220]
+        let inner = [ int (ideograph >>> 16); int (ideograph &&& 0xFFFFu) ]
+        if unicode520 then [ 0x02FF ] @ inner @ [ 0x0300 ]
+        else [ 0x0288 ] @ inner @ [ 0x0289 ]
+    elif not unicode520 then
+        if codepoint <= 0x324F then [ 0xFBC0; 0x8000 + codepoint ]
+        elif codepoint = 0x3250 then [ 0x0FA7; 0x1002; 0x0E8B ]
+        elif codepoint <= 0x3259 then [ 0x0E2B; 0x0E2A + codepoint - 0x3251 ]
+        else [ 0x0E2C; 0x0E29 + codepoint - 0x325A ]
+    else
+        match codepoint with
+        | 0x3244 -> [ 0xFB40; 0xD54F ]
+        | 0x3245 -> [ 0xFB40; 0xDE7C ]
+        | 0x3246 -> [ 0xFB40; 0xE587 ]
+        | 0x3247 -> [ 0xFB40; 0xFB8F ]
+        | value when value <= 0x324F -> [ 0x1206 + value - 0x3248; 0x1205 ]
+        | 0x3250 -> [ 0x13B3; 0x1433; 0x126B ]
+        | value when value <= 0x3259 -> [ 0x1207; 0x1206 + value - 0x3251 ]
+        | value -> [ 0x1208; 0x1205 + value - 0x325A ]
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) =
@@ -1183,6 +1218,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                         for weight in [ 0xFBC0; 0xB21F ] do addWeight weight
                     else
                         for weight in legacyParenthesizedHangulWeights (name = "utf8mb4_unicode_520_ci") codepoint do
+                            addWeight weight
+                | None when codepoint >= 0x3220 && codepoint <= 0x325F ->
+                    if general then addWeight codepoint
+                    else
+                        for weight in legacyEnclosedCjkWeights (name = "utf8mb4_unicode_520_ci") codepoint do
                             addWeight weight
                 | None when codepoint >= 0x3260 && codepoint <= 0x327F ->
                     if general then addWeight codepoint
