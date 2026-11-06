@@ -84,3 +84,19 @@ from 9; 12/412 line relations and 1/189 point relations still differ. All
 100 seeded point-to-line distances, 49 polar-corner point relations, and four
 near-exterior controls still match. A focused test pins the formerly
 divergent zero-distance MySQL result. Broader geographic parity remains open.
+
+## Remaining-distance controls
+
+Two further Release trials tested the eight remaining near-hole distance
+cases. First, using a radian-native Andoyer distance for the cross-track seed
+and each Newton trial point, while leaving general point distance unchanged,
+retained exactly 8/189 near-hole distance, 12/412 line-relation, and 1/189
+point-relation mismatches, with 0/100 seeded point-to-line differences. A
+broader refactor of the shared point-distance path was rejected because it
+raised line-relation differences to 38/412 and seeded point-to-line distance
+differences to 3/100. Second, matching Boost's parenthesization of the three
+terms in reduced-length `m12_b` retained the same counts and the same eight
+individual distance results. Both trials were reverted. The remaining cases
+need a trace of another intermediate in the cross-track iteration or a
+different branch; neither radian distance input nor reduced-length grouping
+alone explains them.
