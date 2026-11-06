@@ -9172,11 +9172,48 @@ and private countArgumentAlwaysPresent = function
     | ApproximateLiteral _ -> true
     | _ -> false
 
-and private isPlainCountRowsSelect (registry: Registry) (select: SelectStmt) =
+and private countArgumentAlwaysPresentForSelect (store: Store) (dbName: string) (select: SelectStmt) argument =
+    if countArgumentAlwaysPresent argument then true
+    else
+        match argument, select.From with
+        | QualifiedCol(qualifier, columnName), Some source when select.Ctes.IsEmpty ->
+            // A declared NOT NULL column can still be NULL in a joined row.
+            // Track which side of each outer join receives padding.
+            let sources =
+                select.Joins
+                |> List.fold (fun sources join ->
+                    match join.Kind with
+                    | LeftJoin | NaturalLeftJoin -> sources @ [ join.Table, true ]
+                    | RightJoin | NaturalRightJoin ->
+                        (sources |> List.map (fun (source, _) -> source, true)) @ [ join.Table, false ]
+                    | _ -> sources @ [ join.Table, false ]) [ source, false ]
+            let matches =
+                sources
+                |> List.choose (function
+                    | FromTable table, nullable ->
+                        let name = table.Alias |> Option.defaultValue table.Table
+                        if equalsIgnoreCase name qualifier then Some(table, nullable) else None
+                    | _ -> None)
+            match matches with
+            | [ table, false ]
+                when not (table.Database.IsNone
+                          && (currentCteScope () |> Map.containsKey (table.Table.ToLowerInvariant()))) ->
+                let database = table.Database |> Option.defaultValue dbName
+                match InformationSchema.findTable store.Catalog database table.Table with
+                | Ok physical ->
+                    physical.Columns
+                    |> List.exists (fun column ->
+                        equalsIgnoreCase column.Name columnName
+                        && (not column.Nullable || column.PrimaryKey))
+                | Error _ -> false
+            | _ -> false
+        | _ -> false
+
+and private isPlainCountRowsSelect (store: Store) (dbName: string) (registry: Registry) (select: SelectStmt) =
     match select.Projections with
     | [ { Expression = FuncCall(name, [ argument ]) } ] ->
         name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
-        && countArgumentAlwaysPresent argument
+        && countArgumentAlwaysPresentForSelect store dbName select argument
         && Functions.isUnmodifiedBuiltinAggregate name registry
         && select.GroupBy.IsEmpty
         && select.Having.IsNone
@@ -9193,7 +9230,7 @@ and private isPlainCountRowsSelect (registry: Registry) (select: SelectStmt) =
     | _ -> false
 
 and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
-    let countRows = isPlainCountRowsSelect outer.Registry select
+    let countRows = isPlainCountRowsSelect outer.Store outer.DbName outer.Registry select
 
     match select.From with
     | Some(FromItem.Qualified qualifier as source) when countRows && select.Joins.IsEmpty ->
@@ -9249,7 +9286,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
     let countRows = function
         | FuncCall(name, [ argument ]) ->
             equalsIgnoreCase name "COUNT"
-            && countArgumentAlwaysPresent argument
+            && countArgumentAlwaysPresentForSelect outer.Store outer.DbName select argument
             && Functions.isUnmodifiedBuiltinAggregate name outer.Registry
         | _ -> false
     let integerLiteral = function
@@ -9726,7 +9763,7 @@ and private tryDecorrelatedMatchCount (outer: EvalContext) (select: SelectStmt) 
                     | false, _ -> Some(Ok 0L))
 
 and private tryDecorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
-    if isPlainCountRowsSelect outer.Registry select && not select.Distinct then
+    if isPlainCountRowsSelect outer.Store outer.DbName outer.Registry select && not select.Distinct then
         tryDecorrelatedMatchCount outer select |> Option.map (Result.map VInt)
     else
         None
@@ -21229,7 +21266,7 @@ and private runGroupedSelect
 
         match tryIndexOnlySimpleGroups () with
         | Some result -> result
-        | None when isPlainCountRowsSelect registry select ->
+        | None when isPlainCountRowsSelect store dbName registry select ->
             let mutable count = 0L
             let mutable failure = None
             let mutable processed = 0

@@ -2426,6 +2426,11 @@ evaluation. The 204-row joined control stays below 400 examined rows.
 Indexed correlated `EXISTS` membership also accepts these constants in
 audited grouped and ungrouped `HAVING` comparisons, preserving empty-group
 semantics.
+[Qualified non-NULL physical columns](torture/findings/2026-11-06-correlated-nonnull-column-count.md)
+now use the same count path, including indexed `EXISTS ... HAVING` membership.
+The proof tracks left and right outer-join padding; nullable or padded
+columns retain ordinary evaluation. The 204-row joined control stays below
+400 examined rows.
 The same [key-tuple path now accepts eligible inner-join `ON` correlations](torture/findings/2026-11-06-correlated-inner-join-on-keys.md),
 including a tuple split between `ON` and `WHERE`; outer-join `ON` predicates
 retain their original semantics. The 205-row control stays below 250

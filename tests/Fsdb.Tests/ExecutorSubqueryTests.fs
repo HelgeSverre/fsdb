@@ -64,6 +64,54 @@ let tests =
                     let _, examined = withExaminedRows (fun () -> runDefault store sql)
                     Expect.isLessThan examined 400L "COUNT(1) groups joined keys once instead of rescanning for outer rows"
 
+                testCase "non-NULL physical COUNT columns use joined keys without assuming outer-join columns are present"
+                <| fun _ ->
+                    let store = joinedStore ()
+                    let expected = runDefault store (countSql + " ORDER BY cat.id")
+                    for column in [ "sys.id"; "sys.status"; "cat_sys.id"; "cat_sys.sys_id" ] do
+                        let sql = countSql.Replace("COUNT(*)", "COUNT(" + column + ")") + " ORDER BY cat.id"
+                        Expect.equal (runDefault store sql) expected (column + " is non-NULL in the inner join")
+                    let values = [ 100 .. 299 ] |> List.map (sprintf "(%d, 'bulk', NULL)") |> String.concat ","
+                    runDefault store ("INSERT INTO cat VALUES " + values) |> ignore
+                    let sql = countSql.Replace("COUNT(*)", "COUNT(cat_sys.id)")
+                    let _, examined = withExaminedRows (fun () -> runDefault store sql)
+                    Expect.isLessThan examined 400L "COUNT of a joined primary key groups once"
+
+                    for statement in
+                        [ "CREATE TABLE count_owner(id INT PRIMARY KEY)"
+                          "CREATE TABLE count_marker(id INT PRIMARY KEY)"
+                          "CREATE TABLE count_item(id INT PRIMARY KEY,owner_id INT,optional INT NULL)"
+                          "INSERT INTO count_owner VALUES(1),(2)"
+                          "INSERT INTO count_marker VALUES(1)"
+                          "INSERT INTO count_item VALUES(10,1,NULL)" ] do
+                        runDefault store statement |> ignore
+                    let outerJoin =
+                        "SELECT o.id,(SELECT COUNT(i.id) FROM count_marker m LEFT JOIN count_item i ON i.owner_id=o.id WHERE m.id=1) c FROM count_owner o ORDER BY o.id"
+                    Expect.equal
+                        (runDefault store outerJoin)
+                        (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]))
+                        "a padded right-side primary key does not count"
+                    let rightJoin =
+                        "SELECT o.id,(SELECT COUNT(i.id) FROM count_item i RIGHT JOIN count_marker m ON i.owner_id=o.id WHERE m.id=1) c FROM count_owner o ORDER BY o.id"
+                    Expect.equal
+                        (runDefault store rightJoin)
+                        (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]))
+                        "a padded left-side primary key does not count"
+                    let preserved = outerJoin.Replace("COUNT(i.id)", "COUNT(m.id)")
+                    Expect.equal
+                        (runDefault store preserved)
+                        (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ]))
+                        "the preserved marker primary key counts its row"
+                    match runDefault store "SELECT COUNT(i.id),COUNT(m.id) FROM count_marker m LEFT JOIN count_item i ON i.owner_id=2" with
+                    | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "direct aggregate must count only the preserved primary key, got %A" other
+                    let nullable =
+                        "SELECT o.id,(SELECT COUNT(i.optional) FROM count_item i WHERE i.owner_id=o.id) c FROM count_owner o ORDER BY o.id"
+                    Expect.equal
+                        (runDefault store nullable)
+                        (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ]))
+                        "a declared nullable column retains ordinary COUNT semantics"
+
                 testCase "the joined inner side is read once per statement rather than once per outer row"
                 <| fun _ ->
                     let store = joinedStore ()
@@ -561,7 +609,7 @@ let tests =
                       | ResultSet(_, rows) -> Expect.equal rows expected sql
                       | other -> failtestf "%s returned %A" sql other
                       Expect.isLessThan examined 30L "constant-key integer COUNT HAVING uses indexed equality counts"
-                  for argument in [ "1"; "0"; "'x'" ] do
+                  for argument in [ "1"; "0"; "'x'"; "i.id" ] do
                       for having, predicate in
                           [ "COUNT(ARG)>1", (fun count -> count > 1)
                             "COUNT(ARG)=0", (fun count -> count = 0)
