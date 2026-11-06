@@ -1226,6 +1226,9 @@ rejection is atomic in both fsdb and MySQL 8.4.11.
 A [dependent window-then-DISTINCT CTE chain](torture/findings/2026-11-06-dependent-window-distinct-cte-view.md)
 also remains a read source beside the writable physical target; its
 inferred CTE outputs and binding scope now survive the view rewrite.
+Repeated references to that dependent CTE, including an upstream
+`RAND()` projection joined on its generated value, retain one source
+rowset and one physical-target update in the audited MySQL and fsdb cases.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
 now has a native MySQL contract and fsdb regression: duplicate derived rows

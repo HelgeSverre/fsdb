@@ -14,6 +14,8 @@ SHAPES = {
     "window-distinct CTE chain": "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b), filtered AS (SELECT DISTINCT id,flag FROM ranked) SELECT a.id,a.n,filtered.flag FROM filtered JOIN a ON a.id=filtered.id",
     "window-distinct CTE renamed": "WITH ranked(raw_id,raw_flag) AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) FROM b), filtered(id,flag) AS (SELECT DISTINCT raw_id,raw_flag FROM ranked) SELECT a.id,a.n,filtered.flag FROM filtered JOIN a ON a.id=filtered.id",
     "window-distinct CTE star": "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b), filtered AS (SELECT DISTINCT * FROM ranked) SELECT a.id,a.n,filtered.flag FROM filtered JOIN a ON a.id=filtered.id",
+    "window-distinct CTE repeated": "WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM b), filtered AS (SELECT DISTINCT id,flag FROM ranked) SELECT a.id,a.n,f.flag FROM filtered f JOIN filtered g ON g.id=f.id AND g.flag=f.flag JOIN a ON a.id=f.id",
+    "volatile CTE repeated": "WITH sampled AS (SELECT id,RAND() AS flag FROM b), filtered AS (SELECT id,flag FROM sampled) SELECT a.id,a.n,f.flag FROM filtered f JOIN filtered g ON g.id=f.id AND g.flag=f.flag JOIN a ON a.id=f.id",
     "union-all derived rows": "SELECT a.id,a.n,u.flag FROM (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) u JOIN a ON a.id=u.id",
     "union-distinct derived rows": "SELECT a.id,a.n,u.flag FROM (SELECT id,flag FROM b UNION DISTINCT SELECT id,aux AS flag FROM c) u JOIN a ON a.id=u.id",
     "union-all CTE rows": "WITH u AS (SELECT id,flag FROM b UNION ALL SELECT id,aux AS flag FROM c) SELECT a.id,a.n,u.flag FROM u JOIN a ON a.id=u.id",

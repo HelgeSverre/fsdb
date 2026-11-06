@@ -33,5 +33,11 @@ an explicit-column variant that renames both CTE outputs, and a
 `SELECT DISTINCT *` variant. The focused fsdb regression runs all three
 and checks metadata, window results, one target update, atomic CHECK
 OPTION rejection, and INSERT/DELETE refusal. All three pass; the
-105-view and 67-CTE test groups passed after the production fix. More
-dependent CTE arrangements and security contexts remain open.
+105-view and 67-CTE test groups passed after the production fix. A
+follow-up adds two references to the dependent `filtered` CTE before
+the target. It also checks a repeated CTE whose upstream projection
+uses `RAND()`: joining the two references on the generated value keeps
+both source rows and updates the target once. Native MySQL 8.4.11 passes
+all 40 composed-view shapes, and both focused fsdb repeated-reference
+tests pass. More dependent CTE arrangements and security contexts remain
+open.

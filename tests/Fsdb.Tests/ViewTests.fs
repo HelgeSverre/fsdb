@@ -363,6 +363,44 @@ let tests =
                   | other -> failtestf "expected joined-view DELETE refusal, got %A" other
                   Expect.equal (rows store "SELECT n FROM chained_cte_target WHERE id=1") [ [ Some "1" ] ] "rejection is atomic"
 
+          testCase "repeated dependent CTE references preserve one writable joined target"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE repeated_cte_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE repeated_cte_source(id INT,flag INT)"
+                    "INSERT INTO repeated_cte_target VALUES(1,0),(2,0)"
+                    "INSERT INTO repeated_cte_source VALUES(1,7),(1,8)"
+                    "CREATE VIEW repeated_cte_joined AS WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM repeated_cte_source), filtered AS (SELECT DISTINCT id,flag FROM ranked) SELECT t.id,t.n,f.flag FROM filtered f JOIN filtered g ON g.id=f.id AND g.flag=f.flag JOIN repeated_cte_target t ON t.id=f.id WHERE t.n>=0 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='repeated_cte_joined'")
+                  [ [ Some "YES" ] ]
+                  "the repeated read source keeps target metadata"
+              Expect.equal
+                  (rows store "SELECT flag FROM repeated_cte_joined ORDER BY flag")
+                  [ [ Some "1" ]; [ Some "2" ] ]
+                  "both CTE references bind their window rows"
+              Expect.equal (run store "UPDATE repeated_cte_joined SET n=n+1 WHERE id=1") (Affected 1UL) "the target changes once"
+              match run store "UPDATE repeated_cte_joined SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM repeated_cte_target WHERE id=1") [ [ Some "1" ] ] "rejection is atomic"
+
+          testCase "volatile repeated CTE references share one joined read source"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE volatile_cte_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE volatile_cte_source(id INT,flag INT)"
+                    "INSERT INTO volatile_cte_target VALUES(1,0)"
+                    "INSERT INTO volatile_cte_source VALUES(1,7),(1,8)"
+                    "CREATE VIEW volatile_cte_joined AS WITH sampled AS (SELECT id,RAND() AS flag FROM volatile_cte_source), filtered AS (SELECT id,flag FROM sampled) SELECT t.id,t.n,f.flag FROM filtered f JOIN filtered g ON g.id=f.id AND g.flag=f.flag JOIN volatile_cte_target t ON t.id=f.id WHERE t.n>=0 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              Expect.equal (rows store "SELECT COUNT(*) FROM volatile_cte_joined") [ [ Some "2" ] ] "both references share the generated values"
+              Expect.equal (run store "UPDATE volatile_cte_joined SET n=n+1 WHERE id=1") (Affected 1UL) "the target changes once"
+              Expect.equal (rows store "SELECT n FROM volatile_cte_target WHERE id=1") [ [ Some "1" ] ] "the update reaches the target"
+
           testCase "dependent lateral UNION source keeps a joined target writable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
