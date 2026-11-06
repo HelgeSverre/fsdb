@@ -5726,81 +5726,32 @@ let tests =
               Expect.equal result (Affected 1UL) "the chained writer updates row 2"
               Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the chained writer commits"
 
-              handle setup "UPDATE tx_chain_source SET flag=1 WHERE id=1" |> ignore
-              handle setup
-                  "CREATE VIEW tx_using_chain_view AS SELECT t.id,t.n,s.flag FROM tx_chain_target t JOIN tx_chain_link l USING(id) JOIN tx_chain_source s ON s.id=l.id"
-              |> ignore
-              let owner, _ = handle (create 4 store) "BEGIN"
-              let owner, changed = handle owner "UPDATE tx_chain_source SET flag=0 WHERE id=2"
-              Expect.equal changed (Affected 1UL) "the owner holds source row 2"
-              let waiter, _ = handle (create 5 store) "BEGIN"
-              let waiting =
-                  Threading.Tasks.Task.Run(fun () ->
-                      handle waiter "UPDATE tx_using_chain_view SET n=n+1 WHERE id=1 AND flag=1")
-              let completed = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
-              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the second owner commits"
-              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the USING chain writer finishes"
-              Expect.isTrue completed "row 1 does not wait for source row 2"
-              let waiter, result = waiting.GetAwaiter().GetResult()
-              Expect.equal result (Affected 1UL) "the USING chain writer updates row 1"
-              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the USING chain writer commits"
+              let mergedJoins =
+                  [ "tx_using_chain_view", "JOIN tx_chain_link l USING(id) JOIN tx_chain_source s ON s.id=l.id"
+                    "tx_natural_chain_view", "NATURAL JOIN tx_chain_link l JOIN tx_chain_source s ON s.id=l.id"
+                    "tx_double_using_view", "JOIN tx_chain_link l USING(id) JOIN tx_chain_source s USING(id)"
+                    "tx_triple_using_view", "JOIN tx_chain_link l USING(id) JOIN tx_chain_link2 m USING(id) JOIN tx_chain_source s USING(id)" ]
 
-              handle setup "UPDATE tx_chain_source SET flag=1 WHERE id=2" |> ignore
-              handle setup
-                  "CREATE VIEW tx_natural_chain_view AS SELECT t.id,t.n,s.flag FROM tx_chain_target t NATURAL JOIN tx_chain_link l JOIN tx_chain_source s ON s.id=l.id"
-              |> ignore
-              let owner, _ = handle (create 6 store) "BEGIN"
-              let owner, changed = handle owner "UPDATE tx_chain_source SET flag=0 WHERE id=2"
-              Expect.equal changed (Affected 1UL) "the owner holds source row 2"
-              let waiter, _ = handle (create 7 store) "BEGIN"
-              let waiting =
-                  Threading.Tasks.Task.Run(fun () ->
-                      handle waiter "UPDATE tx_natural_chain_view SET n=n+1 WHERE id=1 AND flag=1")
-              let completed = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
-              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the third owner commits"
-              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the NATURAL chain writer finishes"
-              Expect.isTrue completed "row 1 does not wait for source row 2"
-              let waiter, result = waiting.GetAwaiter().GetResult()
-              Expect.equal result (Affected 1UL) "the NATURAL chain writer updates row 1"
-              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the NATURAL chain writer commits"
-
-              handle setup "UPDATE tx_chain_source SET flag=1 WHERE id=2" |> ignore
-              handle setup
-                  "CREATE VIEW tx_double_using_view AS SELECT t.id,t.n,s.flag FROM tx_chain_target t JOIN tx_chain_link l USING(id) JOIN tx_chain_source s USING(id)"
-              |> ignore
-              let owner, _ = handle (create 8 store) "BEGIN"
-              let owner, changed = handle owner "UPDATE tx_chain_source SET flag=0 WHERE id=2"
-              Expect.equal changed (Affected 1UL) "the owner holds source row 2"
-              let waiter, _ = handle (create 9 store) "BEGIN"
-              let waiting =
-                  Threading.Tasks.Task.Run(fun () ->
-                      handle waiter "UPDATE tx_double_using_view SET n=n+1 WHERE id=1 AND flag=1")
-              let completed = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
-              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the fourth owner commits"
-              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the double USING writer finishes"
-              Expect.isTrue completed "row 1 does not wait for source row 2"
-              let waiter, result = waiting.GetAwaiter().GetResult()
-              Expect.equal result (Affected 1UL) "the double USING writer updates row 1"
-              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the double USING writer commits"
-
-              handle setup "UPDATE tx_chain_source SET flag=1 WHERE id=2" |> ignore
-              handle setup
-                  "CREATE VIEW tx_triple_using_view AS SELECT t.id,t.n,s.flag FROM tx_chain_target t JOIN tx_chain_link l USING(id) JOIN tx_chain_link2 m USING(id) JOIN tx_chain_source s USING(id)"
-              |> ignore
-              let owner, _ = handle (create 10 store) "BEGIN"
-              let owner, changed = handle owner "UPDATE tx_chain_source SET flag=0 WHERE id=2"
-              Expect.equal changed (Affected 1UL) "the owner holds source row 2"
-              let waiter, _ = handle (create 11 store) "BEGIN"
-              let waiting =
-                  Threading.Tasks.Task.Run(fun () ->
-                      handle waiter "UPDATE tx_triple_using_view SET n=n+1 WHERE id=1 AND flag=1")
-              let completed = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
-              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the fifth owner commits"
-              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the triple USING writer finishes"
-              Expect.isTrue completed "row 1 does not wait for source row 2"
-              let waiter, result = waiting.GetAwaiter().GetResult()
-              Expect.equal result (Affected 1UL) "the triple USING writer updates row 1"
-              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the triple USING writer commits"
+              for index, (viewName, joins) in mergedJoins |> List.indexed do
+                  handle setup "UPDATE tx_chain_source SET flag=1 WHERE id=1" |> ignore
+                  handle setup "UPDATE tx_chain_source SET flag=1 WHERE id=2" |> ignore
+                  handle setup
+                      (sprintf "CREATE VIEW %s AS SELECT t.id,t.n,s.flag FROM tx_chain_target t %s" viewName joins)
+                  |> ignore
+                  let owner, _ = handle (create (4 + 2 * index) store) "BEGIN"
+                  let owner, changed = handle owner "UPDATE tx_chain_source SET flag=0 WHERE id=2"
+                  Expect.equal changed (Affected 1UL) (sprintf "%s owner holds source row 2" viewName)
+                  let waiter, _ = handle (create (5 + 2 * index) store) "BEGIN"
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          handle waiter (sprintf "UPDATE %s SET n=n+1 WHERE id=1 AND flag=1" viewName))
+                  let completed = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) (sprintf "%s writer finishes" viewName)
+                  Expect.isTrue completed (sprintf "%s row 1 does not wait for source row 2" viewName)
+                  let waiter, result = waiting.GetAwaiter().GetResult()
+                  Expect.equal result (Affected 1UL) (sprintf "%s writer updates row 1" viewName)
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the writer commits"
 
           testCase "JSON_TABLE-first view updates wait on the physical target"
           <| fun _ ->
