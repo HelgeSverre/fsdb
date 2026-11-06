@@ -1449,7 +1449,9 @@ adds 1,915 exact-byte matches across the same collations. Other CJK blocks
 and mixed-script compositions remain open.
 The [enclosed Hangul U+3260–U+327F audit](torture/findings/2026-11-06-legacy-enclosed-hangul-weights.md)
 adds 96 exact singleton-weight matches across three legacy Unicode collations.
-The rest of U+3200–U+33FF and full ngram behavior for this block remain open.
+The U+3200–U+33FF `utf8mb4_unicode_ci` ngram and NFKC-equality corpus now
+matches all 3,568 checks at each startup size 1–10. Exact weights for the
+rest of that block and other legacy collation search shapes remain open.
 The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
 likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
 plus 1,464 legacy Unicode searches over its later part at size 1.

@@ -748,6 +748,22 @@ let tests =
                         Expect.equal padded "0E33FB80BB0002090209" "CHAR padding uses exact space weight"
                     | other -> failtestf "expected legacy CHAR weights, got %A" other
 
+                testCase "legacy enclosed Hangul comparison follows MySQL NFKC classes"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ "\u3200", "(\u1100)", "1"
+                          "\u320D", "(\u1112)", "1"
+                          "\u3260", "\u1100", "1"
+                          "\u326D", "\u1112", "1"
+                          "\u326E", "\uAC00", "0" ]
+                    for left, right, expected in cases do
+                        let sql = sprintf "SELECT _utf8mb4'%s' COLLATE utf8mb4_unicode_ci = _utf8mb4'%s' COLLATE utf8mb4_unicode_ci" left right
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some actual ] ]) ->
+                            Expect.equal actual expected (sprintf "legacy equality for %s and %s" left right)
+                        | other -> failtestf "expected legacy enclosed Hangul equality, got %A" other
+
                 testCase "WEIGHT_STRING keeps BIT column bytes"
                 <| fun _ ->
                     let store = newStore ()

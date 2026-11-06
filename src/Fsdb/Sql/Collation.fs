@@ -558,7 +558,9 @@ let private foldLegacyEnclosedCjk (value: string) =
         || (c >= '\u326E' && c <= '\u327E')
         || c = '\u32FF'
     let isExpansion c =
-        (c >= '\u32D0' && c <= '\u32FE')
+        (c >= '\u3200' && c <= '\u320D')
+        || (c >= '\u3260' && c <= '\u326D')
+        || (c >= '\u32D0' && c <= '\u32FE')
         || (c >= '\u3300' && c <= '\u3357')
     if not (value |> Seq.exists (fun c -> c = '\uE030' || isDistinct c || isExpansion c)) then value
     else

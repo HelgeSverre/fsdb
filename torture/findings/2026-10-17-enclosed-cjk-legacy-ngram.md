@@ -36,3 +36,10 @@ token size from 1 through 10: 3,066 ngram queries and 502 NFKC comparisons
 per size. The earlier size-two legacy-punctuation lane (936 queries) and
 default-collation lane (387 queries) also remain at zero. This is an audited
 range, not complete legacy UCA weight-byte parity or MeCab support.
+
+On November 6, a rerun of the then-current pre-fix commit `5e43b492`
+found 28 NFKC equality differences in this same range at size 1. The
+[enclosed Hangul follow-up](2026-11-06-legacy-enclosed-hangul-weights.md)
+corrected those comparison classes and reran all ten sizes with zero
+search or equality mismatches. It also audited the exact weight bytes of
+U+3260–U+327F separately.
