@@ -977,6 +977,48 @@ let private legacyBopomofoWeights unicode520 codepoint =
     if encoded <= 0xFFFFu then [ int encoded ]
     else [ int (encoded >>> 16); int (encoded &&& 0xFFFFu) ]
 
+// MySQL 8.4.11's legacy UCA weights for Bopomofo extensions and CJK strokes.
+// UCA 4.0 predates the stroke block; UCA 5.2 assigns its first 36 entries.
+let private unicode40BopomofoExtensionWeights =
+    [|
+        0x1E82u; 0x1E98u; 0x1E90u; 0x1E8Bu; 0x1EA0u; 0x1EA0u; 0x1E9Du; 0x1E9Cu
+        0x1EAFu; 0x1E9Bu; 0x1EAEu; 0x1EAFu; 0x1EACu; 0x1E8Eu; 0x1EA1u; 0x1EA3u
+        0x1EAAu; 0x1EABu; 0x1EA8u; 0x1EAEu; 0x1E83u; 0x1E88u; 0x1E8Cu; 0x1E8Fu
+    |]
+
+let private unicode52BopomofoExtensionWeights =
+    [|
+        0x2B45u; 0x2B5Bu; 0x2B53u; 0x2B4Eu; 0x2B63u; 0x2B63u; 0x2B60u; 0x2B5Fu
+        0x2B72u; 0x2B5Eu; 0x2B71u; 0x2B72u; 0x2B6Fu; 0x2B51u; 0x2B64u; 0x2B66u
+        0x2B6Du; 0x2B6Eu; 0x2B6Bu; 0x2B71u; 0x2B46u; 0x2B4Bu; 0x2B4Fu; 0x2B52u
+    |]
+
+let private unicode40KatakanaPhoneticWeights =
+    [| 0x1E59u; 0x1E5Du; 0x1E5Eu; 0x1E65u; 0x1E68u; 0x1E6Bu; 0x1E6Cu; 0x1E6Du
+       0x1E6Eu; 0x1E6Fu; 0x1E72u; 0x1E78u; 0x1E79u; 0x1E7Au; 0x1E7Bu; 0x1E7Cu |]
+
+let private unicode52KatakanaPhoneticWeights =
+    [| 0x2B1Cu; 0x2B20u; 0x2B21u; 0x2B28u; 0x2B2Bu; 0x2B2Eu; 0x2B2Fu; 0x2B30u
+       0x2B31u; 0x2B32u; 0x2B35u; 0x2B3Bu; 0x2B3Cu; 0x2B3Du; 0x2B3Eu; 0x2B3Fu |]
+
+let private legacyBopomofoExtensionWeights unicode520 codepoint =
+    let encoded =
+        if codepoint < 0x31B8 then
+            let weights =
+                if unicode520 then unicode52BopomofoExtensionWeights
+                else unicode40BopomofoExtensionWeights
+            weights[codepoint - 0x31A0]
+        elif codepoint >= 0x31C0 && codepoint <= 0x31E3 && unicode520 then
+            0x10E0u + uint32 (codepoint - 0x31C0)
+        elif codepoint >= 0x31F0 then
+            let weights =
+                if unicode520 then unicode52KatakanaPhoneticWeights
+                else unicode40KatakanaPhoneticWeights
+            weights[codepoint - 0x31F0]
+        else 0xFBC08000u + uint32 codepoint
+    if encoded <= 0xFFFFu then [ int encoded ]
+    else [ int (encoded >>> 16); int (encoded &&& 0xFFFFu) ]
+
 // MySQL 8.4.11 legacy UCA primary weights for Hangul Compatibility Jamo.
 // The unassigned positions at either end use implicit two-weight values.
 let private unicode40CompatibilityJamoWeights =
@@ -1403,6 +1445,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     if general then addWeight codepoint
                     else
                         for weight in legacyCompatibilityJamoWeights (name = "utf8mb4_unicode_520_ci") codepoint do
+                            addWeight weight
+                | None when codepoint >= 0x31A0 && codepoint <= 0x31FF ->
+                    if general then addWeight codepoint
+                    else
+                        for weight in legacyBopomofoExtensionWeights (name = "utf8mb4_unicode_520_ci") codepoint do
                             addWeight weight
                 | None when codepoint >= 0x3200 && codepoint <= 0x321F ->
                     if general then addWeight codepoint

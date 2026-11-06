@@ -1448,6 +1448,9 @@ comparisons over U+3040–U+30FF in five legacy collations. Other CJK blocks
 and mixed-script weight combinations remain open.
 The [Bopomofo U+3100–U+312F exact-weight audit](torture/findings/2026-11-06-bopomofo-exact-legacy-weights.md)
 now matches 955 such byte comparisons across five legacy collations.
+The [Bopomofo extension and CJK-stroke audit](torture/findings/2026-11-06-bopomofo-extension-stroke-legacy-weights.md)
+adds 1,920 exact singleton, adjacent-pair, mixed-ideograph, and padded
+byte matches over U+31A0–U+31FF across those collations.
 The [Hangul Compatibility Jamo U+3130–U+318F audit](torture/findings/2026-11-06-compatibility-jamo-exact-legacy-weights.md)
 adds 1,915 exact-byte matches across the same collations. Other CJK blocks
 and mixed-script compositions remain open.
