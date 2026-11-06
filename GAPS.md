@@ -1554,6 +1554,10 @@ also matches 4,795 singleton, adjacent-pair, mixed-ideograph, and padded
 The [CJK Radicals Supplement exact-weight audit](torture/findings/2026-11-06-cjk-radical-supplement-exact-weights.md)
 adds 2,560 matching byte comparisons across those five collations over
 U+2E80–U+2EFF, including the boundary pair into Kangxi Radicals.
+The [Ideographic Description Characters audit](torture/findings/2026-11-06-ideographic-description-exact-weights.md)
+adds 320 exact-byte matches over U+2FF0–U+2FFF across the same collations
+and 2,880 matching ngram searches at startup sizes 1–10 under three
+`utf8mb4` collations.
 The [legacy Unicode collation probe](torture/findings/2026-10-17-unicode-520-ngram.md)
 now matches the audited spacing, format-control, and Korean Jamo ngram cases
 under both `utf8mb4_unicode_ci` and `utf8mb4_unicode_520_ci`. The full

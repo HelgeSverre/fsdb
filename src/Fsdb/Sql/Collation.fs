@@ -1560,6 +1560,14 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                         let target = if codepoint <= 0x2FD5 then mapped else codepoint
                         let implicitLead = if codepoint <= 0x2FD5 then 0xFB40 else 0xFBC0
                         addImplicit implicitLead target
+                // U+2FF0–U+2FFB have consecutive UCA primaries; the last
+                // four positions are implicit in MySQL 8.4's legacy tables.
+                | None when codepoint >= 0x2FF0 && codepoint <= 0x2FFF ->
+                    if general then addWeight codepoint
+                    elif codepoint <= 0x2FFB then
+                        let first = if name = "utf8mb4_unicode_520_ci" then 0x10D4 else 0x0DAF
+                        addWeight (first + codepoint - 0x2FF0)
+                    else addImplicit 0xFBC0 codepoint
                 | None when codepoint >= 0x1F100 && codepoint <= 0x1F1FF && name.StartsWith("utf8mb4_") ->
                     let weights =
                         if name = "utf8mb4_unicode_520_ci" then legacySupplementaryEnclosedAlphanumericWeights codepoint
