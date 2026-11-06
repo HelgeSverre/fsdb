@@ -1420,6 +1420,10 @@ The [U+4500–U+45FF follow-up](torture/findings/2026-11-05-extension-a-4500-ngr
 matches another 39,936 standalone searches and 3,072 targeted searches on a
 combined U+3400–U+45FF index. Later blocks, broader combined-range behavior,
 and cross-form equivalences remain open.
+The [U+4600–U+46FF follow-up](torture/findings/2026-11-06-extension-a-4600-ngram-audit.md)
+matches 39,936 standalone searches across five collations and audited token
+sizes, plus 3,072 targeted searches on a combined U+3400–U+46FF index.
+Later blocks and broader combined-range or cross-form behavior remain open.
 An [exact-byte differential probe](torture/findings/2026-11-04-extension-a-exact-weights.md)
 originally found that all 256 single-character U+3B00–U+3BFF `WEIGHT_STRING`
 values differed from MySQL in each of three legacy collations. The later
