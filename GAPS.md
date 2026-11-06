@@ -2430,7 +2430,10 @@ semantics.
 now use the same count path, including indexed `EXISTS ... HAVING` membership.
 The proof tracks left and right outer-join padding; nullable or padded
 columns retain ordinary evaluation. The 204-row joined control stays below
-400 examined rows.
+400 examined rows. A [statement-scoped proof cache](benchmarks/results/2026-11-06-count-column-presence-cache.md)
+avoids repeating the physical-column and join-nullability check for each
+outer row; interleaved CPU-time checks show a lower primary-key overhead
+relative to `COUNT(*)`, while host load limits precise latency claims.
 The same [key-tuple path now accepts eligible inner-join `ON` correlations](torture/findings/2026-11-06-correlated-inner-join-on-keys.md),
 including a tuple split between `ON` and `WHERE`; outer-join `ON` predicates
 retain their original semantics. The 205-row control stays below 250

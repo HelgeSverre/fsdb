@@ -105,6 +105,11 @@ let tests =
                     match runDefault store "SELECT COUNT(i.id),COUNT(m.id) FROM count_marker m LEFT JOIN count_item i ON i.owner_id=2" with
                     | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
                     | other -> failtestf "direct aggregate must count only the preserved primary key, got %A" other
+                    runDefault store "CREATE TABLE count_shadow(id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO count_shadow VALUES(1)" |> ignore
+                    match runDefault store "WITH count_shadow AS (SELECT CAST(NULL AS SIGNED) id) SELECT (SELECT COUNT(s.id) FROM count_shadow s)" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "CTE shadowing must not inherit the physical non-NULL proof, got %A" other
                     let nullable =
                         "SELECT o.id,(SELECT COUNT(i.optional) FROM count_item i WHERE i.owner_id=o.id) c FROM count_owner o ORDER BY o.id"
                     Expect.equal

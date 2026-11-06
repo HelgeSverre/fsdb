@@ -785,6 +785,7 @@ type private StatementMemo =
       ScopedPhysicalProjections: Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>
       EqualityIndexMatches: Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
+      CountColumnPresence: Dictionary<SelectStmt, Dictionary<string * Expr, bool>>
       InnerExistsProjections: Dictionary<SelectStmt, bool>
       ScopedExistsProjections: Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>
       SourceFreeScalarShapes: Dictionary<SelectStmt, bool>
@@ -831,6 +832,7 @@ let private freshStatementMemo () =
       ScopedPhysicalProjections = Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>(HashIdentity.Reference)
       EqualityIndexMatches = Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>(HashIdentity.Reference)
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
+      CountColumnPresence = Dictionary<SelectStmt, Dictionary<string * Expr, bool>>(HashIdentity.Reference)
       InnerExistsProjections = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
       ScopedExistsProjections = Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>(HashIdentity.Reference)
       SourceFreeScalarShapes = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
@@ -9173,8 +9175,7 @@ and private countArgumentAlwaysPresent = function
     | _ -> false
 
 and private countArgumentAlwaysPresentForSelect (store: Store) (dbName: string) (select: SelectStmt) argument =
-    if countArgumentAlwaysPresent argument then true
-    else
+    let proveColumn () =
         match argument, select.From with
         | QualifiedCol(qualifier, columnName), Some source when select.Ctes.IsEmpty ->
             // A declared NOT NULL column can still be NULL in a joined row.
@@ -9208,6 +9209,27 @@ and private countArgumentAlwaysPresentForSelect (store: Store) (dbName: string) 
                 | Error _ -> false
             | _ -> false
         | _ -> false
+
+    if countArgumentAlwaysPresent argument then true
+    else
+        match argument with
+        | QualifiedCol _ when select.Ctes.IsEmpty && (currentCteScope () |> Map.isEmpty) ->
+            let memo = (currentStatementMemo ()).CountColumnPresence
+            let proofs =
+                match memo.TryGetValue select with
+                | true, cached -> cached
+                | false, _ ->
+                    let cached = Dictionary<string * Expr, bool>()
+                    memo.[select] <- cached
+                    cached
+            let key = dbName, argument
+            match proofs.TryGetValue key with
+            | true, present -> present
+            | false, _ ->
+                let present = proveColumn ()
+                proofs.[key] <- present
+                present
+        | _ -> proveColumn ()
 
 and private isPlainCountRowsSelect (store: Store) (dbName: string) (registry: Registry) (select: SelectStmt) =
     match select.Projections with
