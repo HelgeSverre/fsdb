@@ -2594,6 +2594,9 @@ implementation effort:
    columns raised server CPU in a matched baseline/candidate/baseline run
    without a wall-time gain, so the trial was reverted. Row-store mutation
    and broader method-level server CPU remain to profile.
+   A [single-row replay identity fast-path trial](benchmarks/results/2026-11-06-single-row-replay-identity-trial.md)
+   preserved all ledgers but had no repeatable wall-time or CPU gain in a
+   baseline/candidate/baseline external 8/64/8 run; it was reverted.
    A [managed-stack follow-up](benchmarks/results/2026-11-06-multidb-managed-stack-profile.md)
    sampled a separate-process wide-account run. It found substantial monitor
    and thread-pool wait time around statement execution and table access,
