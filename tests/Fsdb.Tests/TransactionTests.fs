@@ -1671,6 +1671,39 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected both increments after view contention, got %A" result
 
+          testCase "dependent CTE joined view update waits and rebases on its physical target"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql in
+                  [ "CREATE TABLE tx_chain_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE tx_chain_source(id INT,flag INT)"
+                    "INSERT INTO tx_chain_target VALUES(1,0)"
+                    "INSERT INTO tx_chain_source VALUES(1,7),(1,8)"
+                    "CREATE VIEW tx_chain_view AS WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM tx_chain_source), filtered AS (SELECT DISTINCT id,flag FROM ranked) SELECT t.id,t.n,filtered.flag FROM filtered JOIN tx_chain_target t ON t.id=filtered.id WHERE t.n>=0 WITH CASCADED CHECK OPTION" ] do
+                  match handle setup sql |> snd with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, ownerWrite = handle owner "UPDATE tx_chain_target SET n=n+1 WHERE id=1"
+              Expect.equal ownerWrite (Affected 1UL) "owner holds the physical row"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting = Threading.Tasks.Task.Run(fun () ->
+                  started.Set()
+                  handle waiter "UPDATE tx_chain_view SET n=n+1 WHERE id=1")
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "view writer starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "view writer resumes"
+              let waiter, result = waiting.Result
+              Expect.isTrue blocked "dependent CTE view writer waits"
+              Expect.equal result (Affected 1UL) "waiter updates the rebased row once"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "waiter commits"
+              match handle setup "SELECT n FROM tx_chain_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both increments after dependent CTE view contention, got %A" result
+
           testCase "CTE-first CROSS STRAIGHT and NATURAL joined view updates wait for their physical target"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

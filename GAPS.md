@@ -1229,6 +1229,9 @@ inferred CTE outputs and binding scope now survive the view rewrite.
 Repeated references to that dependent CTE, including an upstream
 `RAND()` projection joined on its generated value, retain one source
 rowset and one physical-target update in the audited MySQL and fsdb cases.
+An UPDATE through the same window-then-DISTINCT joined view also waits
+for a concurrent writer of its physical target, then rebases its increment
+after the first transaction commits in both fsdb and MySQL 8.4.11.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
 now has a native MySQL contract and fsdb regression: duplicate derived rows

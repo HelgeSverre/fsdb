@@ -89,6 +89,21 @@ def main():
                 execute(owner, "USE probe")
                 execute(waiter, "USE probe")
 
+                execute(owner, "CREATE TABLE chain_source(id INT,flag INT)")
+                execute(owner, "INSERT INTO chain_source VALUES(1,7),(1,8)")
+                execute(
+                    owner,
+                    "CREATE VIEW chain_view AS WITH ranked AS (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM chain_source), filtered AS (SELECT DISTINCT id,flag FROM ranked) SELECT a.id,a.n,filtered.flag FROM filtered JOIN a ON a.id=filtered.id WHERE a.n>=0 WITH CASCADED CHECK OPTION",
+                )
+                verify_wait(
+                    owner,
+                    waiter,
+                    "UPDATE a SET n=n+1 WHERE id=1",
+                    "UPDATE chain_view SET n=n+1 WHERE id=1",
+                    ((1, 2), (2, 0)),
+                )
+                execute(owner, "UPDATE a SET n=0 WHERE id=1")
+
                 verify_wait(
                     owner,
                     waiter,
