@@ -562,12 +562,13 @@ The [cross-track reduced-length probe](torture/findings/2026-11-05-geographic-cr
 reproduced a distance mismatch with Boost 1.84, which matches MySQL. The
 follow-up identified contracted Andoyer azimuth arithmetic and a radian-native
 cross-track inverse step as the joint cause of that zero-distance difference.
-Eight near-hole point distances still differ; broader edge and topology
+Seven near-hole point distances still differ; broader edge and topology
 behavior remains to resolve.
 The [residual vertex audit](torture/findings/2026-11-06-geographic-residual-vertex-audit.md)
-shows direct point-to-vertex mismatches in five of those eight cases. Four
-arithmetic trials were rejected by the full edge oracle; the next step is to
-trace MySQL's selected endpoint/interior path and its floating-point steps.
+traced five point-to-vertex mismatches to MySQL's SRS angular unit and a
+fused Andoyer cosine sum. Those vertex distances now match; seven near-hole
+polygon distances remain in the segment strategy. A direct SRS-unit change
+to the cross-track entry coordinates worsened the full oracle and was reverted.
 The expanded [near-hole distance oracle](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
 finds 34 point-to-polygon distance mismatches across 189 points. Reversing
 ring traversal globally or only for polygon distance does not reduce that

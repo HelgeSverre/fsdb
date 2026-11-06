@@ -65,3 +65,23 @@ The next production change needs a more complete trace of MySQL's selected
 endpoint/interior strategy and its floating-point operations. The test now
 prints point-to-vertex controls for the residuals so that any fix can be
 checked against both polygon and primitive distances.
+
+## SRS conversion and fused arithmetic follow-up
+
+MySQL's 4326 WKT definition specifies an angular unit of
+`0.017453292519943278` radians per degree. Its WKB parser multiplies each
+coordinate by that value before the Boost distance strategy sees it. Using
+that unit in the native probe reproduces MySQL's 73°, 83°, and 88° vertex
+distances. With Clang's floating-point contraction disabled, the 83° native
+probe instead follows fsdb's smaller value. The discriminating expression is
+the Andoyer cosine sum: fusing its sine product with the cosine product
+reproduces MySQL's rounded result.
+
+fsdb now uses the SRS angular unit for each point-to-point coordinate and
+the corresponding fused Andoyer cosine sum. The five near-vertex regression
+cases match MySQL, and all five vertex diagnostics in the edge oracle agree.
+The full oracle falls from 8 to 7 near-hole point-distance mismatches, with
+the other baseline counts unchanged. Applying the SRS unit to the current
+cross-track entry coordinates increased the near-hole distance count to 9;
+that trial was reverted. The remaining seven cases are segment-strategy
+residuals, not direct vertex-distance residuals.

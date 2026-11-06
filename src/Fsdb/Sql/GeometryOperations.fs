@@ -79,14 +79,17 @@ let internal geographicPointDistance referenceSystem first second =
         let flattening = 1.0 / inverseFlattening
         let firstLatitude, firstLongitude = first
         let secondLatitude, secondLongitude = second
-        let firstLatitude = radians firstLatitude
-        let secondLatitude = radians secondLatitude
-        let longitudeDelta = radians (secondLongitude - firstLongitude)
+        // MySQL converts each stored geographic coordinate with the SRS
+        // angular unit before Boost computes the Andoyer inverse.
+        let firstLatitude = mysqlRadians firstLatitude
+        let secondLatitude = mysqlRadians secondLatitude
+        let longitudeDelta = mysqlRadians secondLongitude - mysqlRadians firstLongitude
         let sinFirst, cosFirst = sin firstLatitude, cos firstLatitude
         let sinSecond, cosSecond = sin secondLatitude, cos secondLatitude
 
         let cosineDistance =
-            sinFirst * sinSecond + cosFirst * cosSecond * cos longitudeDelta
+            Math.FusedMultiplyAdd(sinFirst, sinSecond,
+                                  cosFirst * cosSecond * cos longitudeDelta)
             |> max -1.0
             |> min 1.0
 

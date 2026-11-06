@@ -19320,6 +19320,22 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "1"; Some "1" ] ]) -> ()
                     | result -> failtestf "expected MySQL near-coincident geographic distances, got %A" result
 
+                testCase "geographic vertex distances use MySQL SRS radians and Andoyer rounding"
+                <| fun _ ->
+                    let store = newStore ()
+                    let cases =
+                        [ "POINT(43 2.99999)", "POINT(43 3)", 0.8188541524346334
+                          "POINT(73 2.99999)", "POINT(73 3)", 0.31618400687144826
+                          "POINT(83 2.99999)", "POINT(83 3)", 0.13485314242182217
+                          "POINT(88 1.00001)", "POINT(88 1)", 0.09535991608716497
+                          "POINT(88 2.99999)", "POINT(88 3)", 0.09535991608716497 ]
+                    for first, second, expected in cases do
+                        let expression = sprintf "ST_Distance(ST_GeomFromText('%s',4326),ST_GeomFromText('%s',4326))" first second
+                        let sql = sprintf "SELECT ABS(%s-%.17g)<0.000000001" expression expected
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | result -> failtestf "expected MySQL distance for %s and %s, got %A" first second result
+
                 testCase "geographic line-to-line distance covers crossing and disjoint segments"
                 <| fun _ ->
                     let store = newStore ()

@@ -45,6 +45,30 @@ int main(int argc, char** argv) {
                                      std::stod(argv[5]) * radiansPerDegree);
         std::cout << "radian-query-to-start=" << pointStrategy.apply(queryRadians, startRadians) << '\n';
         std::cout << "radian-query-to-end=" << pointStrategy.apply(queryRadians, endRadians) << '\n';
+        // SRID 4326's angular unit in MySQL's SRS definition differs slightly
+        // from Boost's generic degrees-to-radians constant.
+        const double mysqlAngularUnit = 0.017453292519943278;
+        const RadianPoint mysqlQuery(std::stod(argv[2]) * mysqlAngularUnit,
+                                     std::stod(argv[1]) * mysqlAngularUnit);
+        const RadianPoint mysqlStart(std::stod(argv[4]) * mysqlAngularUnit,
+                                     std::stod(argv[3]) * mysqlAngularUnit);
+        const RadianPoint mysqlEnd(std::stod(argv[6]) * mysqlAngularUnit,
+                                   std::stod(argv[5]) * mysqlAngularUnit);
+        std::cout << "srs-query-to-start=" << pointStrategy.apply(mysqlQuery, mysqlStart) << '\n';
+        std::cout << "srs-query-to-end=" << pointStrategy.apply(mysqlQuery, mysqlEnd) << '\n';
+        const double firstLatitude = std::stod(argv[1]) * mysqlAngularUnit;
+        const double secondLatitude = std::stod(argv[5]) * mysqlAngularUnit;
+        const double longitudeDelta = std::stod(argv[6]) * mysqlAngularUnit
+                                      - std::stod(argv[2]) * mysqlAngularUnit;
+        const double firstSin = std::sin(firstLatitude);
+        const double secondSin = std::sin(secondLatitude);
+        const double firstCos = std::cos(firstLatitude);
+        const double secondCos = std::cos(secondLatitude);
+        std::cout << "srs-first-sin=" << firstSin << " first-cos=" << firstCos
+                  << " second-sin=" << secondSin << " second-cos=" << secondCos
+                  << " delta=" << longitudeDelta << " cos-d="
+                  << firstSin * secondSin + firstCos * secondCos * std::cos(longitudeDelta)
+                  << '\n';
     }
 
     if (argc != 1) return 0;
