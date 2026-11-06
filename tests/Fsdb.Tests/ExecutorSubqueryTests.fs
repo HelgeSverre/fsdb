@@ -434,6 +434,12 @@ let tests =
                           runDefault store ("SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id " + groupClause + ") AS hit FROM exists_outer o ORDER BY o.id"))
                   Expect.equal groupedResult result "grouped EXISTS preserves membership"
                   Expect.isLessThan groupedExamined 200L "grouped EXISTS uses indexed membership"
+              for projection in [ "i.id"; "i.outer_id"; "i.*"; "*" ] do
+                  let projectedResult, projectedExamined =
+                      withExaminedRows (fun () ->
+                          runDefault store ("SELECT o.id, EXISTS(SELECT " + projection + " FROM exists_inner i WHERE i.outer_id=o.id GROUP BY i.outer_id) AS hit FROM exists_outer o ORDER BY o.id"))
+                  Expect.equal projectedResult result "grouped EXISTS ignores a plain inner projection"
+                  Expect.isLessThan projectedExamined 200L "grouped projected EXISTS uses indexed membership"
               match runDefault store "SELECT EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=1 GROUP BY i.missing)" with
               | Err(1054, _) -> ()
               | other -> failtestf "expected unknown GROUP BY column in EXISTS, got %A" other

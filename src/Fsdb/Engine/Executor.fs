@@ -9238,14 +9238,14 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | None | Some(Lit(VInt 0L)) | Some(Lit(VUInt 0UL)) -> true
         | _ -> false
 
-    // Grouping cannot change EXISTS membership when the projection is literal,
-    // there is no HAVING, and every group key is a validated inner column.
+    // Grouping cannot change EXISTS membership when projections only read
+    // columns, there is no HAVING, and every group key is a validated inner column.
     let groupedMembershipShape =
         select.GroupBy.IsEmpty
         || (select.Projections
             |> List.forall (fun projection ->
                 match projection.Expression with
-                | Lit _ -> true
+                | Lit _ | Col _ | QualifiedCol _ | Star _ -> true
                 | _ -> false))
 
     let plainShape =
