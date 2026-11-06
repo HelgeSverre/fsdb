@@ -2536,6 +2536,12 @@ implementation effort:
    columns raised server CPU in a matched baseline/candidate/baseline run
    without a wall-time gain, so the trial was reverted. Row-store mutation
    and broader method-level server CPU remain to profile.
+   A [managed-stack follow-up](benchmarks/results/2026-11-06-multidb-managed-stack-profile.md)
+   sampled a separate-process wide-account run. It found substantial monitor
+   and thread-pool wait time around statement execution and table access,
+   but sampled thread time includes blocked workers and inlined frames obscure
+   the exact lock. The next check should time statement-access manager holds
+   and waits separately from row locks and catalog publication.
    The group-commit leader now drains successive batches iteratively. A
    continuously replenished queue previously grew one call frame per batch;
    the [focused regression and matched write check](benchmarks/results/2026-10-15-iterative-group-commit-drain.md)
