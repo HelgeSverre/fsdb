@@ -1552,6 +1552,10 @@ ngram postings. The audited size 1–3 corpus agrees with MySQL across natural,
 Boolean, and query-expansion searches under both collations and the older
 `utf8mb4_unicode_ci` fallback. The assigned U+1B130–U+1B16F extension also
 matches audited size-1 through size-3 searches under Unicode 5.2 and 9.0.
+The [exact legacy-weight follow-up](torture/findings/2026-11-06-supplementary-kana-legacy-weights.md)
+matches all 368 singleton and 368 adjacent or boundary-pair bytes in three
+legacy `utf8mb4` collations. Its two-column ngram rerun also matches 16,200
+searches across those collations at sizes 1–3.
 The [U+1F100–U+1F1FF enclosed alphanumeric audit](torture/findings/2026-10-18-enclosed-alphanumeric-520-ngram.md)
 also preserves 193 distinct Unicode 5.2 implicit-weight scalars in
 collation keys and two-column ngram postings; the maintained range oracle
