@@ -171,3 +171,18 @@ distance residuals. Line relations remain at 12/412 mismatches; the 100
 seeded point-line distances, 49 polar-corner points, and four near-exterior
 controls still match. The focused near-polar regression now includes
 `88 2.99999`; 32 geometry and 33 geographic tests pass.
+
+## Line/polygon relation strategy control
+
+The 12 remaining line-relation mismatches comprise 11 `Crosses`/`Touches`
+disagreements and one near-polar `Touches`/disjoint disagreement. Fsdb's
+line/polygon topology currently classifies sampled points along each line;
+the point-relation grid itself has no mismatches. The
+[native Boost 1.84 probe](../native/geographic-line-polygon-relate-probe.cpp)
+checks the geographic relation directly. With MySQL's SRID 4326 angular unit
+and radian-coordinate points, it returns `Crosses=0, Touches=1,
+Intersects=1` for the 0° and 40° near-hole controls and `0,0,0` for the
+85° polar control, matching MySQL in all three. Using Boost's generic degree
+conversion instead gives a different polar result. The remaining work is
+therefore in the line/polygon relation strategy and coordinate conversion;
+point sampling alone is not a sufficient parity test for that path.
