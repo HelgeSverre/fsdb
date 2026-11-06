@@ -656,6 +656,11 @@ let tests =
                     let ideographicSymbolLast = System.Char.ConvertFromUtf32 0x16FFF
                     let tangutFirst = System.Char.ConvertFromUtf32 0x17000
                     let tangutLast = System.Char.ConvertFromUtf32 0x187FF
+                    let tangutComponentFirst = System.Char.ConvertFromUtf32 0x18800
+                    let tangutComponentLast = System.Char.ConvertFromUtf32 0x18AFF
+                    let tangutReservedFirst = System.Char.ConvertFromUtf32 0x18B00
+                    let tangutSupplementFirst = System.Char.ConvertFromUtf32 0x18D00
+                    let tangutSpanLast = System.Char.ConvertFromUtf32 0x18DFF
                     let compatibilityBmp = System.Char.ConvertFromUtf32 0x2F800
                     let compatibilitySupplementary = System.Char.ConvertFromUtf32 0x2F803
                     let compatibilityUnassigned = System.Char.ConvertFromUtf32 0x2FA1E
@@ -818,6 +823,9 @@ let tests =
                           ideographicSymbolLast + tangutFirst + tangutLast, "utf8mb4_general_ci", "FFFDFFFDFFFD"
                           ideographicSymbolLast + tangutFirst + tangutLast, "utf8mb4_unicode_ci", "FFFDFFFDFFFD"
                           ideographicSymbolLast + tangutFirst + tangutLast, "utf8mb4_unicode_520_ci", "FBC2EFFFFBC2F000FBC387FF"
+                          tangutLast + tangutComponentFirst, "utf8mb4_general_ci", "FFFDFFFD"
+                          tangutComponentLast + tangutReservedFirst + tangutSupplementFirst + tangutSpanLast,
+                              "utf8mb4_unicode_520_ci", "FBC38AFFFBC38B00FBC38D00FBC38DFF"
                           extensionG + "a", "utf8mb4_unicode_520_ci", "FBC68000120F"
                           compatibilityBmp, "utf8mb4_general_ci", "FFFD"
                           compatibilityBmp, "utf8mb4_unicode_520_ci", "FB40CE3D"

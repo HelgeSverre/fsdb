@@ -28,3 +28,25 @@ uv run --with pymysql python torture/scripts/general-ci-range-weight-oracle.py 1
 
 Repeat with `utf8mb4_unicode_ci` and `utf8mb4_general_ci` to cover the
 other two legacy collations.
+
+## Components, reserved positions, and Supplement
+
+The follow-up audited every position from U+18800 through U+18DFF, including
+Tangut Components U+18800–U+18AFF, the intervening reserved positions, and
+the Tangut Supplement U+18D00–U+18D8F. All 1,536 positions have the same
+legacy rule: `FFFD` in general and Unicode 4.0, and distinct implicit
+weights in Unicode 5.2. The oracle's full weight list matched this formula
+without an exception.
+
+After extending the byte encoder, all 1,536 singletons and 1,535 internal
+adjacent pairs match MySQL in each of the three collations: 9,213 additional
+exact-byte comparisons. A focused regression covers the U+187FF/U+18800,
+U+18AFF/U+18B00, and U+18D00 boundaries. The earlier sampled ngram evidence
+for Components and Supplement remains unchanged.
+
+```sh
+uv run --with pymysql python torture/scripts/general-ci-range-weight-oracle.py 18800 18E00 --collation utf8mb4_unicode_520_ci --compare-fsdb
+uv run --with pymysql python torture/scripts/general-ci-range-weight-oracle.py 18800 18DFF --collation utf8mb4_unicode_520_ci --compare-fsdb --pair-next
+```
+
+Other collations, ngram token sizes and query shapes, and MeCab remain open.
