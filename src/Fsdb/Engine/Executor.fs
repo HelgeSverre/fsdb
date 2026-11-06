@@ -33305,24 +33305,39 @@ let transactionWriteReadTargets
     (statement: Statement)
     : (string * string * RowId list) list =
     match statement with
-    | Update update when update.Joins.IsEmpty ->
+    | Update update ->
+        let update = writableViewFirst store dbName update
         let database = update.From.Database |> Option.defaultValue dbName
+        let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
 
         match tryUpdatableView store database update.From.Table with
         | Some view when not view.UpdateJoins.IsEmpty ->
             let written =
                 update.Assignments
                 |> List.choose (fun assignment ->
-                    Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
-                    |> Option.map viewTargetKey)
+                    if update.Joins.IsEmpty || assignment.Table |> Option.exists (equalsIgnoreCase viewQualifier) then
+                        Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
+                        |> Option.map viewTargetKey
+                    else None)
                 |> List.distinct
 
             match written with
             | [ target ] ->
-                let predicate =
-                    update.Where
-                    |> Option.map (rewriteViewExpression view)
-                    |> combineViewPredicate view.Predicate
+                let viewWhere =
+                    if update.Joins.IsEmpty then
+                        update.Where |> Option.map (rewriteViewExpression view)
+                    else
+                        update.Where
+                        |> optionalConjuncts
+                        |> List.filter (fun expression ->
+                            not (Expression.exists (function
+                                | QualifiedCol(owner, _) -> not (equalsIgnoreCase owner viewQualifier)
+                                | Col _ -> true
+                                | _ -> false) expression))
+                        |> List.map (rewriteViewExpression view)
+                        |> List.fold (fun predicate expression -> combineViewPredicate predicate (Some expression)) None
+
+                let predicate = combineViewPredicate viewWhere view.Predicate
 
                 let literalEqualities =
                     predicate

@@ -24,6 +24,16 @@ equality on the writable target is carried across an inner equality join to
 narrow the read-source claim. Other joined-source predicates retain the
 conservative candidate scan; further selective planning remains useful.
 
+The same rule applies when the writable view leads a larger `UPDATE ... JOIN`
+statement. MySQL waits for a contended source row inside that view and returns
+zero after its predicate changes, while a write targeting a disjoint source
+row proceeds. fsdb initially skipped read-source preparation for this form;
+the follow-up now includes it, using only view-local WHERE conjuncts to narrow
+its source claims. A physical read table can also precede the writable view in
+the UPDATE's join order. The read-source planner applies the same view-moving
+rewrite as write-target planning before claiming rows, so this form waits and
+rebases as well.
+
 Evidence: `uv run --with pymysql torture/scripts/cte-joined-write-oracle.py`
 and the Expecto case `joined view update rechecks a changed read source after
 waiting`.

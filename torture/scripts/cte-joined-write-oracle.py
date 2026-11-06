@@ -185,6 +185,79 @@ def main():
                 assert execute(owner, "SELECT id,n FROM a ORDER BY id") == ((1, 0), (2, 1))
                 execute(owner, "UPDATE a SET n=0 WHERE id=2")
                 execute(owner, "UPDATE source_lock SET flag=1 WHERE id=1")
+                execute(owner, "CREATE TABLE view_outer(id INT PRIMARY KEY)")
+                execute(owner, "INSERT INTO view_outer VALUES(1),(2)")
+                execute(owner, "BEGIN")
+                assert execute(owner, "UPDATE source_lock SET flag=0 WHERE id=1") == 1
+                execute(waiter, "BEGIN")
+                outer_result = []
+
+                def update_outer_joined_view():
+                    outer_result.append(
+                        execute(
+                            waiter,
+                            "UPDATE source_lock_view v JOIN view_outer x ON x.id=v.id SET v.n=v.n+1 WHERE v.id=1 AND v.flag=1",
+                        )
+                    )
+
+                outer_wait = threading.Thread(target=update_outer_joined_view)
+                outer_wait.start()
+                time.sleep(0.2)
+                assert outer_wait.is_alive(), "outer-joined view writer did not wait for source"
+                execute(owner, "COMMIT")
+                outer_wait.join(timeout=5)
+                assert not outer_wait.is_alive(), "outer-joined view writer did not resume"
+                assert outer_result == [0], outer_result
+                execute(waiter, "COMMIT")
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((0,),)
+                execute(owner, "UPDATE source_lock SET flag=1 WHERE id=1")
+                execute(owner, "BEGIN")
+                assert execute(owner, "UPDATE source_lock SET flag=0 WHERE id=1") == 1
+                execute(waiter, "BEGIN")
+                outer_result.clear()
+
+                def update_disjoint_outer_joined_view():
+                    outer_result.append(
+                        execute(
+                            waiter,
+                            "UPDATE source_lock_view v JOIN view_outer x ON x.id=v.id SET v.n=v.n+1 WHERE v.id=2 AND v.flag=1",
+                        )
+                    )
+
+                outer_wait = threading.Thread(target=update_disjoint_outer_joined_view)
+                outer_wait.start()
+                outer_wait.join(timeout=1)
+                assert not outer_wait.is_alive(), "disjoint outer-joined view writer waited"
+                assert outer_result == [1], outer_result
+                execute(owner, "COMMIT")
+                execute(waiter, "COMMIT")
+                assert execute(owner, "SELECT n FROM a WHERE id=2") == ((1,),)
+                execute(owner, "UPDATE a SET n=0 WHERE id=2")
+                execute(owner, "UPDATE source_lock SET flag=1 WHERE id=1")
+                execute(owner, "BEGIN")
+                assert execute(owner, "UPDATE source_lock SET flag=0 WHERE id=1") == 1
+                execute(waiter, "BEGIN")
+                outer_result.clear()
+
+                def update_view_after_outer_source():
+                    outer_result.append(
+                        execute(
+                            waiter,
+                            "UPDATE view_outer x JOIN source_lock_view v ON v.id=x.id SET v.n=v.n+1 WHERE v.id=1 AND v.flag=1",
+                        )
+                    )
+
+                outer_wait = threading.Thread(target=update_view_after_outer_source)
+                outer_wait.start()
+                time.sleep(0.2)
+                assert outer_wait.is_alive(), "read-first joined view writer did not wait"
+                execute(owner, "COMMIT")
+                outer_wait.join(timeout=5)
+                assert not outer_wait.is_alive(), "read-first joined view writer did not resume"
+                assert outer_result == [0], outer_result
+                execute(waiter, "COMMIT")
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((0,),)
+                execute(owner, "UPDATE source_lock SET flag=1 WHERE id=1")
 
                 verify_wait(
                     owner,
