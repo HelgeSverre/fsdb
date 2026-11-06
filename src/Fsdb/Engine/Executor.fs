@@ -9240,7 +9240,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
 
     // Grouping cannot change EXISTS membership when projections only read
     // columns, there is no HAVING, and every group key is a validated inner
-    // column or a null check of one.
+    // column or an error-free Boolean combination of inner null checks.
     let groupedMembershipShape =
         select.GroupBy.IsEmpty
         || (select.Projections
@@ -9337,7 +9337,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
             | _ -> false
         let groupIsSafe expression =
             let aliases = select.Projections |> List.choose (fun projection -> projection.Alias)
-            let rec safe = function
+            let safeColumn = function
                 | QualifiedCol(qualifier, column) ->
                     FromItem.tryQualifier source
                     |> Option.exists (fun sourceQualifier ->
@@ -9345,9 +9345,13 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                 | Col column ->
                     uniqueInnerColumn column
                     && not (aliases |> List.exists (equalsIgnoreCase column))
-                | IsNull value | IsNotNull value -> safe value
                 | _ -> false
-            safe expression
+            let rec safeBoolean = function
+                | IsNull value | IsNotNull value -> safeColumn value
+                | Not value -> safeBoolean value
+                | BinOp((And | Or), left, right) -> safeBoolean left && safeBoolean right
+                | _ -> false
+            safeColumn expression || safeBoolean expression
         let bindingsAreSafe =
             let memo = currentStatementMemo ()
             if memo.InnerExistsProjections.ContainsKey select then true

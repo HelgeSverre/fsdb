@@ -35,3 +35,16 @@ group. Both forms stay below 200 examined rows on the 50-by-500 fixture.
 The native MySQL 8.4.11 oracle confirms their results and prepared forms;
 all 90 correlated tests pass. Other computed group keys remain on the
 ordinary path.
+
+## Boolean combinations of null checks
+
+The indexed membership path also accepts `NOT`, `AND`, and `OR` combinations
+whose leaves are inner-column `IS NULL` or `IS NOT NULL` checks. These
+operations cannot raise a numeric conversion warning and do not change
+whether a nonempty filtered source has a group. Three grouped expressions
+match the ungrouped 50-row result with fewer than 200 examined rows each.
+The native MySQL 8.4.11 oracle agrees on ordinary and prepared results, and
+all 90 correlated tests pass. `GROUP BY NOT i.outer_id` remains on the
+ordinary path because Boolean coercion of a raw column can warn; its
+examined-row control verifies that it does not enter this shortcut. Other
+computed keys remain open.

@@ -429,12 +429,20 @@ let tests =
               Expect.equal distinctResult result "DISTINCT preserves EXISTS membership"
               Expect.isLessThan distinctExamined 200L "DISTINCT EXISTS uses indexed membership"
               for groupClause in [ "GROUP BY i.outer_id"; "GROUP BY outer_id LIMIT 1"
-                                   "GROUP BY (i.outer_id IS NULL)"; "GROUP BY (outer_id IS NOT NULL) LIMIT 1" ] do
+                                   "GROUP BY (i.outer_id IS NULL)"; "GROUP BY (outer_id IS NOT NULL) LIMIT 1"
+                                   "GROUP BY NOT (i.outer_id IS NULL)"
+                                   "GROUP BY (i.outer_id IS NULL) OR (i.id IS NOT NULL)"
+                                   "GROUP BY (i.outer_id IS NOT NULL) AND NOT (i.id IS NULL) LIMIT 1" ] do
                   let groupedResult, groupedExamined =
                       withExaminedRows (fun () ->
                           runDefault store ("SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id " + groupClause + ") AS hit FROM exists_outer o ORDER BY o.id"))
                   Expect.equal groupedResult result "grouped EXISTS preserves membership"
                   Expect.isLessThan groupedExamined 200L "grouped EXISTS uses indexed membership"
+              let coercedResult, coercedExamined =
+                  withExaminedRows (fun () ->
+                      runDefault store "SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id GROUP BY NOT i.outer_id) AS hit FROM exists_outer o ORDER BY o.id")
+              Expect.equal coercedResult result "raw-column Boolean coercion preserves membership"
+              Expect.isGreaterThan coercedExamined 500L "coercing a raw column retains normal evaluation"
               for projection in [ "i.id"; "i.outer_id"; "i.*"; "*" ] do
                   let projectedResult, projectedExamined =
                       withExaminedRows (fun () ->
