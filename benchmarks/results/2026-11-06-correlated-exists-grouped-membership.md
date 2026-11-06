@@ -109,6 +109,8 @@ results and prepared forms; all 90 correlated tests pass.
 ## Zero COUNT HAVING membership
 
 The same guarded path now handles `COUNT(*) = 0` and `0 = COUNT(*)`.
+Because counts are nonnegative integers, it also handles `COUNT(*) < 1`,
+`1 > COUNT(*)`, `COUNT(*) <= 0`, and `0 >= COUNT(*)`.
 With no `GROUP BY`, an empty filtered source still produces one aggregate
 row, so `EXISTS` is true exactly when the indexed match count is zero.
 With safe grouping keys, an empty source produces no group, while every

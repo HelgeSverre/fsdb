@@ -9249,6 +9249,10 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         match select.Having with
         | Some(BinOp(Eq, count, bound)) when countStar count && zero bound -> true
         | Some(BinOp(Eq, bound, count)) when zero bound && countStar count -> true
+        | Some(BinOp(Lt, count, bound)) when countStar count && one bound -> true
+        | Some(BinOp(Gt, bound, count)) when one bound && countStar count -> true
+        | Some(BinOp(Lte, count, bound)) when countStar count && zero bound -> true
+        | Some(BinOp(Gte, bound, count)) when zero bound && countStar count -> true
         | _ -> false
     let membershipHaving =
         match select.Having with

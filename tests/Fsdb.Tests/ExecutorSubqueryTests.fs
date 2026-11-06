@@ -475,7 +475,12 @@ let tests =
                   Expect.isTrue (rows |> List.mapi (fun index row -> row.[1] = Some(if index < 25 then "0" else "1")) |> List.forall id) "zero-count HAVING reverses membership"
               | other -> failtestf "expected zero-count HAVING rows, got %A" other
               Expect.isLessThan zeroCountExamined 200L "zero-count HAVING uses indexed membership"
-              for havingClause in [ "HAVING 0=COUNT(*)"; "GROUP BY i.outer_id HAVING COUNT(*)=0" ] do
+              for havingClause in
+                  [ "HAVING 0=COUNT(*)"; "HAVING COUNT(*)<1"; "HAVING 1>COUNT(*)"
+                    "HAVING COUNT(*)<=0"; "HAVING 0>=COUNT(*)"
+                    "GROUP BY i.outer_id HAVING COUNT(*)=0"
+                    "GROUP BY i.outer_id HAVING COUNT(*)<1"
+                    "GROUP BY i.outer_id HAVING 0>=COUNT(*)" ] do
                   let zeroResult, examined =
                       withExaminedRows (fun () ->
                           runDefault store ("SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id " + havingClause + ") AS hit FROM exists_outer o ORDER BY o.id"))

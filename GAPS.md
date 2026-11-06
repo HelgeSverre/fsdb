@@ -2289,8 +2289,8 @@ shapes remain open.
 [Positive `COUNT(*)` HAVING membership](benchmarks/results/2026-11-06-correlated-exists-grouped-membership.md#positive-count-having-membership)
 also uses the indexed path for literal projections and safe grouping keys;
 `COUNT(*) <> 0` and `0 != COUNT(*)` now do too. The zero-count HAVING control
-also uses the indexed count, preserving the difference between grouped and
-ungrouped empty sources. Other HAVING
+and its `< 1`/`<= 0` equivalent forms also use the indexed count, preserving
+the difference between grouped and ungrouped empty sources. Other HAVING
 predicates remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
