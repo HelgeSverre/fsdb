@@ -348,6 +348,10 @@ def main():
                         "chained_source_view",
                         "JOIN source_link l ON l.id=a.id JOIN source_lock s ON s.id=l.id",
                     ),
+                    (
+                        "using_chained_source_view",
+                        "JOIN source_link l USING(id) JOIN source_lock s ON s.id=l.id",
+                    ),
                 ):
                     execute(
                         owner,

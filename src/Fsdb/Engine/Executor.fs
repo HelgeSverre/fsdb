@@ -33335,7 +33335,7 @@ let transactionWriteReadTargets
                     | _ -> None))
         let usingKeys =
             match joins with
-            | [ join ] when join.Kind = InnerJoin || join.Kind = StraightJoin ->
+            | join :: _ when join.Kind = InnerJoin || join.Kind = StraightJoin ->
                 let left = first.Alias |> Option.defaultValue first.Table
                 FromItem.tryQualifier join.Table
                 |> Option.map (fun right ->

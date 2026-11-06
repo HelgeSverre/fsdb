@@ -53,8 +53,9 @@ ownership is validated.
 
 A single physical `NATURAL JOIN` has the same behavior. The candidate planner
 derives its shared columns from the two physical tables and carries a literal
-target key to the read source. For a view with two explicit inner equality
-joins, it follows the connected key through the intermediate table. MySQL and
+target key to the read source. For a view with two inner joins, it follows
+the connected key through the intermediate table. The first edge can be an
+explicit equality or `USING(id)` followed by an explicit equality. MySQL and
 fsdb both wait on a matching held source row, recheck after commit, and allow
 a disjoint row to proceed. Chains containing outer or grouped joins still
 need separate ownership and null-preservation checks.
@@ -66,4 +67,4 @@ matches MySQL's zero affected rows without an explicit `BEGIN` on the writer.
 Evidence: `uv run --with pymysql python torture/scripts/cte-joined-write-oracle.py`
 and the Expecto cases `joined view update rechecks a changed read source after
 waiting`, `NATURAL joined view locks only its keyed read-source row`, and
-`joined view propagates read-source key through two inner joins`.
+`joined view propagates read-source key through explicit and USING joins`.

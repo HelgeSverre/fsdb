@@ -5680,7 +5680,7 @@ let tests =
               Expect.equal result (Affected 1UL) "the disjoint NATURAL writer updates row 2"
               Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the disjoint writer commits"
 
-          testCase "joined view propagates read-source key through two inner joins"
+          testCase "joined view propagates read-source key through explicit and USING joins"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup = create 1 store
@@ -5723,6 +5723,25 @@ let tests =
               let waiter, result = waiting.GetAwaiter().GetResult()
               Expect.equal result (Affected 1UL) "the chained writer updates row 2"
               Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the chained writer commits"
+
+              handle setup "UPDATE tx_chain_source SET flag=1 WHERE id=1" |> ignore
+              handle setup
+                  "CREATE VIEW tx_using_chain_view AS SELECT t.id,t.n,s.flag FROM tx_chain_target t JOIN tx_chain_link l USING(id) JOIN tx_chain_source s ON s.id=l.id"
+              |> ignore
+              let owner, _ = handle (create 4 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_chain_source SET flag=0 WHERE id=2"
+              Expect.equal changed (Affected 1UL) "the owner holds source row 2"
+              let waiter, _ = handle (create 5 store) "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_using_chain_view SET n=n+1 WHERE id=1 AND flag=1")
+              let completed = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the second owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the USING chain writer finishes"
+              Expect.isTrue completed "row 1 does not wait for source row 2"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 1UL) "the USING chain writer updates row 1"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the USING chain writer commits"
 
           testCase "JSON_TABLE-first view updates wait on the physical target"
           <| fun _ ->
