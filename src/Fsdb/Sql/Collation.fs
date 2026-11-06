@@ -1314,6 +1314,25 @@ let private legacyCircledCjkWeights unicode520 codepoint =
         [ (if unicode520 then 0x2B15 else 0x1E52) + codepoint - 0x32D0 ]
     else [ 0xFBC0; 0xB2FF ]
 
+// MySQL 8.4.11 legacy UCA primaries for CJK Compatibility Forms U+FE30–U+FE4F.
+// U+FE30 expands to two copies of the same primary weight.
+let private legacyCjkCompatibilityForm40 =
+    [| 0x025D; 0x0228; 0x0227; 0x021B; 0x021B; 0x0288; 0x0289; 0x028C
+       0x028D; 0x02B8; 0x02B9; 0x02B6; 0x02B7; 0x02B0; 0x02B1; 0x02AE
+       0x02AF; 0x02B2; 0x02B3; 0x02B4; 0x02B5; 0x0238; 0x0239; 0x028A
+       0x028B; 0x0211; 0x0211; 0x0211; 0x0211; 0x021B; 0x021B; 0x021B |]
+
+let private legacyCjkCompatibilityForm52 =
+    [| 0x0281; 0x022C; 0x022B; 0x021D; 0x021D; 0x02FF; 0x0300; 0x0303
+       0x0304; 0x0347; 0x0348; 0x0345; 0x0346; 0x033F; 0x0340; 0x033D
+       0x033E; 0x0341; 0x0342; 0x0343; 0x0344; 0x0241; 0x0242; 0x0301
+       0x0302; 0x0213; 0x0213; 0x0213; 0x0213; 0x021D; 0x021D; 0x021D |]
+
+let private legacyCjkCompatibilityFormWeights unicode520 codepoint =
+    let weights = if unicode520 then legacyCjkCompatibilityForm52 else legacyCjkCompatibilityForm40
+    let primary = weights[codepoint - 0xFE30]
+    if codepoint = 0xFE30 then [ primary; primary ] else [ primary ]
+
 let private legacySquaredCjkExceptionWeights unicode520 codepoint =
     match codepoint, unicode520 with
     | 0x3382, false -> [ 0x10F8; 0x0E33 ]
@@ -1634,6 +1653,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     if general then addWeight codepoint
                     else
                         for weight in legacySquaredCjkExceptionWeights (name = "utf8mb4_unicode_520_ci") codepoint do
+                            addWeight weight
+                | None when codepoint >= 0xFE30 && codepoint <= 0xFE4F ->
+                    if general then addWeight codepoint
+                    else
+                        for weight in legacyCjkCompatibilityFormWeights (name = "utf8mb4_unicode_520_ci") codepoint do
                             addWeight weight
                 | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =

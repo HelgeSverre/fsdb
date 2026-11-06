@@ -1475,6 +1475,10 @@ the three legacy Unicode collations.
 The U+3200–U+33FF `utf8mb4_unicode_ci` ngram and NFKC-equality corpus now
 matches all 3,568 checks at each startup size 1–10. Other CJK blocks and
 legacy collation search shapes remain open.
+The [CJK Compatibility Forms U+FE30–U+FE4F exact-weight audit](torture/findings/2026-11-06-cjk-compatibility-forms-exact-weights.md)
+adds 635 singleton, adjacent-pair, mixed-ideograph, and padded exact-byte
+matches across five legacy collations. The adjacent U+FE50 and other CJK
+presentation-form ranges remain open.
 The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
 likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
 plus 1,464 legacy Unicode searches over its later part at size 1.
