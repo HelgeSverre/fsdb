@@ -410,3 +410,21 @@ control returns `FF1FF0212` and remains disjoint. The common relation
 matrix confirms that the residual is in line/polygon relation construction,
 not in the point predicates or the distance calculation. The production
 topology logic is unchanged by this probe expansion.
+
+## Current-head overlay check
+
+A current-head rerun still finds 11/448 geographic line/polygon relation
+differences, all `Crosses` versus `Touches`; the point-relation and distance
+lanes remain at zero mismatches. The edge oracle's new
+`--compare-overlays` option asks both engines for
+`ST_AsText(ST_Intersection(line, polygon))` on every mismatching line. MySQL
+returns a short endpoint-adjacent line or a
+line-plus-point collection. Fsdb instead returns error 1235, `ST_INTERSECTION
+with nonzero SRIDs`, in all eleven cases. Thus fsdb has no geographic overlay
+geometry to use as a line-relation authority today.
+
+The next implementation seam is a geographic line/polygon overlay that
+produces ordered boundary events and inside intervals. Its intersection
+geometry can serve `ST_Intersection` and the line relation predicates from
+the same topology decision. Treating the sampled point predicate as that
+authority is contradicted by the pinned MySQL endpoint trace above.

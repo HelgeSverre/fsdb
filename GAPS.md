@@ -540,6 +540,12 @@ limited derived sources and limited or `TEMPTABLE` views use the exposed alias.
 |---|---|---|
 | Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [current edge audit](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#reduced-length-operation-order) matches all 100 seeded point-to-line distances, all 36 added short-corner crossings, and all 189 near-hole point distances, no point relation mismatches, no mismatch across four near-exterior controls or 49 polar-corner points, and 11 line relation mismatches across 448 cases; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
 
+The [current-head overlay check](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#current-head-overlay-check)
+confirms those eleven line mismatches and exposes a broader missing seam:
+MySQL returns geographic `ST_Intersection` geometry for each, while fsdb
+returns error 1235 for nonzero SRIDs. Ordered geographic boundary events
+would support both overlay output and the line-relation decision.
+
 The [geographic strategy follow-up](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
 found zero distance on both engines for its line mismatches,
 including the MySQL case that reports no intersection. MySQL's point/area and

@@ -184,6 +184,11 @@ def main():
         action="store_true",
         help="compare point predicates near the first mismatching line endpoint",
     )
+    parser.add_argument(
+        "--compare-overlays",
+        action="store_true",
+        help="show both engines' intersection geometry for mismatching lines",
+    )
     args = parser.parse_args()
     if not FSDB.exists():
         raise RuntimeError(f"Build the Release CLI first: {FSDB}")
@@ -281,6 +286,12 @@ def main():
             with fsdb_connection.cursor() as cursor:
                 cursor.execute(f"SELECT ST_Distance({shape},{area})")
                 print("fsdb distance", cursor.fetchone())
+                if args.compare_overlays:
+                    try:
+                        cursor.execute(f"SELECT ST_AsText(ST_Intersection({shape},{area}))")
+                        print("fsdb intersection", cursor.fetchone())
+                    except pymysql.MySQLError as error:
+                        print("fsdb intersection error", error.args)
         hole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,3 1,3 3,1 3,1 1))"
         point_count = 0
         point_mismatches = []
