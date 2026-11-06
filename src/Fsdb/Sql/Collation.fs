@@ -835,6 +835,12 @@ let private unicode52SupplementalPunctuationWeights =
         0x028D; 0x0293
     |]
 
+// MySQL 8.4.11 UCA 5.2 primaries for U+FE10–U+FE19. The last form
+// expands to three copies of its primary weight.
+let private unicode52VerticalPunctuationWeights =
+    [| 0x0234; 0x0240; 0x0291; 0x0247; 0x0243
+       0x026E; 0x0273; 0x0349; 0x034A; 0x0281 |]
+
 // MySQL 8.4.11 UCA 4.0/5.2 primary weights for CJK Symbols and Punctuation.
 // U+302A–U+302F have no primary weight; U+3006 and U+303C expand to two.
 let private legacyCjkSymbolWeights unicode520 codepoint =
@@ -1772,6 +1778,17 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     else
                         for weight in legacySquaredCjkExceptionWeights (name = "utf8mb4_unicode_520_ci") codepoint do
                             addWeight weight
+                | None when codepoint >= 0xFE10 && codepoint <= 0xFE1F ->
+                    if general then addWeight codepoint
+                    elif name = "utf8mb4_unicode_520_ci" && codepoint <= 0xFE19 then
+                        let weight = unicode52VerticalPunctuationWeights[codepoint - 0xFE10]
+                        for _ in 1..(if codepoint = 0xFE19 then 3 else 1) do addWeight weight
+                    else addImplicit 0xFBC0 codepoint
+                | None when codepoint >= 0xFE20 && codepoint <= 0xFE2F ->
+                    if general then addWeight codepoint
+                    elif codepoint <= 0xFE23 || (name = "utf8mb4_unicode_520_ci" && codepoint <= 0xFE26) then
+                        ()
+                    else addImplicit 0xFBC0 codepoint
                 | None when codepoint >= 0xFE30 && codepoint <= 0xFE4F ->
                     if general then addWeight codepoint
                     else

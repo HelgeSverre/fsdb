@@ -1441,6 +1441,9 @@ legacy-collation gap; MeCab and unsampled weight families remain open.
 The [U+FE10–U+FE6F legacy vertical-form audit](torture/findings/2026-10-18-legacy-vertical-half-mark-ngram.md)
 also now matches 504 MySQL searches per token size at sizes 1–10, after
 preserving UCA 4.0's distinct U+FE1A–U+FE1F and U+FE24–U+FE2F weights.
+The [U+FE10–U+FE2F exact-weight follow-up](torture/findings/2026-11-06-vertical-punctuation-legacy-weights.md)
+matches singleton and adjacent-pair bytes in five legacy collations and
+two-column ngram searches at sizes 1–10 in three `utf8mb4` collations.
 
 The [Nüshu U+1B170–U+1B2FF audit](torture/findings/2026-10-18-nushu-ngram-audit.md)
 finds no two-column membership or relevance differences in 7,128 general-ci
@@ -1606,7 +1609,8 @@ query-expansion indexing continue to find later-assigned characters.
 The [legacy vertical-punctuation follow-up](torture/findings/2026-10-15-legacy-ngram-punctuation.md#vertical-punctuation-block-follow-up)
 also distinguishes all U+FE10–U+FE19 forms under `utf8mb4_unicode_ci` and
 matches the audited period/vertical-period ngram membership. Its keys retain
-their relative MySQL order, while exact weight bytes remain out of scope.
+their relative MySQL order; exact U+FE10–U+FE2F bytes are covered by the
+[later weight audit](torture/findings/2026-11-06-vertical-punctuation-legacy-weights.md).
 [ASCII, fullwidth, and small comma equality](torture/findings/2026-10-15-legacy-ngram-punctuation.md#ascii-fullwidth-and-small-comma-equality)
 now agrees across the audited insensitive collations while ngram tokenization
 retains MySQL's ASCII punctuation boundary.
