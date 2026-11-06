@@ -67,3 +67,19 @@ targets simultaneously. The expanded native MySQL 8.4.11 oracle passes
 **79 UPDATE cases and 59 contended rebases**. This extends verified view
 rewrite and write scheduling to four targets; other mixed join shapes and
 unmatched arrangements remain open.
+
+## Mixed outer-join matrix and dependent source
+
+The four-view oracle now checks all eight `NATURAL LEFT`/`NATURAL RIGHT`
+combinations across the last three writable views at each of three keys:
+a fully matched row, a row missing the second and fourth views, and a row
+missing the first view. It also replaces the derived read source with a
+dependent `JSON_TABLE(JSON_ARRAY(va.link_id), ...)` in matched, missing,
+and final-right-preserved cases.
+
+The dependent matched form waits and rebases for each of four individual
+physical holders and for four independent holders together. The full
+native MySQL 8.4.11 corpus now matches **106 UPDATE cases and 64 contended
+rebases**, with final base-table contents checked after each operation.
+Other source types, nested join groupings, and wider unmatched data remain
+open.

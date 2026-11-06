@@ -1,5 +1,6 @@
 """Compare writable joined views under LEFT/RIGHT UPDATE joins with MySQL 8.4.11."""
 
+import itertools
 import pathlib
 import socket
 import subprocess
@@ -43,12 +44,18 @@ def six_source_update(row_id):
     )
 
 
-def four_view_update(row_id, final_join="LEFT"):
+def four_view_update(row_id, vb_join="LEFT", vc_join="LEFT", ve_join="LEFT", dependent=False):
+    if dependent:
+        read_source = (
+            "JOIN JSON_TABLE(JSON_ARRAY(va.link_id),'$[*]' "
+            "COLUMNS(bridge INT PATH '$')) r ON r.bridge=va.link_id "
+        )
+    else:
+        read_source = "JOIN (SELECT id AS bridge FROM link) r ON r.bridge=va.link_id "
     return (
-        "WITH c AS (SELECT id FROM link) UPDATE c NATURAL LEFT JOIN va "
-        "JOIN (SELECT id AS bridge FROM link) r ON r.bridge=va.link_id "
-        "NATURAL LEFT JOIN vb_unique vb NATURAL LEFT JOIN vc_unique vc "
-        f"NATURAL {final_join} JOIN ve_unique ve "
+        f"WITH c AS (SELECT id FROM link) UPDATE c NATURAL LEFT JOIN va {read_source}"
+        f"NATURAL {vb_join} JOIN vb_unique vb NATURAL {vc_join} JOIN vc_unique vc "
+        f"NATURAL {ve_join} JOIN ve_unique ve "
         "SET va.n=va.n+1,vb.bonus=vb.bonus+1,vc.extra=vc.extra+1,ve.tail=ve.tail+1 "
         f"WHERE id={row_id}"
     )
@@ -410,8 +417,16 @@ def main():
                     "SET va.n=va.n+1 WHERE va.id=1",
                     four_view_update(1),
                     four_view_update(2),
-                    four_view_update(3, "RIGHT"),
+                    four_view_update(3, ve_join="RIGHT"),
+                    four_view_update(1, dependent=True),
+                    four_view_update(2, dependent=True),
+                    four_view_update(3, ve_join="RIGHT", dependent=True),
                 ]
+                cases.extend(
+                    four_view_update(row_id, *joins)
+                    for joins in itertools.product(("LEFT", "RIGHT"), repeat=3)
+                    for row_id in (1, 2, 3)
+                )
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)
                     assert actual == expected, (sql, expected, actual)
@@ -536,6 +551,9 @@ def main():
                 for target in ("a", "b", "d", "e"):
                     held_cases.append(([(target, 1)], four_view_matched))
                 held_cases.append(([("a", 1), ("b", 1), ("d", 1), ("e", 1)], four_view_matched))
+                four_view_dependent = four_view_update(1, dependent=True)
+                for target in ("a", "b", "d", "e"):
+                    held_cases.append(([(target, 1)], four_view_dependent))
                 for held_rows, sql in held_cases:
                     expected = contended_update(mysql_connection, {"unix_socket": mysql_socket}, held_rows, sql)
                     actual = contended_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, held_rows, sql)
@@ -607,6 +625,9 @@ def main():
                 ]
                 independent_view_cases.append(
                     ([("a", 1), ("b", 1), ("d", 1), ("e", 1)], four_view_matched)
+                )
+                independent_view_cases.append(
+                    ([("a", 1), ("b", 1), ("d", 1), ("e", 1)], four_view_dependent)
                 )
                 for held_rows, sql in independent_view_cases:
                     expected = independently_held_update(
