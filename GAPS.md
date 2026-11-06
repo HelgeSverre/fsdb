@@ -2376,6 +2376,11 @@ comparisons and combinations also uses the indexed count. Integer-literal
 `COUNT(*) BETWEEN` and `NOT BETWEEN` bounds use it as well, as do
 integer-literal `COUNT(*) IN` and `NOT IN` lists and `COUNT(*) IS TRUE`/`IS FALSE`.
 Other HAVING predicates remain open.
+Joined correlated `COUNT(*)` and literal-projection `EXISTS` now precompute
+matches for [multiple exact integer equality keys](torture/findings/2026-11-06-joined-correlated-pair-keys.md)
+once per statement. The pinned MySQL rows cover duplicate inner pairs, misses,
+and NULL keys; a 205-row outer control stays below 250 examined rows. Coercive
+and noninteger outer keys still use ordinary per-row comparison.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

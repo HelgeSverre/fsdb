@@ -54,6 +54,31 @@ let tests =
                     let _, examined = withExaminedRows (fun () -> runDefault store countSql)
                     Expect.isLessThan examined 400L "204 outer rows plus one pass over 4 systems and 7 links"
 
+                testCase "two integer correlation keys share one joined inner pass"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE outer_pair (a BIGINT UNSIGNED, b BIGINT UNSIGNED)" |> ignore
+                    runDefault store "CREATE TABLE inner_pair (a BIGINT UNSIGNED, b BIGINT UNSIGNED, v INT)" |> ignore
+                    runDefault store "CREATE TABLE marker (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO marker VALUES (1)" |> ignore
+                    runDefault store "INSERT INTO outer_pair VALUES (1,1),(1,2),(2,1),(2,2),(NULL,1)" |> ignore
+                    runDefault store "INSERT INTO inner_pair VALUES (1,1,7),(1,1,8),(1,2,9),(2,1,10),(NULL,1,11)" |> ignore
+                    let sql = "SELECT o.a,o.b,(SELECT COUNT(*) FROM inner_pair i JOIN marker m ON m.id=1 WHERE i.a=o.a AND i.b=o.b) c FROM outer_pair o ORDER BY o.a IS NULL,o.a,o.b"
+                    let result, examined = withExaminedRows (fun () -> runDefault store sql)
+                    Expect.equal result (ResultSet([ "a"; "b"; "c" ], [ [ Some "1"; Some "1"; Some "2" ]; [ Some "1"; Some "2"; Some "1" ]; [ Some "2"; Some "1"; Some "1" ]; [ Some "2"; Some "2"; Some "0" ]; [ None; Some "1"; Some "0" ] ])) "pinned MySQL 8.4.11 rows"
+                    Expect.isLessThan examined 25L "joined inner rows are grouped once by the pair"
+                    Expect.equal
+                        (runDefault store "SELECT o.a,o.b FROM outer_pair o WHERE EXISTS (SELECT 1 FROM inner_pair i JOIN marker m ON m.id=1 WHERE i.a=o.a AND i.b=o.b) ORDER BY o.a,o.b")
+                        (ResultSet([ "a"; "b" ], [ [ Some "1"; Some "1" ]; [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ]))
+                        "EXISTS uses the same pair membership"
+                    let extra = [ 100 .. 299 ] |> List.map (sprintf "(%d,1)") |> String.concat ","
+                    runDefault store ("INSERT INTO outer_pair VALUES " + extra) |> ignore
+                    let bulkResult, bulkExamined = withExaminedRows (fun () -> runDefault store sql)
+                    match bulkResult with
+                    | ResultSet(_, rows) -> Expect.equal rows.Length 205 "all outer rows remain visible"
+                    | other -> failtestf "expected pair counts, got %A" other
+                    Expect.isLessThan bulkExamined 250L "200 misses do not rescan the joined inner side"
+
                 testCase "EXISTS and NOT EXISTS over a join follow the same keys"
                 <| fun _ ->
                     let existsSql negate =
