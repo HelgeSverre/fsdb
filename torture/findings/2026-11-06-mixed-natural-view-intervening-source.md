@@ -22,3 +22,20 @@ Run `uv run --with pymysql torture/scripts/two-joined-view-outer-oracle.py`
 after building `src/Fsdb.Cli` in Release. These two cases extend coverage
 through one intervening derived source; other join groupings, longer
 chains, and unmatched arrangements remain to audit.
+
+## Dependent JSON_TABLE and right-preserved final view
+
+A dependent `JSON_TABLE(JSON_ARRAY(va.link_id), ...)` can now sit between the
+two writable views. MySQL and fsdb agree for matched rows, a missing second
+view row, and a CTE row missing the first view. A final `NATURAL RIGHT JOIN`
+also preserves an unmatched second-view row after the dependent source
+eliminates the left row. The equivalent intervening derived source matches.
+
+The last shape exposed a mutation-only binding bug: fsdb's view rewrite knew
+the natural key `id` belonged to the right-preserved view, but rewrote bare
+`WHERE id=3` through the first view's null-extended base row. Qualified
+`WHERE vb.id=3` worked. The rewrite now uses the logical merged-key owner
+before mapping a bare exposed name to the first view's physical expression.
+The focused regression and oracle check both the preserved update and the
+null-extended `c.id` control. The MySQL 8.4.11 oracle passes 69 two-view UPDATE cases and
+40 contended rebases, including a waiter on that right-preserved physical row.

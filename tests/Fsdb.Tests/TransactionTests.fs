@@ -4305,6 +4305,35 @@ let tests =
                       | Err(1052, _) -> ()
                       | result -> failtestf "expected ambiguous bare n error 1052, got %A" result
 
+          testCase "natural right join preserves a later view after dependent JSON_TABLE"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              for sql in
+                  [ "CREATE TABLE tx_json_a(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE tx_json_b(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE tx_json_link(id INT PRIMARY KEY)"
+                    "INSERT INTO tx_json_a VALUES(1,10)"
+                    "INSERT INTO tx_json_b VALUES(1,20),(3,30)"
+                    "INSERT INTO tx_json_link VALUES(1),(3)"
+                    "CREATE VIEW tx_json_va AS SELECT a.id,a.n,l.id AS link_id FROM tx_json_a a JOIN tx_json_link l ON a.id=l.id"
+                    "CREATE VIEW tx_json_vb AS SELECT b.id,b.n AS bonus,l.id AS link_id FROM tx_json_b b JOIN tx_json_link l ON b.id=l.id" ] do
+                  match handle session sql |> snd with
+                  | Err(code, message) -> failtestf "setup failed: %s (%d %s)" sql code message
+                  | _ -> ()
+              let prefix =
+                  "WITH c AS (SELECT id FROM tx_json_link) UPDATE c NATURAL LEFT JOIN tx_json_va va "
+                  + "JOIN JSON_TABLE(JSON_ARRAY(va.link_id),'$[*]' COLUMNS(bridge INT PATH '$')) j "
+                  + "ON j.bridge=va.link_id NATURAL RIGHT JOIN tx_json_vb vb "
+                  + "SET va.n=va.n+1,vb.bonus=vb.bonus+1 "
+              Expect.equal (handle session (prefix + "WHERE id=3") |> snd) (Affected 1UL)
+                  "bare merged id belongs to the right-preserved view"
+              match handle session "SELECT n FROM tx_json_b WHERE id=3" |> snd with
+              | ResultSet(_, [ [ Some "31" ] ]) -> ()
+              | result -> failtestf "expected the preserved view's physical row to change, got %A" result
+              Expect.equal (handle session (prefix + "WHERE c.id=3") |> snd) (Affected 0UL)
+                  "the null-extended left owner does not match"
+
           testCase "joined UPDATE writes two distinct updatable views"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

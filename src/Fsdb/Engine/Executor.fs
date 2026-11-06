@@ -31152,7 +31152,12 @@ let rec executeAs
                             ambiguousColumn <- Some name
                             None
                         else
-                            Map.tryFind (name.ToLowerInvariant()) runtimeView.Expressions |> Option.map qualifyView
+                            // A later NATURAL RIGHT JOIN can replace the view's
+                            // exposed key with its preserved right-hand owner.
+                            match Map.tryFind (name.ToLowerInvariant()) mergedKeyOwners with
+                            | Some owner when not (equalsIgnoreCase owner viewQualifier)
+                                              && isMergedShared name -> Some(QualifiedCol(owner, name))
+                            | _ -> Map.tryFind (name.ToLowerInvariant()) runtimeView.Expressions |> Option.map qualifyView
                     | Col name ->
                         match owners name with
                         | [ owner ] -> Some(QualifiedCol(owner, name))
