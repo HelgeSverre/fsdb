@@ -1480,7 +1480,11 @@ adds 635 singleton, adjacent-pair, mixed-ideograph, and padded exact-byte
 matches across five legacy collations. The [adjacent U+FE50–U+FE6F Small
 Form Variants audit](torture/findings/2026-11-06-cjk-small-forms-exact-weights.md)
 adds another 635 exact-byte matches and the cross-block U+FE4F/U+FE50
-pair. Other CJK presentation-form ranges remain open.
+pair. The [U+FE30–U+FE6F two-column ngram and equality audit](torture/findings/2026-11-06-cjk-presentation-form-ngram-equality.md)
+now matches 6,960 searches and 1,120 NFKC-equality checks across the two
+legacy Unicode collations and startup sizes 1–10, including the four
+U+FE49–U+FE4C overline distinctions. Other CJK presentation-form ranges
+and mixed-script search shapes remain open.
 The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
 likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
 plus 1,464 legacy Unicode searches over its later part at size 1.

@@ -2032,6 +2032,15 @@ let tests =
                     Expect.isFalse (col.Equals "︒" "\uE011\uE013") "a literal private-use marker cannot alias a vertical form"
                     Expect.isFalse (col.Equals "︤" "\uE011\uE025") "a literal marker cannot alias a half mark"
 
+                testCase "legacy CJK overline forms use MySQL equality"
+                <| fun _ ->
+                    for name in [ "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci" ] do
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        for form in [ "﹉"; "﹊"; "﹋"; "﹌" ] do
+                            Expect.isTrue (col.Equals form "‾") (name + ": form matches overline")
+                            Expect.equal (col.KeyOf form) (col.KeyOf "‾") (name + ": form shares index key")
+                            Expect.isFalse (col.Equals form " ̅") (name + ": NFKC expansion differs")
+
                 testCase "legacy enclosed CJK implicit weights stay distinct"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get

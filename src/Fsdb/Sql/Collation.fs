@@ -742,7 +742,11 @@ let private foldCjkPunctuationForms modern (value: string) =
             // ngram keys while the tokenizer retains the original characters.
             let result = StringBuilder(value.Length)
             for c in value do
-                if isWidthForm c then
+                if c >= '\uFE49' && c <= '\uFE4C' then
+                    // NFKC yields SPACE + COMBINING OVERLINE, but MySQL's
+                    // legacy primary weight is the ordinary overline U+203E.
+                    result.Append('\u203E') |> ignore
+                elif isWidthForm c then
                     result.Append((string c).Normalize(NormalizationForm.FormKC)) |> ignore
                 else
                     result.Append(c) |> ignore
