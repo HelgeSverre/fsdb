@@ -28,6 +28,15 @@ MySQL's complete line-distance result is 0.0953599161 m. The raw strategy
 is therefore useful for tracing arithmetic, but cannot substitute for the
 complete SQL operation as an oracle.
 
+The probe also reports Boost's direct geographic point-to-point strategy for
+the query and each segment endpoint. At the 43-degree vertex Boost returns
+0.8188541524346334 m, matching MySQL rather than fsdb. At 83 degrees it
+returns 0.1651606945721662 m and at 88 degrees it returns zero, matching
+fsdb rather than MySQL. The same values result from Clang `-O0`, `-O3`, and
+`-O3 -ffp-contract=fast` builds. This rules out a simple uniform choice of
+the local Boost strategy as an explanation for all residuals. The exact
+MySQL call path and build arithmetic still need tracing.
+
 Four candidate arithmetic changes were built in Release and run through the
 full edge oracle. All were reverted:
 

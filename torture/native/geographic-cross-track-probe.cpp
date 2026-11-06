@@ -5,6 +5,7 @@
 #include <boost/geometry/geometries/point.hpp>
 #include <boost/geometry/srs/spheroid.hpp>
 #include <boost/geometry/strategies/geographic/distance_cross_track.hpp>
+#include <boost/geometry/strategies/geographic/distance.hpp>
 #include <boost/geometry/util/math.hpp>
 
 #include <iomanip>
@@ -30,6 +31,11 @@ int main(int argc, char** argv) {
     const Point end(argc == 7 ? std::stod(argv[6]) : 3.0,
                     argc == 7 ? std::stod(argv[5]) : 3.0);
     std::cout << std::setprecision(17) << "distance=" << strategy.apply(query, start, end) << '\n';
+    if (argc == 7) {
+        const bg::strategy::distance::geographic<bg::strategy::andoyer> pointStrategy(wgs84);
+        std::cout << "query-to-start=" << pointStrategy.apply(query, start) << '\n';
+        std::cout << "query-to-end=" << pointStrategy.apply(query, end) << '\n';
+    }
 
     if (argc != 1) return 0;
 
