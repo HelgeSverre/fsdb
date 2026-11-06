@@ -9224,13 +9224,18 @@ and private plainExistsProjection (projection: Projection) =
     | _ -> false
 
 and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
-    // A positive literal LIMIT cannot change EXISTS membership. Keep zero and
-    // expression limits on the ordinary path for their validation and errors.
+    // A positive literal LIMIT and a literal zero OFFSET cannot change EXISTS
+    // membership. Keep other limits and offsets on the ordinary path.
     let membershipLimit =
         match select.Limit with
         | None -> true
         | Some(Lit(VInt limit)) -> limit > 0L
         | Some(Lit(VUInt limit)) -> limit > 0UL
+        | _ -> false
+
+    let membershipOffset =
+        match select.Offset with
+        | None | Some(Lit(VInt 0L)) | Some(Lit(VUInt 0UL)) -> true
         | _ -> false
 
     let plainShape =
@@ -9239,7 +9244,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         && select.Having.IsNone
         && select.OrderBy.IsEmpty
         && membershipLimit
-        && select.Offset.IsNone
+        && membershipOffset
         && select.Windows.IsEmpty
         && select.Ctes.IsEmpty
         && select.Locking.IsEmpty

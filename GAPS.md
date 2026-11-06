@@ -2178,8 +2178,11 @@ also uses the indexed membership path for `LIMIT 1`. In the matched 100-row
 ShortRun, fsdb took 0.92 ms versus 4.45 ms for `LIMIT 2`, which retains the
 general path in that run. A [positive-limit follow-up](benchmarks/results/2026-11-06-correlated-exists-positive-limit.md)
 extends the lookup to any positive signed or unsigned literal; `LIMIT 2`
-then measured 0.65 ms beside `LIMIT 1` at 0.66 ms. `LIMIT 0`, offsets, and
-expression limits retain ordinary evaluation; broader limited shapes remain open.
+then measured 0.65 ms beside `LIMIT 1` at 0.66 ms. Literal zero offsets in
+both `LIMIT 1 OFFSET 0` and `LIMIT 0, 1` now use the same indexed membership
+path, with result and examined-row controls. `LIMIT 0`, nonzero or expression
+offsets, and expression limits retain ordinary evaluation; broader limited
+shapes remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

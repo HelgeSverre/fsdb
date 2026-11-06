@@ -423,6 +423,16 @@ let tests =
                   Expect.isTrue (rows |> List.mapi (fun index row -> row.[1] = Some(if index < 25 then "1" else "0")) |> List.forall id) "only the first 25 keys have matches"
               | other -> failtestf "expected correlated EXISTS rows, got %A" other
               Expect.isLessThan examined 200L "the indexed EXISTS path does not group or scan all inner rows"
+              for limitClause in [ "LIMIT 1 OFFSET 0"; "LIMIT 0, 1" ] do
+                  let result, examined =
+                      withExaminedRows (fun () ->
+                          runDefault store ("SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id " + limitClause + ") AS hit FROM exists_outer o ORDER BY o.id"))
+                  match result with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows.Length 50 "zero-offset EXISTS retains every outer row"
+                      Expect.isTrue (rows |> List.mapi (fun index row -> row.[1] = Some(if index < 25 then "1" else "0")) |> List.forall id) "zero-offset EXISTS preserves membership"
+                  | other -> failtestf "expected zero-offset EXISTS rows, got %A" other
+                  Expect.isLessThan examined 200L "literal zero offset uses indexed EXISTS membership"
               Expect.equal
                   (runDefault store "SELECT o.id FROM exists_outer o WHERE EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id LIMIT 0)")
                   (ResultSet([ "id" ], []))

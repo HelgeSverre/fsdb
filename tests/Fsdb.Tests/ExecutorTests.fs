@@ -12887,6 +12887,8 @@ let tests =
 
                     let unrestricted = query ""
                     Expect.equal (query "LIMIT 1") unrestricted "positive literal limit preserves membership"
+                    Expect.equal (query "LIMIT 1 OFFSET 0") unrestricted "literal zero offset preserves membership"
+                    Expect.equal (query "LIMIT 0, 1") unrestricted "comma-form zero offset preserves membership"
                     Expect.equal (query "LIMIT 2") unrestricted "larger literal limit preserves membership"
                     Expect.equal (query "LIMIT 18446744073709551615") unrestricted "unsigned literal limit preserves membership"
                     Expect.equal (query "LIMIT 0") [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ] "zero limit yields false"
