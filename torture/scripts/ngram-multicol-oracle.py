@@ -174,7 +174,8 @@ def scores_agree(expected, actual):
 
 
 def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None,
-           collation_override=None, legacy_term_range=None, weight_checks=False):
+           collation_override=None, legacy_term_range=None, weight_checks=False,
+           mixed_checks=False):
     prefix = '中' * (size - 1)
     if legacy_radicals:
         legacy_chars = LEGACY_RADICALS
@@ -280,6 +281,15 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                         actual = query(fsdb_connection, equality_sql, (char, expanded))
                         if actual != expected:
                             mismatches.append(("legacy equality", char, expanded, expected, actual))
+                        if mixed_checks:
+                            for prefix, suffix in (("A", ""), ("", "A"), ("文", ""), ("", "文")):
+                                written = prefix + char + suffix
+                                base = prefix + expanded + suffix
+                                equality_checks += 1
+                                expected = query(mysql_connection, equality_sql, (written, base))
+                                actual = query(fsdb_connection, equality_sql, (written, base))
+                                if actual != expected:
+                                    mismatches.append(("legacy equality", written, base, expected, actual))
                     extra_pairs = []
                     if legacy_range == (0x3000, 0x3200):
                         kana = "クシストヌハヒフヘホムラリルレロ"
@@ -305,11 +315,16 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     if weight_checks:
                         weight_sql = f"SELECT HEX(WEIGHT_STRING(_utf8mb4%s COLLATE {collation}))"
                         for char in legacy_chars:
-                            weight_count += 1
-                            expected = query(mysql_connection, weight_sql, (char,))
-                            actual = query(fsdb_connection, weight_sql, (char,))
-                            if actual != expected:
-                                mismatches.append(("legacy weight", char, expected, actual))
+                            samples = [char]
+                            if mixed_checks:
+                                samples += [prefix + char + suffix for prefix, suffix in
+                                            (("A", ""), ("", "A"), ("文", ""), ("", "文"))]
+                            for sample in samples:
+                                weight_count += 1
+                                expected = query(mysql_connection, weight_sql, (sample,))
+                                actual = query(fsdb_connection, weight_sql, (sample,))
+                                if actual != expected:
+                                    mismatches.append(("legacy weight", sample, expected, actual))
                 for mode in modes:
                     for term in terms:
                         expected = result(mysql_connection, term, mode)
@@ -362,6 +377,7 @@ if __name__ == "__main__":
     corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
     parser.add_argument("--legacy-term-range", help="search only this subrange of --legacy-range while indexing the whole range")
     parser.add_argument("--weight-checks", action="store_true", help="compare exact WEIGHT_STRING bytes for --legacy-range")
+    parser.add_argument("--mixed-checks", action="store_true", help="compare compatibility forms wrapped with ASCII or Han")
     parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_ja_0900_as_cs_ks", "utf8mb4_0900_as_cs"))
     args = parser.parse_args()
     legacy_range = None
@@ -385,7 +401,9 @@ if __name__ == "__main__":
             parser.error("--legacy-term-range must be a subrange of --legacy-range")
     if args.weight_checks and legacy_range is None:
         parser.error("--weight-checks requires --legacy-range")
+    if args.mixed_checks and legacy_range is None:
+        parser.error("--mixed-checks requires --legacy-range")
     sizes = args.sizes or list(range(1, 11))
     raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals,
                                      legacy_range, args.collation, legacy_term_range,
-                                     args.weight_checks) for size in sizes) else 0)
+                                     args.weight_checks, args.mixed_checks) for size in sizes) else 0)

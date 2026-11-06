@@ -116,6 +116,19 @@ two-column oracle found zero search, equality, or exact-weight mismatches at
 all ten ngram sizes: each size checked 3,252 searches, 553 equalities,
 and 542 weights. Mixed-text equality cases are not covered by this follow-up.
 
+### Mixed supplementary compatibility strings
+
+The ngram oracle's `--mixed-checks` follow-up compares each mapped written
+form with its NFKC target after adding `A` or `文` to either side. It also
+compares exact `WEIGHT_STRING` bytes for all 542 mapped forms alone and each
+of their four wrapped spellings. At ngram size 1, each of
+`utf8mb4_unicode_520_ci`, `utf8mb4_unicode_ci`, and `utf8mb4_general_ci`
+matched MySQL 8.4.11 across 3,252 two-column searches, 2,721 equality
+checks, and 2,710 exact weights, with zero mismatches. The other token sizes
+were already audited for the same search corpus; mixed equality and weights
+do not depend on token size. Other mixed characters, longer compositions,
+and legacy collations outside these three remain open.
+
 The equivalent `utf8mb3_general_ci` and `utf8mb3_unicode_ci` collations use
 the same BMP weights. The oracle now selects the matching charset introducer
 and compared all 55,164 adjacent pairs across the two ranges and both

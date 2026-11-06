@@ -1317,8 +1317,10 @@ now match the three `utf8mb4` legacy collations: UCA 4.0 and general use
 replacement weights, while UCA 5.2 uses implicit weights. [All 544
 supplementary compatibility ideographs](torture/findings/2026-11-04-extension-a-exact-weights.md#supplementary-compatibility-ideographs)
 also match under those collations. [All 512 BMP compatibility ideographs](torture/findings/2026-11-04-extension-a-exact-weights.md#bmp-compatibility-ideographs)
-now match under all five audited collations. Other mixed text and exact legacy
-weights remain open.
+now match under all five audited collations. [Supplementary compatibility
+forms wrapped with ASCII or Han](torture/findings/2026-11-04-extension-a-exact-weights.md#mixed-supplementary-compatibility-strings)
+also match equality and exact weights under all three legacy `utf8mb4`
+collations. Other mixed text and exact legacy weights remain open.
 
 The [remaining supplementary compatibility-ideograph block](torture/findings/2026-10-17-compatibility-ideograph-audit.md)
 also matches 1,716 native-MySQL ngram searches at each of startup sizes 1–10.
