@@ -2682,8 +2682,12 @@ implementation effort:
    left all residual counts unchanged. A [first-point and radian-path control](torture/findings/2026-11-04-geographic-cross-track-trial.md#first-newton-point-and-radian-path-control)
    also found no gain by itself. The [contracted azimuth and radian-native
    refinement](torture/findings/2026-11-05-geographic-cross-track-reduced-length.md#contracted-azimuth-and-radian-native-refinement)
-   resolves the zero-distance edge and lowers the residual near-hole distance
-   count to eight of 189, while all 100 seeded point-to-line distances match.
+   resolves the zero-distance edge and lowered the residual near-hole distance
+   count to eight of 189 at that revision, while all 100 seeded point-to-line distances matched.
+   A [current-head rerun and winding-role control](torture/findings/2026-11-06-geographic-polar-hole-current-head.md)
+   now measures five of 189 near-hole distance differences, 12 of 412 line
+   relations, and one of 189 point relations. Switching all holes to the
+   standalone-ring winding role regresses those relation counts and was reverted.
    Numerical and topology gaps remain open.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
