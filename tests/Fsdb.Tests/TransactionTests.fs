@@ -5426,6 +5426,71 @@ let tests =
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
               | actual -> failtestf "the target should stay unchanged, got %A" actual
 
+              handle setup "UPDATE tx_group_source SET flag=1 WHERE id=1" |> ignore
+              handle setup "INSERT INTO tx_group_source VALUES (2, 1)" |> ignore
+              let owner, _ = handle (create 4 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_group_source SET flag=0 WHERE id=2"
+              Expect.equal changed (Affected 1UL) "the owner holds another grouped source row"
+              let waiter, _ = handle (create 5 store) "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_group_view SET n=n+1 WHERE id=1")
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the other source owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the grouped writer resumes"
+              Expect.isTrue blocked "MySQL's grouping also waits for the other source row"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 1UL) "the view row remains visible"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the grouped writer commits"
+
+          testCase "union derived view update waits for its physical read source"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_union_target (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_union_left (id INT PRIMARY KEY, flag INT)" |> ignore
+              handle setup "CREATE TABLE tx_union_right (id INT PRIMARY KEY, flag INT)" |> ignore
+              handle setup "INSERT INTO tx_union_target VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_union_left VALUES (1, 1)" |> ignore
+              handle setup
+                  "CREATE VIEW tx_union_view AS SELECT a.id,a.n,d.flag FROM (SELECT id,flag FROM tx_union_left UNION ALL SELECT id,flag FROM tx_union_right) d JOIN tx_union_target a ON a.id=d.id"
+              |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_union_left SET flag=0 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "the owner changes the union source"
+              let waiter, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+              let waiter, _ = handle waiter "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_union_view SET n=n+1 WHERE id=1 AND flag=1")
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the source owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the view writer resumes"
+              Expect.isTrue blocked "the view writer waits for the union physical source"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 0UL) "the committed source excludes the view row"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the view writer commits"
+              match handle setup "SELECT n FROM tx_union_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | actual -> failtestf "the target should stay unchanged, got %A" actual
+
+              handle setup "UPDATE tx_union_left SET flag=1 WHERE id=1" |> ignore
+              handle setup "INSERT INTO tx_union_left VALUES (2, 1)" |> ignore
+              let owner, _ = handle (create 4 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_union_left SET flag=0 WHERE id=2"
+              Expect.equal changed (Affected 1UL) "the owner holds an unrelated union row"
+              let waiter, _ = handle (create 5 store) "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_union_view SET n=n+1 WHERE id=1 AND flag=1")
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the unrelated owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the view writer resumes after materializing the union"
+              Expect.isTrue blocked "MySQL's union materialization also waits for the other source row"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 1UL) "the matching view row updates"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the view writer commits"
+
           testCase "joined view update rechecks a changed read source after waiting"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -2771,8 +2771,11 @@ implementation effort:
    A grouped derived read source now contributes its physical rows to a
    joined-view update's transaction dependencies; a contended source change
    that removes the group from the view causes the waiting update to affect
-   zero rows, matching the pinned MySQL oracle. Broader write shapes remain
-   to audit.
+   zero rows, matching the pinned MySQL oracle. `UNION ALL` derived read
+   sources now contribute each branch's physical rows too. MySQL waits for
+   an unrelated keyed row while materializing the audited grouped and union
+   sources, so these claims cover their full physical inputs. Broader write
+   shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in
    the eight-writer keyless-insert path; that experiment was reverted.

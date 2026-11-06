@@ -33593,45 +33593,32 @@ let transactionWriteReadTargets
                         let qualifier = source.Alias |> Option.defaultValue source.Table
                         boundFor qualifier sourceJoins sourceLiterals
 
-                    let rec physicalReadSources item predicate =
+                    let rec selectReadSources (select: SelectStmt) =
+                        (select.From |> Option.toList |> List.collect physicalReadSources)
+                        @ (select.Joins |> List.collect (fun join -> physicalReadSources join.Table))
+
+                    and physicalReadSources item =
                         match item with
-                        | FromTable source -> [ source, predicate ]
+                        | FromTable source -> [ source ]
                         | FromJoinGroup(first, joins) ->
-                            physicalReadSources first predicate
-                            @ (joins |> List.collect (fun join -> physicalReadSources join.Table None))
-                        | FromSubquery(PlainSelect select, alias)
-                        | FromLateral(PlainSelect select, alias) ->
-                            let projectedPredicate =
-                                predicate
-                                |> Option.bind (fun condition ->
-                                    literalEqualities (Some condition)
-                                    |> List.tryPick (fun (owner, name, value) ->
-                                        if not (equalsIgnoreCase owner alias) then None
-                                        else
-                                            select.Projections
-                                            |> List.tryPick (fun projection ->
-                                                let outputName = projection.Alias |> Option.orElse projection.SourceName
-                                                if outputName |> Option.exists (equalsIgnoreCase name) then
-                                                    match projection.Expression with
-                                                    | QualifiedCol(sourceOwner, column) ->
-                                                        Some(BinOp(Eq, QualifiedCol(sourceOwner, column), value))
-                                                    | Col column -> Some(BinOp(Eq, Col column, value))
-                                                    | _ -> None
-                                                else None)))
-                            (select.From |> Option.toList |> List.collect (fun source -> physicalReadSources source projectedPredicate))
-                            @ (select.Joins |> List.collect (fun join -> physicalReadSources join.Table projectedPredicate))
-                        | FromSubquery(UnionSelect _, _)
-                        | FromLateral(UnionSelect _, _)
+                            physicalReadSources first
+                            @ (joins |> List.collect (fun join -> physicalReadSources join.Table))
+                        | FromSubquery(PlainSelect select, _)
+                        | FromLateral(PlainSelect select, _) -> selectReadSources select
+                        | FromSubquery(UnionSelect(first, rest, _, _, _), _)
+                        | FromLateral(UnionSelect(first, rest, _, _, _), _) ->
+                            first :: (rest |> List.map snd)
+                            |> List.collect selectReadSources
                         | FromJsonTable _ -> []
 
+                    // MySQL materializes these derived inputs before the outer
+                    // view filter, so an outer key does not narrow their claims.
                     (FromTable view.UpdateFrom :: (view.UpdateJoins |> List.map _.Table))
                     |> List.collect (fun item ->
                         match item with
-                        | FromTable source -> physicalReadSources item (sourcePredicate source)
-                        | FromSubquery(_, alias) | FromLateral(_, alias) ->
-                            physicalReadSources item (boundFor alias sourceJoins sourceLiterals)
-                        | _ -> physicalReadSources item None)
-                    |> List.choose (fun (source, nestedPredicate) ->
+                        | FromTable source -> [ source, sourcePredicate source, false ]
+                        | _ -> physicalReadSources item |> List.map (fun source -> source, None, true))
+                    |> List.choose (fun (source, sourceBound, materialized) ->
                             let sourceDatabase = source.Database |> Option.defaultValue dbName
                             let sourceKey = sourceDatabase.ToLowerInvariant(), source.Table.ToLowerInvariant()
                             let targetDatabase, targetTable, _ = target
@@ -33642,10 +33629,12 @@ let transactionWriteReadTargets
                                 physicalFastPathTable store dbName source
                                 |> Option.map (fun table ->
                                     let rows =
-                                        tryPhysicalCandidates store registry dbName source nestedPredicate
-                                        |> Option.orElseWith (fun () -> tryPhysicalCandidates store registry dbName source predicate)
-                                        |> Option.map snd
-                                        |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> Seq.toList)
+                                        if materialized then table.RowsArray.Indexed |> Seq.toList
+                                        else
+                                            tryPhysicalCandidates store registry dbName source sourceBound
+                                            |> Option.orElseWith (fun () -> tryPhysicalCandidates store registry dbName source predicate)
+                                            |> Option.map snd
+                                            |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> Seq.toList)
 
                                     sourceDatabase, source.Table, rows |> List.map fst))
                 | _ -> []
