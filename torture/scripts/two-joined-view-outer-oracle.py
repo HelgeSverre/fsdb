@@ -45,7 +45,7 @@ def six_source_update(row_id):
 
 
 def four_view_update(row_id, vb_join="LEFT", vc_join="LEFT", ve_join="LEFT", dependent=False,
-                     grouped_first=False):
+                     grouped_first=False, grouped_middle=False):
     if dependent:
         read_source = (
             "JOIN JSON_TABLE(JSON_ARRAY(va.link_id),'$[*]' "
@@ -54,7 +54,11 @@ def four_view_update(row_id, vb_join="LEFT", vc_join="LEFT", ve_join="LEFT", dep
     else:
         read_source = "JOIN (SELECT id AS bridge FROM link) r ON r.bridge=va.link_id "
     first = "(c NATURAL LEFT JOIN va)" if grouped_first else "c NATURAL LEFT JOIN va"
-    middle = f"NATURAL {vb_join} JOIN vb_unique vb NATURAL {vc_join} JOIN vc_unique vc "
+    middle = (
+        f"NATURAL {vb_join} JOIN (vb_unique vb NATURAL {vc_join} JOIN vc_unique vc) "
+        if grouped_middle else
+        f"NATURAL {vb_join} JOIN vb_unique vb NATURAL {vc_join} JOIN vc_unique vc "
+    )
     return (
         f"WITH c AS (SELECT id FROM link) UPDATE {first} {read_source}"
         f"{middle}"
@@ -190,6 +194,10 @@ def main():
                     expected, actual = (execute(connection, sql) for connection in connections)
                     assert actual == expected and not isinstance(expected, tuple), (sql, expected, actual)
                 cases = [
+                    "UPDATE va NATURAL LEFT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc) "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE va.id=1",
+                    "UPDATE va NATURAL LEFT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc) "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE id=1",
                     "UPDATE link l NATURAL LEFT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc) "
                     "SET vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE l.id=1",
                     "UPDATE link l NATURAL LEFT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc) "
@@ -450,6 +458,21 @@ def main():
                     for joins in itertools.product(("LEFT", "RIGHT"), repeat=3)
                     for row_id in (1, 2, 3)
                 )
+                cases.extend(
+                    four_view_update(row_id, *joins, grouped_middle=True)
+                    for joins in itertools.product(("LEFT", "RIGHT"), repeat=3)
+                    for row_id in (1, 2, 3)
+                )
+                cases.extend(
+                    four_view_update(row_id, *joins, grouped_middle=True, dependent=True)
+                    for joins in itertools.product(("LEFT", "RIGHT"), repeat=3)
+                    for row_id in (1, 2, 3)
+                )
+                cases.extend(
+                    four_view_update(row_id, *joins, grouped_middle=True, grouped_first=True)
+                    for joins in itertools.product(("LEFT", "RIGHT"), repeat=3)
+                    for row_id in (1, 2, 3)
+                )
                 for sql in cases:
                     expected, actual = (execute(connection, sql) for connection in connections)
                     assert actual == expected, (sql, expected, actual)
@@ -660,6 +683,14 @@ def main():
                     ([("b", 1), ("d", 1)],
                      "UPDATE link l NATURAL LEFT JOIN (vb_unique vb NATURAL LEFT JOIN vc_unique vc) "
                      "SET vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE l.id=1")
+                )
+                independent_view_cases.append(
+                    ([("a", 1), ("b", 1), ("d", 1), ("e", 1)],
+                     four_view_update(1, grouped_middle=True))
+                )
+                independent_view_cases.append(
+                    ([("a", 1), ("b", 1), ("d", 1), ("e", 1)],
+                     four_view_update(1, grouped_middle=True, dependent=True))
                 )
                 for held_rows, sql in independent_view_cases:
                     expected = independently_held_update(

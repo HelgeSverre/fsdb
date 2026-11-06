@@ -31161,10 +31161,89 @@ let rec executeAs
                 |> Map.ofList
             let mutable mergedKeyMembers = Map.empty<string, Set<string>>
             let mutable inMergedPrefix = true
+            let groupedColumns source =
+                let leaves =
+                    FromItem.leaves source
+                    |> List.choose (fun leaf ->
+                        FromItem.tryQualifier leaf
+                        |> Option.map (fun owner ->
+                            owner,
+                            (selectSourceColumns store dbName leaf
+                             |> List.choose id
+                             |> List.map _.Name)))
+                let namesOf owner =
+                    leaves
+                    |> List.tryFind (fun (candidate, _) -> equalsIgnoreCase candidate owner)
+                    |> Option.map snd
+                    |> Option.defaultValue []
+                match FromItem.logicalColumns namesOf source with
+                | Error _ -> None
+                | Ok columns ->
+                    let unique =
+                        columns
+                        |> List.countBy (fun column -> column.Name.ToLowerInvariant())
+                        |> List.forall (fun (_, count) -> count = 1)
+                    if not unique || columns.IsEmpty || (leaves |> List.exists (snd >> List.isEmpty)) then None
+                    else
+                        let bindings =
+                            columns
+                            |> List.choose (fun column ->
+                                match column.Expression with
+                                | QualifiedCol(owner, _) ->
+                                    let members =
+                                        match column with
+                                        | FromItem.MergedColumn _ ->
+                                            leaves
+                                            |> List.choose (fun (candidate, names) ->
+                                                if names |> List.exists (equalsIgnoreCase column.Name) then Some(candidate.ToLowerInvariant()) else None)
+                                            |> Set.ofList
+                                        | _ -> Set.singleton (owner.ToLowerInvariant())
+                                    Some(column.Name, owner, members)
+                                | _ -> None)
+                        if bindings.Length = columns.Length then Some bindings else None
             let mergedKeys =
                 updateStmt.Joins
                 |> List.map (fun join ->
                     match join.Kind, FromItem.tryQualifier join.Table with
+                    | _, None when inMergedPrefix
+                                   && (join.Kind = NaturalJoin || join.Kind = NaturalLeftJoin
+                                       || join.Kind = NaturalRightJoin || not join.Using.IsEmpty) ->
+                        match groupedColumns join.Table with
+                        | None -> inMergedPrefix <- false; None
+                        | Some columns ->
+                            let keys = if join.Using.IsEmpty then columns |> List.map (fun (name, _, _) -> name) else join.Using
+                            let missingUsingKey =
+                                not join.Using.IsEmpty
+                                && (keys |> List.exists (fun name ->
+                                    not (Map.containsKey (name.ToLowerInvariant()) mergedKeyOwners)
+                                    || not (columns |> List.exists (fun (candidate, _, _) -> equalsIgnoreCase candidate name))))
+                            if missingUsingKey then
+                                inMergedPrefix <- false
+                                None
+                            else
+                                let shared =
+                                    keys
+                                    |> List.choose (fun name ->
+                                        match Map.tryFind (name.ToLowerInvariant()) mergedKeyOwners,
+                                              columns |> List.tryFind (fun (candidate, _, _) -> equalsIgnoreCase candidate name) with
+                                        | Some leftOwner, Some(_, rightOwner, members) ->
+                                            Some(name, leftOwner, rightOwner, members)
+                                        | _ -> None)
+                                for name, leftOwner, _, members in shared do
+                                    let key = name.ToLowerInvariant()
+                                    let members =
+                                        members
+                                        |> Set.add (leftOwner.ToLowerInvariant())
+                                        |> Set.union (mergedKeyMembers |> Map.tryFind key |> Option.defaultValue Set.empty)
+                                    mergedKeyMembers <- Map.add key members mergedKeyMembers
+                                for name, rightOwner, _ in columns do
+                                    let key = name.ToLowerInvariant()
+                                    if join.Kind = NaturalRightJoin
+                                       || (join.Kind = RightJoin && join.Using |> List.exists (equalsIgnoreCase name)) then
+                                        mergedKeyOwners <- Map.add key rightOwner mergedKeyOwners
+                                    elif not (Map.containsKey key mergedKeyOwners) then
+                                        mergedKeyOwners <- Map.add key rightOwner mergedKeyOwners
+                                Some(shared |> List.map (fun (name, leftOwner, rightOwner, _) -> name, leftOwner, rightOwner))
                     | _, Some rightOwner when inMergedPrefix
                                               && (join.Kind = NaturalJoin || join.Kind = NaturalLeftJoin
                                                   || join.Kind = NaturalRightJoin || not join.Using.IsEmpty) ->
@@ -31301,8 +31380,8 @@ let rec executeAs
                         updateStmt.Joins
                         |> List.mapi (fun index join ->
                             let join =
-                                match FromItem.tryQualifier join.Table, mergedKeys.[index] with
-                                | Some _, Some shared ->
+                                match mergedKeys.[index] with
+                                | Some shared ->
                                     // Resolve NATURAL and USING keys against each view's
                                     // exposed columns before its physical joins add hidden
                                     // columns with the same names.
@@ -31322,7 +31401,7 @@ let rec executeAs
                                             | kind -> kind
                                         Using = []
                                         On = BinOp(And, join.On, condition) }
-                                | _ -> join
+                                | None -> join
                             { Join.mapConditions rewrite join with
                                 Table = rewriteDependentSource join.Table })
                     let viewPredicate = runtimeView.Predicate |> Option.map qualifyView
@@ -31350,7 +31429,6 @@ let rec executeAs
                             Where = combineViewPredicate globalViewPredicate (updateStmt.Where |> Option.map rewrite)
                             OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                             Limit = updateStmt.Limit |> Option.map rewrite }
-
                     match ambiguousColumn with
                     | Some name -> ids, Err(1052, sprintf "Column '%s' in field list is ambiguous" name)
                     | None ->

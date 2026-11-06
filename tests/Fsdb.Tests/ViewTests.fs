@@ -1163,6 +1163,15 @@ let tests =
                   (rows store "SELECT id,n FROM three_view_c ORDER BY id")
                   [ [ Some "1"; Some "52" ]; [ Some "2"; Some "60" ]; [ Some "3"; Some "72" ] ]
                   "the nested third view writes only matched rows"
+              for whereClause in [ "va.id=1"; "id=1" ] do
+                  let sql =
+                      "UPDATE three_va va NATURAL LEFT JOIN "
+                      + "(three_vb vb NATURAL LEFT JOIN three_vc vc) "
+                      + "SET va.n=va.n+1,vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE " + whereClause
+                  Expect.equal (run store sql) (Affected 3UL) "a writable first view preserves the grouped natural key"
+              Expect.equal (rows store "SELECT n FROM three_view_a WHERE id=1") [ [ Some "13" ] ] "first view updates through the grouped operand"
+              Expect.equal (rows store "SELECT n FROM three_view_b WHERE id=1") [ [ Some "34" ] ] "second view updates through the grouped operand"
+              Expect.equal (rows store "SELECT n FROM three_view_c WHERE id=1") [ [ Some "54" ] ] "third view updates through the grouped operand"
 
           testCase "grouped outer UPDATE source retains two writable joined views"
           <| fun _ ->

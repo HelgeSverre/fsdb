@@ -111,7 +111,8 @@ sources, but the grouped middle operand has no single qualifier. Extending
 that key tracking alone exposes a second limitation: nested writable views
 inside the group are not expanded, producing 1146 for `probe.vb_unique`.
 This needs a grouped-source view expansion and mutation binding change before
-the grouped matrix can enter the passing oracle.
+the grouped matrix can enter the passing oracle. The follow-up below closes
+this specific case.
 
 ## Physical source before a grouped pair of writable views
 
@@ -128,6 +129,25 @@ contended rebases**. The five added value cases cover matched rows, a
 left-only row, a right-preserved grouped row, and a right-preserved inner
 view. A two-holder check confirms the grouped write waits for both physical
 targets and commits the same rebased values. The focused three-view regression checks affected counts and both
-physical tables. The view-first grouped form above still returns 1052 in
-fsdb: the grouped natural keys need mutation binding across the first
+physical tables. At this point the view-first grouped form above still
+returned 1052: its natural keys needed mutation binding across the first
 view's expansion.
+
+## Grouped natural keys through a writable first view
+
+The mutation rewrite now derives the grouped operand's logical columns
+before expanding the first view. It keeps each merged key's exposed owner
+and physical members, then converts the outer NATURAL join to explicit
+conditions. This prevents hidden `id` and `link_id` columns in the joined
+view definitions from becoming new natural-join keys. Missing `USING`
+keys still follow ordinary error handling.
+
+The original four-view repro and its smaller three-view form now match
+MySQL 8.4.11 with qualified and bare `WHERE id=1`. The maintained oracle
+checks all eight LEFT/RIGHT combinations around the grouped middle pair
+at three keys, then repeats them with a dependent `JSON_TABLE` or a
+parenthesized first operand. It now passes **233 UPDATE value cases and
+68 contended rebases**, including four independent holders on the repaired
+grouped shape, with all physical table contents compared. The focused
+regression and all 52 filtered view tests pass. More deeply nested groups,
+other source types, and longer unmatched chains remain open.
