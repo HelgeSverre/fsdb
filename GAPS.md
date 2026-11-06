@@ -538,7 +538,7 @@ limited derived sources and limited or `TEMPTABLE` views use the exposed alias.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [contracted cross-track follow-up](torture/findings/2026-11-05-geographic-cross-track-reduced-length.md#contracted-azimuth-and-radian-native-refinement) matches all 100 seeded point-to-line distances but retains eight point-distance mismatches across 189 near-hole points, one point relation mismatch, no mismatch across four near-exterior controls or 49 polar-corner points, and 12 line relation mismatches across 412 cases; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
+| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [current edge audit](torture/findings/2026-11-06-geographic-residual-vertex-audit.md) matches all 100 seeded point-to-line distances but retains five point-distance mismatches across 189 near-hole points, one point relation mismatch, no mismatch across four near-exterior controls or 49 polar-corner points, and 12 line relation mismatches across 412 cases; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
 
 The [geographic strategy follow-up](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
 found zero distance on both engines for its line mismatches,
@@ -1447,6 +1447,9 @@ now matches 955 such byte comparisons across five legacy collations.
 The [Hangul Compatibility Jamo U+3130–U+318F audit](torture/findings/2026-11-06-compatibility-jamo-exact-legacy-weights.md)
 adds 1,915 exact-byte matches across the same collations. Other CJK blocks
 and mixed-script compositions remain open.
+The [enclosed Hangul U+3260–U+327F audit](torture/findings/2026-11-06-legacy-enclosed-hangul-weights.md)
+adds 96 exact singleton-weight matches across three legacy Unicode collations.
+The rest of U+3200–U+33FF and full ngram behavior for this block remain open.
 The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
 likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
 plus 1,464 legacy Unicode searches over its later part at size 1.

@@ -944,6 +944,29 @@ let private legacyCompatibilityJamoWeights unicode520 codepoint =
     else
         [ int unicode40CompatibilityJamoWeights[codepoint - 0x3131] ]
 
+// Enclosed Hangul letters reuse the corresponding compatibility-Jamo
+// primaries. Parenthesized forms add the vowel suffix; the last four are
+// independent legacy UCA sequences.
+let private legacyEnclosedHangulWeights unicode520 codepoint =
+    let baseJamo =
+        [| 0x3131; 0x3134; 0x3137; 0x3139; 0x3141; 0x3142; 0x3145
+           0x3147; 0x3148; 0x314A; 0x314B; 0x314C; 0x314D; 0x314E |]
+    if codepoint <= 0x327B then
+        let offset = codepoint - 0x3260
+        let weights = legacyCompatibilityJamoWeights unicode520 baseJamo[offset % baseJamo.Length]
+        if offset < baseJamo.Length then weights
+        else weights @ [ if unicode520 then 0x2A2E else 0x1DBE ]
+    else
+        match codepoint, unicode520 with
+        | 0x327C, false -> [ 0x1D70; 0x1DBE; 0x1E0F; 0x1D62; 0x1DC6 ]
+        | 0x327C, true -> [ 0x29BE; 0x2A2E; 0x2A9B; 0x29B0; 0x2A36 ]
+        | 0x327D, false -> [ 0x1D6E; 0x1DCB; 0x1D6D; 0x1DD1 ]
+        | 0x327D, true -> [ 0x29BC; 0x2A3B; 0x29BB; 0x2A41 ]
+        | 0x327E, false -> [ 0xFBC0; 0xB27E ]
+        | 0x327E, true -> [ 0x29BB; 0x2A3B ]
+        | 0x327F, false -> [ 0x0DC4 ]
+        | _ -> [ 0x110D ]
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) =
@@ -1130,6 +1153,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     if general then addWeight codepoint
                     else
                         for weight in legacyCompatibilityJamoWeights (name = "utf8mb4_unicode_520_ci") codepoint do
+                            addWeight weight
+                | None when codepoint >= 0x3260 && codepoint <= 0x327F ->
+                    if general then addWeight codepoint
+                    else
+                        for weight in legacyEnclosedHangulWeights (name = "utf8mb4_unicode_520_ci") codepoint do
                             addWeight weight
                 | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =
