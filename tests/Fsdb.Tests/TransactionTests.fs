@@ -5396,6 +5396,36 @@ let tests =
               | ResultSet(_, []) -> ()
               | result -> failtestf "the physical row should be absent, got %A" result
 
+          testCase "grouped derived view update waits for its physical read source"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_group_target (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_group_source (id INT PRIMARY KEY, flag INT)" |> ignore
+              handle setup "INSERT INTO tx_group_target VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_group_source VALUES (1, 7)" |> ignore
+              handle setup
+                  "CREATE VIEW tx_group_view AS SELECT a.id,a.n,d.s FROM (SELECT id,SUM(flag) s FROM tx_group_source GROUP BY id HAVING s>0) d JOIN tx_group_target a ON a.id=d.id"
+              |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_group_source SET flag=-1 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "the owner changes the grouped source"
+              let waiter, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+              let waiter, _ = handle waiter "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_group_view SET n=n+1 WHERE id=1")
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the source owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the view writer resumes"
+              Expect.isTrue blocked "the view writer waits for the grouped physical source"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 0UL) "the committed source excludes the view row"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the view writer commits"
+              match handle setup "SELECT n FROM tx_group_target WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | actual -> failtestf "the target should stay unchanged, got %A" actual
+
           testCase "joined view update rechecks a changed read source after waiting"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

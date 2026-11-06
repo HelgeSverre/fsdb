@@ -33593,10 +33593,45 @@ let transactionWriteReadTargets
                         let qualifier = source.Alias |> Option.defaultValue source.Table
                         boundFor qualifier sourceJoins sourceLiterals
 
+                    let rec physicalReadSources item predicate =
+                        match item with
+                        | FromTable source -> [ source, predicate ]
+                        | FromJoinGroup(first, joins) ->
+                            physicalReadSources first predicate
+                            @ (joins |> List.collect (fun join -> physicalReadSources join.Table None))
+                        | FromSubquery(PlainSelect select, alias)
+                        | FromLateral(PlainSelect select, alias) ->
+                            let projectedPredicate =
+                                predicate
+                                |> Option.bind (fun condition ->
+                                    literalEqualities (Some condition)
+                                    |> List.tryPick (fun (owner, name, value) ->
+                                        if not (equalsIgnoreCase owner alias) then None
+                                        else
+                                            select.Projections
+                                            |> List.tryPick (fun projection ->
+                                                let outputName = projection.Alias |> Option.orElse projection.SourceName
+                                                if outputName |> Option.exists (equalsIgnoreCase name) then
+                                                    match projection.Expression with
+                                                    | QualifiedCol(sourceOwner, column) ->
+                                                        Some(BinOp(Eq, QualifiedCol(sourceOwner, column), value))
+                                                    | Col column -> Some(BinOp(Eq, Col column, value))
+                                                    | _ -> None
+                                                else None)))
+                            (select.From |> Option.toList |> List.collect (fun source -> physicalReadSources source projectedPredicate))
+                            @ (select.Joins |> List.collect (fun join -> physicalReadSources join.Table projectedPredicate))
+                        | FromSubquery(UnionSelect _, _)
+                        | FromLateral(UnionSelect _, _)
+                        | FromJsonTable _ -> []
+
                     (FromTable view.UpdateFrom :: (view.UpdateJoins |> List.map _.Table))
-                    |> List.collect FromItem.leaves
-                    |> List.choose (function
-                        | FromTable source ->
+                    |> List.collect (fun item ->
+                        match item with
+                        | FromTable source -> physicalReadSources item (sourcePredicate source)
+                        | FromSubquery(_, alias) | FromLateral(_, alias) ->
+                            physicalReadSources item (boundFor alias sourceJoins sourceLiterals)
+                        | _ -> physicalReadSources item None)
+                    |> List.choose (fun (source, nestedPredicate) ->
                             let sourceDatabase = source.Database |> Option.defaultValue dbName
                             let sourceKey = sourceDatabase.ToLowerInvariant(), source.Table.ToLowerInvariant()
                             let targetDatabase, targetTable, _ = target
@@ -33607,13 +33642,12 @@ let transactionWriteReadTargets
                                 physicalFastPathTable store dbName source
                                 |> Option.map (fun table ->
                                     let rows =
-                                        tryPhysicalCandidates store registry dbName source (sourcePredicate source)
+                                        tryPhysicalCandidates store registry dbName source nestedPredicate
                                         |> Option.orElseWith (fun () -> tryPhysicalCandidates store registry dbName source predicate)
                                         |> Option.map snd
                                         |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> Seq.toList)
 
-                                    sourceDatabase, source.Table, rows |> List.map fst)
-                        | _ -> None)
+                                    sourceDatabase, source.Table, rows |> List.map fst))
                 | _ -> []
             | _ -> []
 

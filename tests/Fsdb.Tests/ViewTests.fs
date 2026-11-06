@@ -51,6 +51,19 @@ let tests =
                   (rows store "SELECT id,n FROM grouped_natural_target ORDER BY id")
                   [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]
                   "the natural key binds the physical targets"
+              expectOk
+                  (run store "CREATE VIEW grouped_natural_checked AS SELECT a.id,a.n,d.s FROM (SELECT id,SUM(flag) s FROM grouped_natural_source GROUP BY id HAVING s>0) d NATURAL JOIN grouped_natural_target a WHERE a.n>=0 WITH CASCADED CHECK OPTION")
+                  "create checked grouped natural view"
+              for sql in
+                  [ "UPDATE grouped_natural_checked SET id=4 WHERE id=1"
+                    "UPDATE grouped_natural_checked SET n=-1 WHERE id=1" ] do
+                  match run store sql with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected MySQL CHECK OPTION rejection for %s, got %A" sql other
+              Expect.equal
+                  (rows store "SELECT id,n FROM grouped_natural_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]
+                  "a rejected key or predicate change leaves the physical target intact"
               for name, join in
                   [ "grouped_natural_right", "NATURAL RIGHT JOIN"
                     "grouped_explicit_right", "RIGHT JOIN" ] do

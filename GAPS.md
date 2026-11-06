@@ -2768,7 +2768,11 @@ implementation effort:
    beyond an intermediate table, including `USING(id)` or a physical
    `NATURAL JOIN` on the first edge. Consecutive `USING(id)` edges carry the
    merged key through three read sources without locking disjoint rows.
-   Broader write shapes remain to audit.
+   A grouped derived read source now contributes its physical rows to a
+   joined-view update's transaction dependencies; a contended source change
+   that removes the group from the view causes the waiting update to affect
+   zero rows, matching the pinned MySQL oracle. Broader write shapes remain
+   to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in
    the eight-writer keyless-insert path; that experiment was reverted.
