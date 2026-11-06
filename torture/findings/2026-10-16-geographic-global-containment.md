@@ -135,15 +135,18 @@ A November 4 expansion of that same disposable-server oracle kept the fixed
 300-ring assertion and added configurable count and seed. The first 1,000
 seed-9173 rings contained exactly the same two disagreements; the additional
 700 rings found none. An independent 1,000-ring seed-9174 corpus found no
-disagreements (734 MySQL-valid rings). The combined sample is 2,000 rings
-with two mismatches; it narrows the observed frequency but does not resolve
-the two known long-edge cases or prove validity parity for other shapes.
+disagreements (734 MySQL-valid rings). A post-0.1.0 seed-9175 run found no
+disagreements in another 1,000 rings (744 MySQL-valid rings). The combined
+sample is 3,000 rings with two mismatches; it narrows the observed frequency
+but does not resolve the two known long-edge cases or prove validity parity
+for other shapes.
 
 ```sh
 dotnet build src/Fsdb.Cli -c Release --nologo
 uv run --with pymysql python torture/scripts/geographic-validity-oracle.py
 uv run --with pymysql python torture/scripts/geographic-validity-oracle.py --count 1000
 uv run --with pymysql python torture/scripts/geographic-validity-oracle.py --count 1000 --seed 9174
+uv run --with pymysql python torture/scripts/geographic-validity-oracle.py --count 1000 --seed 9175
 ```
 
 ## Validity strategy follow-up
