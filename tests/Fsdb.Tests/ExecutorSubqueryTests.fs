@@ -561,6 +561,25 @@ let tests =
                       | ResultSet(_, rows) -> Expect.equal rows expected sql
                       | other -> failtestf "%s returned %A" sql other
                       Expect.isLessThan examined 30L "constant-key integer COUNT HAVING uses indexed equality counts"
+                  for argument in [ "1"; "0"; "'x'" ] do
+                      for having, predicate in
+                          [ "COUNT(ARG)>1", (fun count -> count > 1)
+                            "COUNT(ARG)=0", (fun count -> count = 0)
+                            "COUNT(ARG) IN (1,3)", (fun count -> count = 1 || count = 3) ] do
+                          let clause = having.Replace("ARG", argument)
+                          let sql =
+                              "SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id"
+                              + groupClause + " HAVING " + clause + ") AS hit FROM count_outer o ORDER BY o.id"
+                          let result, examined = withExaminedRows (fun () -> runDefault store sql)
+                          let expected =
+                              [ 0..3 ]
+                              |> List.map (fun count ->
+                                  [ Some(string count)
+                                    Some(if (not grouped || count > 0) && predicate count then "1" else "0") ])
+                          match result with
+                          | ResultSet(_, rows) -> Expect.equal rows expected sql
+                          | other -> failtestf "%s returned %A" sql other
+                          Expect.isLessThan examined 30L "constant COUNT HAVING uses indexed membership"
               for having, singleRowMatches in
                   [ "COUNT(*)>1", false; "COUNT(*)=1", true; "COUNT(*)<>1", false ] do
                   let sql =

@@ -2423,6 +2423,9 @@ and noninteger outer keys still use ordinary per-row comparison.
 [Non-NULL constant `COUNT` arguments](torture/findings/2026-11-06-correlated-constant-count.md)
 now share the grouped key path with `COUNT(*)`; `COUNT(NULL)` retains ordinary
 evaluation. The 204-row joined control stays below 400 examined rows.
+Indexed correlated `EXISTS` membership also accepts these constants in
+audited grouped and ungrouped `HAVING` comparisons, preserving empty-group
+semantics.
 The same [key-tuple path now accepts eligible inner-join `ON` correlations](torture/findings/2026-11-06-correlated-inner-join-on-keys.md),
 including a tuple split between `ON` and `WHERE`; outer-join `ON` predicates
 retain their original semantics. The 205-row control stays below 250
@@ -2910,7 +2913,7 @@ implementation effort:
    now use Boost-shaped geographic winding and ring orientation; 3,600 random
    global point probes and 1,200 random, vertex, and antipodal probes matched
    MySQL 8.4.11. The same two global `ST_IsValid` disagreements remain in an
-   expanded 2,000-ring, two-seed oracle sample; broader geographic polygon
+   expanded 3,000-ring, three-seed oracle sample; broader geographic polygon
    validity still needs the Boost geographic intersection decision.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)

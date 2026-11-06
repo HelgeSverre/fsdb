@@ -9165,17 +9165,18 @@ and private runExpressionSubquery
         memo.[cacheKey] <- UnmemoizedSubquery
         execute (Some ctx)
 
+and private countArgumentAlwaysPresent = function
+    | Star None -> true
+    | Lit value
+    | ConnectionLiteral(value, _) -> value <> VNull
+    | ApproximateLiteral _ -> true
+    | _ -> false
+
 and private isPlainCountRowsSelect (registry: Registry) (select: SelectStmt) =
-    let countsEveryRow = function
-        | Star None -> true
-        | Lit value
-        | ConnectionLiteral(value, _) -> value <> VNull
-        | ApproximateLiteral _ -> true
-        | _ -> false
     match select.Projections with
     | [ { Expression = FuncCall(name, [ argument ]) } ] ->
         name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
-        && countsEveryRow argument
+        && countArgumentAlwaysPresent argument
         && Functions.isUnmodifiedBuiltinAggregate name registry
         && select.GroupBy.IsEmpty
         && select.Having.IsNone
@@ -9245,9 +9246,10 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | None | Some(Lit(VInt 0L)) | Some(Lit(VUInt 0UL)) -> true
         | _ -> false
 
-    let countStar = function
-        | FuncCall(name, [ Star None ]) ->
+    let countRows = function
+        | FuncCall(name, [ argument ]) ->
             equalsIgnoreCase name "COUNT"
+            && countArgumentAlwaysPresent argument
             && Functions.isUnmodifiedBuiltinAggregate name outer.Registry
         | _ -> false
     let integerLiteral = function
@@ -9268,15 +9270,15 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | Not expression ->
             countHaving expression
             |> Option.map (fun (predicate, groupedSafe) -> (fun count -> not (predicate count)), groupedSafe)
-        | IsTrue count when countStar count -> Some((fun count -> count > 0), true)
-        | IsFalse count when countStar count -> Some((fun count -> count = 0), true)
-        | Between(count, lower, upper) when countStar count ->
+        | IsTrue count when countRows count -> Some((fun count -> count > 0), true)
+        | IsFalse count when countRows count -> Some((fun count -> count = 0), true)
+        | Between(count, lower, upper) when countRows count ->
             match integerLiteral lower, integerLiteral upper with
             | Some lower, Some upper ->
                 let predicate count = decimal count >= lower && decimal count <= upper
                 Some(predicate, upper < 1M || lower > upper)
             | _ -> None
-        | In(count, candidates) when countStar count ->
+        | In(count, candidates) when countRows count ->
             let bounds = candidates |> List.map integerLiteral
             if bounds |> List.exists Option.isNone then None
             else
@@ -9293,14 +9295,14 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
             | Some(leftPredicate, leftGroupedSafe), Some(rightPredicate, rightGroupedSafe) ->
                 Some((fun count -> leftPredicate count || rightPredicate count), leftGroupedSafe && rightGroupedSafe)
             | _ -> None
-        | BinOp(operator, count, bound) when countStar count ->
+        | BinOp(operator, count, bound) when countRows count ->
             countComparison operator
             |> Option.bind (fun compare ->
                 integerLiteral bound
                 |> Option.map (fun bound ->
                     let predicate count = compare (decimal count) bound
                     predicate, (bound <= 1M && predicate 1 = predicate 2)))
-        | BinOp(operator, bound, count) when countStar count ->
+        | BinOp(operator, bound, count) when countRows count ->
             countComparison operator
             |> Option.bind (fun compare ->
                 integerLiteral bound
