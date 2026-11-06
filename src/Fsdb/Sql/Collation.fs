@@ -167,16 +167,10 @@ let private normalizeJapaneseKana (value: string) =
         value.Normalize(NormalizationForm.FormC)
     else value
 
-// ICU's Japanese sort key merges kana scripts even for MySQL's `_ks` variant.
-// Full-text keys retain a separate marker for katakana while sort order uses
-// the unmarked base key followed by a script-level tie-break.
-let private markJapaneseKatakana (value: string) =
-    let value = normalizeJapaneseKana value
+let private markJapaneseKana isKana (value: string) =
     let marker = '\uE0B8'
-    let isKatakana (c: char) =
-        (c >= '\u30A1' && c <= '\u30FA') || c = '\u30FD' || c = '\u30FE'
     let mutable first = 0
-    while first < value.Length && not (isKatakana value.[first] || value.[first] = marker) do
+    while first < value.Length && not (isKana value.[first] || value.[first] = marker) do
         first <- first + 1
 
     if first = value.Length then value
@@ -186,8 +180,26 @@ let private markJapaneseKatakana (value: string) =
         for index in first .. value.Length - 1 do
             let c = value.[index]
             result.Append(c) |> ignore
-            if isKatakana c || c = marker then result.Append(marker) |> ignore
+            if isKana c || c = marker then result.Append(marker) |> ignore
         result.ToString()
+
+let private markJapaneseHiraganaForFullText (value: string) =
+    let value =
+        if value.Contains('\u3099') || value.Contains('\u309A') then
+            value.Normalize(NormalizationForm.FormC)
+        else value
+    let isHiragana (c: char) =
+        (c >= '\u3041' && c <= '\u3096') || c = '\u309D' || c = '\u309E'
+    markJapaneseKana isHiragana value
+
+// ICU's Japanese sort key merges kana scripts even for MySQL's `_ks` variant.
+// SQL ordering uses the unmarked base key followed by a script tie-break;
+// full-text tokens use the hiragana marker above.
+let private markJapaneseKatakana (value: string) =
+    let value = normalizeJapaneseKana value
+    let isKatakana (c: char) =
+        (c >= '\u30A1' && c <= '\u30FA') || c = '\u30FD' || c = '\u30FE'
+    markJapaneseKana isKatakana value
 
 // MySQL 8.4 Japanese UCA weights distinguish most compatibility ideographs
 // from their NFKC forms. These tables retain its measured weight classes.
@@ -1594,6 +1606,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         elif name = "utf8mb4_unicode_520_ci" then
             // MySQL's ngram index keeps the older token equivalence classes.
             foldUnicode520 false s |> trim
+        elif name = "utf8mb4_ja_0900_as_cs_ks" then
+            s |> markJapaneseHiraganaForFullText |> foldJapaneseCompatibility |> trim
         else primaryText s
     let substringFold =
         if spec.Fold.HasFlag CompareOptions.IgnoreCase then

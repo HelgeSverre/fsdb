@@ -1646,8 +1646,9 @@ decorated number forms that ICU had merged.
 [Japanese kana-sensitive ngrams](torture/findings/2026-10-17-ja-kana-sensitive-ngram.md)
 now keep hiragana and katakana postings separate under
 `utf8mb4_ja_0900_as_cs_ks`; the maintained 387-search two-column corpus
-matches MySQL at all startup token sizes 1–10 after accounting for
-compatibility ideograph weight classes. The range-specific probes retain
+matches MySQL at all startup token sizes 1–10 after the
+[full-text key regression fix](torture/findings/2026-11-06-japanese-fulltext-key-regression.md)
+separated kana posting keys from SQL ordering. The range-specific probes retain
 their size-one and size-two scope. The [complete U+3040–U+30FF kana order
 audit](torture/findings/2026-11-06-japanese-kana-order-and-weights.md) matches
 11,520 searches plus ordering and indexed ranges at sizes 1–10; all 192
@@ -1722,15 +1723,15 @@ keeps mark positions in `utf8mb4_general_ci` keys. Its original two-column
 corpus had smaller-size differences; the [current-head rerun](torture/findings/2026-11-06-cjk-current-head-ngram-rerun.md)
 matches all 387 searches at each size 1–10.
 The [format-control probe](torture/findings/2026-10-17-general-ci-format-controls.md)
-also keeps nine audited format/space characters distinct. The corpus now
-matches at token sizes 5–10; smaller sizes and broader collation behavior
-remain open.
+also keeps nine audited format/space characters distinct. The maintained
+two-column corpus now matches at token sizes 1–10; broader collation behavior
+remains open.
 The [decomposed-kana probe](torture/findings/2026-10-17-general-ci-kana-marks.md)
 keeps combining voicing marks distinct from precomposed kana under
-`utf8mb4_general_ci`; the audited corpus now matches at sizes 4–10.
+`utf8mb4_general_ci`; the maintained corpus now matches at sizes 1–10.
 The [radical-weight probe](torture/findings/2026-10-17-general-ci-radical-weights.md)
 also preserves the distinct primary weights of assigned CJK radicals; the
-audited general-collation corpus now matches at ngram sizes 3–10.
+maintained general-collation corpus now matches at ngram sizes 1–10.
 The [combining-accent probe](torture/findings/2026-10-17-general-ci-combining-accents.md)
 keeps decomposed accents in positional keys and removes the audited size-2
 short Boolean false positives; kana forms and query expansion remain open.

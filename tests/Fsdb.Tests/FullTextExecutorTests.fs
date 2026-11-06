@@ -645,6 +645,22 @@ let tests =
               Expect.equal (search "こ") [ "1" ] "hiragana posting remains separate"
               Expect.equal (search "コ") [ "2" ] "katakana posting remains separate"
               Expect.equal (search "カ") [ "3"; "4" ] "unvoiced width forms share a posting"
+              run store "CREATE TABLE japanese_mixed_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_ja_0900_as_cs_ks,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO japanese_mixed_docs VALUES(1,'がらす'),(2,'ガラス'),(3,'ｶﾞﾗｽ')" |> ignore
+              Expect.equal
+                  (ids (run store "SELECT id FROM japanese_mixed_docs WHERE MATCH(body) AGAINST('ｶﾞﾗｽ' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+                  [ "2"; "3" ]
+                  "halfwidth query excludes decomposed hiragana"
+              Expect.equal
+                  (ids (run store "SELECT id FROM japanese_mixed_docs WHERE MATCH(body) AGAINST('ｶﾞﾗｽ' IN BOOLEAN MODE) ORDER BY id"))
+                  [ "3" ]
+                  "short Boolean tokens retain the native halfwidth boundary"
+              run store "CREATE TABLE japanese_pair_docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_ja_0900_as_cs_ks,title TEXT COLLATE utf8mb4_ja_0900_as_cs_ks,FULLTEXT KEY ft(body,title) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO japanese_pair_docs VALUES(1,'ｶﾞｯｺｳ',''),(2,'ガラス','がらす')" |> ignore
+              Expect.equal
+                  (ids (run store "SELECT id FROM japanese_pair_docs WHERE MATCH(body,title) AGAINST('ｶﾞｯｺｳ' IN NATURAL LANGUAGE MODE) ORDER BY id"))
+                  [ "1" ]
+                  "mixed-script columns do not gain a false halfwidth posting"
 
           testCase "Japanese kana-sensitive order and indexed range follow MySQL script and voicing levels"
           <| fun _ ->
