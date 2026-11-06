@@ -2573,7 +2573,7 @@ let tests =
           testCase "limited ordered writes reselect after a contended predicate or sort key changes"
           <| fun _ ->
               for indexed in [ false; true ] do
-                  for limit in [ 1; 2; 3; 4; 8 ] do
+                  for limit in [ 1 .. 8 ] do
                       for scenario in [ "predicate"; "sort_key"; "descending_sort_key" ] do
                           for verb in [ "UPDATE"; "DELETE" ] do
                               let store = Fsdb.Storage.create ()
@@ -2727,7 +2727,7 @@ let tests =
 
           testCase "limited ordered writes reselect after a contended first row is deleted"
           <| fun _ ->
-              for limit in [ 1; 2; 3; 4; 8 ] do
+              for limit in [ 1 .. 8 ] do
                   for indexed in [ false; true ] do
                       for verb in [ "UPDATE"; "DELETE" ] do
                           let store = Fsdb.Storage.create ()

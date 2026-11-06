@@ -404,3 +404,14 @@ rows and affected counts. This extends the ordered re-selection audit to a
 descending secondary sort key. The full oracle run later encountered a
 separate timing-sensitive pending-insert assertion, so this result is based
 on the focused mode and regression.
+
+## All limits from one through eight
+
+The maintained MySQL 8.4.11 oracle and fsdb transaction regression now run
+the predicate-change, ascending and descending sort-key-change, and
+deleted-first-candidate scenarios at every `LIMIT` from 1 through 8,
+with and without `KEY(n)`, for both UPDATE and DELETE. The focused MySQL
+descending run passed 32 cases. The full MySQL run passed 132 ordered
+re-selection cases and its pending-insert controls; the four focused fsdb
+transaction tests passed with matching affected counts and final rows.
+The extra limits exercise the same scheduling path without a code change.

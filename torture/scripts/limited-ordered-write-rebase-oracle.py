@@ -53,7 +53,7 @@ def main():
                     cursor.execute("USE probe")
 
                 cases = 0
-                for limit in (1, 2, 3, 4, 8):
+                for limit in range(1, 9):
                     for indexed in (False, True):
                         scenarios = (
                             ("descending_sort_key",)
@@ -145,7 +145,7 @@ def main():
                     print(f"MySQL {version}: {cases} descending ordered writes reselected after contention")
                     return
 
-                for limit in (1, 2, 3, 4, 8):
+                for limit in range(1, 9):
                     for indexed in (False, True):
                         for verb in ("UPDATE", "DELETE"):
                             waiter = connect(socket)
@@ -975,7 +975,7 @@ def main():
                         finally:
                             waiter.close()
 
-                print(f"MySQL {version}: {cases} ordered LIMIT 1/2/3/4/8 writes reselected after updates/deletes; "
+                print(f"MySQL {version}: {cases} ordered LIMIT 1–8 writes reselected after updates/deletes; "
                       f"{filesort_cases} primary-key and {keyless_filesort_cases} keyless "
                       "filesort-expression pending-insert cases; "
                       f"{len(insert_cases) * 4} integer, {len(date_cases) * 2} DATE, "
