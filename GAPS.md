@@ -1538,8 +1538,9 @@ ngram corpus at each token size 1–10, but its Han ordering is not fully
 compatible: among U+4E00–U+4EFF, MySQL sorts 乾 (U+4E7E) before 亁
 (U+4E81), while fsdb places it later. All 64 sampled U+4E00–U+4E3F
 `WEIGHT_STRING` byte sequences differ as well. The same pair disagrees on
-the SQL `<` predicate. Chinese collation ordering, range predicates, and
-exact weight bytes remain open even where full-text
+the SQL `<` predicate, and a forced indexed `body < '亁文'` range omits
+乾文 in fsdb. Chinese collation ordering, range predicates, and exact
+weight bytes remain open even where full-text
 membership and relevance agree.
 The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
 also matches MySQL's distinct U+2200–U+22FF primary weights in the same

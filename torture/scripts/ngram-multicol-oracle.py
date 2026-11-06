@@ -269,6 +269,8 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                 equality_checks = 0
                 weight_count = 0
                 if order_checks:
+                    for connection in (mysql_connection, fsdb_connection):
+                        query(connection, "CREATE INDEX idx_body ON docs(body(20))")
                     order_sql = "SELECT id FROM docs ORDER BY body,id"
                     expected_order = query(mysql_connection, order_sql)
                     actual_order = query(fsdb_connection, order_sql)
@@ -283,6 +285,13 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                         actual_comparison = query(fsdb_connection, comparison_sql, pair)
                         if actual_comparison != expected_comparison:
                             mismatches.append(("collation comparison", pair, expected_comparison, actual_comparison))
+                        range_sql = "SELECT id FROM docs FORCE INDEX (idx_body) WHERE body < %s ORDER BY id"
+                        expected_range = query(mysql_connection, range_sql, (pair[1],))
+                        actual_range = query(fsdb_connection, range_sql, (pair[1],))
+                        if actual_range != expected_range:
+                            first_range = next((index for index, (expected, actual) in enumerate(zip(expected_range, actual_range)) if expected != actual), min(len(expected_range), len(actual_range)))
+                            mismatches.append(("collation indexed range", pair[1], first_range,
+                                               expected_range[first_range:first_range + 10], actual_range[first_range:first_range + 10]))
                 if legacy_range is not None:
                     equality_sql = (
                         f"SELECT _utf8mb4%s COLLATE {collation} "
@@ -353,7 +362,7 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                             mismatches.append((mode, term, "relevance", expected_scores, actual_scores))
                 equality_mismatches = sum(item[0] == "legacy equality" for item in mismatches)
                 weight_mismatches = sum(item[0] == "legacy weight" for item in mismatches)
-                order_mismatches = sum(item[0] in ("collation order", "collation comparison") for item in mismatches)
+                order_mismatches = sum(item[0] in ("collation order", "collation comparison", "collation indexed range") for item in mismatches)
                 search_mismatches = len(mismatches) - equality_mismatches - weight_mismatches - order_mismatches
                 print(
                     f"size {size}: {len(modes) * len(terms)} ngram queries, "
@@ -365,7 +374,7 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                 search_kinds = Counter(
                     (item[0], "relevance" if len(item) == 5 else "membership")
                     for item in mismatches
-                    if item[0] not in ("legacy equality", "legacy weight", "collation order", "collation comparison")
+                    if item[0] not in ("legacy equality", "legacy weight", "collation order", "collation comparison", "collation indexed range")
                 )
                 for (mode, kind), count in sorted(search_kinds.items()):
                     print(f"  {mode} {kind}: {count}")
