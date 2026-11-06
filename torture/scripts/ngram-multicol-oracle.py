@@ -7,6 +7,7 @@ utf8mb4_unicode_ci corpora.
 """
 
 import argparse
+from collections import Counter
 import math
 import pathlib
 import socket
@@ -344,6 +345,13 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     f"{equality_mismatches} equality mismatches"
                     + (f"; {weight_count} weights, {weight_mismatches} mismatches" if weight_checks else "")
                 )
+                search_kinds = Counter(
+                    (item[0], "relevance" if len(item) == 5 else "membership")
+                    for item in mismatches
+                    if item[0] not in ("legacy equality", "legacy weight")
+                )
+                for (mode, kind), count in sorted(search_kinds.items()):
+                    print(f"  {mode} {kind}: {count}")
                 for mismatch in mismatches[:40]:
                     print(mismatch)
                 if len(mismatches) > 40:
