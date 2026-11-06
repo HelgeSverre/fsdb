@@ -232,3 +232,23 @@ distance values; the 100 seeded point-line cases still matched. This trial
 was reverted. The earlier combined projection trial and this isolated
 formula trial both leave the first direct point and inverse calculation as
 the next arithmetic comparison.
+
+## Line-interior versus endpoint control
+
+The current-head edge oracle still has 12/412 line/polygon relation
+mismatches. The native Boost 1.84 probe now prints the DE-9IM relation
+matrix for seven near-hole controls. Six return `F01FF0212`: the line's
+interior meets the polygon boundary and exterior, but not its interior.
+They agree with MySQL's `Touches=1, Crosses=0`. The 85-degree polar control
+returns `FF1FF0212`, disjoint, also agreeing with MySQL. Fsdb's point
+sampling labels the six as crossing and the polar control as touching.
+
+A temporary topology trial excluded line endpoints from the sampled
+interior/exterior evidence. The full oracle worsened from 12 to 70 relation
+mismatches out of 412. MySQL reports crossing for numerous lines whose
+interior enters the polygon for a very short distance near an endpoint;
+the fixed samples miss that portion. The trial was reverted and Release
+rebuilt from unchanged production code. Both endpoint-only sampling and
+denser fixed sampling are inadequate. The next implementation needs to
+classify geographic segment/boundary intersections and the intervals
+between them, including portions near endpoints that the samples miss.

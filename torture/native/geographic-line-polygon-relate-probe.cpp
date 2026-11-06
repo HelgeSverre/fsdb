@@ -6,6 +6,7 @@
 #include <boost/geometry/algorithms/crosses.hpp>
 #include <boost/geometry/algorithms/intersects.hpp>
 #include <boost/geometry/algorithms/is_valid.hpp>
+#include <boost/geometry/algorithms/relation.hpp>
 #include <boost/geometry/algorithms/touches.hpp>
 #include <boost/geometry/geometries/linestring.hpp>
 #include <boost/geometry/geometries/point.hpp>
@@ -29,11 +30,16 @@ void probe(double base, double longitude) {
     std::cout << base << ' ' << longitude << " valid=" << bg::is_valid(polygon)
               << " crosses=" << bg::crosses(line, polygon)
               << " touches=" << bg::touches(line, polygon)
-              << " intersects=" << bg::intersects(line, polygon) << '\n';
+              << " intersects=" << bg::intersects(line, polygon)
+              << " relation=" << bg::relation(line, polygon).str() << '\n';
 }
 
 int main() {
     probe(0, 2.999);
+    probe(0, 2.99999);
     probe(40, 1.00001);
+    probe(60, 2.99999);
+    probe(70, 2.99999);
+    probe(80, 1.00001);
     probe(85, 1.00001);
 }
