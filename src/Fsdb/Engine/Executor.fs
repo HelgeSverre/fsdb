@@ -758,10 +758,10 @@ type private NullTestKind =
 type private CteGroup = string * string * string
 
 /// Inner-key row counts for a joined correlated subquery whose outer references
-/// are integer equalities, computed once per statement.
+/// are exact numeric equalities, computed once per statement.
 type private DecorrelatedKeyCounts =
-    { OuterKeys: Expr list
-      Counts: Dictionary<decimal list, int64> }
+    { OuterKeys: (Expr * bool) list
+      Counts: Dictionary<decimal option list, int64> }
 
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
@@ -9542,6 +9542,11 @@ and private exactNumericKey (value: Value) : decimal option =
     | VDecimal value -> Some value
     | _ -> None
 
+and private exactNullableNumericKey (value: Value) : decimal option option =
+    match value with
+    | VNull -> Some None
+    | _ -> exactNumericKey value |> Option.map Some
+
 /// Predicates that evaluate without warnings or side effects, so running
 /// them once per inner row instead of once per outer row is unobservable.
 and private isPlainRowPredicate (expression: Expr) : bool =
@@ -9559,9 +9564,9 @@ and private isPlainRowPredicate (expression: Expr) : bool =
     | _ -> false
 
 /// Splits a subquery's WHERE and inner-join ON clauses into top-level
-/// `outer.column = inner.column` conjuncts and a local remainder. Grouping
+/// `outer.column = inner.column` or `<=>` conjuncts and a local remainder. Grouping
 /// the remainder by the inner keys yields every outer row's match count.
-and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : (Expr list * SelectStmt) option =
+and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : ((Expr * bool) list * SelectStmt) option =
     let isPlainBlock =
         select.GroupBy.IsEmpty
         && select.Having.IsNone
@@ -9583,10 +9588,11 @@ and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : 
 
         let correlation =
             function
-            | BinOp(Eq, (QualifiedCol(left, _) as leftColumn), (QualifiedCol(right, _) as rightColumn)) ->
+            | BinOp((Eq | NullSafeEq as comparison), (QualifiedCol(left, _) as leftColumn), (QualifiedCol(right, _) as rightColumn)) ->
+                let nullSafe = comparison = NullSafeEq
                 match isInner left, isInner right with
-                | true, false -> Some(rightColumn, leftColumn)
-                | false, true -> Some(leftColumn, rightColumn)
+                | true, false -> Some(rightColumn, leftColumn, nullSafe)
+                | false, true -> Some(leftColumn, rightColumn, nullSafe)
                 | _ -> None
             | _ -> None
 
@@ -9608,7 +9614,7 @@ and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : 
                     |> Option.defaultValue available
                 let eligibleOnKey expression =
                     match correlation expression with
-                    | Some(_, QualifiedCol(qualifier, _)) -> Set.contains (qualifier.ToLowerInvariant()) available
+                    | Some(_, QualifiedCol(qualifier, _), _) -> Set.contains (qualifier.ToLowerInvariant()) available
                     | _ -> false
                 let rewritten, keys =
                     match join.Kind with
@@ -9623,8 +9629,9 @@ and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : 
 
         match correlated with
         | _ :: _ when remainder |> List.forall isPlainRowPredicate ->
-            let outerKeys, innerKeys =
-                correlated |> List.choose correlation |> List.unzip
+            let keyPairs = correlated |> List.choose correlation
+            let outerKeys = keyPairs |> List.map (fun (outerKey, _, nullSafe) -> outerKey, nullSafe)
+            let innerKeys = keyPairs |> List.map (fun (_, innerKey, _) -> innerKey)
             let keyProjections =
                 innerKeys
                 |> List.map (fun innerKey ->
@@ -9665,18 +9672,18 @@ and private decorrelatedKeyCounts (outer: EvalContext) (select: SelectStmt) : De
             |> Option.bind (fun (outerKeys, grouped) ->
                 match runSelectStmt outer.Store outer.Registry outer.DbName grouped None with
                 | ResultSet _, _, rows ->
-                    let counts = Dictionary<decimal list, int64>()
+                    let counts = Dictionary<decimal option list, int64>()
 
                     let collected =
                         rows
                         |> List.forall (fun row ->
                             if row.Length <> outerKeys.Length + 1 then false
                             else
-                                let keys = row |> Array.take outerKeys.Length
+                                let keys = row |> Array.take outerKeys.Length |> Array.toList
                                 match row.[outerKeys.Length] with
-                                | VInt _ when keys |> Array.exists ((=) VNull) -> true
+                                | VInt _ when List.exists2 (fun (_, nullSafe) key -> not nullSafe && key = VNull) outerKeys keys -> true
                                 | VInt count ->
-                                    let numericKeys = keys |> Array.toList |> List.map exactNumericKey
+                                    let numericKeys = keys |> List.map exactNullableNumericKey
                                     if numericKeys |> List.forall Option.isSome then
                                         counts.[numericKeys |> List.choose id] <- count
                                         true
@@ -9694,14 +9701,14 @@ and private decorrelatedKeyCounts (outer: EvalContext) (select: SelectStmt) : De
 and private tryDecorrelatedMatchCount (outer: EvalContext) (select: SelectStmt) : Result<int64, EvalError> option =
     decorrelatedKeyCounts outer select
     |> Option.bind (fun counts ->
-        let values = counts.OuterKeys |> List.map (evalExpr outer)
+        let values = counts.OuterKeys |> List.map (fst >> evalExpr outer)
         match values |> List.tryPick (function Error error -> Some error | _ -> None) with
         | Some error -> Some(Error error)
         | None ->
             let keys = values |> List.choose (function Ok value -> Some value | _ -> None)
-            if keys |> List.contains VNull then Some(Ok 0L)
+            if List.exists2 (fun (_, nullSafe) key -> not nullSafe && key = VNull) counts.OuterKeys keys then Some(Ok 0L)
             else
-                let numericKeys = keys |> List.map exactNumericKey
+                let numericKeys = keys |> List.map exactNullableNumericKey
                 if numericKeys |> List.exists Option.isNone then None
                 else
                     let key = numericKeys |> List.choose id

@@ -175,6 +175,32 @@ let tests =
               let _, examined = withExaminedRows (fun () -> runDefault store query)
               Expect.isLessThan examined 250L "decimal outer misses share one grouped inner pass"
 
+          testCase "joined correlated NULL-safe key tuples share one inner pass"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE nullsafe_join_outer (a BIGINT UNSIGNED NULL,b DECIMAL(10,1) NULL)"
+                    "CREATE TABLE nullsafe_join_inner (a BIGINT UNSIGNED NULL,b DECIMAL(10,1) NULL)"
+                    "CREATE TABLE nullsafe_join_marker (id INT PRIMARY KEY)"
+                    "INSERT INTO nullsafe_join_outer VALUES(NULL,NULL),(1,NULL),(NULL,2.0),(1,2.0),(2,2.0)"
+                    "INSERT INTO nullsafe_join_inner VALUES(NULL,NULL),(NULL,NULL),(1,NULL),(NULL,2.0),(1,2.0),(1,2.0),(2,NULL)"
+                    "INSERT INTO nullsafe_join_marker VALUES(1)" ] do
+                  runDefault store sql |> ignore
+              let query comparison =
+                  sprintf "SELECT o.a,o.b,(SELECT COUNT(*) FROM nullsafe_join_inner i JOIN nullsafe_join_marker m ON m.id=1 WHERE i.a %s o.a AND i.b <=> o.b) c FROM nullsafe_join_outer o ORDER BY o.a IS NOT NULL,o.a,o.b IS NOT NULL,o.b" comparison
+              Expect.equal
+                  (runDefault store (query "<=>"))
+                  (ResultSet([ "a"; "b"; "c" ], [ [ None; None; Some "2" ]; [ None; Some "2.0"; Some "1" ]; [ Some "1"; None; Some "1" ]; [ Some "1"; Some "2.0"; Some "2" ]; [ Some "2"; Some "2.0"; Some "0" ] ]))
+                  "two NULL-safe keys match the pinned MySQL oracle"
+              Expect.equal
+                  (runDefault store (query "="))
+                  (ResultSet([ "a"; "b"; "c" ], [ [ None; None; Some "0" ]; [ None; Some "2.0"; Some "0" ]; [ Some "1"; None; Some "1" ]; [ Some "1"; Some "2.0"; Some "2" ]; [ Some "2"; Some "2.0"; Some "0" ] ]))
+                  "ordinary equality still rejects NULL on its key"
+              let extra = [ 100 .. 299 ] |> List.map (sprintf "(%d,2.0)") |> String.concat ","
+              runDefault store ("INSERT INTO nullsafe_join_outer VALUES " + extra) |> ignore
+              let _, examined = withExaminedRows (fun () -> runDefault store (query "<=>"))
+              Expect.isLessThan examined 260L "NULL-safe misses do not rescan the inner join"
+
           testCase "numeric aggregate metadata retains binary numeric coercibility"
           <| fun _ ->
               Expect.equal

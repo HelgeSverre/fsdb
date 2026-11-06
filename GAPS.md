@@ -216,7 +216,8 @@ reads index cardinality only when distinct, complete stored key parts cover
 every equality; prefix collisions and uncovered predicates retain row filtering.
 Joined correlated `COUNT(*)` and `EXISTS` equality keys also share one grouped
 inner pass for exact integer and decimal values, including mixed decimal and
-unsigned keys above the double-precision integer boundary; text and approximate
+unsigned keys above the double-precision integer boundary. Nullable tuples
+retain `=` versus `<=>` semantics while sharing that pass. Text and approximate
 numeric keys retain per-row coercion.
 [Correlated `ABS` equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-abs.md)
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete
