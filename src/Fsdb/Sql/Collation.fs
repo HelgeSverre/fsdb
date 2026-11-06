@@ -1025,6 +1025,62 @@ let private legacyEnclosedCjkWeights unicode520 codepoint =
         | value when value <= 0x3259 -> [ 0x1207; 0x1206 + value - 0x3251 ]
         | value -> [ 0x1208; 0x1205 + value - 0x325A ]
 
+let private laterEnclosedIdeographWeights =
+    [|
+        0xFB40CE0Au; 0xFB40CE2Du; 0xFB40CE0Bu; 0xFB40DDE6u
+        0xFB40D3F3u; 0xFB40D33Bu; 0xFB40DB97u; 0xFB40DB66u
+        0xFB40F6E3u; 0xFB40CF01u; 0xFB418CC7u; 0xFB40D354u
+        0xFB40D91Cu
+    |]
+
+let private legacyCircledCjkWeights unicode520 codepoint =
+    if codepoint <= 0x32B0 then
+        let ideograph =
+            if codepoint <= 0x32A3 then
+                match codepoint with
+                | 0x3299 -> 0xFB40F9D8u
+                | 0x329A -> 0xFB40F537u
+                | 0x329B -> 0xFB40D973u
+                | 0x329C -> 0xFB419069u
+                | 0x329D -> 0xFB40D12Au
+                | 0x329E -> 0xFB40D370u
+                | 0x329F -> 0xFB40ECE8u
+                | 0x32A0 -> 0xFB419805u
+                | 0x32A2 -> 0xFB40D199u
+                | 0x32A3 -> 0xFB40EB63u
+                | _ -> enclosedIdeographWeights[codepoint - 0x3280]
+            else laterEnclosedIdeographWeights[codepoint - 0x32A4]
+        [ int (ideograph >>> 16); int (ideograph &&& 0xFFFFu) ]
+    elif codepoint <= 0x32BF then
+        if unicode520 then
+            if codepoint <= 0x32B4 then [ 0x1208; 0x120B + codepoint - 0x32B1 ]
+            elif codepoint <= 0x32BE then [ 0x1209; 0x1205 + codepoint - 0x32B5 ]
+            else [ 0x120A; 0x1205 ]
+        elif codepoint <= 0x32B4 then [ 0x0E2C; 0x0E2F + codepoint - 0x32B1 ]
+        elif codepoint <= 0x32BE then [ 0x0E2D; 0x0E29 + codepoint - 0x32B5 ]
+        else [ 0x0E2E; 0x0E29 ]
+    elif codepoint <= 0x32CB then
+        let number =
+            if codepoint <= 0x32C8 then
+                if unicode520 then [ 0x1206 + codepoint - 0x32C0 ]
+                else [ 0x0E2A + codepoint - 0x32C0 ]
+            elif unicode520 then [ 0x1206; 0x1205 + codepoint - 0x32C9 ]
+            else [ 0x0E2A; 0x0E29 + codepoint - 0x32C9 ]
+        number @ [ 0xFB40; 0xE708 ]
+    elif codepoint <= 0x32CF then
+        match codepoint, unicode520 with
+        | 0x32CC, false -> [ 0x0EE1; 0x0EC1 ]
+        | 0x32CC, true -> [ 0x12D3; 0x12B0 ]
+        | 0x32CD, false -> [ 0x0E8B; 0x0FC0; 0x0EC1 ]
+        | 0x32CD, true -> [ 0x126B; 0x13DA; 0x12B0 ]
+        | 0x32CE, false -> [ 0x0E8B; 0x1044 ]
+        | 0x32CE, true -> [ 0x126B; 0x147B ]
+        | 0x32CF, false -> [ 0x0F2E; 0x1002; 0x0E6D ]
+        | _ -> [ 0x1330; 0x1433; 0x1250 ]
+    elif codepoint <= 0x32FE then
+        [ (if unicode520 then 0x2B15 else 0x1E52) + codepoint - 0x32D0 ]
+    else [ 0xFBC0; 0xB2FF ]
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) =
@@ -1228,6 +1284,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     if general then addWeight codepoint
                     else
                         for weight in legacyEnclosedHangulWeights (name = "utf8mb4_unicode_520_ci") codepoint do
+                            addWeight weight
+                | None when codepoint >= 0x3280 && codepoint <= 0x32FF ->
+                    if general then addWeight codepoint
+                    else
+                        for weight in legacyCircledCjkWeights (name = "utf8mb4_unicode_520_ci") codepoint do
                             addWeight weight
                 | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =
