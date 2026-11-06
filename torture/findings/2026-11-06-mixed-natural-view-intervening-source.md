@@ -149,5 +149,18 @@ at three keys, then repeats them with a dependent `JSON_TABLE` or a
 parenthesized first operand. It now passes **233 UPDATE value cases and
 68 contended rebases**, including four independent holders on the repaired
 grouped shape, with all physical table contents compared. The focused
-regression and all 52 filtered view tests pass. More deeply nested groups,
-other source types, and longer unmatched chains remain open.
+regression and all 52 filtered view tests pass. The nested-group follow-up
+below extends this coverage.
+
+## Three writable views in a nested right operand
+
+The oracle now tests `vb_unique vb NATURAL ... JOIN (vc_unique vc NATURAL
+... JOIN ve_unique ve)` as one nested operand after `va` and the derived
+read source. It checks all eight LEFT/RIGHT combinations at three keys,
+then repeats that matrix with a dependent `JSON_TABLE` and with the first
+`c NATURAL LEFT JOIN va` operand parenthesized. MySQL 8.4.11 and fsdb
+agree on affected rows and all four physical tables in **305 UPDATE value
+cases**. A four-holder check on the nested form waits for each target and
+commits the same rebased values, bringing the contended corpus to **69
+rebases**. This covers one further nesting level; other group placements,
+source types, and longer chains remain to audit.
