@@ -2503,7 +2503,9 @@ implementation effort:
    read lock](torture/findings/2026-11-06-global-read-waiting-writer-gate.md)
    now proceed as on MySQL while the writers remain blocked, including
    independent databases; the shared statement-access monitor is still a
-   high-fan-out throughput target.
+   high-fan-out throughput target. An [atomic fast-path trial](benchmarks/results/2026-11-06-statement-access-fast-path-trial.md)
+   bypassed that monitor for ordinary statements but did not improve the
+   measured 8/64/8-account throughput, so it was reverted.
    Indexed point/range UPDATE and DELETE statements,
    plus [ordered `LIMIT 1`–`8` UPDATE and DELETE re-selection after a contended
    first candidate stops matching, moves behind another candidate (including
