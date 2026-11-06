@@ -652,6 +652,11 @@ let tests =
                     let extensionI = System.Char.ConvertFromUtf32 0x2EBF0
                     let extensionILast = System.Char.ConvertFromUtf32 0x2EE5F
                     let extensionG = System.Char.ConvertFromUtf32 0x30000
+                    let extensionHLast = System.Char.ConvertFromUtf32 0x323AF
+                    let extensionJFirst = System.Char.ConvertFromUtf32 0x323B0
+                    let extensionJLast = System.Char.ConvertFromUtf32 0x3347F
+                    let afterExtensionJ = System.Char.ConvertFromUtf32 0x33480
+                    let planeThreeLast = System.Char.ConvertFromUtf32 0x3FFFF
                     let ideographicSymbol = System.Char.ConvertFromUtf32 0x16FE0
                     let ideographicSymbolLast = System.Char.ConvertFromUtf32 0x16FFF
                     let supplementaryKanaFirst = System.Char.ConvertFromUtf32 0x1B000
@@ -827,6 +832,12 @@ let tests =
                           ideographicSymbol + ideographicSymbolLast, "utf8mb4_general_ci", "FFFDFFFD"
                           ideographicSymbol + ideographicSymbolLast, "utf8mb4_unicode_ci", "FFFDFFFD"
                           ideographicSymbol + ideographicSymbolLast, "utf8mb4_unicode_520_ci", "FBC2EFE0FBC2EFFF"
+                          extensionJFirst + extensionJLast, "utf8mb4_general_ci", "FFFDFFFD"
+                          extensionJFirst + extensionJLast, "utf8mb4_unicode_ci", "FFFDFFFD"
+                          extensionHLast + extensionJFirst + extensionJLast, "utf8mb4_unicode_520_ci", "FBC6A3AFFBC6A3B0FBC6B47F"
+                          extensionJLast + afterExtensionJ, "utf8mb4_general_ci", "FFFDFFFD"
+                          extensionJLast + afterExtensionJ, "utf8mb4_unicode_520_ci", "FBC6B47FFBC6B480"
+                          planeThreeLast, "utf8mb4_unicode_520_ci", "FBC7FFFF"
                           supplementaryKanaFirst + supplementaryKanaLast, "utf8mb4_general_ci", "FFFDFFFD"
                           supplementaryKanaFirst + supplementaryKanaLast, "utf8mb4_unicode_ci", "FFFDFFFD"
                           supplementaryKanaFirst + supplementaryKanaLast + nushuFirst, "utf8mb4_unicode_520_ci", "FBC3B000FBC3B16FFBC3B170"

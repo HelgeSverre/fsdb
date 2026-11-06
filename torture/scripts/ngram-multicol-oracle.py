@@ -279,14 +279,16 @@ def probe_han_permutation(mysql_connection, fsdb_connection, collation,
 def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None,
            collation_override=None, legacy_term_range=None, weight_checks=False,
            mixed_checks=False, order_checks=False, cldr_pinyin=None,
-           tailoring_probe=False):
+           tailoring_probe=False, all_range_scalars=False):
     prefix = '中' * (size - 1)
     if legacy_radicals:
         legacy_chars = LEGACY_RADICALS
     elif legacy_punctuation:
         legacy_chars = LEGACY_PUNCTUATION
     elif legacy_range is not None:
-        legacy_chars = [chr(code) for code in range(*legacy_range) if chr(code).isprintable()]
+        legacy_chars = [chr(code) for code in range(*legacy_range)
+                        if not 0xD800 <= code < 0xE000
+                        and (all_range_scalars or chr(code).isprintable())]
     else:
         legacy_chars = None
     documents = ([(prefix + char + '文', '') for char in legacy_chars]
@@ -535,6 +537,7 @@ if __name__ == "__main__":
     corpus.add_argument("--legacy-punctuation", action="store_true")
     corpus.add_argument("--legacy-radicals", action="store_true")
     corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
+    parser.add_argument("--all-range-scalars", action="store_true", help="include range scalars missing from Python's Unicode character database")
     parser.add_argument("--legacy-term-range", help="search only this subrange of --legacy-range while indexing the whole range")
     parser.add_argument("--weight-checks", action="store_true", help="compare exact WEIGHT_STRING bytes for --legacy-range")
     parser.add_argument("--order-checks", action="store_true", help="compare document ordering under the selected collation")
@@ -564,6 +567,8 @@ if __name__ == "__main__":
             parser.error("--legacy-term-range must be a subrange of --legacy-range")
     if args.weight_checks and legacy_range is None:
         parser.error("--weight-checks requires --legacy-range")
+    if args.all_range_scalars and legacy_range is None:
+        parser.error("--all-range-scalars requires --legacy-range")
     if args.mixed_checks and legacy_range is None:
         parser.error("--mixed-checks requires --legacy-range")
     if args.cldr_pinyin and not args.order_checks:
@@ -574,4 +579,5 @@ if __name__ == "__main__":
     raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals,
                                      legacy_range, args.collation, legacy_term_range,
                                      args.weight_checks, args.mixed_checks, args.order_checks,
-                                     args.cldr_pinyin, args.tailoring_probe) for size in sizes) else 0)
+                                     args.cldr_pinyin, args.tailoring_probe,
+                                     args.all_range_scalars) for size in sizes) else 0)
