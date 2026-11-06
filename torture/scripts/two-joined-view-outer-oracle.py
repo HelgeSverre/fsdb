@@ -311,6 +311,15 @@ def main():
                     "JOIN (SELECT id AS bridge FROM link) l ON l.bridge=va.link_id "
                     "NATURAL LEFT JOIN vb_unique vb "
                     "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=1",
+                    "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
+                    "UPDATE c NATURAL LEFT JOIN va "
+                    "JOIN (SELECT id AS bridge FROM link) l ON l.bridge=va.link_id "
+                    "NATURAL LEFT JOIN vb_unique vb "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=2",
+                    "WITH c AS (SELECT 3 AS id) UPDATE c NATURAL RIGHT JOIN va "
+                    "JOIN (SELECT id AS bridge FROM link) l ON l.bridge=va.link_id "
+                    "NATURAL LEFT JOIN vb_unique vb "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=1",
                     "WITH c AS (SELECT id FROM link) UPDATE (c NATURAL JOIN va) "
                     "NATURAL JOIN vb_unique vb SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1",
                     "UPDATE va LEFT JOIN (link l JOIN vb USING(id)) USING(id) "
@@ -405,6 +414,15 @@ def main():
                     ("b", 1, six_source_update(1)),
                     ("a", 2, six_source_update(2)),
                     ("b", 3, six_source_update(3)),
+                    ("a", 2, "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
+                     "UPDATE c NATURAL LEFT JOIN va "
+                     "JOIN (SELECT id AS bridge FROM link) l ON l.bridge=va.link_id "
+                     "NATURAL LEFT JOIN vb_unique vb "
+                     "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=2"),
+                    ("a", 1, "WITH c AS (SELECT 3 AS id) UPDATE c NATURAL RIGHT JOIN va "
+                     "JOIN (SELECT id AS bridge FROM link) l ON l.bridge=va.link_id "
+                     "NATURAL LEFT JOIN vb_unique vb "
+                     "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=1"),
                 ]
                 held_cases = [([(table, row_id)], sql) for table, row_id, sql in contended]
                 held_cases.append(([("a", 1), ("b", 1)], six_source_update(1)))

@@ -2470,8 +2470,10 @@ implementation effort:
    ambiguity from a subsequent ordinary join. [Two writable views around an
    intervening derived read source](torture/findings/2026-11-06-mixed-natural-view-intervening-source.md)
    now match MySQL for recursive-CTE first natural left and right prefixes,
-   final natural left joins, and independent physical-row waits. Other
-   intervening sources, unmatched rows, and longer mixed join chains remain
+   final natural left joins, and independent physical-row waits. Missing
+   second-view rows and right-preserved first-view rows also match affected
+   counts and contended rebases. Other intervening sources, unmatched
+   arrangements, and longer mixed join chains remain
    open. [CTE-first natural outer joins](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#cte-first-natural-outer-join-to-a-writable-view)
    to a writable view now wait and rebase, including one preceding ordinary
    read join and matched and unmatched left and right cases; duplicate `id`
