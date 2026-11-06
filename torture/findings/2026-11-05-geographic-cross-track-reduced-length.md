@@ -47,3 +47,17 @@ regression continued to fail. A targeted inverse implementation or a
 geometric robustness rule needs broader oracle coverage before adoption.
 
 The [MySQL-pinned cross-track strategy](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/strategies/geographic/distance_cross_track.hpp) and [Andoyer differential quantities](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/extra/boost/boost_1_84_0/boost/geometry/formulas/differential_quantities.hpp) are the source references for this comparison. The native probe is a diagnostic and is not part of fsdb's build.
+
+## Longitude-difference conversion control
+
+Fsdb's general Andoyer azimuth helper converts the longitude difference from
+degrees to radians, whereas Boost converts both longitudes to radians before
+subtracting them. A Release trial changed only that conversion order. The
+maintained MySQL 8.4.11 edge oracle remained at 12/412 line-relation,
+1/189 near-hole point-relation, and 9/189 near-hole point-distance mismatches;
+the isolated `POINT(3 1.00001)` distance remained 0.0950425203706804 m in
+fsdb versus zero in MySQL. All 100 seeded point-to-line distances matched.
+The trial was reverted. Longitude-difference conversion alone does not
+explain the near-coincident inverse discrepancy; the next diagnostic should
+compare the first inverse's `A`, `B`, `U`, `V`, and `d/sin(d)` terms on identical
+radian inputs before changing cross-track behavior.
