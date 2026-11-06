@@ -2667,6 +2667,8 @@ implementation effort:
    now waits, rechecks the committed source value, and keeps an unrelated
    keyed source row free to progress, including when the view participates in
    a larger `UPDATE ... JOIN` statement before or after a physical read table.
+   Multi-target updates through two joined views now also claim the second
+   view's read source and carry a literal key bound across both joins.
    Broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in

@@ -275,6 +275,70 @@ def main():
                 assert execute(owner, "SELECT n FROM a WHERE id=1") == ((0,),)
                 execute(owner, "UPDATE source_lock SET flag=1 WHERE id=1")
 
+                execute(owner, "CREATE TABLE second_target(id INT PRIMARY KEY,n INT)")
+                execute(owner, "CREATE TABLE second_source(id INT PRIMARY KEY,flag INT)")
+                execute(owner, "INSERT INTO second_target VALUES(1,0)")
+                execute(owner, "INSERT INTO second_source VALUES(1,1)")
+                execute(
+                    owner,
+                    "CREATE VIEW second_view AS SELECT t.id,t.n,s.flag FROM second_target t JOIN second_source s ON s.id=t.id",
+                )
+                execute(owner, "BEGIN")
+                assert execute(owner, "UPDATE second_source SET flag=0 WHERE id=1") == 1
+                execute(waiter, "BEGIN")
+                second_result = []
+                second_errors = []
+
+                def update_two_joined_views():
+                    try:
+                        second_result.append(
+                            execute(
+                                waiter,
+                                "UPDATE source_lock_view v JOIN second_view w ON w.id=v.id SET v.n=v.n+1,w.n=w.n+1 WHERE v.id=1 AND w.flag=1",
+                            )
+                        )
+                    except pymysql.MySQLError as error:
+                        second_errors.append(error)
+
+                second_wait = threading.Thread(target=update_two_joined_views)
+                second_wait.start()
+                time.sleep(0.2)
+                assert second_wait.is_alive(), "second joined-view source did not delay writer"
+                execute(owner, "COMMIT")
+                second_wait.join(timeout=5)
+                assert not second_wait.is_alive(), "second joined-view writer did not resume"
+                assert not second_errors, second_errors
+                assert second_result == [0], second_result
+                execute(waiter, "COMMIT")
+                assert execute(owner, "SELECT n FROM a WHERE id=1") == ((0,),)
+                assert execute(owner, "SELECT n FROM second_target WHERE id=1") == ((0,),)
+                execute(owner, "INSERT INTO second_target VALUES(2,0)")
+                execute(owner, "INSERT INTO second_source VALUES(2,1)")
+                execute(owner, "UPDATE second_source SET flag=1 WHERE id=1")
+                execute(owner, "BEGIN")
+                assert execute(owner, "UPDATE second_source SET flag=0 WHERE id=1") == 1
+                execute(waiter, "BEGIN")
+                second_result.clear()
+
+                def update_disjoint_joined_views():
+                    second_result.append(
+                        execute(
+                            waiter,
+                            "UPDATE source_lock_view v JOIN second_view w ON w.id=v.id SET v.n=v.n+1,w.n=w.n+1 WHERE v.id=2 AND w.flag=1",
+                        )
+                    )
+
+                second_wait = threading.Thread(target=update_disjoint_joined_views)
+                second_wait.start()
+                second_wait.join(timeout=1)
+                assert not second_wait.is_alive(), "disjoint second-view writer waited"
+                assert second_result == [2], second_result
+                execute(owner, "COMMIT")
+                execute(waiter, "COMMIT")
+                assert execute(owner, "SELECT n FROM a WHERE id=2") == ((1,),)
+                assert execute(owner, "SELECT n FROM second_target WHERE id=2") == ((1,),)
+                execute(owner, "UPDATE a SET n=0 WHERE id=2")
+
                 verify_wait(
                     owner,
                     waiter,

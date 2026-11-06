@@ -33314,107 +33314,123 @@ let transactionWriteReadTargets
     (dbName: string)
     (statement: Statement)
     : (string * string * RowId list) list =
+    let literalEqualities predicate =
+        predicate
+        |> optionalConjuncts
+        |> List.choose (function
+            | BinOp(Eq, QualifiedCol(owner, column), (LiteralValue _ as value))
+            | BinOp(Eq, (LiteralValue _ as value), QualifiedCol(owner, column)) ->
+                Some(owner, column, value)
+            | _ -> None)
+    let joinedEqualities joins =
+        joins
+        |> List.filter (fun (join: Join) -> join.Kind = InnerJoin || join.Kind = StraightJoin)
+        |> List.collect (fun join ->
+            join.On
+            |> conjuncts
+            |> List.choose (function
+                | BinOp(Eq, QualifiedCol(leftOwner, leftColumn), QualifiedCol(rightOwner, rightColumn)) ->
+                    Some((leftOwner, leftColumn), (rightOwner, rightColumn))
+                | _ -> None))
+    let boundFor qualifier equalities literals =
+        equalities
+        |> List.tryPick (fun ((leftOwner, leftColumn), (rightOwner, rightColumn)) ->
+            let sourceSide =
+                if equalsIgnoreCase leftOwner qualifier then Some(leftColumn, rightOwner, rightColumn)
+                elif equalsIgnoreCase rightOwner qualifier then Some(rightColumn, leftOwner, leftColumn)
+                else None
+            sourceSide
+            |> Option.bind (fun (column, otherOwner, otherColumn) ->
+                literals
+                |> List.tryPick (fun (owner, name, value) ->
+                    if equalsIgnoreCase owner otherOwner && equalsIgnoreCase name otherColumn then
+                        Some(BinOp(Eq, QualifiedCol(qualifier, column), value))
+                    else None)))
     match statement with
-    | Update update ->
-        let update = writableViewFirst store dbName update
-        let database = update.From.Database |> Option.defaultValue dbName
-        let viewQualifier = update.From.Alias |> Option.defaultValue update.From.Table
+    | Update original ->
+        let update = writableViewFirst store dbName original
+        let viewSources =
+            FromTable update.From :: (update.Joins |> List.map _.Table)
+            |> List.collect FromItem.leaves
+            |> List.choose (function FromTable source -> Some source | _ -> None)
+        let outerLiterals = literalEqualities update.Where
+        let outerJoins = joinedEqualities update.Joins
 
-        match tryUpdatableView store database update.From.Table with
-        | Some view when not view.UpdateJoins.IsEmpty ->
-            let written =
-                update.Assignments
-                |> List.choose (fun assignment ->
-                    if update.Joins.IsEmpty || assignment.Table |> Option.exists (equalsIgnoreCase viewQualifier) then
-                        Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
-                        |> Option.map viewTargetKey
-                    else None)
-                |> List.distinct
+        let targetsForView (viewRef: TableRef) =
+            let database = viewRef.Database |> Option.defaultValue dbName
+            let viewQualifier = viewRef.Alias |> Option.defaultValue viewRef.Table
 
-            match written with
-            | [ target ] ->
-                let viewWhere =
-                    if update.Joins.IsEmpty then
-                        update.Where |> Option.map (rewriteViewExpression view)
-                    else
-                        update.Where
-                        |> optionalConjuncts
-                        |> List.filter (fun expression ->
-                            not (Expression.exists (function
-                                | QualifiedCol(owner, _) -> not (equalsIgnoreCase owner viewQualifier)
-                                | Col _ -> true
-                                | _ -> false) expression))
-                        |> List.map (rewriteViewExpression view)
-                        |> List.fold (fun predicate expression -> combineViewPredicate predicate (Some expression)) None
+            match tryUpdatableView store database viewRef.Table with
+            | Some view when not view.UpdateJoins.IsEmpty ->
+                let written =
+                    update.Assignments
+                    |> List.choose (fun assignment ->
+                        if update.Joins.IsEmpty || assignment.Table |> Option.exists (equalsIgnoreCase viewQualifier) then
+                            Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
+                            |> Option.map viewTargetKey
+                        else None)
+                    |> List.distinct
 
-                let predicate = combineViewPredicate viewWhere view.Predicate
-
-                let literalEqualities =
-                    predicate
-                    |> optionalConjuncts
-                    |> List.choose (function
-                        | BinOp(Eq, QualifiedCol(qualifier, column), (LiteralValue _ as value))
-                        | BinOp(Eq, (LiteralValue _ as value), QualifiedCol(qualifier, column)) ->
-                            Some(qualifier.ToLowerInvariant(), column.ToLowerInvariant(), value)
-                        | _ -> None)
-
-                let joinedEqualities =
-                    view.UpdateJoins
-                    |> List.filter (fun join -> join.Kind = InnerJoin || join.Kind = StraightJoin)
-                    |> List.collect (fun join ->
-                        join.On
-                        |> conjuncts
-                        |> List.choose (function
-                            | BinOp(Eq, QualifiedCol(leftOwner, leftColumn), QualifiedCol(rightOwner, rightColumn)) ->
-                                Some((leftOwner, leftColumn), (rightOwner, rightColumn))
-                            | _ -> None))
-
-                let sourcePredicate (source: TableRef) =
-                    let qualifier = source.Alias |> Option.defaultValue source.Table
-                    joinedEqualities
-                    |> List.tryPick (fun ((leftOwner, leftColumn), (rightOwner, rightColumn)) ->
-                        let sourceColumn, otherOwner, otherColumn =
-                            if equalsIgnoreCase leftOwner qualifier then Some leftColumn, rightOwner, rightColumn
-                            elif equalsIgnoreCase rightOwner qualifier then Some rightColumn, leftOwner, leftColumn
-                            else None, "", ""
-
-                        sourceColumn
-                        |> Option.bind (fun column ->
-                            literalEqualities
-                            |> List.tryPick (fun (owner, name, value) ->
-                                if equalsIgnoreCase owner otherOwner && equalsIgnoreCase name otherColumn then
-                                    Some(BinOp(Eq, QualifiedCol(qualifier, column), value))
-                                else None)))
-
-                (FromTable view.UpdateFrom
-                 :: (view.UpdateJoins |> List.map _.Table))
-                |> List.collect FromItem.leaves
-                |> List.choose (function
-                    | FromTable source ->
-                        let sourceDatabase = source.Database |> Option.defaultValue dbName
-                        let sourceKey = sourceDatabase.ToLowerInvariant(), source.Table.ToLowerInvariant()
-                        let targetDatabase, targetTable, _ = target
-                        let targetKey = targetDatabase.ToLowerInvariant(), targetTable.ToLowerInvariant()
-
-                        if sourceKey = targetKey then None
+                match written with
+                | [ target ] ->
+                    let viewWhere =
+                        if update.Joins.IsEmpty then
+                            update.Where |> Option.map (rewriteViewExpression view)
                         else
-                            physicalFastPathTable store dbName source
-                            |> Option.map (fun table ->
-                                let rows =
-                                    tryPhysicalCandidates store registry dbName source (sourcePredicate source)
-                                    |> Option.orElseWith (fun () -> tryPhysicalCandidates store registry dbName source predicate)
-                                    |> Option.map snd
-                                    |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> Seq.toList)
+                            let local =
+                                update.Where
+                                |> optionalConjuncts
+                                |> List.filter (fun expression ->
+                                    not (Expression.exists (function
+                                        | QualifiedCol(owner, _) -> not (equalsIgnoreCase owner viewQualifier)
+                                        | Col _ -> true
+                                        | _ -> false) expression))
+                                |> List.map (rewriteViewExpression view)
+                                |> List.fold (fun predicate expression -> combineViewPredicate predicate (Some expression)) None
+                            let inferred =
+                                boundFor viewQualifier outerJoins outerLiterals
+                                |> Option.map (rewriteViewExpression view)
+                            combineViewPredicate local inferred
 
-                                sourceDatabase, source.Table, rows |> List.map fst)
-                    | _ -> None)
-                |> List.groupBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
-                |> List.map (fun (_, sources) ->
-                    let database, table, _ = List.head sources
-                    database, table, sources |> List.collect (fun (_, _, rows) -> rows) |> List.distinct)
-                |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+                    let predicate = combineViewPredicate viewWhere view.Predicate
+                    let sourceLiterals = literalEqualities predicate
+                    let sourceJoins = joinedEqualities view.UpdateJoins
+
+                    let sourcePredicate (source: TableRef) =
+                        let qualifier = source.Alias |> Option.defaultValue source.Table
+                        boundFor qualifier sourceJoins sourceLiterals
+
+                    (FromTable view.UpdateFrom :: (view.UpdateJoins |> List.map _.Table))
+                    |> List.collect FromItem.leaves
+                    |> List.choose (function
+                        | FromTable source ->
+                            let sourceDatabase = source.Database |> Option.defaultValue dbName
+                            let sourceKey = sourceDatabase.ToLowerInvariant(), source.Table.ToLowerInvariant()
+                            let targetDatabase, targetTable, _ = target
+                            let targetKey = targetDatabase.ToLowerInvariant(), targetTable.ToLowerInvariant()
+
+                            if sourceKey = targetKey then None
+                            else
+                                physicalFastPathTable store dbName source
+                                |> Option.map (fun table ->
+                                    let rows =
+                                        tryPhysicalCandidates store registry dbName source (sourcePredicate source)
+                                        |> Option.orElseWith (fun () -> tryPhysicalCandidates store registry dbName source predicate)
+                                        |> Option.map snd
+                                        |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> Seq.toList)
+
+                                    sourceDatabase, source.Table, rows |> List.map fst)
+                        | _ -> None)
+                | _ -> []
             | _ -> []
-        | _ -> []
+
+        viewSources
+        |> List.collect targetsForView
+        |> List.groupBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
+        |> List.map (fun (_, sources) ->
+            let database, table, _ = List.head sources
+            database, table, sources |> List.collect (fun (_, _, rows) -> rows) |> List.distinct)
+        |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
     | _ -> []
 
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) =

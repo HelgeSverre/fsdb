@@ -5532,6 +5532,67 @@ let tests =
               Expect.isTrue blocked (sprintf "the autocommit writer waits for its source; result %A" result)
               Expect.equal result (Affected 0UL) "the autocommit writer sees the committed predicate"
 
+          testCase "multi-view update waits on the second joined view's read source"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_multi_first (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_multi_first_source (id INT PRIMARY KEY, flag INT)" |> ignore
+              handle setup "CREATE TABLE tx_multi_second (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_multi_second_source (id INT PRIMARY KEY, flag INT)" |> ignore
+              handle setup "INSERT INTO tx_multi_first VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_multi_first_source VALUES (1, 1)" |> ignore
+              handle setup "INSERT INTO tx_multi_second VALUES (1, 0)" |> ignore
+              handle setup "INSERT INTO tx_multi_second_source VALUES (1, 1)" |> ignore
+              handle setup
+                  "CREATE VIEW tx_multi_first_view AS SELECT t.id,t.n,s.flag FROM tx_multi_first t JOIN tx_multi_first_source s ON s.id=t.id"
+              |> ignore
+              handle setup
+                  "CREATE VIEW tx_multi_second_view AS SELECT t.id,t.n,s.flag FROM tx_multi_second t JOIN tx_multi_second_source s ON s.id=t.id"
+              |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_multi_second_source SET flag=0 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "the owner holds only the second view's source"
+              let waiter, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+              let waiter, _ = handle waiter "BEGIN"
+              let sql =
+                  "UPDATE tx_multi_first_view v JOIN tx_multi_second_view w ON w.id=v.id "
+                  + "SET v.n=v.n+1,w.n=w.n+1 WHERE v.id=1 AND w.flag=1"
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter sql)
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the source owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the multi-view writer finishes"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.isTrue blocked (sprintf "the second view's source delays the writer; result %A" result)
+              Expect.equal result (Affected 0UL) "the changed source excludes both targets"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the writer commits"
+              match handle setup "SELECT n FROM tx_multi_first WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | actual -> failtestf "first target should be unchanged, got %A" actual
+              match handle setup "SELECT n FROM tx_multi_second WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | actual -> failtestf "second target should be unchanged, got %A" actual
+
+              handle setup "INSERT INTO tx_multi_first VALUES (2, 0)" |> ignore
+              handle setup "INSERT INTO tx_multi_first_source VALUES (2, 1)" |> ignore
+              handle setup "INSERT INTO tx_multi_second VALUES (2, 0)" |> ignore
+              handle setup "INSERT INTO tx_multi_second_source VALUES (2, 1)" |> ignore
+              let owner, _ = handle (create 4 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_multi_second_source SET flag=1 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "the owner holds the second view's row 1"
+              let waiter, _ = handle (create 5 store) "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter
+                          "UPDATE tx_multi_first_view v JOIN tx_multi_second_view w ON w.id=v.id SET v.n=v.n+1,w.n=w.n+1 WHERE v.id=2 AND w.flag=1")
+              let completed = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the disjoint source owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the disjoint multi-view writer finishes"
+              Expect.isTrue completed "row 2 does not wait for the second view's row 1"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 2UL) "the disjoint writer updates both targets"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the disjoint writer commits"
+
           testCase "JSON_TABLE-first view updates wait on the physical target"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

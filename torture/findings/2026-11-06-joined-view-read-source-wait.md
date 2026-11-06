@@ -34,6 +34,15 @@ the UPDATE's join order. The read-source planner applies the same view-moving
 rewrite as write-target planning before claiming rows, so this form waits and
 rebases as well.
 
+An UPDATE assigning through two joined views must also claim the second
+view's physical read source. MySQL waits when that source row is held and
+returns zero changed rows after its flag stops matching; fsdb previously
+completed immediately and changed both targets. The planner now visits every
+assigned joined view and coalesces its source claims by physical table.
+Literal equality bounds propagate through the outer inner join and then the
+view's inner join, so a row-2 write does not wait for a holder on source row 1.
+Both the contended and disjoint controls match the native oracle.
+
 The same source-row wait also holds with autocommit enabled. fsdb routes a
 joined-view UPDATE through an implicit transaction, and its post-wait result
 matches MySQL's zero affected rows without an explicit `BEGIN` on the writer.
