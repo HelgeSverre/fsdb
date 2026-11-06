@@ -1081,6 +1081,44 @@ let private legacyCircledCjkWeights unicode520 codepoint =
         [ (if unicode520 then 0x2B15 else 0x1E52) + codepoint - 0x32D0 ]
     else [ 0xFBC0; 0xB2FF ]
 
+let private legacySquaredCjkExceptionWeights unicode520 codepoint =
+    match codepoint, unicode520 with
+    | 0x3382, false -> [ 0x10F8; 0x0E33 ]
+    | 0x3382, true -> [ 0x1557; 0x120F ]
+    | 0x338C, false -> [ 0x10F8; 0x0EB9 ]
+    | 0x338C, true -> [ 0x1557; 0x12A3 ]
+    | 0x338D, false -> [ 0x10F8; 0x0EC1 ]
+    | 0x338D, true -> [ 0x1557; 0x12B0 ]
+    | 0x3395, false -> [ 0x10F8; 0x0F2E ]
+    | 0x3395, true -> [ 0x1557; 0x1330 ]
+    | 0x339B, false -> [ 0x10F8; 0x0F5B ]
+    | 0x339B, true -> [ 0x1557; 0x135F ]
+    | 0x33A7, false -> [ 0x0F5B; 0x0437; 0x0FEA ]
+    | 0x33A7, true -> [ 0x135F; 0x055F; 0x1410 ]
+    | 0x33A8, false -> [ 0x0F5B; 0x0437; 0x0FEA; 0x0E2B ]
+    | 0x33A8, true -> [ 0x135F; 0x055F; 0x1410; 0x1207 ]
+    | 0x33AE, false -> [ 0x0FC0; 0x0E33; 0x0E6D; 0x0437; 0x0FEA ]
+    | 0x33AE, true -> [ 0x13DA; 0x120F; 0x1250; 0x055F; 0x1410 ]
+    | 0x33AF, false -> [ 0x0FC0; 0x0E33; 0x0E6D; 0x0437; 0x0FEA; 0x0E2B ]
+    | 0x33AF, true -> [ 0x13DA; 0x120F; 0x1250; 0x055F; 0x1410; 0x1207 ]
+    | 0x33B2, false -> [ 0x10F8; 0x0FEA ]
+    | 0x33B2, true -> [ 0x1557; 0x1410 ]
+    | 0x33B6, false -> [ 0x10F8; 0x1044 ]
+    | 0x33B6, true -> [ 0x1557; 0x147B ]
+    | 0x33BC, false -> [ 0x10F8; 0x1051 ]
+    | 0x33BC, true -> [ 0x1557; 0x148D ]
+    | 0x33C0, false -> [ 0x0F21; 0x1109 ]
+    | 0x33C0, true -> [ 0x131E; 0x156D ]
+    | 0x33C1, false -> [ 0x0F5B; 0x1109 ]
+    | 0x33C1, true -> [ 0x135F; 0x156D ]
+    | 0x33C6, false -> [ 0x0E60; 0x0437; 0x0F21; 0x0EC1 ]
+    | 0x33C6, true -> [ 0x123D; 0x055F; 0x131E; 0x12B0 ]
+    | 0x33DE, false -> [ 0x1044; 0x0437; 0x0F5B ]
+    | 0x33DE, true -> [ 0x147B; 0x055F; 0x135F ]
+    | 0x33DF, false -> [ 0x0E33; 0x0437; 0x0F5B ]
+    | 0x33DF, true -> [ 0x120F; 0x055F; 0x135F ]
+    | _ -> []
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) =
@@ -1171,6 +1209,16 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
 
     let legacyWeight (s: string) =
         let general = name = "utf8mb4_general_ci" || name = "utf8mb3_general_ci"
+        let s =
+            if general || not (s |> Seq.exists (fun c -> c >= '\u3300' && c <= '\u33FF')) then s
+            else
+                s.EnumerateRunes()
+                |> Seq.map (fun rune ->
+                    if rune.Value >= 0x3300 && rune.Value <= 0x33FF
+                       && (legacySquaredCjkExceptionWeights false rune.Value).IsEmpty then
+                        rune.ToString().Normalize(NormalizationForm.FormKC)
+                    else rune.ToString())
+                |> String.concat ""
         let asciiWeights =
             if name = "utf8mb4_unicode_520_ci" then unicode52AsciiWeights
             else unicode40AsciiWeights
@@ -1289,6 +1337,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     if general then addWeight codepoint
                     else
                         for weight in legacyCircledCjkWeights (name = "utf8mb4_unicode_520_ci") codepoint do
+                            addWeight weight
+                | None when codepoint >= 0x3300 && codepoint <= 0x33FF ->
+                    if general then addWeight codepoint
+                    else
+                        for weight in legacySquaredCjkExceptionWeights (name = "utf8mb4_unicode_520_ci") codepoint do
                             addWeight weight
                 | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =

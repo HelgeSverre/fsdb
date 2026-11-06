@@ -1457,10 +1457,13 @@ The [enclosed CJK U+3220–U+325F audit](torture/findings/2026-11-06-legacy-encl
 adds 192 exact singleton and 192 adjacent-pair weight matches across them.
 The [circled CJK U+3280–U+32FF audit](torture/findings/2026-11-06-legacy-circled-cjk-weights.md)
 adds 384 exact singleton and 381 within-range adjacent-pair matches.
+The [squared CJK U+3300–U+33FF audit](torture/findings/2026-11-06-legacy-squared-cjk-weights.md)
+adds 3,072 exact singleton, adjacent, ideograph-pair, and `AS CHAR(4)`
+matches. This completes the audited U+3200–U+33FF exact-weight block under
+the three legacy Unicode collations.
 The U+3200–U+33FF `utf8mb4_unicode_ci` ngram and NFKC-equality corpus now
-matches all 3,568 checks at each startup size 1–10. Exact weights for the
-rest of that block from U+3300 and other legacy collation search shapes
-remain open.
+matches all 3,568 checks at each startup size 1–10. Other CJK blocks and
+legacy collation search shapes remain open.
 The [Yi U+A000–U+A4FF audit](torture/findings/2026-10-18-yi-ngram-audit.md)
 likewise finds no differences in 15,216 general-ci searches at sizes 1–2,
 plus 1,464 legacy Unicode searches over its later part at size 1.
