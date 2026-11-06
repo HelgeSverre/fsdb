@@ -2,12 +2,12 @@
 
 Fsdb is an embeddable F# database with a MySQL-compatible SQL engine and wire-protocol server for .NET 10. It can host SQL inside a .NET application, extend SQL with F# functions and tables, or serve MySQL clients from the same engine.
 
-MySQL 8.4 is the compatibility target, but some behavior differs; see the [compatibility gaps](https://github.com/HelgeSverre/fsdb/blob/main/GAPS.md) before depending on a specific MySQL feature. This is the first stable package version; the API and storage format may evolve in later minor releases.
+MySQL 8.4 is the compatibility target, but some behavior differs; see the [compatibility gaps](https://github.com/HelgeSverre/fsdb/blob/main/GAPS.md) before depending on a specific MySQL feature. The API and storage format may evolve in later minor releases.
 
 ## Install
 
 ```sh
-dotnet add package Fsdb --version 0.1.1
+dotnet add package Fsdb --version 0.1.2
 ```
 
 ## Run SQL in process
