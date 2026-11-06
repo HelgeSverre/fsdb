@@ -35,6 +35,16 @@ int main(int argc, char** argv) {
         const bg::strategy::distance::geographic<bg::strategy::andoyer> pointStrategy(wgs84);
         std::cout << "query-to-start=" << pointStrategy.apply(query, start) << '\n';
         std::cout << "query-to-end=" << pointStrategy.apply(query, end) << '\n';
+        using RadianPoint = bg::model::point<double, 2, bg::cs::geographic<bg::radian>>;
+        const double radiansPerDegree = bg::math::d2r<double>();
+        const RadianPoint queryRadians(std::stod(argv[2]) * radiansPerDegree,
+                                       std::stod(argv[1]) * radiansPerDegree);
+        const RadianPoint startRadians(std::stod(argv[4]) * radiansPerDegree,
+                                       std::stod(argv[3]) * radiansPerDegree);
+        const RadianPoint endRadians(std::stod(argv[6]) * radiansPerDegree,
+                                     std::stod(argv[5]) * radiansPerDegree);
+        std::cout << "radian-query-to-start=" << pointStrategy.apply(queryRadians, startRadians) << '\n';
+        std::cout << "radian-query-to-end=" << pointStrategy.apply(queryRadians, endRadians) << '\n';
     }
 
     if (argc != 1) return 0;

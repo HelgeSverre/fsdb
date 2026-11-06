@@ -35,7 +35,20 @@ returns 0.1651606945721662 m and at 88 degrees it returns zero, matching
 fsdb rather than MySQL. The same values result from Clang `-O0`, `-O3`, and
 `-O3 -ffp-contract=fast` builds. This rules out a simple uniform choice of
 the local Boost strategy as an explanation for all residuals. The exact
-MySQL call path and build arithmetic still need tracing.
+coordinate conversion and build arithmetic still need tracing.
+
+MySQL 8.4.11's
+[`sql/gis/distance_functor.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/distance_functor.cc)
+constructs `distance::andoyer`
+for point pairs and `geographic_cross_track<andoyer>` for other geographic
+pairs. Its
+[`Geographic_point`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/geometries.h)
+coordinates are stored in radians. The native
+probe now also constructs radian-coordinate Boost points explicitly; all
+three controls above remain unchanged. Strategy selection and a basic
+degree-versus-radian Boost coordinate type difference therefore do not
+explain the residuals. MySQL's WKT conversion and Linux build arithmetic
+remain to be checked before changing fsdb's point-distance formula.
 
 Four candidate arithmetic changes were built in Release and run through the
 full edge oracle. All were reverted:
