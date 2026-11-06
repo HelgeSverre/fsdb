@@ -5593,6 +5593,51 @@ let tests =
               Expect.equal result (Affected 2UL) "the disjoint writer updates both targets"
               Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the disjoint writer commits"
 
+          testCase "USING joined view locks only its keyed read-source row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              handle setup "CREATE TABLE tx_using_target (id INT PRIMARY KEY, n INT)" |> ignore
+              handle setup "CREATE TABLE tx_using_source (id INT PRIMARY KEY, flag INT)" |> ignore
+              handle setup "INSERT INTO tx_using_target VALUES (1, 0), (2, 0)" |> ignore
+              handle setup "INSERT INTO tx_using_source VALUES (1, 1), (2, 1)" |> ignore
+              handle setup
+                  "CREATE VIEW tx_using_view AS SELECT t.id,t.n,s.flag FROM tx_using_target t JOIN tx_using_source s USING(id)"
+              |> ignore
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_using_source SET flag=0 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "the owner holds source row 1"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_using_view SET n=n+1 WHERE id=1 AND flag=1")
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the USING writer finishes"
+              Expect.isTrue blocked "the USING writer waits for source row 1"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 0UL) "the committed source excludes row 1"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the USING writer commits"
+
+              handle setup "UPDATE tx_using_source SET flag=1 WHERE id=1" |> ignore
+              let owner, _ = handle (create 4 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_using_source SET flag=0 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "the owner holds unrelated source row 1"
+              let waiter, _ = handle (create 5 store) "BEGIN"
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE tx_using_view SET n=n+1 WHERE id=2 AND flag=1")
+              let completed = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the disjoint owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the disjoint USING writer finishes"
+              Expect.isTrue completed "row 2 does not wait for source row 1"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 1UL) "the disjoint USING writer updates row 2"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the disjoint writer commits"
+              match handle setup "SELECT id,n FROM tx_using_target ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "0" ]; [ Some "2"; Some "1" ] ]) -> ()
+              | actual -> failtestf "only the disjoint target should change, got %A" actual
+
           testCase "JSON_TABLE-first view updates wait on the physical target"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

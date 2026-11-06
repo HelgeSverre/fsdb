@@ -33322,16 +33322,27 @@ let transactionWriteReadTargets
             | BinOp(Eq, (LiteralValue _ as value), QualifiedCol(owner, column)) ->
                 Some(owner, column, value)
             | _ -> None)
-    let joinedEqualities joins =
-        joins
-        |> List.filter (fun (join: Join) -> join.Kind = InnerJoin || join.Kind = StraightJoin)
-        |> List.collect (fun join ->
-            join.On
-            |> conjuncts
-            |> List.choose (function
-                | BinOp(Eq, QualifiedCol(leftOwner, leftColumn), QualifiedCol(rightOwner, rightColumn)) ->
-                    Some((leftOwner, leftColumn), (rightOwner, rightColumn))
-                | _ -> None))
+    let joinedEqualities (first: TableRef) joins =
+        let explicit =
+            joins
+            |> List.filter (fun (join: Join) -> join.Kind = InnerJoin || join.Kind = StraightJoin)
+            |> List.collect (fun join ->
+                join.On
+                |> conjuncts
+                |> List.choose (function
+                    | BinOp(Eq, QualifiedCol(leftOwner, leftColumn), QualifiedCol(rightOwner, rightColumn)) ->
+                        Some((leftOwner, leftColumn), (rightOwner, rightColumn))
+                    | _ -> None))
+        let usingKeys =
+            match joins with
+            | [ join ] when join.Kind = InnerJoin || join.Kind = StraightJoin ->
+                let left = first.Alias |> Option.defaultValue first.Table
+                FromItem.tryQualifier join.Table
+                |> Option.map (fun right ->
+                    join.Using |> List.map (fun key -> (left, key), (right, key)))
+                |> Option.defaultValue []
+            | _ -> []
+        explicit @ usingKeys
     let boundFor qualifier equalities literals =
         equalities
         |> List.tryPick (fun ((leftOwner, leftColumn), (rightOwner, rightColumn)) ->
@@ -33354,7 +33365,7 @@ let transactionWriteReadTargets
             |> List.collect FromItem.leaves
             |> List.choose (function FromTable source -> Some source | _ -> None)
         let outerLiterals = literalEqualities update.Where
-        let outerJoins = joinedEqualities update.Joins
+        let outerJoins = joinedEqualities update.From update.Joins
 
         let targetsForView (viewRef: TableRef) =
             let database = viewRef.Database |> Option.defaultValue dbName
@@ -33394,7 +33405,7 @@ let transactionWriteReadTargets
 
                     let predicate = combineViewPredicate viewWhere view.Predicate
                     let sourceLiterals = literalEqualities predicate
-                    let sourceJoins = joinedEqualities view.UpdateJoins
+                    let sourceJoins = joinedEqualities view.UpdateFrom view.UpdateJoins
 
                     let sourcePredicate (source: TableRef) =
                         let qualifier = source.Alias |> Option.defaultValue source.Table

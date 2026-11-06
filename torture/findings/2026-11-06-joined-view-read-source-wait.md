@@ -43,6 +43,14 @@ Literal equality bounds propagate through the outer inner join and then the
 view's inner join, so a row-2 write does not wait for a holder on source row 1.
 Both the contended and disjoint controls match the native oracle.
 
+A view whose physical read join uses `USING(id)` has the same selective wait.
+MySQL waits and rechecks a held matching source row, but allows an update of
+row 2 while source row 1 is held. Fsdb previously claimed both source rows
+because the `USING` key is absent from the explicit `ON` expression. The
+candidate planner now carries the merged key across a single inner `USING`
+edge. Longer merged-key chains retain conservative claims until their key
+ownership is validated.
+
 The same source-row wait also holds with autocommit enabled. fsdb routes a
 joined-view UPDATE through an implicit transaction, and its post-wait result
 matches MySQL's zero affected rows without an explicit `BEGIN` on the writer.

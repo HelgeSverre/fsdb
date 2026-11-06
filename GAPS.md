@@ -2668,7 +2668,9 @@ implementation effort:
    keyed source row free to progress, including when the view participates in
    a larger `UPDATE ... JOIN` statement before or after a physical read table.
    Multi-target updates through two joined views now also claim the second
-   view's read source and carry a literal key bound across both joins.
+   view's read source and carry a literal key bound across both joins. A
+   single inner `USING(id)` edge in the view now narrows its source-row claim
+   without delaying a disjoint keyed update.
    Broader write shapes remain to audit.
    A [durability-matched dependency profile](benchmarks/results/2026-10-14-write-dependency-profile.md)
    found no throughput gain from removing a trigger-metadata lazy monitor in

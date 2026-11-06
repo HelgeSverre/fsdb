@@ -339,6 +339,47 @@ def main():
                 assert execute(owner, "SELECT n FROM second_target WHERE id=2") == ((1,),)
                 execute(owner, "UPDATE a SET n=0 WHERE id=2")
 
+                execute(
+                    owner,
+                    "CREATE VIEW using_source_view AS SELECT a.id,a.n,s.flag FROM a JOIN source_lock s USING(id)",
+                )
+                execute(owner, "BEGIN")
+                assert execute(owner, "UPDATE source_lock SET flag=0 WHERE id=1") == 1
+                execute(waiter, "BEGIN")
+                using_result = []
+
+                def update_using_view(row_id):
+                    using_result.append(
+                        execute(
+                            waiter,
+                            f"UPDATE using_source_view SET n=n+1 WHERE id={row_id} AND flag=1",
+                        )
+                    )
+
+                using_wait = threading.Thread(target=update_using_view, args=(1,))
+                using_wait.start()
+                time.sleep(0.2)
+                assert using_wait.is_alive(), "USING-view writer did not wait for source row"
+                execute(owner, "COMMIT")
+                using_wait.join(timeout=5)
+                assert not using_wait.is_alive(), "USING-view writer did not resume"
+                assert using_result == [0], using_result
+                execute(waiter, "COMMIT")
+                execute(owner, "UPDATE source_lock SET flag=1 WHERE id=1")
+                execute(owner, "BEGIN")
+                assert execute(owner, "UPDATE source_lock SET flag=0 WHERE id=1") == 1
+                execute(waiter, "BEGIN")
+                using_result.clear()
+                using_wait = threading.Thread(target=update_using_view, args=(2,))
+                using_wait.start()
+                using_wait.join(timeout=1)
+                assert not using_wait.is_alive(), "disjoint USING-view writer waited for row 1"
+                assert using_result == [1], using_result
+                execute(owner, "COMMIT")
+                execute(waiter, "COMMIT")
+                assert execute(owner, "SELECT n FROM a WHERE id=2") == ((1,),)
+                execute(owner, "UPDATE a SET n=0 WHERE id=2")
+
                 verify_wait(
                     owner,
                     waiter,
