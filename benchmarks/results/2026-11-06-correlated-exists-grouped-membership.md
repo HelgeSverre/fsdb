@@ -107,6 +107,13 @@ correlated integer key. A zero-to-three-row fixture and the MySQL 8.4.11
 oracle check the negated truth table, including empty grouped sources. This
 is an examined-row result, not a latency measurement.
 
+Integer-literal `COUNT(*) BETWEEN lower AND upper` and `NOT BETWEEN` now use
+the same indexed count. On the 50-by-500 fixture, `BETWEEN 19 AND 21`
+previously examined 550 rows and now stays below 200, both ungrouped and
+grouped by the correlated integer key. The zero-to-three-row fixture and
+native MySQL 8.4.11 oracle cover inclusive bounds, negation, and empty
+grouped sources. Noninteger bounds retain ordinary evaluation.
+
 ## Positive COUNT HAVING membership
 
 An `EXISTS` projection of literals with no `ORDER BY` and

@@ -9261,6 +9261,12 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | Not expression ->
             countHaving expression
             |> Option.map (fun (predicate, groupedSafe) -> (fun count -> not (predicate count)), groupedSafe)
+        | Between(count, lower, upper) when countStar count ->
+            match integerLiteral lower, integerLiteral upper with
+            | Some lower, Some upper ->
+                let predicate count = decimal count >= lower && decimal count <= upper
+                Some(predicate, upper < 1M || lower > upper)
+            | _ -> None
         | BinOp(And, left, right) ->
             match countHaving left, countHaving right with
             | Some(leftPredicate, leftGroupedSafe), Some(rightPredicate, rightGroupedSafe) ->

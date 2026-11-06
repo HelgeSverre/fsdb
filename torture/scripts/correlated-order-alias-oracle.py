@@ -100,6 +100,8 @@ for grouped in (False, True):
         ('COUNT(*)>1 AND COUNT(*)<3', lambda count: 1 < count < 3),
         ('COUNT(*)=0 OR COUNT(*)=3', lambda count: count in (0, 3)),
         ('NOT (COUNT(*)<=1 OR COUNT(*)>=3)', lambda count: not (count <= 1 or count >= 3)),
+        ('COUNT(*) BETWEEN 1 AND 2', lambda count: 1 <= count <= 2),
+        ('COUNT(*) NOT BETWEEN 1 AND 2', lambda count: not (1 <= count <= 2)),
     ):
         sql = (
             'SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id'
