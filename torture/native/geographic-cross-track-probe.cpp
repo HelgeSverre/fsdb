@@ -9,19 +9,29 @@
 
 #include <iomanip>
 #include <iostream>
+#include <string>
 
 namespace bg = boost::geometry;
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc != 1 && argc != 7) {
+        std::cerr << "usage: geographic-cross-track-probe [query-lat query-lon start-lat start-lon end-lat end-lon]\n";
+        return 2;
+    }
     using Point = bg::model::point<double, 2, bg::cs::geographic<bg::degree>>;
     const bg::srs::spheroid<double> wgs84(6378137.0, 6356752.314245179);
     const bg::strategy::distance::geographic_cross_track<bg::strategy::andoyer> strategy(wgs84);
 
     // Boost takes longitude, latitude; MySQL's SRID 4326 WKT takes latitude, longitude.
-    const Point query(1.00001, 3.0);
-    const Point start(1.0, 3.0);
-    const Point end(3.0, 3.0);
+    const Point query(argc == 7 ? std::stod(argv[2]) : 1.00001,
+                      argc == 7 ? std::stod(argv[1]) : 3.0);
+    const Point start(argc == 7 ? std::stod(argv[4]) : 1.0,
+                      argc == 7 ? std::stod(argv[3]) : 3.0);
+    const Point end(argc == 7 ? std::stod(argv[6]) : 3.0,
+                    argc == 7 ? std::stod(argv[5]) : 3.0);
     std::cout << std::setprecision(17) << "distance=" << strategy.apply(query, start, end) << '\n';
+
+    if (argc != 1) return 0;
 
     // The strategy's first direct point, captured in radians from the pinned
     // Boost trace. A one-ULP latitude change reverses the tiny reduced length.

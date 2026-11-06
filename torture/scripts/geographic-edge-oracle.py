@@ -88,6 +88,14 @@ def point_line_distance(connection, coordinates, line):
         return cursor.fetchone()[0]
 
 
+def point_pair_distance(connection, first, second):
+    point = f"ST_GeomFromText('POINT({first})',4326)"
+    other = f"ST_GeomFromText('POINT({second})',4326)"
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT ST_Distance({point},{other})")
+        return cursor.fetchone()[0]
+
+
 def near_edge_newton_control(connection, distance):
     line = "ST_GeomFromText('LINESTRING(3 1,3 3)',4326)"
     point = "ST_GeomFromText('POINT(3 1.00001)',4326)"
@@ -340,6 +348,20 @@ def main():
             print("nearest hole segment", coordinates, mysql_nearest, fsdb_nearest)
             if mysql_nearest != fsdb_nearest:
                 print("segment distances", mysql_segments, fsdb_segments)
+            hole_vertices = polygon.split("),(", 1)[1].removesuffix("))").split(",")
+            for vertex in hole_vertices[:-1]:
+                mysql_vertex = point_pair_distance(
+                    mysql_connection, coordinates, vertex
+                )
+                fsdb_vertex = point_pair_distance(fsdb_connection, coordinates, vertex)
+                if abs(mysql_vertex - fsdb_vertex) >= 0.01:
+                    print(
+                        "vertex distance",
+                        coordinates,
+                        vertex,
+                        mysql_vertex,
+                        fsdb_vertex,
+                    )
         print(
             f"{matching_hole_distances}/{len(point_distance_mismatches)} polygon distances equal hole-line distances in both engines"
         )
@@ -603,13 +625,19 @@ def main():
         for offset in (0.000001, 0.000002, 0.000005, 0.00001, 0.00002, 0.00005, 0.0001):
             point = f"3 {1 + offset:.8f}"
             line = "LINESTRING(3 1,3 3)"
-            print("near-latitude segment", point,
-                  point_line_distance(mysql_connection, point, line),
-                  point_line_distance(fsdb_connection, point, line))
+            print(
+                "near-latitude segment",
+                point,
+                point_line_distance(mysql_connection, point, line),
+                point_line_distance(fsdb_connection, point, line),
+            )
         initial_distance = 1.1164968068957286
-        print("near-edge first Newton point", initial_distance,
-              near_edge_newton_control(mysql_connection, initial_distance),
-              near_edge_newton_control(fsdb_connection, initial_distance))
+        print(
+            "near-edge first Newton point",
+            initial_distance,
+            near_edge_newton_control(mysql_connection, initial_distance),
+            near_edge_newton_control(fsdb_connection, initial_distance),
+        )
     finally:
         if fsdb_connection:
             fsdb_connection.close()
