@@ -161,12 +161,16 @@ observation claims do not serialize them.
 On a current-head full-oracle rerun, MySQL 8.4.11 twice waited for the
 pending `(id,rank_value)=(0,0)` insert while running `UPDATE ... ORDER BY
 rank_value DESC LIMIT 1` against two visible rows. This is beyond the
-selected frontier, and the maintained case currently expects no wait; the
-oracle stops there after the temporal cases. Its `EXPLAIN` uses `ix_rank`
-with a temporary table, and the lock diagnostic shows the pending primary
-record. The matching fsdb regression also expects no wait. This is a newly
-observed scheduling divergence that needs a focused descending-size matrix
-before changing the scheduler rule or the test expectation.
+selected frontier. Its `EXPLAIN` uses `ix_rank` with a temporary table, and
+the lock diagnostic shows the pending primary record. A separate native
+descending-size matrix completed the identical case without waiting, even
+after the ascending matrix ran first. Other beyond-frontier descending cases
+also varied between runs. Final rows and affected counts stayed the same.
+The maintained oracle now allows either wait result for this one observed
+variable case while still checking the committed result; the focused fsdb
+regression retains its no-wait expectation. The current evidence does not
+support a deterministic scheduler change. Run the matrix with
+`uv run --with pymysql python torture/scripts/secondary-limit-frontier-oracle.py --descending-only`.
 
 At `LIMIT 2`, the native oracle now covers another ten UPDATE/DELETE cases
 with three visible rows. Fsdb and MySQL both wait for an insert that enters

@@ -859,6 +859,8 @@ def main():
                         variable_wait = (
                             verb == "DELETE" and limit == 1
                             and direction == "ASC" and inserted_id == 3
+                        ) or (
+                            limit == 1 and direction == "DESC" and inserted_id == 0
                         )
                         if not variable_wait and waited != should_wait:
                             with owner.cursor() as cursor:

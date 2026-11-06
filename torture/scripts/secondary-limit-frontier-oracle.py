@@ -1,5 +1,6 @@
 """Probe MySQL 8.4 secondary-index ordered limited-write wait boundaries."""
 
+import argparse
 import pathlib
 import subprocess
 import tempfile
@@ -19,6 +20,10 @@ def connect(socket):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--descending-only", action="store_true")
+    parser.add_argument("--descending-after-asc", action="store_true")
+    args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="fsdb-secondary-frontier-") as directory:
         root = pathlib.Path(directory)
         data = root / "data"
@@ -70,7 +75,19 @@ def main():
                           (2, 3, "rank_value IS NOT NULL", False, None, "DELETE"),
                           (2, 3, "rank_value IS TRUE", True, 0, "UPDATE"),
                           (2, 3, "rank_value IS TRUE", True, 0, "DELETE")]
-                for limit, size, predicate, should_wait, inserted_rank, verb in cases:
+                cases = [(*case, "ASC", case[1] + 1) for case in cases]
+                descending_cases = [
+                    (limit, size, "n>=0", None, 0, verb, "DESC", 0)
+                    for limit in (1, 2)
+                    for size in (2, 3, 4, 8, 16)
+                    if size >= limit
+                    for verb in ("UPDATE", "DELETE")
+                ]
+                if args.descending_only:
+                    cases = descending_cases
+                elif args.descending_after_asc:
+                    cases.extend(descending_cases)
+                for limit, size, predicate, should_wait, inserted_rank, verb, direction, inserted_id in cases:
                     waiter = connect(socket)
                     try:
                         with owner.cursor() as cursor:
@@ -78,7 +95,7 @@ def main():
                             cursor.execute("CREATE TABLE target(id INT PRIMARY KEY,rank_value INT,n INT,KEY ix_rank(rank_value))")
                             cursor.executemany("INSERT INTO target VALUES(%s,%s,0)", [(i, i) for i in range(1, size + 1)])
                             cursor.execute("BEGIN")
-                            cursor.execute("INSERT INTO target VALUES(%s,%s,0)", (size + 1, inserted_rank))
+                            cursor.execute("INSERT INTO target VALUES(%s,%s,0)", (inserted_id, inserted_rank))
                         with waiter.cursor() as cursor:
                             cursor.execute("USE probe")
                             cursor.execute("BEGIN")
@@ -91,7 +108,7 @@ def main():
                                     started.set()
                                     where = f" WHERE {predicate}" if predicate else ""
                                     command = "UPDATE target SET n=n+1" if verb == "UPDATE" else "DELETE FROM target"
-                                    cursor.execute(f"{command}{where} ORDER BY rank_value ASC LIMIT {limit}")
+                                    cursor.execute(f"{command}{where} ORDER BY rank_value {direction} LIMIT {limit}")
                                     result["affected"] = cursor.rowcount
                                     cursor.execute("COMMIT")
                             except Exception as error:
@@ -106,20 +123,29 @@ def main():
                         thread.join(5)
                         assert not thread.is_alive(), (size, result)
                         assert result == {"affected": limit}, (limit, size, result)
-                        assert waited == should_wait, (limit, size, predicate, waited)
+                        if should_wait is not None:
+                            assert waited == should_wait, (limit, size, predicate, waited)
                         with owner.cursor() as cursor:
                             cursor.execute("SELECT id,n FROM target ORDER BY id")
                             final_rows = cursor.fetchall()
-                        selected_ids = ((size + 1, 1) if predicate == "id IN (1,2,4)"
-                                        or (predicate == "rank_value IS NOT NULL" and inserted_rank == 0)
-                                        else tuple(range(1, limit + 1)))
-                        expected_rows = (tuple((i, int(i in selected_ids)) for i in range(1, size + 2))
+                        if direction == "DESC":
+                            selected_ids = tuple(range(size - limit + 1, size + 1))
+                        elif predicate == "id IN (1,2,4)" or (
+                            predicate == "rank_value IS NOT NULL" and inserted_rank == 0
+                        ):
+                            selected_ids = (size + 1, 1)
+                        else:
+                            selected_ids = tuple(range(1, limit + 1))
+                        all_ids = tuple(sorted((*range(1, size + 1), inserted_id)))
+                        expected_rows = (tuple((i, int(i in selected_ids)) for i in all_ids)
                                          if verb == "UPDATE" else
-                                         tuple((i, 0) for i in range(1, size + 2) if i not in selected_ids))
+                                         tuple((i, 0) for i in all_ids if i not in selected_ids))
                         assert final_rows == expected_rows, (limit, size, predicate, final_rows)
-                        print(f"MySQL {version}: {verb} limit={limit} visible_rows={size} predicate={predicate or 'none'} inserted_rank={inserted_rank} wait={waited}", flush=True)
+                        print(f"MySQL {version}: {verb} limit={limit} visible_rows={size} direction={direction} predicate={predicate or 'none'} inserted_rank={inserted_rank} wait={waited}", flush=True)
                     finally:
                         waiter.close()
+                if args.descending_only or args.descending_after_asc:
+                    return
                 tie_cases = (
                     ("IS NULL", "ASC", None, 0, True, (0, 1)),
                     ("IS NULL", "ASC", None, 4, False, (1, 2)),
