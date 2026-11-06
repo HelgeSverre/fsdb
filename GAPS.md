@@ -2636,6 +2636,9 @@ implementation effort:
    high-fan-out throughput target. An [atomic fast-path trial](benchmarks/results/2026-11-06-statement-access-fast-path-trial.md)
    bypassed that monitor for ordinary statements but did not improve the
    measured 8/64/8-account throughput, so it was reverted.
+   A [per-database manager trial](benchmarks/results/2026-11-06-per-database-statement-admission-trial.md)
+   likewise preserved the measured ledgers but made the 64-account phase
+   slower than both matched baselines; its sharded admission code was reverted.
    Indexed point/range UPDATE and DELETE statements,
    plus [ordered `LIMIT 1`–`8` UPDATE and DELETE re-selection after a contended
    first candidate stops matching, moves behind another candidate (including
