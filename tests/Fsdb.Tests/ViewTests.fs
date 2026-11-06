@@ -281,6 +281,54 @@ let tests =
                   | other -> failtestf "expected %s CHECK OPTION rejection, got %A" source other
                   Expect.equal (rows store "SELECT n FROM distinct_target") [ [ Some "1" ] ] (source + " atomic rejection")
 
+          testCase "DISTINCT derived read source keeps a joined target writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE distinct_derived_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE distinct_derived_source(id INT,flag INT)"
+                    "INSERT INTO distinct_derived_target VALUES(1,0),(2,0)"
+                    "INSERT INTO distinct_derived_source VALUES(1,7),(1,7),(1,8)"
+                    "CREATE VIEW distinct_derived_joined AS SELECT t.id,t.n,d.flag FROM (SELECT DISTINCT id,flag FROM distinct_derived_source) d JOIN distinct_derived_target t ON t.id=d.id WHERE d.flag>t.n WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='distinct_derived_joined'")
+                  [ [ Some "YES" ] ]
+                  "the later physical target is writable"
+              Expect.equal
+                  (rows store "SELECT flag FROM distinct_derived_joined ORDER BY flag")
+                  [ [ Some "7" ]; [ Some "8" ] ]
+                  "the source eliminates duplicate rows"
+              Expect.equal (run store "UPDATE distinct_derived_joined SET n=n+1 WHERE id=1") (Affected 1UL) "the target changes once"
+              match run store "UPDATE distinct_derived_joined SET n=7 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM distinct_derived_target WHERE id=1") [ [ Some "1" ] ] "rejection is atomic"
+
+          testCase "window derived read source keeps a joined target writable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE window_derived_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE window_derived_source(id INT,flag INT)"
+                    "INSERT INTO window_derived_target VALUES(1,0),(2,0)"
+                    "INSERT INTO window_derived_source VALUES(1,7),(1,8)"
+                    "CREATE VIEW window_derived_joined AS SELECT t.id,t.n,d.flag FROM (SELECT id,ROW_NUMBER() OVER (PARTITION BY id ORDER BY flag) AS flag FROM window_derived_source) d JOIN window_derived_target t ON t.id=d.id WHERE t.n>=0 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='window_derived_joined'")
+                  [ [ Some "YES" ] ]
+                  "the physical target remains writable beside a window source"
+              Expect.equal
+                  (rows store "SELECT flag FROM window_derived_joined ORDER BY flag")
+                  [ [ Some "1" ]; [ Some "2" ] ]
+                  "the window result is available through the view"
+              Expect.equal (run store "UPDATE window_derived_joined SET n=n+1 WHERE id=1") (Affected 1UL) "the target changes once"
+              match run store "UPDATE window_derived_joined SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT n FROM window_derived_target WHERE id=1") [ [ Some "1" ] ] "rejection is atomic"
+
           testCase "dependent lateral UNION source keeps a joined target writable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
