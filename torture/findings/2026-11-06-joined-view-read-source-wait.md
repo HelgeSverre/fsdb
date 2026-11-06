@@ -47,19 +47,19 @@ A view whose physical read join uses `USING(id)` has the same selective wait.
 MySQL waits and rechecks a held matching source row, but allows an update of
 row 2 while source row 1 is held. Fsdb previously claimed both source rows
 because the `USING` key is absent from the explicit `ON` expression. The
-candidate planner now carries the merged key across a single inner `USING`
-edge. Longer merged-key chains retain conservative claims until their key
-ownership is validated.
+candidate planner now carries the merged key across inner `USING` edges.
 
 A single physical `NATURAL JOIN` has the same behavior. The candidate planner
 derives its shared columns from the two physical tables and carries a literal
 target key to the read source. For a view with two inner joins, it follows
 the connected key through the intermediate table. The first edge can be an
 explicit equality, `USING(id)`, or a physical `NATURAL JOIN`, followed by an
-explicit equality. MySQL and fsdb both wait on a matching held source row,
-recheck after commit, and allow
-a disjoint row to proceed. Chains containing outer or grouped joins still
-need separate ownership and null-preservation checks.
+explicit equality. Two and three successive `USING(id)` edges also carry
+the key through to the final physical source. The planner drops a first-table
+column from this path if a later nonmerged duplicate makes its owner unclear.
+MySQL and fsdb both wait on a matching held source row, recheck after commit,
+and allow a disjoint row to proceed. Chains containing outer or grouped joins
+still need separate ownership and null-preservation checks.
 
 The same source-row wait also holds with autocommit enabled. fsdb routes a
 joined-view UPDATE through an implicit transaction, and its post-wait result

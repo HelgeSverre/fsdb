@@ -33333,38 +33333,51 @@ let transactionWriteReadTargets
                     | BinOp(Eq, QualifiedCol(leftOwner, leftColumn), QualifiedCol(rightOwner, rightColumn)) ->
                         Some((leftOwner, leftColumn), (rightOwner, rightColumn))
                     | _ -> None))
-        let usingKeys =
-            match joins with
-            | join :: _ when join.Kind = InnerJoin || join.Kind = StraightJoin ->
-                let left = first.Alias |> Option.defaultValue first.Table
-                FromItem.tryQualifier join.Table
-                |> Option.map (fun right ->
-                    join.Using |> List.map (fun key -> (left, key), (right, key)))
-                |> Option.defaultValue []
+        let firstColumns =
+            physicalFastPathTable store dbName first
+            |> Option.map (fun table ->
+                table.Columns
+                |> Seq.map (fun column -> column.Name.ToLowerInvariant())
+                |> Set.ofSeq)
+        let firstOwner = first.Alias |> Option.defaultValue first.Table
+        let rec mergedKeys (available: Set<string> option) remaining =
+            match remaining with
+            | join :: tail
+                when join.Kind = NaturalJoin
+                     || ((join.Kind = InnerJoin || join.Kind = StraightJoin) && not join.Using.IsEmpty) ->
+                match FromItem.tryQualifier join.Table with
+                | None -> []
+                | Some rightOwner ->
+                    let rightColumns =
+                        match join.Table with
+                        | FromTable tableRef ->
+                            physicalFastPathTable store dbName tableRef
+                            |> Option.map (fun table ->
+                                table.Columns
+                                |> Seq.map (fun column -> column.Name.ToLowerInvariant())
+                                |> Set.ofSeq)
+                        | _ -> None
+                    let keys =
+                        if join.Kind = NaturalJoin then
+                            match available, rightColumns with
+                            | Some left, Some right -> Set.intersect left right |> Set.toList
+                            | _ -> []
+                        else
+                            join.Using
+                            |> List.map _.ToLowerInvariant()
+                            |> List.filter (fun key -> available |> Option.forall (Set.contains key))
+                    let equalities =
+                        keys |> List.map (fun key -> (firstOwner, key), (rightOwner, key))
+                    let nextAvailable =
+                        match available, rightColumns with
+                        | Some left, Some right when join.Kind = NaturalJoin -> Some left
+                        | Some left, Some right ->
+                            let merged = keys |> Set.ofList
+                            Some(Set.difference left (Set.difference right merged))
+                        | _ -> None
+                    equalities @ (nextAvailable |> Option.map (fun columns -> mergedKeys (Some columns) tail) |> Option.defaultValue [])
             | _ -> []
-        let naturalKeys =
-            match joins with
-            | join :: _ when join.Kind = NaturalJoin ->
-                match join.Table with
-                | FromTable right ->
-                    match physicalFastPathTable store dbName first, physicalFastPathTable store dbName right with
-                    | Some leftTable, Some rightTable ->
-                        let rightColumns =
-                            rightTable.Columns
-                            |> Seq.map (fun column -> column.Name.ToLowerInvariant())
-                            |> Set.ofSeq
-                        let left = first.Alias |> Option.defaultValue first.Table
-                        let right = right.Alias |> Option.defaultValue right.Table
-                        leftTable.Columns
-                        |> Seq.choose (fun column ->
-                            if Set.contains (column.Name.ToLowerInvariant()) rightColumns then
-                                Some((left, column.Name), (right, column.Name))
-                            else None)
-                        |> Seq.toList
-                    | _ -> []
-                | _ -> []
-            | _ -> []
-        explicit @ usingKeys @ naturalKeys
+        explicit @ mergedKeys firstColumns joins
     let boundFor qualifier equalities literals =
         let rec reachable (seen: Set<string * string>) (pending: (string * string) list) =
             match pending with

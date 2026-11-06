@@ -341,6 +341,8 @@ def main():
 
                 execute(owner, "CREATE TABLE source_link(id INT PRIMARY KEY)")
                 execute(owner, "INSERT INTO source_link VALUES(1),(2)")
+                execute(owner, "CREATE TABLE source_link2(id INT PRIMARY KEY)")
+                execute(owner, "INSERT INTO source_link2 VALUES(1),(2)")
                 for view_name, join_sql in (
                     ("using_source_view", "JOIN source_lock s USING(id)"),
                     ("natural_source_view", "NATURAL JOIN source_lock s"),
@@ -355,6 +357,14 @@ def main():
                     (
                         "natural_chained_source_view",
                         "NATURAL JOIN source_link l JOIN source_lock s ON s.id=l.id",
+                    ),
+                    (
+                        "double_using_source_view",
+                        "JOIN source_link l USING(id) JOIN source_lock s USING(id)",
+                    ),
+                    (
+                        "triple_using_source_view",
+                        "JOIN source_link l USING(id) JOIN source_link2 m USING(id) JOIN source_lock s USING(id)",
                     ),
                 ):
                     execute(
