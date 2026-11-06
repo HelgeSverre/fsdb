@@ -981,18 +981,50 @@ let internal geographicLinePolygonTopology referenceSystem lines polygons =
                     else
                         geographicPointPolygonPosition referenceSystem point polygons)
                 |> Array.toList))
+    // Coordinate crossings nominate intervals; their geographic midpoints
+    // decide whether the geodesic line enters the polygon between fixed samples.
+    let planarCrossingFraction (ax, ay) (bx, by) (cx, cy) (dx, dy) =
+        let rx, ry = bx - ax, by - ay
+        let sx, sy = dx - cx, dy - cy
+        let denominator = rx * sy - ry * sx
+        if denominator = 0.0 then None
+        else
+            let qx, qy = cx - ax, cy - ay
+            let along = (qx * sy - qy * sx) / denominator
+            let across = (qx * ry - qy * rx) / denominator
+            if along > 0.0 && along < 1.0 && across > 0.0 && across < 1.0 then Some along
+            else None
+    let intervalPositions =
+        lineSegments
+        |> List.collect (fun (start, endpoint) ->
+            let fractions =
+                boundarySegments
+                |> List.choose (fun (boundaryStart, boundaryEnd) ->
+                    planarCrossingFraction start endpoint boundaryStart boundaryEnd)
+                |> List.sort
+            if fractions.IsEmpty then []
+            else
+                let cuts = 0.0 :: (fractions @ [ 1.0 ])
+                let length = geographicPointDistance referenceSystem start endpoint
+                cuts
+                |> List.pairwise
+                |> List.choose (fun (lower, upper) ->
+                    if lower >= upper then None
+                    else
+                        let midpoint = geographicPointAlong referenceSystem start endpoint (length * (lower + upper) / 2.0)
+                        Some(geographicPointPolygonPosition referenceSystem midpoint polygons)))
+    let allPositions = positions @ intervalPositions
     let hasInterior =
-        positions
-        |> List.exists (function
-            | GeographicPointPolygonPosition.Interior -> true
-            | _ -> false)
+        allPositions |> List.contains GeographicPointPolygonPosition.Interior
     let hasOutside =
-        positions
+        allPositions
         |> List.exists (function GeographicPointPolygonPosition.Outside _ -> true | _ -> false)
-    let sampledContact =
-        positions
+    let hasContact =
+        allPositions
         |> List.exists (function GeographicPointPolygonPosition.Outside _ -> false | _ -> true)
-    let intersects = sampledContact && geographicLinePolygonDistance referenceSystem lines polygons = Some 0.0
+    let intersects =
+        hasContact
+        && geographicLinePolygonDistance referenceSystem lines polygons = Some 0.0
     if boundaryOnly then
         { Intersects = true
           Crosses = false

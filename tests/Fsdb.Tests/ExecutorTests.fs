@@ -19321,6 +19321,12 @@ let tests =
                     match runDefault store polarSql with
                     | ResultSet(_, [ [ Some "0"; Some "1"; Some "0"; Some "0" ] ]) -> ()
                     | result -> failtestf "zero geographic distance can coexist with a disjoint relation: %A" result
+                    let cornerLine = "ST_GeomFromText('LINESTRING(-0.01 0.010001,0.010001 -0.01)',4326)"
+                    let cornerArea = "ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326)"
+                    let cornerSql = sprintf "SELECT ST_Crosses(%s,%s),ST_Touches(%s,%s),ST_Intersects(%s,%s)" cornerLine cornerArea cornerLine cornerArea cornerLine cornerArea
+                    match runDefault store cornerSql with
+                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "1" ] ]) -> ()
+                    | result -> failtestf "a short geographic line can cross between fixed samples: %A" result
 
                 testCase "geographic crossing requires an intersection at a near-hole edge"
                 <| fun _ ->

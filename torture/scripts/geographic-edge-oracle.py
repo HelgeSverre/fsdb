@@ -119,6 +119,19 @@ def cases():
                 latitude = base + delta
                 for first, last in [(-1, 5), (-1, 1), (1, 3), (2, 5)]:
                     yield f"LINESTRING({first} {latitude},{last} {latitude})", polygon
+    for latitude_shift in (0, 40, 70, 85):
+        polygon = (
+            f"POLYGON(({latitude_shift} 0,{latitude_shift} 4,"
+            f"{latitude_shift + 4} 4,{latitude_shift + 4} 0,{latitude_shift} 0))"
+        )
+        for delta in (0.01, 0.1, 1.0):
+            for excess in (0.000001, 0.0001, 0.01):
+                near = delta + excess
+                yield (
+                    f"LINESTRING({latitude_shift - delta} {near},"
+                    f"{latitude_shift + near} {-delta})",
+                    polygon,
+                )
     yield (
         "LINESTRING(-1 0,8 0)",
         "MULTIPOLYGON(((0 0,0 3,3 3,3 0,0 0)),((5 -1,5 1,7 1,7 -1,5 -1)))",

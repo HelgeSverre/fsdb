@@ -287,3 +287,25 @@ from 12 to 11 line-relation mismatches out of 412; its 0/189 point-relation,
 4/189 near-hole distance, 0/49 polar-corner, and 0/100 seeded point-line
 distance counts are unchanged. All 33 geographic and 22 geometry tests pass.
 The 11 near-hole line disagreements still require ordered boundary events.
+
+## Short corner crossings between fixed samples
+
+A broader oracle added 36 lines whose endpoints are outside a polygon but
+whose path clips a very short interval near one exterior corner. The cases
+use four latitude bands (0°, 40°, 70°, and 85°), three line spans, and
+three corner offsets. A guard based only on fixed sampled contact made seven
+of the nine equatorial cases appear disjoint even when MySQL reported crossing;
+distance was zero in both engines. A binary segment-crossing flag found
+contact but labelled a representative line as touching.
+
+Fsdb now obtains ordered candidate boundary fractions from planar segment
+crossings, then classifies geographic midpoints in the intervals between
+them. This recovers interior evidence for 34 of the 36 corner cases without
+changing the original 412-case mismatch set or the polar disjoint result.
+The expanded native oracle reports **13/448 line-relation mismatches**:
+the former 11 near-hole cases and two very narrow corner clips at the
+equator. The point-relation and point-distance counts remain 0/189 and
+4/189, with 0/49 polar-corner and 0/100 seeded point-line distance
+differences. All 33 geographic and 22 geometry tests pass. The planar
+fractions are candidates, not a complete ellipsoidal relation strategy;
+the two narrow misses and other segment orientations remain open.
