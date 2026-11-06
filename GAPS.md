@@ -1455,6 +1455,9 @@ across the ideograph, Components, and sampled Supplement ranges at sizes 1–2;
 representative pages also match legacy Unicode, Unicode 5.2, Unicode 9.0,
 and Japanese 9.0 collations. MeCab and the untested token-size, collation,
 and query-shape combinations remain open.
+The [Tangut exact-weight follow-up](torture/findings/2026-11-06-tangut-legacy-weights.md)
+matches all 6,144 singleton and 6,143 internal adjacent-pair bytes under
+three legacy `utf8mb4` collations; the U+16FFF/U+17000 boundary is pinned.
 The [Khitan Small Script ngram audit](torture/findings/2026-10-20-khitan-ngram-audit.md)
 finds no two-column membership or relevance differences across the printable
 U+18B00–U+18CFF scalars under general and legacy Unicode collations at token

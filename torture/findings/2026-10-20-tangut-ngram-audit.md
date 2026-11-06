@@ -22,6 +22,8 @@ Supplement count reflects the harness's printable-scalar selection in that
 range. The full-size-3 and other-collation results are representative pages,
 not block-wide claims. The harness did not run standalone equality or exact
 `WEIGHT_STRING()` comparisons in this campaign.
+The [later exact-weight audit](2026-11-06-tangut-legacy-weights.md) covers
+the full U+17000–U+187FF block in three legacy collations.
 
 To reproduce the broad lane after building `Fsdb.Cli` in Release mode, run
 the maintained harness once per 256-scalar page from `17000:17100` through
@@ -38,5 +40,5 @@ uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py \
 
 This closes the sampled Tangut two-column ngram parity question for the
 reported ranges, collations, token sizes, and search modes. MeCab, other
-token sizes, full-block coverage under the other collations, exact legacy
-weight bytes, and other CJK query shapes remain open.
+token sizes, full-block ngram coverage under the other collations, and other
+CJK query shapes remain open.
