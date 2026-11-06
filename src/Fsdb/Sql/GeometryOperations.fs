@@ -70,20 +70,15 @@ let internal minimumPointSetDistance pointDistance firstPoints secondPoints =
 let internal sphericalPointSetDistance radius toRadians firstPoints secondPoints =
     minimumPointSetDistance (sphericalPointDistance radius toRadians) firstPoints secondPoints
 
-/// MySQL delegates geographic point distance to Boost.Geometry's first-order
-/// Andoyer strategy; more exact geodesic formulae produce observably different
-/// results and therefore are not interchangeable here.
-let internal geographicPointDistance referenceSystem first second =
+/// Boost's first-order Andoyer inverse consumes radians. Cross-track Newton
+/// points must stay in radians here; a degree round trip changes edge distances.
+let private geographicPointDistanceRadians referenceSystem first second =
     match referenceSystem.SemiMajorAxis, referenceSystem.InverseFlattening with
     | Some semiMajorAxis, Some inverseFlattening ->
         let flattening = 1.0 / inverseFlattening
         let firstLatitude, firstLongitude = first
         let secondLatitude, secondLongitude = second
-        // MySQL converts each stored geographic coordinate with the SRS
-        // angular unit before Boost computes the Andoyer inverse.
-        let firstLatitude = mysqlRadians firstLatitude
-        let secondLatitude = mysqlRadians secondLatitude
-        let longitudeDelta = mysqlRadians secondLongitude - mysqlRadians firstLongitude
+        let longitudeDelta = secondLongitude - firstLongitude
         let sinFirst, cosFirst = sin firstLatitude, cos firstLatitude
         let sinSecond, cosSecond = sin secondLatitude, cos secondLatitude
 
@@ -127,6 +122,13 @@ let internal geographicPointDistance referenceSystem first second =
         tinyMeridionalDistance
         |> Option.defaultValue (semiMajorAxis * (angularDistance + flatteningCorrection))
     | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
+
+/// MySQL converts each geographic coordinate with its SRS angular unit before
+/// calling Boost's Andoyer strategy.
+let internal geographicPointDistance referenceSystem (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
+    geographicPointDistanceRadians referenceSystem
+        (mysqlRadians firstLatitude, mysqlRadians firstLongitude)
+        (mysqlRadians secondLatitude, mysqlRadians secondLongitude)
 
 /// Boost's default geographic line interpolation uses Andoyer for the initial
 /// azimuth and first-order Thomas for the direct point. Keep this paired with
@@ -287,16 +289,17 @@ let private geographicCrossTrackDistance referenceSystem point start endpoint =
     let projectedLongitude =
         lo1 + atan2 (sin a12Spherical * sin angular * cos la1)
                         (cos angular - sin la1 * sin projectedLatitude)
-    let projected = projectedLatitude * 180.0 / Math.PI, projectedLongitude * 180.0 / Math.PI
-    let mutable position = geographicPointDistance referenceSystem start projected
+    let mutable position = geographicPointDistanceRadians referenceSystem
+                               (la1, lo1) (projectedLatitude, projectedLongitude)
     let mutable best = Double.PositiveInfinity
     let mutable previous = -1.0
     let mutable iteration = 0
     let mutable keepGoing = true
     while keepGoing && iteration < 100 do
         let onLatitude, onLongitude = geographicPointAlongRadians referenceSystem start endpoint position
-        let onSegment = onLatitude * 180.0 / Math.PI, onLongitude * 180.0 / Math.PI
-        let distance = geographicPointDistance referenceSystem onSegment point
+        let distance = geographicPointDistanceRadians referenceSystem
+                           (onLatitude, onLongitude)
+                           (mysqlRadians lat3, mysqlRadians lon3)
         let forward, reverse = geographicSegmentAzimuthsRadians flattening
                                     (onLatitude, onLongitude) (la3, lo3)
         let towardEnd = geographicSegmentAzimuthsRadians flattening

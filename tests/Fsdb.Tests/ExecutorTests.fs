@@ -19296,6 +19296,7 @@ let tests =
                           "ST_Distance(ST_GeomFromText('POINT(-20 100)',4326),ST_GeomFromText('LINESTRING(-10 90,-30 110)',4326))", 71223.12145876266, 0.01
                           "ST_Distance(ST_GeomFromText('POINT(2.5 1.00001)',4326),ST_GeomFromText('LINESTRING(1 1,3 1)',4326))", 2.168963456525661, 0.01
                           "ST_Distance(ST_GeomFromText('POINT(3 1.00001)',4326),ST_GeomFromText('LINESTRING(3 1,3 3)',4326))", 0.0, 0.000000001
+                          "ST_Distance(ST_GeomFromText('POINT(86.00001 1.00001)',4326),ST_GeomFromText('LINESTRING(86 1,88 1)',4326))", 0.0, 0.000000001
                           "ST_Distance(ST_GeomFromText('POINT(19.137255381 -154.411051972)',4326),ST_GeomFromText('LINESTRING(20.914019769 -151.996558329,16.414606136 -157.532343566)',4326))", 11467.670267413752, 0.01
                           "ST_Distance(ST_GeomFromText('POINT(57.483429302 -136.870890788)',4326),ST_GeomFromText('LINESTRING(58.826935156 -132.179573559,57.265371549 -141.583629170)',4326))", 71050.4664908598, 0.01
                           "ST_Distance(ST_GeomFromText('POINT(0 150)',4326),ST_GeomFromText('LINESTRING(10 20,10 150)',4326))", 1105843.247087976, 0.01 ]
@@ -19373,6 +19374,8 @@ let tests =
                           "POINT(15 180)", "POLYGON((10 170,10 -170,20 -170,20 170,10 170))", 0.0
                           "POINT(85 0)", "POLYGON((80 -120,80 0,80 120,80 -120))", 0.0
                           "POINT(41.00001 2.99999)", "POLYGON((40 0,40 4,44 4,44 0,40 0),(41 1,43 1,43 3,41 3,41 1))", 0.8351905929261193
+                          "POINT(43 2.99999)", "POLYGON((40 0,40 4,44 4,44 0,40 0),(41 1,43 1,43 3,41 3,41 1))", 0.16487191356485287
+                          "POINT(86.00001 1.00001)", "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))", 0.0
                           "MULTIPOINT((10 10),(1 1))", "MULTIPOLYGON(((0 0,0 2,2 2,2 0,0 0)),((20 20,20 22,22 22,22 20,20 20)))", 0.0 ]
                     for point, polygon, expected in cases do
                         for first, second in [ point, polygon; polygon, point ] do

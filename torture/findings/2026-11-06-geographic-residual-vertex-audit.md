@@ -95,3 +95,26 @@ the MySQL line distance, including MySQL's zero result at `86.00001 1.00001`.
 This makes the native strategy a useful arithmetic reference for the six
 segment cases, while the separate polygon classification must be addressed
 for the seventh.
+
+## Radian-native Newton distances
+
+The cross-track routine previously converted the spherical projected point
+and each Thomas direct point from radians to degrees, then back to radians
+inside its Andoyer distance helper. Keeping both calls in radians reduces
+the full near-hole polygon-distance oracle from 7 to 5 mismatches. The
+`43 2.99999` and `86.00001 1.00001` polygon cases now agree with MySQL.
+The remaining five comprise four hole-segment distance differences (the two
+`71.00001` points, `72 2.99999`, and `88 1.00001`) plus the `88 2.99999`
+polygon classification difference. The line oracle still reports 12/412
+relation mismatches; the point relation and seeded point-line controls are
+unchanged.
+
+The 71° trace shows fsdb's first Newton distance at 0.3566792078 m and its
+next at 0.3691980567 m. Native Boost with SRS-radian input begins at
+0.3691980556 m, which MySQL returns. The initial spherical position and
+first direct point still differ enough to change the selected minimum.
+Changing all cross-track entry coordinates to SRS radians did not improve
+the full oracle, so that trial was reverted. A standalone `POINT(43 2.99999)`
+to `LINESTRING(43 1,43 3)` control also remains different even though the
+polygon case agrees; the polygon result must not be used to claim general
+point-line parity.
