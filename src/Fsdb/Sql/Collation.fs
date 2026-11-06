@@ -1687,6 +1687,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                         let weight = legacyCjkSmallFormWeight (name = "utf8mb4_unicode_520_ci") codepoint
                         if weight = 0 then addImplicit 0xFBC0 codepoint
                         else addWeight weight
+                | None when general && codepoint >= 0xFF00 && codepoint <= 0xFFEF ->
+                    addWeight (if codepoint >= 0xFF41 && codepoint <= 0xFF5A then codepoint - 0x20 else codepoint)
                 | None when codepoint >= 0x20 && codepoint <= 0x7E ->
                     let weight =
                         let uppercase =

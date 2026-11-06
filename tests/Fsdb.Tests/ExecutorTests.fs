@@ -669,7 +669,11 @@ let tests =
                     let enclosedHistorical = System.Char.ConvertFromUtf32 0x1F12E
                     let regionalIndicator = System.Char.ConvertFromUtf32 0x1F1E6
                     let cases =
-                        [ "\u3B00\u3B01", "utf8mb4_general_ci", "3B003B01"
+                        [ "\uFF00\uFF01", "utf8mb4_general_ci", "FF00FF01"
+                          "\uFF21\uFF41", "utf8mb4_general_ci", "FF21FF21"
+                          "\uFF9E\uFF9F", "utf8mb4_general_ci", "FF9EFF9F"
+                          "\uFFEF", "utf8mb3_general_ci", "FFEF"
+                          "\u3B00\u3B01", "utf8mb4_general_ci", "3B003B01"
                           "\u3B00\u3B01", "utf8mb4_unicode_ci", "FB80BB00FB80BB01"
                           "\u3B00\u3B01", "utf8mb3_general_ci", "3B003B01"
                           "\u3B00\u3B01", "utf8mb3_unicode_ci", "FB80BB00FB80BB01"
