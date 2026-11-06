@@ -186,3 +186,17 @@ Intersects=1` for the 0° and 40° near-hole controls and `0,0,0` for the
 conversion instead gives a different polar result. The remaining work is
 therefore in the line/polygon relation strategy and coordinate conversion;
 point sampling alone is not a sufficient parity test for that path.
+
+## Comparable-haversine initialization trial
+
+An integrated cross-track trial replaced fsdb's spherical initial guess with
+Boost 1.84's comparable-haversine cross-track calculation, spherical-direct
+projection, and MySQL SRID 4326 radian coordinates. The full edge oracle
+still found 12/412 line-relation mismatches, 0/189 point-relation mismatches,
+and 4/189 near-hole polygon-distance mismatches. It fixed the old
+`88 1.00001` distance case but introduced `3 1.00001`; the two
+`71.00001` cases and `72 2.99999` remained. The 100 seeded point-line
+distances and polar-corner controls still matched. The trial was reverted.
+Matching only the spherical initialization is insufficient; the next trace
+should compare the first Thomas direct point and Andoyer inverse result from
+the same coordinate and arithmetic path.
