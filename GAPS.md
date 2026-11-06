@@ -2369,8 +2369,8 @@ now use the indexed count when each leaf is eligible, including zero-count
 ungrouped results and conservative grouped eligibility. `NOT` around eligible
 comparisons and combinations also uses the indexed count. Integer-literal
 `COUNT(*) BETWEEN` and `NOT BETWEEN` bounds use it as well, as do
-integer-literal `COUNT(*) IN` and `NOT IN` lists. Other HAVING predicates
-remain open.
+integer-literal `COUNT(*) IN` and `NOT IN` lists and `COUNT(*) IS TRUE`/`IS FALSE`.
+Other HAVING predicates remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell

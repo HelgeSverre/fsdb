@@ -9261,6 +9261,8 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         | Not expression ->
             countHaving expression
             |> Option.map (fun (predicate, groupedSafe) -> (fun count -> not (predicate count)), groupedSafe)
+        | IsTrue count when countStar count -> Some((fun count -> count > 0), true)
+        | IsFalse count when countStar count -> Some((fun count -> count = 0), true)
         | Between(count, lower, upper) when countStar count ->
             match integerLiteral lower, integerLiteral upper with
             | Some lower, Some upper ->

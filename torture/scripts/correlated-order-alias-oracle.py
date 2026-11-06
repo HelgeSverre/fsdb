@@ -104,6 +104,8 @@ for grouped in (False, True):
         ('COUNT(*) NOT BETWEEN 1 AND 2', lambda count: not (1 <= count <= 2)),
         ('COUNT(*) IN (0,2)', lambda count: count in (0, 2)),
         ('COUNT(*) NOT IN (0,2)', lambda count: count not in (0, 2)),
+        ('COUNT(*) IS TRUE', lambda count: count > 0),
+        ('COUNT(*) IS FALSE', lambda count: count == 0),
     ):
         sql = (
             'SELECT o.id,EXISTS(SELECT 1 FROM count_inner i WHERE i.outer_id=o.id'

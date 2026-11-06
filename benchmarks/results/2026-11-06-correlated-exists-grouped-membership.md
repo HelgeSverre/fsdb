@@ -121,6 +121,12 @@ The zero-to-three-row fixture and native MySQL 8.4.11 oracle cover matching
 and nonmatching counts, negation, and empty grouped sources. Lists with
 noninteger members retain ordinary evaluation.
 
+`COUNT(*) IS TRUE` and `IS FALSE` also reuse the indexed count. The
+50-by-500 fixture's `IS TRUE` case fell from 550 examined rows to fewer
+than 200, both ungrouped and grouped by the correlated key. The
+zero-to-three-row fixture and native MySQL 8.4.11 oracle cover both truth
+tests and the empty grouped-source distinction.
+
 ## Positive COUNT HAVING membership
 
 An `EXISTS` projection of literals with no `ORDER BY` and

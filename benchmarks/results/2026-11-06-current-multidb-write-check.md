@@ -21,3 +21,16 @@ access monitor remains the measured design target from that trial.
 Run `uv run --with pymysql benchmarks/scripts/external-multidb-write.py
 --hot-accounts 8 64 8` after building the Release CLI. The server and its
 databases are disposable.
+
+## Host-contended rerun
+
+The Release CLI at `99d2fb7a` passed the same eight-database 8/64/8
+workload, again with 412 committed transfers per database and verified
+balances and ledgers in every phase. Wall times were 21.23, 22.51, and
+20.65 seconds; server CPU times were 30.50, 31.18, and 25.25 seconds.
+At the time, host load average was 57.42 over one minute, unrelated
+rendering and TypeScript processes were consuming cores, and the data
+volume was 98% full with 20 GiB available. The CPU times remain near the
+earlier run while wall times roughly doubled. This run confirms correctness
+under host contention but cannot isolate an fsdb scheduling regression or
+support a scheduling-policy change.
