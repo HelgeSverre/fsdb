@@ -23,6 +23,7 @@ def connect(socket):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--descending-only", action="store_true")
+    parser.add_argument("--temporal-only", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="fsdb-limited-write-") as directory:
         root = pathlib.Path(directory)
@@ -488,21 +489,30 @@ def main():
                     finally:
                         waiter.close()
 
-                date_cases = (
-                    ("ASC", "2026-01-01", True, "2026-01-01"),
-                    ("ASC", "2026-01-04", False, "2026-01-02"),
-                    ("DESC", "2026-01-04", True, "2026-01-04"),
-                    ("DESC", "2026-01-01", False, "2026-01-03"),
+                temporal_types = (
+                    ("DATE", "2026-01-02", "2026-01-03", "2026-01-01", "2026-01-04"),
+                    ("TIME", "10:00:00", "11:00:00", "09:00:00", "12:00:00"),
+                    ("DATETIME", "2026-01-02 10:00:00", "2026-01-03 10:00:00", "2026-01-01 10:00:00", "2026-01-04 10:00:00"),
+                    ("TIMESTAMP", "2026-01-02 10:00:00", "2026-01-03 10:00:00", "2026-01-01 10:00:00", "2026-01-04 10:00:00"),
                 )
-                for verb, (direction, inserted_id, should_wait, changed_id) in itertools.product(
-                    ("UPDATE", "DELETE"), date_cases
+                temporal_cases = (
+                    ("ASC", "early", True, "early"),
+                    ("ASC", "late", False, "first"),
+                    ("DESC", "late", True, "late"),
+                    ("DESC", "early", False, "second"),
+                )
+                for temporal_type, verb, (direction, inserted_name, should_wait, changed_name) in itertools.product(
+                    temporal_types, ("UPDATE", "DELETE"), temporal_cases
                 ):
+                    column_type, first, second, early, late = temporal_type
+                    values = {"first": first, "second": second, "early": early, "late": late}
+                    inserted_id, changed_id = values[inserted_name], values[changed_name]
                     waiter = connect(socket)
                     try:
                         with owner.cursor() as cursor:
                             cursor.execute("DROP TABLE IF EXISTS target")
-                            cursor.execute("CREATE TABLE target(id DATE PRIMARY KEY,n INT)")
-                            cursor.execute("INSERT INTO target VALUES('2026-01-02',0),('2026-01-03',0)")
+                            cursor.execute(f"CREATE TABLE target(id {column_type} PRIMARY KEY,n INT)")
+                            cursor.execute(f"INSERT INTO target VALUES('{first}',0),('{second}',0)")
                             cursor.execute("BEGIN")
                             cursor.execute(f"INSERT INTO target VALUES('{inserted_id}',0)")
                         with waiter.cursor() as cursor:
@@ -539,12 +549,16 @@ def main():
                         assert waited == should_wait, (statement, inserted_id, waited)
                         expected = tuple(
                             (id, 1 if id == changed_id else 0)
-                            for id in sorted(("2026-01-02", "2026-01-03", inserted_id))
+                            for id in sorted((first, second, inserted_id))
                             if verb == "UPDATE" or id != changed_id
                         )
                         assert actual == expected, (statement, inserted_id, actual, expected)
                     finally:
                         waiter.close()
+
+                if args.temporal_only:
+                    print(f"MySQL {version}: {len(temporal_types) * len(temporal_cases) * 2} temporal primary-key pending-insert cases matched")
+                    return
 
                 waiter = connect(socket)
                 try:
@@ -978,7 +992,7 @@ def main():
                 print(f"MySQL {version}: {cases} ordered LIMIT 1–8 writes reselected after updates/deletes; "
                       f"{filesort_cases} primary-key and {keyless_filesort_cases} keyless "
                       "filesort-expression pending-insert cases; "
-                      f"{len(insert_cases) * 4} integer, {len(date_cases) * 2} DATE, "
+                      f"{len(insert_cases) * 4} integer, {len(temporal_cases) * len(temporal_types) * 2} temporal, "
                       f"{len(composite_cases) * 2} composite, {text_case_count} text, "
                       f"{composite_text_count} composite text, and {len(secondary_cases) * 2} secondary-order "
                       "pending-insert cases covered ordered frontiers; six literal-NULL comparisons "

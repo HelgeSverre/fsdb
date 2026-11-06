@@ -2450,7 +2450,8 @@ implementation effort:
    a descending secondary sort), or is
    deleted](torture/findings/2026-10-16-limited-ordered-write-rebase.md)
    with and without a secondary predicate index, including two successive owner waits, plus pending inserts across
-   integer, valid `DATE`, [text](torture/findings/2026-10-16-limited-ordered-write-rebase.md#text-primary-keys),
+   integer, valid `DATE`, `TIME`, `DATETIME`, `TIMESTAMP`,
+   [text](torture/findings/2026-10-16-limited-ordered-write-rebase.md#text-primary-keys),
    audited two-part integer, and [text-plus-integer](torture/findings/2026-10-16-limited-ordered-write-rebase.md#composite-text-and-integer-primary-keys) primary-key order
    frontiers, plus [filesort `id+0` ordering at LIMIT 1–4, 8, 16, and 32](torture/findings/2026-10-16-limited-ordered-write-rebase.md#filesort-expression-order)
    that waits for pending primary-key inserts, plus audited joined UPDATE and DELETE statements with named

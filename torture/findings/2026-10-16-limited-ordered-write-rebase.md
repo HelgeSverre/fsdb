@@ -71,6 +71,14 @@ claim and compares it with visible candidate dates at the `LIMIT` frontier.
 The focused transaction regression covers the eight cases. Zero dates and
 other order expressions remain outside this DATE audit.
 
+The same pending-insert frontier check also passes for `TIME`, `DATETIME`,
+and `TIMESTAMP` primary keys. The focused fsdb regression and native MySQL
+8.4.11 oracle cover 32 total temporal cases: each type has ascending and
+descending `LIMIT 1` UPDATE/DELETE writes with an insert on either side of
+the visible frontier. Every case agrees on whether the writer waits, the
+affected count, and the final rows. Run the native subset with
+`uv run --with pymysql python torture/scripts/limited-ordered-write-rebase-oracle.py --temporal-only`.
+
 ## Composite primary keys
 
 An uncommitted insert into `PRIMARY KEY(a,b)` can cross the result frontier of
@@ -149,6 +157,16 @@ inserts, a pending NULL ordering value, affected counts, and final rows.
 Distinct primary-key inserts with
 the same non-unique secondary value remain independent on both engines; the
 observation claims do not serialize them.
+
+On a current-head full-oracle rerun, MySQL 8.4.11 twice waited for the
+pending `(id,rank_value)=(0,0)` insert while running `UPDATE ... ORDER BY
+rank_value DESC LIMIT 1` against two visible rows. This is beyond the
+selected frontier, and the maintained case currently expects no wait; the
+oracle stops there after the temporal cases. Its `EXPLAIN` uses `ix_rank`
+with a temporary table, and the lock diagnostic shows the pending primary
+record. The matching fsdb regression also expects no wait. This is a newly
+observed scheduling divergence that needs a focused descending-size matrix
+before changing the scheduler rule or the test expectation.
 
 At `LIMIT 2`, the native oracle now covers another ten UPDATE/DELETE cases
 with three visible rows. Fsdb and MySQL both wait for an insert that enters
