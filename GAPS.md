@@ -1619,8 +1619,10 @@ general-collation ngram corpus now has only four size-1 relevance differences,
 with sizes 2–10 matching all audited searches.
 The [U+FF00–U+FFEF exact-weight audit](torture/findings/2026-11-06-fullwidth-halfwidth-general-weights.md)
 now matches all 240 singleton weights in each `utf8mb4_general_ci` and
-`utf8mb3_general_ci`; the corresponding legacy Unicode-collation weights
-remain open.
+`utf8mb3_general_ci`; the U+FF00–U+FFFF legacy Unicode-collation tables now
+match all 256 singleton weights across three collations. The audited
+U+FF00–U+FF9F two-column ngram and NFKC-equality corpus also matches both
+Unicode collations at token sizes 1 and 2.
 The [compatibility-ideograph probe](torture/findings/2026-10-17-general-ci-compatibility-ideographs.md)
 separates U+F900–U+FAFF from unified Han in `utf8mb4_general_ci`. The maintained
 two-column corpus now matches MySQL 8.4.11 in membership and relevance for

@@ -673,6 +673,12 @@ let tests =
                           "\uFF21\uFF41", "utf8mb4_general_ci", "FF21FF21"
                           "\uFF9E\uFF9F", "utf8mb4_general_ci", "FF9EFF9F"
                           "\uFFEF", "utf8mb3_general_ci", "FFEF"
+                          "\uFF00", "utf8mb4_unicode_ci", "FBC1FF00"
+                          "\uFF21\uFF41", "utf8mb4_unicode_ci", "0E330E33"
+                          "\uFF9E\uFF9F", "utf8mb3_unicode_ci", ""
+                          "\uFFFC\uFFFD", "utf8mb4_unicode_ci", "0DC50DC6"
+                          "\uFFFC\uFFFD", "utf8mb4_unicode_520_ci", "110E110F"
+                          "\uFFEF\uFFF0", "utf8mb4_unicode_ci", "FBC1FFEFFBC1FFF0"
                           "\u3B00\u3B01", "utf8mb4_general_ci", "3B003B01"
                           "\u3B00\u3B01", "utf8mb4_unicode_ci", "FB80BB00FB80BB01"
                           "\u3B00\u3B01", "utf8mb3_general_ci", "3B003B01"
@@ -825,6 +831,12 @@ let tests =
                         | ResultSet(_, [ [ Some actual ] ]) ->
                             Expect.equal actual expected (sprintf "legacy weight for %s under %s" sample collation)
                         | other -> failtestf "expected legacy weight for %s, got %A" sample other
+
+                    match runDefault store "SELECT _utf8mb4'！' COLLATE utf8mb4_unicode_520_ci = _utf8mb4'!' COLLATE utf8mb4_unicode_520_ci, _utf8mb4'Ａ' COLLATE utf8mb4_unicode_520_ci = _utf8mb4'A' COLLATE utf8mb4_unicode_520_ci" with
+                    | ResultSet(_, [ [ Some punctuation; Some letter ] ]) ->
+                        Expect.equal punctuation "1" "Unicode 5.2 equality folds fullwidth punctuation"
+                        Expect.equal letter "1" "Unicode 5.2 equality folds fullwidth letters"
+                    | other -> failtestf "expected fullwidth equality row, got %A" other
 
                     match runDefault store "SELECT HEX(WEIGHT_STRING('a\u3B00' COLLATE utf8mb4_unicode_ci AS CHAR(1))), HEX(WEIGHT_STRING('a\u3B00' COLLATE utf8mb4_unicode_ci AS CHAR(4)))" with
                     | ResultSet(_, [ [ Some truncated; Some padded ] ]) ->
