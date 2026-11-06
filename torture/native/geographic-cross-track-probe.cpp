@@ -54,6 +54,7 @@ int main(int argc, char** argv) {
                                      std::stod(argv[3]) * mysqlAngularUnit);
         const RadianPoint mysqlEnd(std::stod(argv[6]) * mysqlAngularUnit,
                                    std::stod(argv[5]) * mysqlAngularUnit);
+        std::cout << "srs-cross-track=" << strategy.apply(mysqlQuery, mysqlStart, mysqlEnd) << '\n';
         std::cout << "srs-query-to-start=" << pointStrategy.apply(mysqlQuery, mysqlStart) << '\n';
         std::cout << "srs-query-to-end=" << pointStrategy.apply(mysqlQuery, mysqlEnd) << '\n';
         const double firstLatitude = std::stod(argv[1]) * mysqlAngularUnit;

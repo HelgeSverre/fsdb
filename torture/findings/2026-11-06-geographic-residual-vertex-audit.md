@@ -81,7 +81,17 @@ fsdb now uses the SRS angular unit for each point-to-point coordinate and
 the corresponding fused Andoyer cosine sum. The five near-vertex regression
 cases match MySQL, and all five vertex diagnostics in the edge oracle agree.
 The full oracle falls from 8 to 7 near-hole point-distance mismatches, with
-the other baseline counts unchanged. Applying the SRS unit to the current
+the other baseline counts unchanged. Applying the SRS unit only to the current
 cross-track entry coordinates increased the near-hole distance count to 9;
-that trial was reverted. The remaining seven cases are segment-strategy
-residuals, not direct vertex-distance residuals.
+that incomplete trial was reverted. Six of the remaining seven polygon
+distances equal hole-line distances in both engines and point to the segment
+strategy. In the seventh (`88 2.99999`), the hole-line distances agree at
+0.09535991608716497 m, but fsdb classifies the point as inside the polygon
+and returns zero. That case is a polygon topology residual.
+
+The native Boost probe can now run cross-track directly on SRS-radian points.
+For representative 43°, 71°, 72°, and 86° residual segments, this returns
+the MySQL line distance, including MySQL's zero result at `86.00001 1.00001`.
+This makes the native strategy a useful arithmetic reference for the six
+segment cases, while the separate polygon classification must be addressed
+for the seventh.
