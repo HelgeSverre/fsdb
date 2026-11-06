@@ -1573,6 +1573,13 @@ ranked Han order in three audited blocks (1,020, 4,092, and 4,088
 characters); a fourth 4,087-character block differs by one moved
 character. This is a candidate data source for a future production
 tailoring, with mixed-script ordering and key consistency still unverified.
+An [indexed-range tailoring probe](torture/findings/2026-11-06-zh-tailoring-weight-probe.md)
+reduced a 400-value mixed corpus from 193 to 8 order inversions by permuting
+Han characters into host ICU rank positions, but still left 13 of 400 indexed
+ranges wrong. MySQL singleton weights compose exactly for 406 of 409 tested
+strings; three tailored Chinese sequences require contraction handling.
+The permutation was rejected as a production fix. A consistent Chinese
+weight source across Han and other scripts remains necessary.
 The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
 also matches MySQL's distinct U+2200–U+22FF primary weights in the same
 two-column ngram lane at token sizes 1–10.

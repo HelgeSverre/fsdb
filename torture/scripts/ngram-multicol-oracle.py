@@ -207,9 +207,79 @@ def order_difference(expected, actual):
     return first, displaced, inversions
 
 
+def probe_han_permutation(mysql_connection, fsdb_connection, collation,
+                          legacy_chars, expected_order, actual_order):
+    mysql_chars = [legacy_chars[row[0] - 1] for row in expected_order]
+    host_chars = [legacy_chars[row[0] - 1] for row in actual_order]
+    replacement = dict(zip(mysql_chars, host_chars))
+    samples = legacy_chars + ["a", "A", "中", "文", "!", "〇", "0", "é", "ア", "가", "㐀", "⼀", "神", "𠀀", "😀", "e\u0301"]
+    for char in legacy_chars[::max(1, len(legacy_chars) // 32)]:
+        samples.extend(("A" + char, char + "A", "文" + char, char + "文"))
+
+    for connection, transform in (
+        (mysql_connection, lambda value: value),
+        (fsdb_connection, lambda value: "".join(replacement.get(char, char) for char in value)),
+    ):
+        query(connection, f"CREATE TABLE tailor_probe(id INT PRIMARY KEY,value VARCHAR(20) COLLATE {collation},KEY idx_value(value))")
+        for index, value in enumerate(samples, 1):
+            query(connection, "INSERT INTO tailor_probe VALUES(%s,%s)", (index, transform(value)))
+    query(fsdb_connection, f"CREATE TABLE baseline_probe(id INT PRIMARY KEY,value VARCHAR(20) COLLATE {collation},KEY idx_value(value))")
+    for index, value in enumerate(samples, 1):
+        query(fsdb_connection, "INSERT INTO baseline_probe VALUES(%s,%s)", (index, value))
+
+    order_sql = "SELECT id FROM tailor_probe ORDER BY value,id"
+    mysql_order = query(mysql_connection, order_sql)
+    host_order = query(fsdb_connection, order_sql)
+    baseline_order = query(fsdb_connection, "SELECT id FROM baseline_probe ORDER BY value,id")
+    _, baseline_displaced, baseline_inversions = order_difference(mysql_order, baseline_order)
+    print(f"Host ICU baseline: {len(samples)} mixed values; {baseline_displaced} displaced, {baseline_inversions} inversions")
+    if mysql_order == host_order:
+        first, displaced, inversions = None, 0, 0
+    else:
+        first, displaced, inversions = order_difference(mysql_order, host_order)
+    print(f"Han permutation: {len(samples)} mixed values; {displaced} displaced, {inversions} inversions")
+    if displaced:
+        print("  first order difference", first,
+              samples[mysql_order[first][0] - 1], samples[host_order[first][0] - 1])
+    range_sql = "SELECT id FROM tailor_probe FORCE INDEX(idx_value) WHERE value < %s ORDER BY id"
+    baseline_range_sql = "SELECT id FROM baseline_probe FORCE INDEX(idx_value) WHERE value < %s ORDER BY id"
+    range_mismatches = []
+    baseline_range_mismatches = []
+    thresholds = samples
+    for threshold in thresholds:
+        expected = query(mysql_connection, range_sql, (threshold,))
+        transformed = "".join(replacement.get(char, char) for char in threshold)
+        actual = query(fsdb_connection, range_sql, (transformed,))
+        if expected != actual:
+            range_mismatches.append(threshold)
+        if expected != query(fsdb_connection, baseline_range_sql, (threshold,)):
+            baseline_range_mismatches.append(threshold)
+    print(f"Host ICU baseline: {len(baseline_range_mismatches)}/{len(thresholds)} indexed-range mismatches")
+    print(f"Han permutation: {len(range_mismatches)}/{len(thresholds)} indexed-range mismatches", range_mismatches[:5])
+    weight_sql = f"SELECT HEX(WEIGHT_STRING(_utf8mb4%s COLLATE {collation}))"
+    singleton_weights = {}
+    composition_mismatches = []
+    composition_values = samples + ["重庆", "重慶", "沉阳", "沈阳", "藏文", "é", "e\u0301", "æ", "ae"]
+    for value in composition_values:
+        parts = []
+        for char in value:
+            if char not in singleton_weights:
+                encoded = query(mysql_connection, weight_sql, (char,))[0][0]
+                singleton_weights[char] = bytes.fromhex(encoded).split(b"\x00\x00")
+            parts.append(singleton_weights[char])
+        expected = bytes.fromhex(query(mysql_connection, weight_sql, (value,))[0][0])
+        composed = b"\x00\x00".join(b"".join(part[level] for part in parts) for level in range(3))
+        if expected != composed:
+            composition_mismatches.append(value)
+    print(f"Han permutation: {len(composition_mismatches)}/{len(composition_values)} singleton-weight composition mismatches", composition_mismatches[:10])
+    for value in ("一", "乾", "亁", "a", "A", "〇", "一a", "a一", "一乾", "乾一"):
+        print("  MySQL weight", value, query(mysql_connection, weight_sql, (value,))[0][0])
+
+
 def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None,
            collation_override=None, legacy_term_range=None, weight_checks=False,
-           mixed_checks=False, order_checks=False, cldr_pinyin=None):
+           mixed_checks=False, order_checks=False, cldr_pinyin=None,
+           tailoring_probe=False):
     prefix = '中' * (size - 1)
     if legacy_radicals:
         legacy_chars = LEGACY_RADICALS
@@ -307,6 +377,9 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     order_sql = "SELECT id FROM docs ORDER BY body,id"
                     expected_order = query(mysql_connection, order_sql)
                     actual_order = query(fsdb_connection, order_sql)
+                    if tailoring_probe:
+                        probe_han_permutation(mysql_connection, fsdb_connection, collation,
+                                              legacy_chars, expected_order, actual_order)
                     if cldr_pinyin is not None:
                         ranks = cldr_pinyin_ranks(cldr_pinyin)
                         ranked = {index: ranks[body[len(prefix)]]
@@ -466,6 +539,7 @@ if __name__ == "__main__":
     parser.add_argument("--weight-checks", action="store_true", help="compare exact WEIGHT_STRING bytes for --legacy-range")
     parser.add_argument("--order-checks", action="store_true", help="compare document ordering under the selected collation")
     parser.add_argument("--cldr-pinyin", type=pathlib.Path, help="compare MySQL order with a local CLDR 30 zh.xml pinyin rule file")
+    parser.add_argument("--tailoring-probe", action="store_true", help="test a Han-rank permutation on mixed text and indexed ranges")
     parser.add_argument("--mixed-checks", action="store_true", help="compare compatibility forms wrapped with ASCII or Han")
     parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_0900_as_ci", "utf8mb4_ja_0900_as_cs_ks", "utf8mb4_0900_as_cs", "utf8mb4_zh_0900_as_cs"))
     args = parser.parse_args()
@@ -494,8 +568,10 @@ if __name__ == "__main__":
         parser.error("--mixed-checks requires --legacy-range")
     if args.cldr_pinyin and not args.order_checks:
         parser.error("--cldr-pinyin requires --order-checks")
+    if args.tailoring_probe and (not args.order_checks or not args.legacy_range or args.collation != "utf8mb4_zh_0900_as_cs"):
+        parser.error("--tailoring-probe requires --order-checks, --legacy-range, and Chinese 0900 collation")
     sizes = args.sizes or list(range(1, 11))
     raise SystemExit(1 if sum(verify(size, args.legacy_punctuation, args.legacy_radicals,
                                      legacy_range, args.collation, legacy_term_range,
                                      args.weight_checks, args.mixed_checks, args.order_checks,
-                                     args.cldr_pinyin) for size in sizes) else 0)
+                                     args.cldr_pinyin, args.tailoring_probe) for size in sizes) else 0)
