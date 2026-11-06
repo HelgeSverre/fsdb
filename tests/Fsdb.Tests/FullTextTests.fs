@@ -209,6 +209,13 @@ let tests =
                                   [ 1, rules, [ "하늘하늘"; "한글" ] ]
                   Expect.isEmpty (booleanScores index "하늘") (name + " short composed query does not address a Jamo ngram")
 
+          testCase "UCA 9 Boolean ngrams compose Korean Jamo into short terms"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 5; Stopwords = StopwordPolicy.BuiltIn }
+              let collation = tryFind "utf8mb4_0900_ai_ci" |> Option.get
+              let index = buildIndexWithDocumentSettings rules collation [ 1, rules, [ "하늘"; "" ] ]
+              Expect.equal (booleanScores index "하늘" |> Map.keys |> Seq.toList) [ 1 ] "short composed query reaches the Jamo posting"
+
           testCase "general Unicode ngrams retain halfwidth voicing marks in relevance"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 6; Stopwords = StopwordPolicy.BuiltIn }

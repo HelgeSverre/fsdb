@@ -1526,8 +1526,9 @@ The [accent-insensitive current-head check](torture/findings/2026-11-06-0900-ai-
 found that a misplaced Unicode 5.2 U+180E weight caused 146 search
 differences at ngram size 1 and 102 at size 2 under `utf8mb4_0900_ai_ci`.
 The corrected 0900 path now matches all 387 searches at sizes 1–4 and
-6–10; size 5 retains one Korean Jamo Boolean membership and relevance
-case. Broader accent-insensitive corpora remain open.
+6–10. Removing a second misplaced legacy Jamo fold also resolves the size-5
+Boolean case, so the same 387-search corpus now matches MySQL at all ten
+ngram sizes. Broader accent-insensitive corpora remain open.
 The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
 also matches MySQL's distinct U+2200–U+22FF primary weights in the same
 two-column ngram lane at token sizes 1–10.

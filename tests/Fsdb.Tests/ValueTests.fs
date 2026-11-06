@@ -1608,6 +1608,8 @@ let tests =
                     Expect.isTrue (col.Equals "生\u180e日" "生日") "U+180E has no primary weight"
                     Expect.equal (col.KeyOf "\u180e") (col.KeyOf "") "equality keys ignore U+180E"
                     Expect.equal (col.FullTextKeyOf "\u180e") (col.FullTextKeyOf "ﾞ") "ngram singleton marks share the empty primary weight"
+                    Expect.isTrue (col.Equals "하늘" "하늘") "UCA 9 composes conjoining Jamo"
+                    Expect.equal (col.FullTextKeyOf "하늘") (col.FullTextKeyOf "하늘") "composed and decomposed Hangul share an ngram key"
 
                 testTheory "legacy Unicode collations keep Hangul Jamo distinct from syllables"
                     [ "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci" ]

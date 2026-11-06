@@ -56,3 +56,18 @@ baseline, so they were not introduced by the U+180E correction. The focused coll
 do the 18 filtered full-text tests. The size-5 Korean Jamo result is a
 separate remaining parity case.
 The 93 filtered collation tests also pass.
+
+## UCA 9 Hangul composition
+
+The remaining size-5 Boolean `하늘` case came from another legacy fold in the
+0900 path. MySQL 8.4.11 equates `하늘` with `하늘` under
+`utf8mb4_0900_ai_ci`, including equal `WEIGHT_STRING` bytes. Fsdb applied
+the older-collation Jamo escape, so the short composed Boolean query could
+not address the five-Jamo ngram posting. Removing that fold from the UCA 9
+path preserves the older Unicode collations' distinct Jamo keys.
+
+The maintained native oracle now matches **all 387 searches at every ngram
+size from 1 through 10** under `utf8mb4_0900_ai_ci`, including membership
+and relevance in all three search modes. Focused Jamo and U+180E regressions,
+18 filtered full-text tests, and 93 filtered collation tests pass. This proves
+parity for this two-column corpus; other CJK and parser shapes remain open.

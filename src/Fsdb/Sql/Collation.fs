@@ -1525,9 +1525,10 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_general_ci" -> foldGeneral true value
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci" ->
-            // U+180E is ignorable in UCA 9; its distinct weight belongs to UCA 5.2 only.
+            // U+180E is ignorable and conjoining Jamo compose in UCA 9;
+            // their distinct legacy weights belong to older collations.
             value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
-            |> foldUnicodeQuoteForms |> foldLegacyUnicodeJamo
+            |> foldUnicodeQuoteForms
             |> foldSupplementaryKanaImplicit false
         | "utf8mb4_unicode_520_ci" -> foldUnicode520 true value
         | "utf8mb4_unicode_ci" ->
