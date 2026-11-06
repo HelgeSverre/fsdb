@@ -9305,13 +9305,24 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                     |> Option.exists (fun context -> validateExpressionInContext context expression |> Result.isOk)
                 | _ -> false
         let orderIsSafe (expression, _) =
+            let aliases =
+                select.Projections
+                |> List.choose (fun projection -> projection.Alias)
+            let rec shadowsAlias expression =
+                match expression with
+                | Col column when aliases |> List.exists (equalsIgnoreCase column) -> true
+                | _ -> Expression.children expression |> List.exists shadowsAlias
             match expression, FromItem.tryQualifier source with
             | QualifiedCol(qualifier, column), Some sourceQualifier
                 when equalsIgnoreCase qualifier sourceQualifier && uniqueInnerColumn column -> true
-            | Col column, _ when uniqueInnerColumn column
-                                 && not (select.Projections
-                                         |> List.exists (fun projection ->
-                                             projection.Alias |> Option.exists (equalsIgnoreCase column))) -> true
+            | Col column, _ when uniqueInnerColumn column && not (shadowsAlias expression) -> true
+            | _ when not (shadowsAlias expression)
+                     && innerOnly expression
+                     && not (containsAggregate outer.Registry expression)
+                     && (collectWindowFuncs expression).IsEmpty
+                     && (Expression.collectSubqueries expression).IsEmpty ->
+                sourceContext.Value
+                |> Option.exists (fun context -> validateExpressionInContext context expression |> Result.isOk)
             | _ -> false
         let bindingsAreSafe =
             let memo = currentStatementMemo ()

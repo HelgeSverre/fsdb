@@ -30,6 +30,17 @@ An alias-shadowed `ORDER BY` stays on the ordinary path. MySQL 8.4.11
 confirms the matching results, unknown bare-column error, and successful
 preparation of the valid queries; all 90 correlated tests pass.
 
+## Computed inner order keys
+
+Validated expressions over inner columns now use indexed `EXISTS` membership
+too. The 50-row control covers `i.id+1` and mixed `ABS(i.id)`/bare-column
+ordering with fewer than 200 examined rows in each case. Projection aliases,
+outer references, aggregates, windows, and nested subqueries retain ordinary
+evaluation. The native MySQL 8.4.11 oracle confirms membership, computed
+alias binding, missing-column error 1054, and preparation. All 90 focused
+correlated tests pass. This checks the indexed route and compatibility; no
+latency claim was measured for the new expressions.
+
 Run `dotnet run --project tests/Fsdb.Tests -c Release -- --filter-test-case
 'correlated' --no-spinner` and `uv run --with pymysql
 torture/scripts/correlated-order-alias-oracle.py`.
