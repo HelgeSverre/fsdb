@@ -118,3 +118,24 @@ the full oracle, so that trial was reverted. A standalone `POINT(43 2.99999)`
 to `LINESTRING(43 1,43 3)` control also remains different even though the
 polygon case agrees; the polygon result must not be used to claim general
 point-line parity.
+
+## Spherical projection trial
+
+The 71° first-iteration trace separates the initialization error from the
+later Newton update. Boost's SRS-radian trace starts with spherical along-track
+distance 1.111190703481076 m and returns 0.3691980556077172 m. In the
+pre-radian-native fsdb trace, the first projected position was
+1.1149777346723868 m along the segment and its first distance was
+0.35667920777369744 m. Its second iteration was approximately
+0.3691980567 m, but the lower first value remained selected. The oracle
+still reports 0.3566792078 m after the radian-native change; its new
+intermediate position has not yet been captured.
+
+Replacing fsdb's spherical projection formula with Boost's `spherical_direct`
+formula resolved both `71.00001` cases and `72 2.99999`, but introduced
+`72 1.00001` and both `86.00001` cases. The full count stayed at 5/189.
+Combining that projection with SRS-radian entry coordinates also stayed at
+5/189 while shifting failures again, including the formerly matching
+`3 1.00001` control. Both trials were reverted. The next attempt needs to
+match the spherical initial guess, direct point, and Andoyer inverse as one
+path, then verify the full edge grid before replacing any portion.
