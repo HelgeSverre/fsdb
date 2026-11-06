@@ -200,3 +200,15 @@ distances and polar-corner controls still matched. The trial was reverted.
 Matching only the spherical initialization is insufficient; the next trace
 should compare the first Thomas direct point and Andoyer inverse result from
 the same coordinate and arithmetic path.
+
+## Denser line sampling control
+
+The current-head edge oracle on `a6f1de86` still reports 12/412 line-relation
+and 4/189 near-hole point-distance mismatches, with zero point-relation,
+polar-corner, and seeded point-line-distance mismatches. A temporary trial
+reduced the line interpolation spacing in `sampleGeographicSegment` from
+25 km to 5 km, retaining the same 256-step cap. The full oracle returned
+the same counts in every lane. The trial was reverted because it increased
+the number of sampled positions without closing any counted gap. The line
+relation work should use the Boost geographic segment strategy rather than
+assuming that a denser point grid resolves these cases.
