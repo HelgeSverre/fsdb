@@ -252,3 +252,24 @@ rebuilt from unchanged production code. Both endpoint-only sampling and
 denser fixed sampling are inadequate. The next implementation needs to
 classify geographic segment/boundary intersections and the intervals
 between them, including portions near endpoints that the samples miss.
+
+## Interpolated-point and proper-crossing control
+
+For the first remaining `LINESTRING(1 2.999,3 2.999)` near-hole mismatch,
+`ST_LineInterpolatePoint` at fractions 1/9 through 8/9 yields points that
+both engines classify outside the polygon. Both classify the start point
+inside. Nevertheless MySQL's complete line/polygon relation is `Touches=1,
+Crosses=0`, while fsdb's sampled relation is `Touches=0, Crosses=1`.
+MySQL's intersection is only a tiny line near the start. The point
+predicate at that endpoint therefore cannot stand in for the line's
+interior/boundary relation.
+
+A temporary trial excluded endpoints from interior evidence and added
+`geographicSegmentsProperlyCross` against each polygon boundary as crossing
+evidence. The full oracle worsened from 12 to 15 line-relation mismatches
+out of 412; the point and distance lanes stayed at 0/189 relations and
+4/189 near-hole distances. The trial and diagnostic printout were removed,
+and Release was rebuilt from unchanged production geometry code. The next
+implementation needs the geographic relation's ordered intersection events
+and segment intervals, rather than an endpoint classification plus a binary
+proper-crossing flag.
