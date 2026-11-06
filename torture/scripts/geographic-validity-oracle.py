@@ -64,9 +64,13 @@ def segment_relations(connection, wkt):
                 cursor.execute(
                     "SELECT ST_Intersects(" + left + "," + right + "),"
                     "ST_Crosses(" + left + "," + right + "),"
-                    "ST_Touches(" + left + "," + right + ")"
+                    "ST_Touches(" + left + "," + right + "),"
+                    "ST_Distance(" + left + "," + right + ")"
                 )
-                results.append((first, second, cursor.fetchone()))
+                intersects, crosses, touches, distance = cursor.fetchone()
+                results.append(
+                    (first, second, (intersects, crosses, touches), distance)
+                )
     return results
 
 
@@ -153,15 +157,18 @@ def main():
                             for mysql_relation, fsdb_relation in zip(
                                 mysql_relations, fsdb_relations
                             ):
-                                first, second, expected_relation = mysql_relation
-                                _, _, actual_relation = fsdb_relation
+                                first, second, expected_relation, expected_distance = (
+                                    mysql_relation
+                                )
+                                _, _, actual_relation, actual_distance = fsdb_relation
                                 if expected_relation != actual_relation:
                                     differences[first, second] = (
                                         expected_relation,
                                         actual_relation,
                                     )
                                 print(
-                                    f"  edges {first},{second}: MySQL={expected_relation} fsdb={actual_relation}",
+                                    f"  edges {first},{second}: MySQL={expected_relation} distance={expected_distance} "
+                                    f"fsdb={actual_relation} distance={actual_distance}",
                                     flush=True,
                                 )
                             relation_mismatches[case] = differences

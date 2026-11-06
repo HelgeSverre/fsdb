@@ -178,23 +178,31 @@ The current-head `--diagnose-segments` oracle also constructs geographic
 agree. The disagreeing pair in each ring is exactly the pair identified by
 the validity probe:
 
-| Ring | Edges | MySQL `(intersects,crosses,touches)` | fsdb |
+| Ring | Edges | MySQL `(intersects,crosses,touches)`, distance | fsdb |
 | --- | --- | --- | --- |
-| 76 | 0,2 | `(1,1,0)` | `(0,0,0)` |
-| 92 | 1,2 | `(1,0,1)` | `(1,1,0)` |
+| 76 | 0,2 | `(1,1,0)`, 0 m | `(0,0,0)`, 183,641.78 m |
+| 92 | 1,2 | `(1,0,1)`, 0 m | `(1,1,0)`, 0 m |
 
 Thus the discrepancy is visible in public geographic line relations, not
-confined to polygon validity. Both paths use fsdb's sampled-arc proper crossing
-test. A correction should be validated against line topology as well as
-`ST_IsValid`, then checked for distance and polygon relations before it
-replaces that shared primitive. The oracle pins these two relation deltas on
-the default 300-ring corpus.
+confined to polygon validity. For case 76 the independent sampled-arc distance
+path also misses the crossing by 183.6 km; case 92 still has zero distance
+because its edges share an endpoint. A correction should be validated against
+line topology, line distance, and `ST_IsValid`, then checked for polygon
+relations before it replaces these sampled-arc paths. The oracle pins the two
+relation deltas on the default 300-ring corpus and prints distances for every
+edge pair.
 
 A candidate that replaced sampled crossings with opposite azimuth-side signs
 fixed the two examples but introduced 37 false invalid results among the same
 300 global rings. It was reverted. The next validity change needs the
 geographic intersection calculation and segment-range checks used by Boost,
 or a separately validated equivalent; side signs alone are insufficient.
+Boost 1.84's strategy first rejects endpoint pairs on the same side, then
+computes a Sjöberg intersection on a normalized spheroid and checks signed
+distance ratios against both segment lengths. Its endpoint and collinear
+branches also affect whether a contact is a touch or a crossing. The earlier
+side-sign trial covered only the first stage, which explains why it could
+remove the two examples while creating many new false intersections.
 
 Source trail: MySQL [`is_valid.cc`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/is_valid.cc)
 and [`is_valid_functor.h`](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/is_valid_functor.h)

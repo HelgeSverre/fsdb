@@ -2917,8 +2917,9 @@ implementation effort:
    validity still needs the Boost geographic intersection decision. A
    [segment-relation diagnostic](torture/findings/2026-10-16-geographic-global-containment.md#sql-line-relation-diagnostic)
    confirms that the same two edge pairs also disagree in public geographic
-   `ST_Crosses`/`ST_Touches` results, so the shared line crossing primitive is
-   the next correction target.
+   `ST_Crosses`/`ST_Touches` results. One missed crossing also produces a
+   183.6 km `ST_Distance` error, so both sampled-arc paths need the geographic
+   intersection correction.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)
    are covered for audited cases. [Point-to-polygon distance](torture/findings/2026-10-11-geographic-point-polygon-distance.md)
