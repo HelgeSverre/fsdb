@@ -1,4 +1,4 @@
-"""Compare two writable joined views under LEFT/RIGHT UPDATE joins with MySQL 8.4.11."""
+"""Compare writable joined views under LEFT/RIGHT UPDATE joins with MySQL 8.4.11."""
 
 import pathlib
 import socket
@@ -71,7 +71,7 @@ def contended_update(owner, waiter_options, held_rows, sql):
         assert execute(owner, "COMMIT") == 0
         thread.join(5)
         assert not thread.is_alive(), (sql, outcome)
-        assert outcome["affected"] in (1, 2) and outcome["commit"] == 0, (sql, outcome)
+        assert outcome["affected"] in (1, 2, 3) and outcome["commit"] == 0, (sql, outcome)
         return waited, outcome["affected"]
     finally:
         waiter.close()
@@ -102,6 +102,32 @@ def independently_held_update(first_owner, connection_options, sql):
         return outcome["affected"]
     finally:
         second_owner.close()
+        waiter.close()
+
+
+def three_independently_held_update(first_owner, connection_options, sql):
+    second_owner = connect(**connection_options)
+    third_owner = connect(**connection_options)
+    waiter = connect(**connection_options)
+    try:
+        for connection in (second_owner, third_owner, waiter):
+            assert execute(connection, "USE probe") == 0
+        for connection, table in ((first_owner, "a"), (second_owner, "b"), (third_owner, "d")):
+            assert execute(connection, "BEGIN") == 0
+            assert execute(connection, f"UPDATE {table} SET n=n+10 WHERE id=1") == 1
+        assert execute(waiter, "BEGIN") == 0
+        thread, outcome = start_waiting_update(waiter, sql)
+        for owner in (first_owner, second_owner, third_owner):
+            thread.join(0.2)
+            assert thread.is_alive(), ("three-view UPDATE finished before all holders committed", outcome)
+            assert execute(owner, "COMMIT") == 0
+        thread.join(5)
+        assert not thread.is_alive(), (sql, outcome)
+        assert outcome == {"affected": 3, "commit": 0}, (sql, outcome)
+        return outcome["affected"]
+    finally:
+        second_owner.close()
+        third_owner.close()
         waiter.close()
 
 
@@ -492,11 +518,20 @@ def main():
                 ]
                 held_cases = [([(table, row_id)], sql) for table, row_id, sql in contended]
                 held_cases.append(([("a", 1), ("b", 1)], six_source_update(1)))
+                three_view_matched = (
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL LEFT JOIN va "
+                    "JOIN (SELECT id AS bridge FROM link) r ON r.bridge=va.link_id "
+                    "NATURAL LEFT JOIN vb_unique vb NATURAL LEFT JOIN vc_unique vc "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1,vc.extra=vc.extra+1 WHERE id=1"
+                )
+                for target in ("a", "b", "d"):
+                    held_cases.append(([(target, 1)], three_view_matched))
+                held_cases.append(([("a", 1), ("b", 1), ("d", 1)], three_view_matched))
                 for held_rows, sql in held_cases:
                     expected = contended_update(mysql_connection, {"unix_socket": mysql_socket}, held_rows, sql)
                     actual = contended_update(fsdb_connection, {"host": "127.0.0.1", "port": port}, held_rows, sql)
                     assert expected == actual and expected[0], (sql, expected, actual)
-                    for target in ("a", "b"):
+                    for target in ("a", "b", "d"):
                         query = f"SELECT id,n FROM {target} ORDER BY id"
                         expected_rows, actual_rows = (execute(connection, query) for connection in connections)
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
@@ -555,9 +590,20 @@ def main():
                         query = f"SELECT id,n FROM {target} ORDER BY id"
                         expected_rows, actual_rows = (execute(connection, query) for connection in connections)
                         assert actual_rows == expected_rows, (sql, query, expected_rows, actual_rows)
+                expected = three_independently_held_update(
+                    mysql_connection, {"unix_socket": mysql_socket}, three_view_matched
+                )
+                actual = three_independently_held_update(
+                    fsdb_connection, {"host": "127.0.0.1", "port": port}, three_view_matched
+                )
+                assert actual == expected == 3, (three_view_matched, expected, actual)
+                for target in ("a", "b", "d"):
+                    query = f"SELECT id,n FROM {target} ORDER BY id"
+                    expected_rows, actual_rows = (execute(connection, query) for connection in connections)
+                    assert actual_rows == expected_rows, (three_view_matched, query, expected_rows, actual_rows)
                 print(
                     f"MySQL 8.4.11: {len(cases)} joined-view outer UPDATE cases, atomic CHECK OPTION, "
-                    f"and {len(held_cases) + len(independently_held_cases)} contended rebases matched"
+                    f"and {len(held_cases) + len(independently_held_cases) + 1} contended rebases matched"
                 )
             finally:
                 if fsdb_connection:

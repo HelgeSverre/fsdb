@@ -246,8 +246,12 @@ operand into the prefix, preserving its association while moving the next
 writable view to the front.
 
 The oracle covers matched and one-sided rows under `NATURAL LEFT` and
-`NATURAL RIGHT` joins. All 76 UPDATE cases now match MySQL 8.4.11 in affected
-counts and physical rows, along with 40 contended rebases. More three-view
-join associations and contended three-target writes remain open.
+`NATURAL RIGHT` joins. All 76 UPDATE cases match MySQL 8.4.11 in affected
+counts and physical rows. Five added contention cases hold each of the
+three physical targets separately, all three in one transaction, and all
+three under independent owners. In each case the joined UPDATE waits for
+the owners, then commits the same three rebased rows as MySQL. The maintained
+contention matrix now has 45 cases. More three-view join associations and
+lock-order combinations remain open.
 
 Wider outer-join trees and nested security layers remain untested here.
