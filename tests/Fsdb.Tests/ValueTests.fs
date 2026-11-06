@@ -1750,6 +1750,14 @@ let tests =
                     Expect.isFalse (col.Equals "‐" "\uE0BC\uF820")
                         "a literal marker cannot alias punctuation"
 
+                testCase "utf8mb4_general_ci keeps compatibility punctuation and subscripts distinct"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    for written, expansion in [ "․", "."; "…", "..."; "‼", "!!"; "ₐ", "a"; "₨", "Rs" ] do
+                        Expect.isFalse (col.Equals written expansion) (written + " differs from its NFKC form")
+                        Expect.notEqual (col.KeyOf written) (col.KeyOf expansion) "index keys preserve the distinction"
+                    Expect.isFalse (col.Equals "․" "\uE0BE\uF924") "literal marker cannot alias punctuation"
+
                 testCase "utf8mb4_general_ci keeps Glagolitic and Coptic weights distinct"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get

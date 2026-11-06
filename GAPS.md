@@ -1598,6 +1598,10 @@ matches MySQL at sizes 1 and 2.
 The [punctuation and script-number probe](torture/findings/2026-10-17-general-ci-punctuation-script-numbers.md)
 preserves distinct dash, quote, superscript, and subscript weights that ICU
 otherwise merges; the U+2000–U+20FF ngram lane matches at sizes 1 and 2.
+The [general-collation punctuation and subscript equality probe](torture/findings/2026-11-06-general-ci-punctuation-subscript-equality.md)
+also preserves 25 written forms that MySQL keeps distinct from their NFKC
+expansions; the audited two-column ngram lane and 58 equality checks match
+at sizes 1–10.
 The [adjacent symbol-block audit](torture/findings/2026-10-17-general-ci-adjacent-symbol-blocks.md)
 found no additional membership or relevance differences across eight
 U+2300–U+2AFF blocks at sizes 1 and 2. The U+2800–U+28FF block also matches

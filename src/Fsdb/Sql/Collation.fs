@@ -446,13 +446,22 @@ let private foldGeneralUnicodeJamo (value: string) = foldUnicodeJamo (fun _ -> N
 
 // Every synthetic key has a private-use marker. Literal markers double so
 // they cannot alias a generated weight, including beside other private-use text.
-let private generalSyntheticPair c =
+let private generalSyntheticPair includeEqualityExceptions c =
     let pair marker weight = ValueSome(struct (marker, weight))
     match c with
     | '\uE0C0' | '\uE0D0' | '\uE0E0' | '\uE300' | '\uE0F0' | '\uE600'
     | '\uE0B1' | '\uE0B2' | '\uE0B3' | '\uE0B4' | '\uE0B5'
-    | '\uE0B6' | '\uE0B7' | '\uE0B8' | '\uE0B9' | '\uE0BA' | '\uE0BB' | '\uE0BC' | '\uE0BD' as marker ->
+    | '\uE0B6' | '\uE0B7' | '\uE0B8' | '\uE0B9' | '\uE0BA' | '\uE0BB' | '\uE0BC' | '\uE0BD' | '\uE0BE' as marker ->
         pair marker marker
+    // MySQL compares these compatibility punctuation/subscript forms by their
+    // written weight, although the audited ngram token keys retain ICU folds.
+    | c when includeEqualityExceptions
+             && ((c >= '\u2024' && c <= '\u2026')
+                 || (c >= '\u2033' && c <= '\u2037')
+                 || c = '\u203C' || (c >= '\u2047' && c <= '\u2049')
+                 || c = '\u2057' || (c >= '\u2090' && c <= '\u2098')
+                 || (c >= '\u209A' && c <= '\u209C') || c = '\u20A8') ->
+        pair '\uE0BE' (char (0xF900 + int c - 0x2000))
     // Halfwidth voicing and decomposed kana marks have their own positional weights.
     | '\uff9e' -> pair '\uE0C0' '\uE0C1'
     | '\uff9f' -> pair '\uE0C0' '\uE0C2'
@@ -536,10 +545,10 @@ let private generalSyntheticPair c =
         pair '\uE0B7' (char (0xF200 + int c - 0x2700))
     | _ -> ValueNone
 
-let private foldGeneralSyntheticWeights (value: string) =
+let private foldGeneralSyntheticWeights includeEqualityExceptions (value: string) =
     let mutable first = 0
     while first < value.Length
-          && (match generalSyntheticPair value.[first] with ValueNone -> true | ValueSome _ -> false) do
+          && (match generalSyntheticPair includeEqualityExceptions value.[first] with ValueNone -> true | ValueSome _ -> false) do
         first <- first + 1
     if first = value.Length then value
     else
@@ -547,7 +556,7 @@ let private foldGeneralSyntheticWeights (value: string) =
         result.Append(value, 0, first) |> ignore
         for index in first .. value.Length - 1 do
             let c = value.[index]
-            match generalSyntheticPair c with
+            match generalSyntheticPair includeEqualityExceptions c with
             | ValueSome(struct (marker, weight)) -> result.Append(marker).Append(weight) |> ignore
             | ValueNone -> result.Append(c) |> ignore
         result.ToString()
@@ -1166,13 +1175,15 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
               |> foldLegacyUnicodeJamo |> foldSupplementaryKanaImplicit true
               |> foldUnicode520EnclosedImplicit
 
+    let foldGeneral includeEqualityExceptions (value: string) =
+        value.Replace("ß", "s").Replace("ẞ", "s")
+        |> foldLegacySupplementary |> foldGeneralUnicodeJamo
+        |> foldGeneralSyntheticWeights includeEqualityExceptions
+
     let foldText (value: string) =
         match name with
         | "utf8mb4_ja_0900_as_cs_ks" -> value |> markJapaneseHiragana |> foldJapaneseCompatibility
-        | "utf8mb4_general_ci" ->
-            value.Replace("ß", "s").Replace("ẞ", "s")
-            |> foldLegacySupplementary |> foldGeneralUnicodeJamo
-            |> foldGeneralSyntheticWeights
+        | "utf8mb4_general_ci" -> foldGeneral true value
         | "utf8mb4_0900_ai_ci"
         | "utf8mb4_0900_as_ci" ->
             value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
@@ -1191,7 +1202,9 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
 
     let primaryText (s: string) = s |> foldText |> trim
     let fullTextKeyText (s: string) =
-        if name = "utf8mb4_unicode_520_ci" then
+        if name = "utf8mb4_general_ci" then
+            foldGeneral false s |> trim
+        elif name = "utf8mb4_unicode_520_ci" then
             // MySQL's ngram index keeps the older token equivalence classes.
             foldUnicode520 false s |> trim
         else primaryText s
