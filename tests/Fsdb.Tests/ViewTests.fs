@@ -447,6 +447,32 @@ let tests =
               | other -> failtestf "expected CHECK OPTION rejection, got %A" other
               Expect.equal (rows store "SELECT id,n FROM set_view_target ORDER BY id") [ [ Some "1"; Some "3" ]; [ Some "2"; Some "0" ] ] "rejection is atomic"
 
+          testCase "EXCEPT ALL and INTERSECT ALL preserve duplicate read rows beside one writable target"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE set_all_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE set_all_source(id INT,flag INT)"
+                    "CREATE TABLE set_all_excluded(id INT,flag INT)"
+                    "INSERT INTO set_all_target VALUES(1,0),(2,0)"
+                    "INSERT INTO set_all_source VALUES(1,7),(1,7),(1,7),(1,8),(2,9)"
+                    "INSERT INTO set_all_excluded VALUES(1,7)"
+                    "CREATE VIEW set_all_joined AS WITH chosen AS (SELECT id,flag FROM set_all_source EXCEPT ALL SELECT id,flag FROM set_all_excluded), matched AS (SELECT id,flag FROM chosen INTERSECT ALL SELECT id,flag FROM set_all_source) SELECT t.id,t.n,matched.flag FROM matched JOIN set_all_target t ON t.id=matched.id WHERE t.n>=0 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='set_all_joined'")
+                  [ [ Some "YES" ] ]
+                  "the multiset read side leaves target metadata writable"
+              Expect.equal
+                  (rows store "SELECT id,n,flag FROM set_all_joined ORDER BY id,flag")
+                  [ [ Some "1"; Some "0"; Some "7" ]; [ Some "1"; Some "0"; Some "7" ]; [ Some "1"; Some "0"; Some "8" ]; [ Some "2"; Some "0"; Some "9" ] ]
+                  "EXCEPT ALL subtracts one copy and INTERSECT ALL keeps two"
+              Expect.equal (run store "UPDATE set_all_joined SET n=n+1 WHERE id=1") (Affected 1UL) "duplicate view rows update one physical row"
+              match run store "UPDATE set_all_joined SET n=-1 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected multiset CHECK OPTION rejection, got %A" other
+              Expect.equal (rows store "SELECT id,n FROM set_all_target ORDER BY id") [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ] "rejected update is atomic"
+
           testCase "volatile repeated CTE references share one joined read source"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

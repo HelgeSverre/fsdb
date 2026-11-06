@@ -23,4 +23,19 @@ these results in the focused `ViewTests` regression, including the unchanged
 physical target after the rejected update.
 
 This extends the audited read-source compositions. It does not prove every
-set-operation nesting, duplicate multiplicity, or definer/security context.
+set-operation nesting, duplicate arrangement, or definer/security context.
+
+## Multiset follow-up
+
+The pinned MySQL 8.4.11 oracle also accepts the same joined-view structure
+with `EXCEPT ALL` feeding `INTERSECT ALL`. Starting with three `(1,7)` rows
+in the first source, one `(1,7)` exclusion, and the original first source
+as the intersection's right side, the view retains two `(1,7)` rows. A
+separate `(1,8)` and `(2,9)` row remain. MySQL reports `IS_UPDATABLE=YES`;
+`UPDATE v SET n=n+1 WHERE id=1` affects one physical target row despite
+three matching view rows. Fsdb matches these rows, affected-row count, and
+an atomic cascaded CHECK OPTION rejection in a focused regression.
+
+This verifies duplicate multiplicity through two set operators in a read
+source beside one writable target. Other set-operation orderings, nested
+security contexts, and concurrent writes remain separate questions.
