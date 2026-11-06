@@ -2141,6 +2141,9 @@ let tests =
                     + "SET n=n+1,bonus=bonus+1 WHERE va.id=1"
                     "WITH c AS (SELECT id FROM natural_view_link) UPDATE c "
                     + "NATURAL JOIN natural_view_va va NATURAL JOIN natural_view_vb vb "
+                    + "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1"
+                    "WITH RECURSIVE c(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM c WHERE id<3) "
+                    + "UPDATE c NATURAL JOIN natural_view_va va NATURAL JOIN natural_view_vb vb "
                     + "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1" ]
               for index, sql in List.indexed cases do
                   let ownerA, _ = handle (create (2 + 3 * index) store) "BEGIN"

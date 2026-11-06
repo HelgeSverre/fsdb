@@ -1155,6 +1155,8 @@ atomic `CHECK OPTION` rejection, and 30 contended rebases. The
 claims both physical targets for uniquely owned bare assignments before a
 contended rebase, including a CTE read source ahead of both views and dependent
 `LATERAL` or `JSON_TABLE` sources between them. Joined updates
+also handle an [independent recursive CTE before both writable views](torture/findings/2026-11-05-cte-natural-two-view-write.md#recursive-cte-follow-up)
+under NATURAL JOIN, including two independently held physical rows. They
 now claim every assigned writable view's physical target before taking their
 transaction snapshot, including a right-only row that previously failed
 COMMIT with 1205 after the holder released its lock.
