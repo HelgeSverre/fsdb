@@ -7,7 +7,7 @@ MySQL 8.4 is the compatibility target, but some behavior differs; see the [compa
 ## Install
 
 ```sh
-dotnet add package Fsdb --version 0.1.0
+dotnet add package Fsdb --version 0.1.1
 ```
 
 ## Run SQL in process
