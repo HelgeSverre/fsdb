@@ -2482,8 +2482,9 @@ implementation effort:
    counts and contended rebases. [Dependent `JSON_TABLE` and derived
    intervening sources](torture/findings/2026-11-06-mixed-natural-view-intervening-source.md#dependent-json_table-and-right-preserved-final-view)
    also preserve the final view through `NATURAL RIGHT JOIN`, including a
-   missing first-view row and a physical-row wait. Other intervening sources,
-   unmatched arrangements, and longer mixed join chains remain
+   missing first-view row, a later matched or unmatched natural read tail,
+   and a physical-row wait. Other intervening sources, unmatched
+   arrangements, and longer mixed join chains remain
    open. [CTE-first natural outer joins](torture/findings/2026-11-05-cte-cross-joined-view-rebase.md#cte-first-natural-outer-join-to-a-writable-view)
    to a writable view now wait and rebase, including one preceding ordinary
    read join and matched and unmatched left and right cases; duplicate `id`

@@ -346,6 +346,16 @@ def main():
                     "JOIN JSON_TABLE(JSON_ARRAY(va.link_id),'$[*]' COLUMNS(bridge INT PATH '$')) j "
                     "ON j.bridge=va.link_id NATURAL RIGHT JOIN vb_unique vb "
                     "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=3",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL LEFT JOIN va "
+                    "JOIN JSON_TABLE(JSON_ARRAY(va.link_id),'$[*]' COLUMNS(bridge INT PATH '$')) j "
+                    "ON j.bridge=va.link_id NATURAL RIGHT JOIN vb_unique vb "
+                    "NATURAL LEFT JOIN (SELECT id FROM link) tail "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=3",
+                    "WITH c AS (SELECT id FROM link) UPDATE c NATURAL LEFT JOIN va "
+                    "JOIN JSON_TABLE(JSON_ARRAY(va.link_id),'$[*]' COLUMNS(bridge INT PATH '$')) j "
+                    "ON j.bridge=va.link_id NATURAL RIGHT JOIN vb_unique vb "
+                    "NATURAL LEFT JOIN (SELECT 1 AS id) tail "
+                    "SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE id=3",
                     "WITH c AS (SELECT id FROM link) UPDATE (c NATURAL JOIN va) "
                     "NATURAL JOIN vb_unique vb SET va.n=va.n+1,vb.bonus=vb.bonus+1 WHERE c.id=1",
                     "UPDATE va LEFT JOIN (link l JOIN vb USING(id)) USING(id) "

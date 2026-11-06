@@ -39,3 +39,9 @@ before mapping a bare exposed name to the first view's physical expression.
 The focused regression and oracle check both the preserved update and the
 null-extended `c.id` control. The MySQL 8.4.11 oracle passes 69 two-view UPDATE cases and
 40 contended rebases, including a waiter on that right-preserved physical row.
+
+A later `NATURAL LEFT JOIN` to a read-only derived source also keeps the
+right-preserved writable row. The oracle checks both a matching `id=3` read
+row and a missing read row; `WHERE id=3` still binds to the preserved view's
+merged key and updates its physical row. The maintained value corpus now
+passes 71 two-view UPDATE cases against MySQL 8.4.11.
