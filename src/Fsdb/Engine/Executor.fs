@@ -9308,6 +9308,10 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
             match expression, FromItem.tryQualifier source with
             | QualifiedCol(qualifier, column), Some sourceQualifier
                 when equalsIgnoreCase qualifier sourceQualifier && uniqueInnerColumn column -> true
+            | Col column, _ when uniqueInnerColumn column
+                                 && not (select.Projections
+                                         |> List.exists (fun projection ->
+                                             projection.Alias |> Option.exists (equalsIgnoreCase column))) -> true
             | _ -> false
         let bindingsAreSafe =
             let memo = currentStatementMemo ()

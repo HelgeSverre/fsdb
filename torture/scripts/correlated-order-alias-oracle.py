@@ -27,8 +27,12 @@ cases = [
     ('SELECT -v AS a FROM ordering_scope ORDER BY (SELECT ordering_scope.a)', (1054, '42S22')),
     ('SELECT -v AS a FROM ordering_scope ORDER BY (SELECT a FROM ordering_scope inner_scope LIMIT 1)', 'a\n-2\n-1\n'),
     ('SELECT o.v,EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=o.v ORDER BY i.v DESC) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t1\n2\t1\n'),
+    ('SELECT o.v,EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=o.v ORDER BY w DESC) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t1\n2\t1\n'),
+    ('SELECT o.v,EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=o.v ORDER BY i.w DESC,i.v) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t1\n2\t1\n'),
+    ('SELECT o.v,EXISTS(SELECT 1 AS w FROM ordering_scope i WHERE i.v=o.v ORDER BY w) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t1\n2\t1\n'),
     ('SELECT o.v,EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=o.v+10 ORDER BY i.v DESC) AS hit FROM ordering_scope o ORDER BY o.v', 'v\thit\n1\t0\n2\t0\n'),
     ('SELECT EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=1 ORDER BY i.missing)', (1054, '42S22')),
+    ('SELECT EXISTS(SELECT 1 FROM ordering_scope i WHERE i.v=1 ORDER BY missing)', (1054, '42S22')),
 ]
 
 prepared_cases = [

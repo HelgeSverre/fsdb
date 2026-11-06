@@ -433,6 +433,16 @@ let tests =
                       runDefault store "SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id ORDER BY i.id DESC) AS hit FROM exists_outer o ORDER BY o.id")
               Expect.equal orderedResult result "ORDER BY does not change EXISTS membership"
               Expect.isLessThan orderedExamined 200L "ordered EXISTS uses indexed membership"
+              for orderClause in [ "ORDER BY outer_id DESC"; "ORDER BY i.id DESC,outer_id" ] do
+                  let bareResult, bareExamined =
+                      withExaminedRows (fun () ->
+                          runDefault store ("SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id " + orderClause + ") AS hit FROM exists_outer o ORDER BY o.id"))
+                  Expect.equal bareResult result "inner-column ordering preserves EXISTS membership"
+                  Expect.isLessThan bareExamined 200L "inner-column ordering uses indexed membership"
+              Expect.equal
+                  (runDefault store "SELECT o.id, EXISTS(SELECT 1 AS outer_id FROM exists_inner i WHERE i.outer_id=o.id ORDER BY outer_id) AS hit FROM exists_outer o ORDER BY o.id")
+                  result
+                  "projection aliases retain their normal ORDER BY binding"
               let orderedLimitedResult, orderedLimitedExamined =
                   withExaminedRows (fun () ->
                       runDefault store "SELECT o.id, EXISTS(SELECT 1 FROM exists_inner i WHERE i.outer_id=o.id ORDER BY i.id DESC LIMIT 1) AS hit FROM exists_outer o ORDER BY o.id")

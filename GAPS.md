@@ -2212,9 +2212,10 @@ shapes remain open.
 indexed membership too; focused controls cover results, unused expressions,
 unknown projected columns, and examined rows. A [qualified inner-column
 `ORDER BY` follow-up](benchmarks/results/2026-11-06-correlated-exists-qualified-order.md)
-also uses indexed membership, including with `LIMIT 1`; the 50-row control
-falls from 550 examined rows to fewer than 200. Other ordered, grouped, and
-more complex source shapes remain open.
+also uses indexed membership, including with `LIMIT 1` and uniquely owned
+bare inner-column keys; the 50-row control falls from 550 examined rows to
+fewer than 200. Alias-bound, computed, grouped, and more complex source
+shapes remain open.
 The [source-free scalar follow-up](benchmarks/results/2026-11-04-source-free-scalar-fast-path.md)
 evaluates a simple correlated `SELECT expression` in its outer row context
 when metadata is inferable. On the matched 100-row control, latency fell
