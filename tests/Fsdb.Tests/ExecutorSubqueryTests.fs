@@ -117,6 +117,21 @@ let tests =
                         (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ]))
                         "a declared nullable column retains ordinary COUNT semantics"
 
+                testCase "nullable physical COUNT columns use joined keys without counting NULL rows"
+                <| fun _ ->
+                    let store = joinedStore ()
+                    runDefault store "UPDATE sys SET created_at='2024-01-02 03:04:05' WHERE id=10" |> ignore
+                    let sql =
+                        "SELECT cat.id,(SELECT COUNT(sys.created_at) FROM sys INNER JOIN cat_sys ON sys.id=cat_sys.sys_id WHERE cat.id=cat_sys.cat_id AND status='published') c FROM cat ORDER BY cat.id"
+                    Expect.equal
+                        (runDefault store sql)
+                        (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ]; [ Some "4"; Some "0" ] ]))
+                        "the joined count excludes NULL timestamps"
+                    let values = [ 100 .. 299 ] |> List.map (sprintf "(%d, 'bulk', NULL)") |> String.concat ","
+                    runDefault store ("INSERT INTO cat VALUES " + values) |> ignore
+                    let _, examined = withExaminedRows (fun () -> runDefault store sql)
+                    Expect.isLessThan examined 400L "the nullable count groups joined keys once"
+
                 testCase "the joined inner side is read once per statement rather than once per outer row"
                 <| fun _ ->
                     let store = joinedStore ()

@@ -9231,11 +9231,11 @@ and private countArgumentAlwaysPresentForSelect (store: Store) (dbName: string) 
                 present
         | _ -> proveColumn ()
 
-and private isPlainCountRowsSelect (store: Store) (dbName: string) (registry: Registry) (select: SelectStmt) =
+and private isPlainCountSelect (registry: Registry) (select: SelectStmt) acceptsArgument =
     match select.Projections with
     | [ { Expression = FuncCall(name, [ argument ]) } ] ->
         name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
-        && countArgumentAlwaysPresentForSelect store dbName select argument
+        && acceptsArgument argument
         && Functions.isUnmodifiedBuiltinAggregate name registry
         && select.GroupBy.IsEmpty
         && select.Having.IsNone
@@ -9250,6 +9250,12 @@ and private isPlainCountRowsSelect (store: Store) (dbName: string) (registry: Re
         && not select.CalculateFoundRows
         && not select.Rollup
     | _ -> false
+
+and private isPlainCountRowsSelect (store: Store) (dbName: string) (registry: Registry) (select: SelectStmt) =
+    isPlainCountSelect registry select (countArgumentAlwaysPresentForSelect store dbName select)
+
+and private isPlainQualifiedColumnCountSelect (registry: Registry) (select: SelectStmt) =
+    isPlainCountSelect registry select (function QualifiedCol _ -> true | _ -> false)
 
 and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
     let countRows = isPlainCountRowsSelect outer.Store outer.DbName outer.Registry select
@@ -9635,8 +9641,29 @@ and private isPlainRowPredicate (expression: Expr) : bool =
 /// `outer.column = inner.column` or `<=>` conjuncts and a local remainder. Grouping
 /// the remainder by the inner keys yields every outer row's match count.
 and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : ((Expr * bool) list * SelectStmt) option =
+    let countColumnIsPhysical =
+        if not (isPlainQualifiedColumnCountSelect outer.Registry select) then true
+        else
+            match select.Projections with
+            | [ { Expression = FuncCall(_, [ QualifiedCol(qualifier, columnName) ]) } ] ->
+                let sources: TableRef list =
+                    (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+                    |> List.choose (function FromTable table -> Some table | _ -> None)
+                    |> List.filter (fun source ->
+                        equalsIgnoreCase (source.Alias |> Option.defaultValue source.Table) qualifier)
+                match sources with
+                | [ source ] when not (source.Database.IsNone
+                                       && (currentCteScope () |> Map.containsKey (source.Table.ToLowerInvariant()))) ->
+                    physicalFastPathTable outer.Store outer.DbName source
+                    |> Option.exists (fun (table: Table) ->
+                        table.Columns
+                        |> List.exists (fun (column: ColumnDef) ->
+                            equalsIgnoreCase column.Name columnName && column.Generated.IsNone))
+                | _ -> false
+            | _ -> false
     let isPlainBlock =
-        select.GroupBy.IsEmpty
+        countColumnIsPhysical
+        && select.GroupBy.IsEmpty
         && select.Having.IsNone
         && select.Limit.IsNone
         && select.Offset.IsNone
@@ -9707,8 +9734,14 @@ and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : 
                       Alias = None
                       SourceName = None
                       BindingOrigin = None })
+            let countArgument =
+                match select.Projections with
+                | [ { Expression = FuncCall(name, [ QualifiedCol _ as argument ]) } ]
+                    when equalsIgnoreCase name "COUNT"
+                         && isPlainQualifiedColumnCountSelect outer.Registry select -> argument
+                | _ -> Star None
             let countProjection =
-                { Expression = FuncCall("COUNT", [ Star None ])
+                { Expression = FuncCall("COUNT", [ countArgument ])
                   Alias = None
                   SourceName = None
                   BindingOrigin = None }
@@ -9785,7 +9818,9 @@ and private tryDecorrelatedMatchCount (outer: EvalContext) (select: SelectStmt) 
                     | false, _ -> Some(Ok 0L))
 
 and private tryDecorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
-    if isPlainCountRowsSelect outer.Store outer.DbName outer.Registry select && not select.Distinct then
+    if (isPlainCountRowsSelect outer.Store outer.DbName outer.Registry select
+        || isPlainQualifiedColumnCountSelect outer.Registry select)
+       && not select.Distinct then
         tryDecorrelatedMatchCount outer select |> Option.map (Result.map VInt)
     else
         None

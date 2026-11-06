@@ -2429,8 +2429,10 @@ audited grouped and ungrouped `HAVING` comparisons, preserving empty-group
 semantics.
 [Qualified non-NULL physical columns](torture/findings/2026-11-06-correlated-nonnull-column-count.md)
 now use the same count path, including indexed `EXISTS ... HAVING` membership.
-The proof tracks left and right outer-join padding; nullable or padded
-columns retain ordinary evaluation. The 204-row joined control stays below
+The non-NULL proof tracks left and right outer-join padding and never treats
+a padded column as always present. Eligible [nullable-column scalar counts](torture/findings/2026-11-06-correlated-nullable-column-count.md)
+now group the original `COUNT(column)` expression once for exact numeric
+correlation keys, preserving NULL counts. The 204-row joined control stays below
 400 examined rows. A [statement-scoped proof cache](benchmarks/results/2026-11-06-count-column-presence-cache.md)
 avoids repeating the physical-column and join-nullability check for each
 outer row; interleaved CPU-time checks show a lower primary-key overhead
