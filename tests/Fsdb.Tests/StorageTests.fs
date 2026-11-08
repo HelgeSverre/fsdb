@@ -2160,6 +2160,28 @@ let tests =
                     Expect.equal primaryRange ("PRIMARY", [ VInt 2L; VInt 3L ]) "primary keys share the ordered access path"
                     Expect.equal (reindexCallCount ()) reindexesBefore "point writes preserve ordered buckets incrementally"
 
+                testCase "DOUBLE range candidates accept finite truncated string bounds"
+                <| fun _ ->
+                    let store = create ()
+                    let columns = [ idCol; col "k" (TDouble false) false ]
+                    createTable store defaultDatabase "double_range" columns [] [] None None |> ignore
+                    let index = { Name = "ix_k"; GeneratedForForeignKey = false; KeyColumns = indexColumns [ "k" ]; Unique = false; Visible = true; Kind = BTree }
+                    alterTable store defaultDatabase "double_range" [ AddIndex index ] |> ignore
+                    insertRows store defaultDatabase "double_range" None
+                        [ [ VInt 1L; VDouble 12.5 ]; [ VInt 2L; VDouble 12.75 ]; [ VInt 3L; VDouble 20.0 ] ]
+                    |> ignore
+                    let matching =
+                        trySecondaryRangeLookup store defaultDatabase "double_range" "k"
+                            (Some(VString "12.5x", true)) (Some(VString "13x", true))
+                        |> Option.defaultWith (fun () -> failtest "expected a finite leading-numeric range")
+                    Expect.equal
+                        (matching.RangeRows.Value |> List.map (snd >> fun row -> row.[0]))
+                        [ VInt 1L; VInt 2L ]
+                        "range includes both numeric candidates and excludes the out-of-range row"
+                    Expect.isNone
+                        (trySecondaryRangeLookup store defaultDatabase "double_range" "k" (Some(VString "1e309x", true)) None)
+                        "overflow-clamped bound remains on the scan path"
+
                 testCase "updating a non-indexed column preserves immutable index groups"
                 <| fun _ ->
                     let store = withUsersTable ()

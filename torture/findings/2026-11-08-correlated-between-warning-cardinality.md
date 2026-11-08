@@ -84,7 +84,7 @@ of the three outer rows before the owner filter; the two setup warnings are
 separate. This supports modeling diagnostics at the selected range access,
 not at the final matching rows.
 
-## Planner boundary on current head
+## Planner boundary before the direct-range fix
 
 `EXPLAIN` on fsdb reports `ALL` for the inner `i` source with and without
 `FORCE INDEX(ix_k)`; the indexed three-outer-row query reports six warnings
@@ -97,3 +97,23 @@ index is forced. A compatible fix needs a safe leading-numeric range bound,
 selection of that access path, and warning emission tied to its setup and
 candidate evaluation. Expanding the bound alone would change which rows are
 read without reproducing MySQL's diagnostics.
+
+## Selective direct range follow-up
+
+The storage range key now accepts a finite leading DOUBLE from a truncated
+string when it is an exact cut; overflow-clamped bounds still fall back to a
+scan. On a 102-row table with two keys inside `BETWEEN '12.5x' AND '13x'`,
+both engines select `ix_k` as a `range` access and return two rows. For a
+direct `COUNT(*)`, MySQL 8.4.11 and fsdb now report six 1292 warnings: two
+during range setup and two per selected candidate. `IGNORE INDEX(ix_k)`
+scans all 102 rows and reports 204 warnings in both. `LIMIT 0` returns no
+aggregate row and no warning in both. The focused regressions cover the
+storage candidate cut, executor access plan and rows, and diagnostics.
+
+The correlated query still differs. With the same 102-row inner table and
+an unindexed `owner_id`, both engines select the `ix_k` range; MySQL reports
+fourteen warnings for three outer rows and two with no outer rows, while fsdb
+reports six and zero. Its correlated path evaluates the owner filter before
+the local `BETWEEN` and plans the subquery only when an outer row executes.
+The remaining fix must preserve MySQL's candidate-first warning order and
+statement-level range setup even when no outer row exists.

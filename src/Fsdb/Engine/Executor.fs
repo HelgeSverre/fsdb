@@ -12633,6 +12633,26 @@ and private streamFilteredSourceRows
             | Error(code, message) -> raise (SqlError(code, message))
     }
 
+and private reportTruncatedDoubleRangeSetup (tableRef: TableRef) (predicate: Expr) access =
+    match access with
+    | RangeAccess lookup when (match lookup.RangeColumns.[lookup.RangeColumnIndex].Type with TDouble _ -> true | _ -> false) ->
+        let indexed = lookup.RangeColumns.[lookup.RangeColumnIndex].Name
+        predicate
+        |> conjuncts
+        |> List.iter (function
+            | Between(value, lower, upper)
+                when rangeColumnNameFor BareOrQualifiedColumn tableRef value
+                     |> Option.exists (equalsIgnoreCase indexed) ->
+                for bound in [ lower; upper ] do
+                    match bound with
+                    | LiteralValue(VString text) ->
+                        let number, truncated = Value.coerceLeadingDouble text
+                        if truncated && System.Double.IsFinite number && abs number <> System.Double.MaxValue then
+                            Diagnostics.numericConversion "DOUBLE" text
+                    | _ -> ()
+            | _ -> ())
+    | _ -> ()
+
 and private narrowPhysicalSourceRows
     (store: Store)
     (registry: Registry)
@@ -15205,6 +15225,12 @@ and private runUnlockedSelectStmt
 
                         let physicalAccess = choosePhysicalAccess physicalCandidates
 
+                        let physicalRowsWithWarnings access =
+                            if not (hasZeroRowLimit select) then
+                                select.Where
+                                |> Option.iter (fun predicate -> reportTruncatedDoubleRangeSetup tref predicate access)
+                            physicalAccessRows access
+
                         let orderedPrefix =
                             tryEqualityPrefixOrder store registry dbName tref select equalityAccess
 
@@ -15216,7 +15242,7 @@ and private runUnlockedSelectStmt
                             let indexOrder = tryIndexOrder store registry dbName tref select
                             let earlyPhysicalAccess = choosePhysicalAccessBeforeIndexOrder indexOrder physicalCandidates
 
-                            match earlyPhysicalAccess |> Option.map physicalAccessRows with
+                            match earlyPhysicalAccess |> Option.map physicalRowsWithWarnings with
                             | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None (coveredSelect earlyPhysicalAccess)
                             | None ->
                                 let projectedLookup =
@@ -15231,7 +15257,7 @@ and private runUnlockedSelectStmt
                                     | None ->
                                         let resolved =
                                             physicalAccess
-                                            |> Option.map (physicalAccessRows >> fun (columns, rows) -> Ok(columns, rows |> List.map snd))
+                                            |> Option.map (physicalRowsWithWarnings >> fun (columns, rows) -> Ok(columns, rows |> List.map snd))
                                             |> Option.orElseWith (fun () ->
                                                 tryInformationSchemaNarrow store registry dbName tref select.Where
                                                 |> Option.map Ok)

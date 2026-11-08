@@ -8491,6 +8491,28 @@ let tests =
                             "ORDER BY and LIMIT use complete values after the mutation"
                     | other -> failtestf "expected ordered rows, got %A" other
 
+                testCase "selective DOUBLE range accepts finite truncated string bounds"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE double_range_indexed(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))" |> ignore
+                    runDefault store "CREATE TABLE double_range_scanned(id INT PRIMARY KEY,k DOUBLE)" |> ignore
+                    let values =
+                        [ "(1,12.5)"; "(2,12.75)" ]
+                        @ [ for id in 3 .. 102 -> sprintf "(%d,20)" id ]
+                        |> String.concat ","
+                    runDefault store ("INSERT INTO double_range_indexed VALUES " + values) |> ignore
+                    runDefault store ("INSERT INTO double_range_scanned VALUES " + values) |> ignore
+                    let predicate = "k BETWEEN '12.5x' AND '13x'"
+                    let select table = runDefault store (sprintf "SELECT id FROM %s WHERE %s ORDER BY id" table predicate)
+                    Expect.equal (select "double_range_indexed") (select "double_range_scanned")
+                        "the index candidate cut preserves residual DOUBLE comparisons"
+                    Expect.equal (select "double_range_indexed")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "both range members remain visible"
+                    let plan = runDefault store ("EXPLAIN SELECT id FROM double_range_indexed WHERE " + predicate) |> explainRow
+                    Expect.equal plan.AccessType (Some "range") "the selective range uses the index"
+                    Expect.equal plan.Key (Some "ix_k") "the DOUBLE index supplies the candidates"
+
                 testCase "text range bounds include complete collation equivalence classes"
                 <| fun _ ->
                     let store = newStore ()

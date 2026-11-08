@@ -1650,6 +1650,30 @@ let tests =
                   Expect.equal (current.Diagnostics |> List.map _.Code) (List.replicate warningCount 1292)
                       (text + " warns once per evaluated candidate")
 
+          testCase "selective DOUBLE BETWEEN range warns during setup and candidate filtering"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE range_warning_rows(id INT PRIMARY KEY,k DOUBLE,KEY ix_k(k))"
+              let values =
+                  [ "(1,12.5)"; "(2,12.75)" ]
+                  @ [ for id in 3 .. 102 -> sprintf "(%d,20)" id ]
+                  |> String.concat ","
+              let session, _ = handle session ("INSERT INTO range_warning_rows VALUES " + values)
+              let current, result =
+                  handle session "SELECT COUNT(*) FROM range_warning_rows WHERE k BETWEEN '12.5x' AND '13x'"
+              Expect.equal result (ResultSet([ "COUNT(*)" ], [ [ Some "2" ] ])) "pinned MySQL 8.4.11 range count"
+              Expect.equal (current.Diagnostics |> List.map _.Code) (List.replicate 6 1292)
+                  "two range-setup warnings precede four candidate comparisons"
+              let scanned, scannedResult =
+                  handle session
+                      "SELECT COUNT(*) FROM range_warning_rows IGNORE INDEX(ix_k) WHERE k BETWEEN '12.5x' AND '13x'"
+              Expect.equal scannedResult (ResultSet([ "COUNT(*)" ], [ [ Some "2" ] ])) "scan retains the same count"
+              Expect.equal scanned.DiagnosticsCount 204 "the scan warns twice for each of 102 rows"
+              let limited, limitedResult =
+                  handle session "SELECT COUNT(*) FROM range_warning_rows WHERE k BETWEEN '12.5x' AND '13x' LIMIT 0"
+              Expect.equal limitedResult (ResultSet([ "COUNT(*)" ], [])) "LIMIT zero returns no aggregate row"
+              Expect.equal limited.DiagnosticsCount 0 "LIMIT zero does not start the range"
+
           testCase "failed decorrelation does not duplicate numeric conversion warnings"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

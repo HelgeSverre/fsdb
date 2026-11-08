@@ -231,7 +231,10 @@ remain divergent when the `DOUBLE` column is indexed. The no-index
 repeated-key nullable count now retains MySQL 8.4.11's six per-outer-row
 warnings by taking the ordinary correlated scan. An oracle follow-up
 identifies separate indexed range-setup and per-outer-row warnings; even an
-empty outer result retains two indexed warnings.
+empty outer result retains two indexed warnings. A selective direct DOUBLE
+`BETWEEN` range now accepts finite truncated string bounds and matches MySQL's
+range-setup plus candidate warning count; the correlated range still filters
+in the wrong diagnostic order and lacks zero-outer-row setup warnings.
 [Correlated `ABS` equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-abs.md)
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete
 OR branches and exact `INT` minimum magnitude, while other operand types retain

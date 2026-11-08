@@ -5652,7 +5652,13 @@ let private exactRangeProbeValue (store: Store) (table: Table) (index: int) (val
     | TDouble _, VString text ->
         match Double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
         | true, number when Double.IsFinite number -> Some(VDouble number)
-        | _ -> None
+        | _ ->
+            let number, truncated = Value.coerceLeadingDouble text
+            // A finite leading number is the DOUBLE comparison boundary.
+            // Overflow can clamp to MaxValue, which is not an exact key cut.
+            if truncated && Double.IsFinite number && abs number <> Double.MaxValue then
+                Some(VDouble number)
+            else None
     | (TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _), VDecimal _ ->
         // The ordered key comparator compares integer and DECIMAL values
         // exactly, so a fractional boundary needs no stored-key coercion.
