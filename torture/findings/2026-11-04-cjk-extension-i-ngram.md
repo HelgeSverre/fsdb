@@ -11,6 +11,7 @@ both result membership and relevance scores.
 | `utf8mb4_0900_ai_ci` | 1–10 | 37,320 | 0 |
 | `utf8mb4_unicode_ci` | 1–10 | 37,320 | 0 |
 | `utf8mb4_ja_0900_as_cs_ks` | 1–10 | 37,320 | 0 |
+| `utf8mb4_general_ci` (all 624 scalars) | 1–10 | 37,440 | 0 |
 
 Commands used `uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py
 <sizes> --legacy-range 2EBF0:2EE60 --collation <collation>` from the repository
@@ -21,6 +22,17 @@ these results establish two-column ngram search parity for the sampled modes
 and sizes, not general collation equality. Japanese sizes 3–10 were completed
 in a separate current-head replay using the same fixture and oracle. MeCab
 and other query shapes remain open.
+
+The `utf8mb4_general_ci` row was added on 2026-11-08 using the Release build
+at `b92c375a`. It passed `--all-range-scalars` to include all 624 positions,
+including those that Python's Unicode database does not classify as printable.
+Each size compared 3,744 searches. The command was:
+
+```sh
+uv run --with pymysql torture/scripts/ngram-multicol-oracle.py \
+  --legacy-range 2EBF0:2EE60 --all-range-scalars \
+  --collation utf8mb4_general_ci 1 2 3 4 5 6 7 8 9 10
+```
 
 An exact-byte `WEIGHT_STRING` follow-up found that MySQL 8.4.11 gives all 624
 Extension I scalars replacement weight `FFFD` under `utf8mb4_general_ci` and
