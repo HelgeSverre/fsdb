@@ -65,6 +65,26 @@ let tests =
                   (rows store "SELECT id,n FROM nested_window_target ORDER BY id")
                   [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ]
                   "target-first failed write is atomic"
+              expectOk
+                  (run store "CREATE VIEW nested_window_using AS WITH ranked AS (SELECT id,ROW_NUMBER() OVER(PARTITION BY id ORDER BY flag) rn FROM nested_window_source), grouped AS (SELECT id,SUM(flag) total FROM nested_window_source GROUP BY id) SELECT v.id,v.n,v.aux,ranked.rn,grouped.total FROM nested_window_inner v JOIN ranked USING(id) JOIN grouped USING(id) WHERE v.n<10 WITH CASCADED CHECK OPTION")
+                  "create target-first view with two logical USING joins"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_window_using'")
+                  [ [ Some "YES" ] ] "two-USING view is writable"
+              Expect.equal
+                  (rows store "SELECT id,n,aux,rn,total FROM nested_window_using ORDER BY id,rn")
+                  [ [ Some "1"; Some "2"; Some "5"; Some "1"; Some "15" ]
+                    [ Some "1"; Some "2"; Some "5"; Some "2"; Some "15" ]
+                    [ Some "2"; Some "0"; Some "6"; Some "1"; Some "9" ] ]
+                  "both USING joins retain the nested view's exposed key"
+              Expect.equal (run store "UPDATE nested_window_using SET n=3 WHERE id=1") (Affected 1UL) "two-USING view changes one row"
+              match run store "UPDATE nested_window_using SET n=11 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected two-USING CHECK OPTION error 1369, got %A" other
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_window_target ORDER BY id")
+                  [ [ Some "1"; Some "3" ]; [ Some "2"; Some "0" ] ]
+                  "two-USING failed write is atomic"
 
           testCase "grouped HAVING and ROLLUP NATURAL read sources leave a physical target writable"
           <| fun _ ->

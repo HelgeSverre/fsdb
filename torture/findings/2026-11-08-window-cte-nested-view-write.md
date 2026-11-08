@@ -13,3 +13,10 @@ outer join saw a second, hidden `id` column. The outer join now resolves its
 shared keys against the view's exposed columns before the physical joins are
 inserted. The regression covers both source orders, metadata, rows, affected
 count, and failed-write atomicity.
+
+A follow-up on the same pinned oracle joins the nested target to a window CTE
+and a grouped CTE with successive `USING(id)` clauses. Both engines report the
+outer view updatable, return two rows for target `id=1`, update that physical
+row once, and reject an outer CHECK OPTION violation with 1369. The regression
+keeps both join keys bound to the inner view's exposed `id` rather than its
+hidden physical join columns.
