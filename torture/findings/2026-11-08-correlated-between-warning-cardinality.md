@@ -83,3 +83,17 @@ Thus, in this fixture each range candidate contributes two warnings for each
 of the three outer rows before the owner filter; the two setup warnings are
 separate. This supports modeling diagnostics at the selected range access,
 not at the final matching rows.
+
+## Planner boundary on current head
+
+`EXPLAIN` on fsdb reports `ALL` for the inner `i` source with and without
+`FORCE INDEX(ix_k)`; the indexed three-outer-row query reports six warnings
+after the scanned-count fix. MySQL 8.4.11 reports `range` on `ix_k` and
+fourteen warnings. The immediate range-planning barrier is
+`Storage.exactRangeProbeValue`: for a `DOUBLE` key it accepts a string bound
+only when the whole string parses as a finite double. The `'12.5x'` and
+`'13x'` bounds therefore cannot form an fsdb range lookup, even when the
+index is forced. A compatible fix needs a safe leading-numeric range bound,
+selection of that access path, and warning emission tied to its setup and
+candidate evaluation. Expanding the bound alone would change which rows are
+read without reproducing MySQL's diagnostics.
