@@ -12,6 +12,7 @@ both result membership and relevance scores.
 | `utf8mb4_unicode_ci` | 1–10 | 37,320 | 0 |
 | `utf8mb4_ja_0900_as_cs_ks` | 1–10 | 37,320 | 0 |
 | `utf8mb4_general_ci` (all 624 scalars) | 1–10 | 37,440 | 0 |
+| `utf8mb4_unicode_520_ci` (all 624 scalars) | 1–10 | 37,440 | 0 |
 
 Commands used `uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py
 <sizes> --legacy-range 2EBF0:2EE60 --collation <collation>` from the repository
@@ -33,6 +34,11 @@ uv run --with pymysql torture/scripts/ngram-multicol-oracle.py \
   --legacy-range 2EBF0:2EE60 --all-range-scalars \
   --collation utf8mb4_general_ci 1 2 3 4 5 6 7 8 9 10
 ```
+
+The same full-block, all-scalar command passed under
+`utf8mb4_unicode_520_ci` on the current Release build, also with 3,744
+searches and zero mismatches per size. This extends search coverage to
+Unicode 5.2; the legacy-equality lane was not enabled.
 
 An exact-byte `WEIGHT_STRING` follow-up found that MySQL 8.4.11 gives all 624
 Extension I scalars replacement weight `FFFD` under `utf8mb4_general_ci` and

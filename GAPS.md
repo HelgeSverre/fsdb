@@ -1508,8 +1508,9 @@ The [CJK Extension I audit](torture/findings/2026-11-04-cjk-extension-i-ngram.md
 finds no two-column membership or relevance differences across the printable
 U+2EBF0–U+2EE5F scalars under Unicode 9.0 and legacy Unicode collations at
 token sizes 1–10, plus Japanese kana-sensitive collation at sizes 1–10. A
-later full-block `utf8mb4_general_ci` replay includes all 624 scalars and
-matches 37,440 two-column searches at sizes 1–10. Other collations and MeCab
+later full-block `utf8mb4_general_ci` and `utf8mb4_unicode_520_ci` replays
+include all 624 scalars and each match 37,440 two-column searches at sizes
+1–10. Other collations and MeCab
 remain open. Exact legacy `WEIGHT_STRING` bytes now match
 all 624 singletons and 623 adjacent pairs under general, Unicode 4.0, and
 Unicode 5.2 `utf8mb4` collations.
