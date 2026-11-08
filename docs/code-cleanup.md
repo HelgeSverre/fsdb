@@ -117,7 +117,9 @@ hypothesis outside this planner cluster.
 
 ## Residual work
 
-CI on the changed head and a focused performance comparison remain. A-04 is
-an open compatibility gap; A-02 is a
+CI on `4d6b49d2` passed all three jobs. The focused [performance
+comparison](../benchmarks/results/4d6b49d2-correlated-warning-comparison.md)
+found no material regression in the repeat run, although machine drift in the
+first run limits the claim. A-04 is an open compatibility gap; A-02 is a
 fallback-coverage gap. No broad concurrency safety claim is inferred from the
 bounded suite.
