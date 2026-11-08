@@ -2434,7 +2434,9 @@ a padded column as always present. Eligible [nullable-column scalar counts](tort
 now group the original `COUNT(column)` expression once for exact numeric
 correlation keys, preserving NULL counts. The 204-row joined control stays below
 400 examined rows. Ungrouped `EXISTS ... HAVING COUNT(nullable_column)` now
-reuses that grouped count for eligible single-table exact numeric correlations.
+reuses that grouped count for eligible single-table and joined exact numeric
+correlations. The 204-row joined control fell from 4,714 examined rows to
+under 400, including a mixed `COUNT(column)`/`COUNT(*)` predicate.
 The pinned MySQL 8.4.11 control distinguishes empty input from a nonempty
 all-NULL group. Grouped HAVING also uses this path when every grouping key is
 fixed by the correlated equality and an indexed matched-row count establishes

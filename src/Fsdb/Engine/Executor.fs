@@ -785,7 +785,7 @@ type private StatementMemo =
       ScopedPhysicalProjections: Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>
       EqualityIndexMatches: Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
-      NullableHavingCountSelects: Dictionary<SelectStmt, SelectStmt>
+      HavingCountSelects: Dictionary<SelectStmt, SelectStmt * SelectStmt>
       CountColumnPresence: Dictionary<SelectStmt, Dictionary<string * Expr, bool>>
       InnerExistsProjections: Dictionary<SelectStmt, bool>
       ScopedExistsProjections: Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>
@@ -833,7 +833,7 @@ let private freshStatementMemo () =
       ScopedPhysicalProjections = Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>(HashIdentity.Reference)
       EqualityIndexMatches = Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>(HashIdentity.Reference)
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
-      NullableHavingCountSelects = Dictionary<SelectStmt, SelectStmt>(HashIdentity.Reference)
+      HavingCountSelects = Dictionary<SelectStmt, SelectStmt * SelectStmt>(HashIdentity.Reference)
       CountColumnPresence = Dictionary<SelectStmt, Dictionary<string * Expr, bool>>(HashIdentity.Reference)
       InnerExistsProjections = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
       ScopedExistsProjections = Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>(HashIdentity.Reference)
@@ -9321,20 +9321,24 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
             | FuncCall(name, [ QualifiedCol _ as argument ])
                 when equalsIgnoreCase name "COUNT" -> Some argument
             | expression -> Expression.children expression |> List.tryPick firstCount
-        match select.From, select.Having |> Option.bind firstCount with
-        | Some(FromTable source), Some(QualifiedCol(qualifier, columnName) as argument)
-            when select.Joins.IsEmpty
-                 && not (source.Database.IsNone
-                         && (currentCteScope () |> Map.containsKey (source.Table.ToLowerInvariant())))
-                 && equalsIgnoreCase qualifier (source.Alias |> Option.defaultValue source.Table) ->
-            physicalFastPathTable outer.Store outer.DbName source
-            |> Option.bind (fun (table: Table) ->
-                table.Columns
-                |> List.tryFind (fun (column: ColumnDef) ->
-                    equalsIgnoreCase column.Name columnName
-                    && column.Nullable
-                    && column.Generated.IsNone)
-                |> Option.map (fun _ -> argument))
+        match select.Having |> Option.bind firstCount with
+        | Some(QualifiedCol(qualifier, columnName) as argument) ->
+            (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+            |> List.choose (function FromTable source -> Some source | _ -> None)
+            |> List.filter (fun source ->
+                equalsIgnoreCase qualifier (source.Alias |> Option.defaultValue source.Table))
+            |> function
+                | [ source ] when not (source.Database.IsNone
+                                       && (currentCteScope () |> Map.containsKey (source.Table.ToLowerInvariant()))) ->
+                    physicalFastPathTable outer.Store outer.DbName source
+                    |> Option.bind (fun (table: Table) ->
+                        table.Columns
+                        |> List.tryFind (fun (column: ColumnDef) ->
+                            equalsIgnoreCase column.Name columnName
+                            && column.Nullable
+                            && column.Generated.IsNone)
+                        |> Option.map (fun _ -> argument))
+                | _ -> None
         | _ -> None
     let supportedCount = function
         | FuncCall(name, [ argument ]) ->
@@ -9434,9 +9438,8 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                 |> List.forall (fun projection ->
                     match projection.Expression with Lit _ -> true | _ -> false)))
 
-    let plainShape =
-        select.Joins.IsEmpty
-        && membershipHaving
+    let membershipShape =
+        membershipHaving
         && havingProjectionsAreSafe
         && (not select.Distinct || select.OrderBy.IsEmpty)
         && membershipLimit
@@ -9448,8 +9451,49 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         && not select.CalculateFoundRows
         && not select.Rollup
 
+    let tryNullableHavingMembership argument =
+        let memo = (currentStatementMemo ()).HavingCountSelects
+        let nullableSelect, matchedSelect =
+            match memo.TryGetValue select with
+            | true, countSelects -> countSelects
+            | false, _ ->
+                let countSelect argument =
+                    { select with
+                        Projections =
+                            [ { Expression = FuncCall("COUNT", [ argument ])
+                                Alias = None
+                                SourceName = None
+                                BindingOrigin = None } ]
+                        GroupBy = []
+                        Having = None
+                        Limit = None
+                        Offset = None }
+                let countSelects = countSelect argument, countSelect (Star None)
+                memo.[select] <- countSelects
+                countSelects
+        // An ungrouped HAVING with no matched-row COUNT needs only the
+        // nullable count. Otherwise COUNT(*) also establishes group existence.
+        let matchedRows =
+            if select.GroupBy.IsEmpty && not countHavingUsesMatchedRows then Some(Ok 0L)
+            else tryDecorrelatedMatchCount outer matchedSelect
+        matchedRows
+        |> Option.bind (fun matchedResult ->
+            tryDecorrelatedMatchCount outer nullableSelect
+            |> Option.bind (fun nullableResult ->
+                match matchedResult, nullableResult with
+                | Error error, _ | _, Error error -> Some(Error error)
+                | Ok matched, Ok nonNull
+                    when matched <= int64 System.Int32.MaxValue
+                         && nonNull <= int64 System.Int32.MaxValue ->
+                    countHaving
+                    |> Option.map (fun (predicate, _) ->
+                        Ok(boolToValue
+                            ((select.GroupBy.IsEmpty || matched > 0L)
+                             && predicate (int matched, int nonNull))))
+                | _ -> None))
+
     match select.From with
-    | Some(FromItem.Qualified _ as source) when plainShape ->
+    | Some(FromItem.Qualified _ as source) when select.Joins.IsEmpty && membershipShape ->
         let projectedColumns = lazy (selectSourceColumns outer.Store outer.DbName source)
         let sourceColumns = lazy (projectedColumns.Value |> List.choose id)
         let sourceContext =
@@ -9645,41 +9689,7 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
         if not groupedMembershipShape || not bindingsAreSafe || not (groupedCountIsSafe ()) then None
         else
             match nullableCountArgument with
-            | Some argument ->
-                let memo = (currentStatementMemo ()).NullableHavingCountSelects
-                let countSelect =
-                    match memo.TryGetValue select with
-                    | true, countSelect -> countSelect
-                    | false, _ ->
-                        let countSelect =
-                            { select with
-                                Projections =
-                                    [ { Expression = FuncCall("COUNT", [ argument ])
-                                        Alias = None
-                                        SourceName = None
-                                        BindingOrigin = None } ]
-                                GroupBy = []
-                                Having = None }
-                        memo.[select] <- countSelect
-                        countSelect
-                // Ungrouped HAVING needs no group-existence check. If it only
-                // references the nullable count, the matched count is unused.
-                let matchedRows =
-                    if select.GroupBy.IsEmpty && not countHavingUsesMatchedRows then Some 0
-                    else tryCorrelatedEqualityCount outer source select.Where
-                matchedRows
-                |> Option.bind (fun matchedRows ->
-                    tryDecorrelatedMatchCount outer countSelect
-                    |> Option.bind (function
-                        | Ok count when count > int64 System.Int32.MaxValue -> None
-                        | result ->
-                            result
-                            |> Result.map (fun count ->
-                                boolToValue
-                                    ((select.GroupBy.IsEmpty || matchedRows > 0)
-                                     && (countHaving
-                                         |> Option.exists (fun (predicate, _) -> predicate (matchedRows, int count)))))
-                            |> Some))
+            | Some argument -> tryNullableHavingMembership argument
             | None ->
                 tryCorrelatedEqualityCount outer source select.Where
                 |> Option.map (fun count ->
@@ -9690,6 +9700,8 @@ and private tryCorrelatedExists (outer: EvalContext) (select: SelectStmt) : Resu
                             && predicate (count, count)
                         | None -> count > 0
                     Ok(boolToValue exists))
+    | Some _ when not select.Joins.IsEmpty && select.GroupBy.IsEmpty && membershipShape ->
+        nullableCountArgument |> Option.bind tryNullableHavingMembership
     | _ -> None
 
 /// Integer and decimal keys compare exactly under SQL `=`, so they can index a

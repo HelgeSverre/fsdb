@@ -132,6 +132,28 @@ let tests =
                     let _, examined = withExaminedRows (fun () -> runDefault store sql)
                     Expect.isLessThan examined 400L "the nullable count groups joined keys once"
 
+                testCase "joined nullable COUNT HAVING reuses grouped inner keys"
+                <| fun _ ->
+                    let store = joinedStore ()
+                    runDefault store "UPDATE sys SET created_at='2024-01-02 03:04:05' WHERE id=10" |> ignore
+                    let sql =
+                        "SELECT cat.id,EXISTS(SELECT 1 FROM sys JOIN cat_sys l ON sys.id=l.sys_id WHERE cat.id=l.cat_id AND status='published' HAVING COUNT(sys.created_at)=0) AS empty_count,"
+                        + "EXISTS(SELECT 1 FROM sys JOIN cat_sys l ON sys.id=l.sys_id WHERE cat.id=l.cat_id AND status='published' HAVING COUNT(sys.created_at)=0 AND COUNT(*)>0) AS has_rows "
+                        + "FROM cat ORDER BY cat.id"
+                    Expect.equal
+                        (runDefault store sql)
+                        (ResultSet(
+                            [ "id"; "empty_count"; "has_rows" ],
+                            [ [ Some "1"; Some "0"; Some "0" ]
+                              [ Some "2"; Some "1"; Some "1" ]
+                              [ Some "3"; Some "1"; Some "0" ]
+                              [ Some "4"; Some "1"; Some "1" ] ]))
+                        "pinned MySQL 8.4.11 joined nullable count membership"
+                    let extra = [ 100 .. 299 ] |> List.map (sprintf "(%d, 'bulk', NULL)") |> String.concat ","
+                    runDefault store ("INSERT INTO cat VALUES " + extra) |> ignore
+                    let _, examined = withExaminedRows (fun () -> runDefault store sql)
+                    Expect.isLessThan examined 400L "joined nullable COUNT HAVING groups inner rows once"
+
                 testCase "the joined inner side is read once per statement rather than once per outer row"
                 <| fun _ ->
                     let store = joinedStore ()

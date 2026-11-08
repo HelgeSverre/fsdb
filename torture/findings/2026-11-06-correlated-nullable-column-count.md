@@ -20,7 +20,7 @@ once per grouped inner row. Coercive outer keys and unstable expressions
 continue through the ordinary path.
 
 `EXISTS` with `HAVING COUNT(nullable_column)` now reuses the same
-statement-local grouped count for a single physical inner source and exact
+statement-local grouped count for a qualified physical column and exact
 numeric equality key. Pinned MySQL 8.4.11 returns true for an empty input
 under ungrouped `HAVING COUNT(column)=0`, but false for the corresponding
 grouped query because no group exists. For a grouped query whose grouping keys
@@ -34,3 +34,11 @@ mixed 204-row controls stay below 400
 examined rows; before the ungrouped path it examined 1,229 rows and failed
 that budget. Unfixed grouping keys and multiple nullable count arguments
 retain ordinary evaluation.
+
+The ungrouped path now also accepts eligible inner joins. It computes the
+nullable count and, when a mixed HAVING predicate needs it, `COUNT(*)` through
+the existing grouped-key planner. A four-category MySQL 8.4.11 oracle returns
+`0,1,1,1` for `COUNT(sys.created_at)=0` and `0,1,0,1` after adding
+`AND COUNT(*)>0`. The corresponding 204-row fsdb control examined 4,714 rows
+before the plan and stays below 400 with it. The two synthetic count queries
+are memoized per statement, so each inner join is grouped once.
