@@ -2539,10 +2539,56 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 select.Joins
                                 (List.tail sources)
 
+                        let joinsAfterExpandedFirstSource (original: TableRef) =
+                            let columnsOf qualifier =
+                                sources
+                                |> List.tryFind (fun source -> equalsIgnoreCase source.Qualifier qualifier)
+                                |> Option.map _.Columns
+                                |> Option.defaultValue []
+                            let initial = FromItem.logicalColumns columnsOf (FromTable original)
+                            let expanded, _ =
+                                List.zip3 select.Joins (List.tail sources) rewrittenJoins
+                                |> List.mapFold (fun left (originalJoin, rightSource, rewrittenJoin) ->
+                                    let keys =
+                                        left
+                                        |> Result.bind (fun left ->
+                                            FromItem.logicalColumns columnsOf rightSource.Reference
+                                            |> Result.bind (fun right -> FromItem.logicalJoinKeys left right originalJoin))
+                                    let next =
+                                        left |> Result.bind (fun left -> FromItem.logicalJoinColumns columnsOf left originalJoin)
+                                    let join =
+                                        match keys with
+                                        | Ok keys when originalJoin.Kind = NaturalJoin
+                                                       || originalJoin.Kind = NaturalLeftJoin
+                                                       || originalJoin.Kind = NaturalRightJoin
+                                                       || not originalJoin.Using.IsEmpty ->
+                                            let conditions =
+                                                keys
+                                                |> List.map (fun (_, left, right) ->
+                                                    BinOp(Eq, rewriteSources left, rewriteSources right))
+                                            let on =
+                                                conditions
+                                                |> List.fold (fun on condition -> BinOp(And, on, condition)) rewrittenJoin.On
+                                            { rewrittenJoin with
+                                                Kind =
+                                                    match originalJoin.Kind with
+                                                    | NaturalJoin -> InnerJoin
+                                                    | NaturalLeftJoin -> LeftJoin
+                                                    | NaturalRightJoin -> RightJoin
+                                                    | kind -> kind
+                                                Using = []
+                                                On = on }
+                                        | _ -> rewrittenJoin
+                                    join, next) initial
+                            expanded
+
                         let updateSources =
                             match source, sources, select.Joins with
                             | FromTable original, { Reference = FromTable physical; JoinedSources = nestedJoins } :: _, _ ->
-                                Some(physical, nestedJoins @ rewrittenJoins, original, select.Joins)
+                                let outerJoins =
+                                    if nestedJoins.IsEmpty then rewrittenJoins
+                                    else joinsAfterExpandedFirstSource original
+                                Some(physical, nestedJoins @ outerJoins, original, select.Joins)
                             | (FromSubquery _ | FromLateral _ | FromJsonTable _), derived :: ({ Reference = FromTable physical; JoinedSources = nestedJoins } as targetSource) :: _, join :: trailing
                                 when (join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin || join.Kind = NaturalJoin) ->
                                 let physicalQualifier = physical.Alias |> Option.defaultValue physical.Table

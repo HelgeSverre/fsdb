@@ -20,7 +20,53 @@ let private setup () =
 let tests =
     testList
         "views"
-        [ testCase "grouped HAVING and ROLLUP NATURAL read sources leave a physical target writable"
+        [ testCase "window CTE natural join can update a nested checked view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE nested_window_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE nested_window_source(id INT,flag INT)"
+                    "CREATE TABLE nested_window_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO nested_window_target VALUES(1,0),(2,0)"
+                    "INSERT INTO nested_window_source VALUES(1,7),(1,8),(2,9)"
+                    "INSERT INTO nested_window_aux VALUES(1,5),(2,6)"
+                    "CREATE VIEW nested_window_inner AS SELECT a.id,a.n,c.aux FROM nested_window_target a JOIN nested_window_aux c ON c.id=a.id WHERE a.n>=0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW nested_window_outer AS WITH ranked AS (SELECT id,ROW_NUMBER() OVER(PARTITION BY id ORDER BY flag) rn FROM nested_window_source) SELECT v.id,v.n,v.aux,ranked.rn FROM ranked NATURAL JOIN nested_window_inner v WHERE v.n<10 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_window_outer'")
+                  [ [ Some "YES" ] ] "pinned MySQL 8.4.11 reports the layered view writable"
+              Expect.equal
+                  (rows store "SELECT id,n,aux,rn FROM nested_window_outer ORDER BY id,rn")
+                  [ [ Some "1"; Some "0"; Some "5"; Some "1" ]
+                    [ Some "1"; Some "0"; Some "5"; Some "2" ]
+                    [ Some "2"; Some "0"; Some "6"; Some "1" ] ]
+                  "window CTE rows survive the nested view join"
+              Expect.equal (run store "UPDATE nested_window_outer SET n=1 WHERE id=1") (Affected 1UL) "one physical target row changes"
+              for value in [ -1; 11 ] do
+                  match run store (sprintf "UPDATE nested_window_outer SET n=%d WHERE id=1" value) with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected checked update %d to fail with 1369, got %A" value other
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_window_target ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
+                  "rejected writes leave the accepted value committed"
+              expectOk
+                  (run store "CREATE VIEW nested_window_reverse AS WITH ranked AS (SELECT id,ROW_NUMBER() OVER(PARTITION BY id ORDER BY flag) rn FROM nested_window_source) SELECT v.id,v.n,v.aux,ranked.rn FROM nested_window_inner v NATURAL JOIN ranked WHERE v.n<10 WITH CASCADED CHECK OPTION")
+                  "create target-first layered view"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='nested_window_reverse'")
+                  [ [ Some "YES" ] ] "target-first view is writable"
+              Expect.equal (run store "UPDATE nested_window_reverse SET n=2 WHERE id=1") (Affected 1UL) "target-first view changes one row"
+              match run store "UPDATE nested_window_reverse SET n=11 WHERE id=1" with
+              | Err(1369, _) -> ()
+              | other -> failtestf "expected target-first CHECK OPTION error 1369, got %A" other
+              Expect.equal
+                  (rows store "SELECT id,n FROM nested_window_target ORDER BY id")
+                  [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ] ]
+                  "target-first failed write is atomic"
+
+          testCase "grouped HAVING and ROLLUP NATURAL read sources leave a physical target writable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               for sql in

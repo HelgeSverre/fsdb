@@ -847,6 +847,27 @@ module FromItem =
         member column.Expression =
             match column with SourceColumn(_, expression) | MergedColumn(_, expression) -> expression
 
+    /// Resolve NATURAL/USING keys against the logical operands before a view
+    /// or grouped source is expanded into its hidden physical joins.
+    let logicalJoinKeys (left: LogicalColumn list) (right: LogicalColumn list) (join: Join) =
+        let sameName (left: string) right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+        let names =
+            match join.Kind with
+            | NaturalJoin | NaturalLeftJoin | NaturalRightJoin ->
+                left |> List.map _.Name |> List.filter (fun name -> right |> List.exists (fun column -> sameName name column.Name))
+            | _ -> join.Using
+        let resolve name (columns: LogicalColumn list) =
+            match columns |> List.filter (fun column -> sameName name column.Name) with
+            | [ column ] -> Ok column.Expression
+            | [] -> Error(MissingColumn name)
+            | _ -> Error(AmbiguousColumn name)
+        names
+        |> List.fold (fun state name ->
+            state |> Result.bind (fun keys ->
+                resolve name left |> Result.bind (fun leftExpression ->
+                    resolve name right |> Result.map (fun rightExpression ->
+                        keys @ [ name, leftExpression, rightExpression ])))) (Ok [])
+
     /// Logical output columns merge USING keys without hiding qualified source columns.
     let rec logicalColumns (columnsOf: string -> string list) item =
         let leaf qualifier = columnsOf qualifier |> List.map (fun name -> SourceColumn(name, QualifiedCol(qualifier, name))) |> Ok
@@ -862,28 +883,16 @@ module FromItem =
         let sameName (left: string) right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
         logicalColumns columnsOf join.Table
         |> Result.bind (fun right ->
-            let names =
-                match join.Kind with
-                | NaturalJoin | NaturalLeftJoin | NaturalRightJoin ->
-                    left |> List.map _.Name |> List.filter (fun name -> right |> List.exists (fun column -> sameName name column.Name))
-                | _ -> join.Using
-            let resolve name (columns: LogicalColumn list) =
-                match columns |> List.filter (fun column -> sameName name column.Name) with
-                | [ column ] -> Ok column.Expression
-                | [] -> Error(MissingColumn name)
-                | _ -> Error(AmbiguousColumn name)
-            let merged =
-                names
-                |> List.fold (fun state name ->
-                    state |> Result.bind (fun columns ->
-                        resolve name left |> Result.bind (fun leftExpression ->
-                            resolve name right |> Result.map (fun rightExpression ->
-                                let expression =
-                                    match join.Kind with
-                                    | RightJoin | NaturalRightJoin -> rightExpression
-                                    | _ -> leftExpression
-                                columns @ [ MergedColumn(name, expression) ])))) (Ok [])
-            merged |> Result.map (fun common ->
+            logicalJoinKeys left right join |> Result.map (fun keys ->
+                let names = keys |> List.map (fun (name, _, _) -> name)
+                let common =
+                    keys
+                    |> List.map (fun (name, leftExpression, rightExpression) ->
+                        let expression =
+                            match join.Kind with
+                            | RightJoin | NaturalRightJoin -> rightExpression
+                            | _ -> leftExpression
+                        MergedColumn(name, expression))
                 let isCommon (column: LogicalColumn) = names |> List.exists (sameName column.Name)
                 // USING order follows the left operand's columns, not its key list.
                 let common = left |> List.choose (fun column -> common |> List.tryFind (fun merged -> sameName column.Name merged.Name))
