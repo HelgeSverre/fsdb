@@ -763,6 +763,10 @@ type private DecorrelatedKeyCounts =
     { OuterKeys: (Expr * bool) list
       Counts: Dictionary<decimal option list, int64> }
 
+type private CorrelatedNumericWarningState =
+    | Pending of string
+    | Reported
+
 type private HavingCountSelects =
     { Nullable: SelectStmt
       Matched: SelectStmt
@@ -790,6 +794,7 @@ type private StatementMemo =
       ScopedPhysicalProjections: Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>
       EqualityIndexMatches: Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
+      CorrelatedNumericWarnings: Dictionary<Expr, CorrelatedNumericWarningState>
       HavingCountSelects: Dictionary<SelectStmt, HavingCountSelects>
       CountColumnPresence: Dictionary<SelectStmt, Dictionary<string * Expr, bool>>
       InnerExistsProjections: Dictionary<SelectStmt, bool>
@@ -838,6 +843,7 @@ let private freshStatementMemo () =
       ScopedPhysicalProjections = Dictionary<FromItem, Dictionary<obj, PhysicalProjection option>>(HashIdentity.Reference)
       EqualityIndexMatches = Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>(HashIdentity.Reference)
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
+      CorrelatedNumericWarnings = Dictionary<Expr, CorrelatedNumericWarningState>(HashIdentity.Reference)
       HavingCountSelects = Dictionary<SelectStmt, HavingCountSelects>(HashIdentity.Reference)
       CountColumnPresence = Dictionary<SelectStmt, Dictionary<string * Expr, bool>>(HashIdentity.Reference)
       InnerExistsProjections = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
@@ -850,6 +856,55 @@ let private freshStatementMemo () =
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
 
 let private currentStatementMemo () = DynamicScope.getOrCreate freshStatementMemo statementMemo
+let private metadataProbe = System.Threading.AsyncLocal<bool>()
+
+/// A probe may discover a constant conversion before real rows exist. Keep
+/// that condition pending until the enclosing SELECT commits its diagnostics.
+let private recordCorrelatedNumericWarning expression text =
+    let warnings = (currentStatementMemo ()).CorrelatedNumericWarnings
+    match warnings.TryGetValue expression with
+    | true, Reported -> ()
+    | found, previous ->
+        let firstText =
+            match found, previous with
+            | true, Pending original -> original
+            | _ -> text
+        if Diagnostics.isSuppressed () || metadataProbe.Value then
+            warnings.[expression] <- Pending firstText
+        else
+            warnings.[expression] <- Reported
+            Diagnostics.numericConversion "DOUBLE" firstText
+
+let private pendingCorrelatedNumericWarningCheckpoint () =
+    let pending =
+        (currentStatementMemo ()).CorrelatedNumericWarnings
+        |> Seq.choose (fun (KeyValue(expression, state)) ->
+            match state with Pending _ -> Some expression | Reported -> None)
+    HashSet<Expr>(pending, HashIdentity.Reference)
+
+let private rollbackCorrelatedNumericWarnings (checkpoint: HashSet<Expr>) =
+    let warnings = (currentStatementMemo ()).CorrelatedNumericWarnings
+    let newPending =
+        warnings
+        |> Seq.choose (fun (KeyValue(expression, state)) ->
+            match state with
+            | Pending _ when not (checkpoint.Contains expression) -> Some expression
+            | _ -> None)
+        |> Seq.toArray
+    for expression in newPending do warnings.Remove expression |> ignore
+
+let private flushCorrelatedNumericWarnings () =
+    if not (Diagnostics.isSuppressed ()) then
+        let warnings = (currentStatementMemo ()).CorrelatedNumericWarnings
+        if warnings.Count > 0 then
+            let pending =
+                warnings
+                |> Seq.choose (fun (KeyValue(expression, state)) ->
+                    match state with Pending text -> Some(expression, text) | Reported -> None)
+                |> Seq.toArray
+            for expression, text in pending do
+                warnings.[expression] <- Reported
+                Diagnostics.numericConversion "DOUBLE" text
 
 let private compileStatementRegex
     (expression: Expr)
@@ -937,7 +992,9 @@ let internal withJoinHintDiagnostics (diagnostics: OptimizerHintResolution.Execu
     if diagnostics.Warnings.IsEmpty && inherited.Warnings.IsEmpty then body ()
     else DynamicScope.withValue joinHintDiagnostics diagnostics body
 
-let private metadataProbe = System.Threading.AsyncLocal<bool>()
+/// Owns DOUBLE/FLOAT literal conversions across a correlated execution tree,
+/// including its synthetic grouped SELECT whose own outer context is empty.
+let private correlatedNumericWarningScope = System.Threading.AsyncLocal<bool>()
 let private planningProbe = System.Threading.AsyncLocal<bool>()
 let private emptyPhysicalPlanningProbe = System.Threading.AsyncLocal<bool>()
 let private accessPlanningMemo = System.Threading.AsyncLocal<AccessPlanningMemo option>()
@@ -7433,6 +7490,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             let reducedProjection = tryReducedScalarProjection ctx select
             let executionSelect =
                 match reducedProjection with
+                | Some _ when select.From.IsSome && hasZeroRowLimit select -> select
                 | Some _ when select.Limit.IsSome || select.Offset.IsSome -> { select with Limit = None; Offset = None }
                 | _ -> select
             let subquery = runExpressionSubquery ctx select executionSelect
@@ -9743,8 +9801,10 @@ and private exactNullableNumericKey (value: Value) : decimal option option =
     | VNull -> Some None
     | _ -> exactNumericKey value |> Option.map Some
 
-/// Predicates that evaluate without warnings or side effects, so running
-/// them once per inner row instead of once per outer row is unobservable.
+/// Side-effect-free predicate shapes that can run in the grouped inner pass.
+/// Conversion-warning cardinality still depends on the access path; direct
+/// DOUBLE string bounds have a statement-scoped warning owner below, while
+/// other coercive shapes remain compatibility gaps.
 and private isPlainRowPredicate (expression: Expr) : bool =
     match expression with
     | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _
@@ -9884,37 +9944,40 @@ and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : 
         | _ -> None
     | _ -> None
 
-and private decorrelatedKeyCounts (outer: EvalContext) (select: SelectStmt) : DecorrelatedKeyCounts option =
+and private decorrelatedKeyCounts
+    (outer: EvalContext)
+    (select: SelectStmt)
+    (outerKeys: (Expr * bool) list, grouped: SelectStmt)
+    : DecorrelatedKeyCounts option =
     let memo = (currentStatementMemo ()).DecorrelatedKeyCounts
 
     match memo.TryGetValue select with
     | true, counts -> counts
     | false, _ ->
         let counts =
-            tryDecorrelatedKeyShape outer select
-            |> Option.bind (fun (outerKeys, grouped) ->
-                match runSelectStmt outer.Store outer.Registry outer.DbName grouped None with
-                | ResultSet _, _, rows ->
-                    let counts = Dictionary<decimal option list, int64>()
+            match DynamicScope.withValue correlatedNumericWarningScope true (fun () ->
+                runSelectStmt outer.Store outer.Registry outer.DbName grouped None) with
+            | ResultSet _, _, rows ->
+                let counts = Dictionary<decimal option list, int64>()
 
-                    let collected =
-                        rows
-                        |> List.forall (fun row ->
-                            if row.Length <> outerKeys.Length + 1 then false
-                            else
-                                let keys = row |> Array.take outerKeys.Length |> Array.toList
-                                match row.[outerKeys.Length] with
-                                | VInt _ when List.exists2 (fun (_, nullSafe) key -> not nullSafe && key = VNull) outerKeys keys -> true
-                                | VInt count ->
-                                    let numericKeys = keys |> List.map exactNullableNumericKey
-                                    if numericKeys |> List.forall Option.isSome then
-                                        counts.[numericKeys |> List.choose id] <- count
-                                        true
-                                    else false
-                                | _ -> false)
+                let collected =
+                    rows
+                    |> List.forall (fun row ->
+                        if row.Length <> outerKeys.Length + 1 then false
+                        else
+                            let keys = row |> Array.take outerKeys.Length |> Array.toList
+                            match row.[outerKeys.Length] with
+                            | VInt _ when List.exists2 (fun (_, nullSafe) key -> not nullSafe && key = VNull) outerKeys keys -> true
+                            | VInt count ->
+                                let numericKeys = keys |> List.map exactNullableNumericKey
+                                if numericKeys |> List.forall Option.isSome then
+                                    counts.[numericKeys |> List.choose id] <- count
+                                    true
+                                else false
+                            | _ -> false)
 
-                    if collected then Some { OuterKeys = outerKeys; Counts = counts } else None
-                | _ -> None)
+                if collected then Some { OuterKeys = outerKeys; Counts = counts } else None
+            | _ -> None
 
         memo.[select] <- counts
         counts
@@ -9922,22 +9985,41 @@ and private decorrelatedKeyCounts (outer: EvalContext) (select: SelectStmt) : De
 /// The outer row's match count, or `None` when its key is not exact numeric and
 /// must take the ordinary per-row path to keep SQL's coercion rules.
 and private tryDecorrelatedMatchCount (outer: EvalContext) (select: SelectStmt) : Result<int64, EvalError> option =
-    decorrelatedKeyCounts outer select
-    |> Option.bind (fun counts ->
-        let values = counts.OuterKeys |> List.map (fst >> evalExpr outer)
+    let memo = (currentStatementMemo ()).DecorrelatedKeyCounts
+    let cached = memo.TryGetValue select
+    let shape =
+        match cached with
+        | true, Some counts -> Some(counts.OuterKeys, None)
+        | true, None -> None
+        | false, _ ->
+            tryDecorrelatedKeyShape outer select
+            |> Option.map (fun (outerKeys, grouped) -> outerKeys, Some grouped)
+
+    shape
+    |> Option.bind (fun (outerKeys, grouped) ->
+        let values = outerKeys |> List.map (fst >> evalExpr outer)
         match values |> List.tryPick (function Error error -> Some error | _ -> None) with
         | Some error -> Some(Error error)
         | None ->
             let keys = values |> List.choose (function Ok value -> Some value | _ -> None)
-            if List.exists2 (fun (_, nullSafe) key -> not nullSafe && key = VNull) counts.OuterKeys keys then Some(Ok 0L)
+            if List.exists2 (fun (_, nullSafe) key -> not nullSafe && key = VNull) outerKeys keys then None
             else
                 let numericKeys = keys |> List.map exactNullableNumericKey
                 if numericKeys |> List.exists Option.isNone then None
                 else
                     let key = numericKeys |> List.choose id
-                    match counts.Counts.TryGetValue key with
-                    | true, count -> Some(Ok count)
-                    | false, _ -> Some(Ok 0L))
+                    let counts =
+                        match cached with
+                        | true, Some counts -> Some counts
+                        | _ when Diagnostics.isSuppressed () || metadataProbe.Value -> None
+                        | _ ->
+                            grouped
+                            |> Option.bind (fun grouped -> decorrelatedKeyCounts outer select (outerKeys, grouped))
+                    counts
+                    |> Option.map (fun counts ->
+                        match counts.Counts.TryGetValue key with
+                        | true, count -> Ok count
+                        | false, _ -> Ok 0L))
 
 and private tryDecorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
     if (isPlainCountRowsSelect outer.Store outer.DbName outer.Registry select
@@ -11466,6 +11548,16 @@ and private prepareWhereMatches
         let validated = validateElidedPredicate expression
         fun _ -> validated |> Result.map (fun () -> truth)
 
+    let normalizeCorrelatedDoubleBound (column: ColumnDef) expression bound =
+        match column.Type, bound with
+        | (TDouble _ | TFloat _), VString text when correlatedNumericWarningScope.Value ->
+            let number, truncated = Value.coerceLeadingDouble text
+            if truncated && System.Double.IsFinite number then
+                recordCorrelatedNumericWarning expression text
+                VDouble number
+            else bound
+        | _ -> bound
+
     let directComparison eager op columnExpression constantExpression columnOnLeft =
         match tryDirectColumnForExpr context columnExpression with
         | Some(index, column)
@@ -11475,7 +11567,10 @@ and private prepareWhereMatches
                       containsDivision expression
                       && isLiteralConstantExpression context.Registry expression) ->
             // A top-level bound evaluates even for an empty scan; a Boolean branch waits until reached.
-            let boundResult = lazy (evalExpr context constantExpression)
+            let boundResult =
+                lazy (
+                    evalExpr context constantExpression
+                    |> Result.map (normalizeCorrelatedDoubleBound column constantExpression))
             if eager then ignore boundResult.Value
             Some(fun (row: Value[]) ->
                 match boundResult.Value with
@@ -11503,6 +11598,20 @@ and private prepareWhereMatches
             directComparison eager op left right true
             |> Option.orElseWith (fun () -> directComparison eager op right left false)
             |> Option.defaultWith (fun () -> evaluate expression)
+        | In(value, candidates) when correlatedNumericWarningScope.Value ->
+            match tryDirectColumnForExpr context value with
+            | Some(_, column) ->
+                let normalized =
+                    candidates
+                    |> List.map (fun candidate ->
+                        match candidate with
+                        | LiteralValue(VString text) ->
+                            match normalizeCorrelatedDoubleBound column candidate (VString text) with
+                            | VDouble number -> Lit(VDouble number)
+                            | _ -> candidate
+                        | _ -> candidate)
+                evaluate (In(value, normalized))
+            | None -> evaluate expression
         | _ -> evaluate expression
 
     match where with
@@ -14471,6 +14580,23 @@ and private runSelectStmt
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
+    let pendingBefore =
+        if select.Limit.IsSome then Some(pendingCorrelatedNumericWarningCheckpoint ())
+        else None
+    let result = runSelectStmtCore store registry dbName select outer
+    if hasZeroRowLimit select then
+        pendingBefore |> Option.iter rollbackCorrelatedNumericWarnings
+    elif not metadataProbe.Value then
+        flushCorrelatedNumericWarnings ()
+    result
+
+and private runSelectStmtCore
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (select: SelectStmt)
+    (outer: EvalContext option)
+    : QueryResult * ColumnMetadata list * Value[] list =
     let cteNames =
         Set.union (currentCteScope () |> Map.keys |> Set.ofSeq)
             (select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList)
@@ -14487,7 +14613,9 @@ and private runSelectStmt
             let ctes = referencedCtes select.Ctes (selectOrUnionTableNames (PlainSelect body))
             withCteScope store registry dbName ctes outer (fun () -> runSelectStmt store registry dbName body outer)
         elif outer.IsSome then
-            runUnmergedSelectStmt store registry dbName select outer
+            let canWarn = not (hasZeroRowLimit select)
+            DynamicScope.withValue correlatedNumericWarningScope canWarn (fun () ->
+                runUnmergedSelectStmt store registry dbName select outer)
         else
         match tryMergeDirectView store registry dbName select with
         | Error error -> error, [], []
@@ -19260,6 +19388,9 @@ and private rowCount =
         | Some variable -> rowCount (Lit variable.Value)
         | None -> raise (SqlError(1210, "Incorrect arguments to LIMIT"))
     | _ -> raise (SqlError(1210, "Incorrect arguments to LIMIT"))
+
+and private hasZeroRowLimit (select: SelectStmt) =
+    select.Limit |> Option.exists (fun limit -> rowCount limit = 0)
 
 and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =

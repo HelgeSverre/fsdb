@@ -35,6 +35,7 @@ let private retainedLimit = AsyncLocal<int option>()
 let private rowNumber = AsyncLocal<int option>()
 let private divisionByZeroPolicy = AsyncLocal<DivisionByZeroPolicy>()
 let private strictNumericConversion = AsyncLocal<bool>()
+let private suppressed = AsyncLocal<bool>()
 
 let private boundedCondition (condition: Condition) =
     if condition.Message.Length > 511 then
@@ -177,5 +178,9 @@ let afterError (body: unit -> 'a) : 'a =
     DynamicScope.withValue active deferred.Value body
 
 let suppress (body: unit -> 'a) : 'a =
-    withStrictNumericConversion false (fun () ->
-        DynamicScope.withValue deferred None (fun () -> DynamicScope.withValue active None body))
+    DynamicScope.withValue suppressed true (fun () ->
+        withStrictNumericConversion false (fun () ->
+            DynamicScope.withValue deferred None (fun () -> DynamicScope.withValue active None body)))
+
+/// True only while condition collection and strict numeric conversion are suppressed.
+let internal isSuppressed () = suppressed.Value

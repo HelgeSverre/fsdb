@@ -1650,6 +1650,198 @@ let tests =
                   Expect.equal (current.Diagnostics |> List.map _.Code) (List.replicate warningCount 1292)
                       (text + " warns once per evaluated candidate")
 
+          testCase "failed decorrelation does not duplicate numeric conversion warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id VARCHAR(8))"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT NOT NULL,k DOUBLE NOT NULL,payload INT NULL)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES('1')"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7)"
+              let current, result =
+                  handle session
+                      "SELECT (SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id=o.id AND i.k='12.5x') AS c FROM outer_rows AS o"
+              Expect.equal result (ResultSet([ "c" ], [ [ Some "1" ] ])) "pinned MySQL 8.4.11 count"
+              Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
+              Expect.equal (current.Diagnostics |> List.map _.Code) [ 1292 ] "truncated DOUBLE warning"
+
+          testCase "decorrelated nullable counts retain conversion warning cardinality"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT NOT NULL,k DOUBLE NOT NULL,payload INT NULL)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1),(1),(2)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7),(2,12.5,8)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id=o.id AND i.k='12.5x') AS c FROM outer_rows AS o ORDER BY o.id"
+              Expect.equal result (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ])) "pinned MySQL 8.4.11 counts"
+              Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
+              Expect.equal (current.Diagnostics |> List.map _.Code) [ 1292 ] "truncated DOUBLE warning"
+
+          testCase "ordinary correlated nullable counts retain conversion warning cardinality"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT NOT NULL,k DOUBLE NOT NULL,payload INT NULL)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1),(1),(2)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7),(2,12.5,8)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id=o.id AND i.k='12.5x' LIMIT 1) AS c FROM outer_rows AS o ORDER BY o.id"
+              Expect.equal result (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ])) "pinned MySQL 8.4.11 counts"
+              Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
+
+          testCase "null-safe correlated nullable counts retain conversion warning cardinality"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT NULL)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT NULL,k DOUBLE NOT NULL,payload INT NULL)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(NULL),(1)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(NULL,12.5,7),(1,12.5,8)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id <=> o.id AND i.k='12.5x') AS c FROM outer_rows AS o ORDER BY o.id"
+              Expect.equal result (ResultSet([ "id"; "c" ], [ [ None; Some "1" ]; [ Some "1"; Some "1" ] ])) "pinned MySQL 8.4.11 counts"
+              Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
+
+          testCase "grouped outer null-safe correlated count retains conversion warning"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT NULL)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT NULL,k DOUBLE NOT NULL,payload INT NULL)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(NULL),(1)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(NULL,12.5,7),(1,12.5,8)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id <=> o.id AND i.k='12.5x') AS c FROM outer_rows AS o GROUP BY o.id ORDER BY o.id"
+              Expect.equal result (ResultSet([ "id"; "c" ], [ [ None; Some "1" ]; [ Some "1"; Some "1" ] ])) "pinned MySQL 8.4.11 counts"
+              Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
+
+          testCase "null outer key before numeric key defers grouped count materialization"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT NULL)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT,k DOUBLE,payload INT)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(NULL),(1)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id=o.id AND i.k='12.5x') AS c FROM outer_rows AS o ORDER BY o.id"
+              Expect.equal result (ResultSet([ "id"; "c" ], [ [ None; Some "0" ]; [ Some "1"; Some "1" ] ])) "pinned MySQL 8.4.11 counts"
+              Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
+
+          testCase "mixed nullable count HAVING retains conversion warning cardinality"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT NOT NULL,k DOUBLE NOT NULL,payload INT NULL)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1),(1),(2)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7),(2,12.5,8)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,EXISTS(SELECT 1 FROM inner_rows AS i WHERE i.owner_id=o.id AND i.k='12.5x' HAVING COUNT(i.payload)=0 AND COUNT(*)>0) AS present FROM outer_rows AS o ORDER BY o.id"
+              Expect.equal result (ResultSet([ "id"; "present" ], [ [ Some "1"; Some "0" ]; [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ])) "pinned MySQL 8.4.11 membership"
+              Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
+
+          testCase "correlated count conversion warns with no outer result rows"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT,k DOUBLE,payload INT)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id=o.id AND i.k='12.5x') AS c FROM outer_rows AS o WHERE o.id=9"
+              Expect.equal result (ResultSet([ "id"; "c" ], [])) "pinned MySQL 8.4.11 returns no rows"
+              Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 still warns once"
+
+          testCase "grouped outer conversion warns with no result rows"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT,k DOUBLE,payload INT)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id=o.id AND i.k='12.5x') AS c FROM outer_rows AS o WHERE o.id=9 GROUP BY o.id"
+              Expect.equal result (ResultSet([ "id"; "c" ], [])) "pinned MySQL 8.4.11 returns no groups"
+              Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 still warns once"
+
+          testCase "correlated count conversion with LIMIT zero has no warning"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT,k DOUBLE,payload INT)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id=o.id AND i.k='12.5x') AS c FROM outer_rows AS o LIMIT 0"
+              Expect.equal result (ResultSet([ "id"; "c" ], [])) "pinned MySQL 8.4.11 returns no rows"
+              Expect.equal current.DiagnosticsCount 0 "pinned MySQL 8.4.11 does not warn"
+
+          testCase "inner LIMIT zero discards pending correlated conversion warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT,k DOUBLE,payload INT)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1),(2)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id=o.id AND i.k='12.5x' LIMIT 0) AS c FROM outer_rows AS o ORDER BY o.id"
+              Expect.equal result (ResultSet([ "id"; "c" ], [ [ Some "1"; None ]; [ Some "2"; None ] ])) "pinned MySQL 8.4.11 returns NULL scalar values"
+              Expect.equal current.DiagnosticsCount 0 "pinned MySQL 8.4.11 does not warn"
+
+          testCase "derived outer LIMIT zero retains child conversion warning"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT,k DOUBLE,payload INT)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1),(2)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7)"
+              let current, result =
+                  handle session
+                      "SELECT * FROM (SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id=o.id AND i.k='12.5x') AS c FROM outer_rows AS o) AS d LIMIT 0"
+              Expect.equal result (ResultSet([ "id"; "c" ], [])) "pinned MySQL 8.4.11 returns no rows"
+              Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 retains the derived warning"
+
+          testCase "decorrelated nullable count IN conversion warning cardinality"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT,k DOUBLE,payload INT)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1),(1),(2)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7),(2,12.5,8)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id=o.id AND i.k IN('12.5x')) AS c FROM outer_rows AS o ORDER BY o.id"
+              Expect.equal result (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ])) "pinned MySQL 8.4.11 counts"
+              Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
+
+          testCase "correlated count numeric literal warning matrix"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT,k DOUBLE,payload INT)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1),(1),(2)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7),(2,12.5,8)"
+              for predicate, expectedCount, expectedWarnings in
+                  [ "i.k IN('12.5x','12.5x')", "1", 2
+                    "i.k='1e309'", "0", 1
+                    "i.k='Infinity'", "0", 1 ] do
+                  let current, result =
+                      handle session
+                          ("SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows AS i WHERE i.owner_id=o.id AND "
+                           + predicate + ") AS c FROM outer_rows AS o ORDER BY o.id")
+                  Expect.equal result
+                      (ResultSet([ "id"; "c" ], [ [ Some "1"; Some expectedCount ]; [ Some "1"; Some expectedCount ]; [ Some "2"; Some expectedCount ] ]))
+                      (predicate + " counts from pinned MySQL 8.4.11")
+                  Expect.equal current.DiagnosticsCount expectedWarnings
+                      (predicate + " warning count from pinned MySQL 8.4.11")
+
           testCase "correlated DOUBLE IN warnings follow indexed and scanned plans"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

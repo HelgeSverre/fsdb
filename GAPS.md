@@ -219,6 +219,10 @@ inner pass for exact integer and decimal values, including mixed decimal and
 unsigned keys above the double-precision integer boundary. Nullable tuples
 retain `=` versus `<=>` semantics while sharing that pass. Text and approximate
 numeric keys retain per-row coercion.
+[Correlated `BETWEEN` conversion warnings](torture/findings/2026-11-08-correlated-between-warning-cardinality.md)
+remain divergent: a repeated-key nullable count returns the right rows but
+reports fewer 1292 conditions than MySQL 8.4.11 in the grouped path; the
+ordinary path also differs when the `DOUBLE` column is indexed.
 [Correlated `ABS` equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-abs.md)
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete
 OR branches and exact `INT` minimum magnitude, while other operand types retain
