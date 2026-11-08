@@ -3,7 +3,7 @@
 `src/Fsdb/Fsdb.fsproj` produces the `Fsdb` NuGet library for .NET 10.
 `src/Fsdb.Cli/Fsdb.Cli.fsproj` produces the server executable and is not part
 of the library package. `0.1.0-preview.1` was the first published preview;
-the current source targets stable package `0.1.5`. Its public
+the current source targets stable package `0.1.6`. Its public
 embedding entry point is `Fsdb.Db`. Later minor versions may evolve the API
 and storage format; test a copy of durable data before upgrading.
 

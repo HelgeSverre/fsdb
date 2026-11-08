@@ -117,3 +117,12 @@ reports six and zero. Its correlated path evaluates the owner filter before
 the local `BETWEEN` and plans the subquery only when an outer row executes.
 The remaining fix must preserve MySQL's candidate-first warning order and
 statement-level range setup even when no outer row exists.
+An execution trace confirms that this scalar count takes
+`tryCorrelatedSourceLookup`, bypassing the direct single-table
+`physicalRowsWithWarnings` hook. The correlated lookup currently returns only
+columns and candidate rows, so the caller cannot tell which index access
+produced them. The next change should carry the selected access through that
+boundary, then attach candidate-first evaluation and statement-level setup
+to that access. A deliberately failing indexed regression confirmed six
+conditions versus MySQL's fourteen and was removed from the passing suite
+until the access contract is changed.
