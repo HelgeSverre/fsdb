@@ -64,3 +64,22 @@ both phases and choose them from the actual access path; adding warnings per
 materialized grouped row would fail the zero-row controls. These observations
 are bounded to the fixture and do not establish a general warning formula for
 all predicates or indexes.
+
+## Scanned count follow-up
+
+The no-index three-outer-row case is now a regression. The grouped count
+shortcut no longer precomputes a local `BETWEEN` whose string bound needs a
+truncated numeric conversion; the ordinary correlated scan evaluates that
+predicate for each outer row. The pinned MySQL 8.4.11 oracle and fsdb both
+return `(1,1),(1,1),(2,1)` with six warning 1292 conditions. The indexed
+case remains open: the same oracle reports fourteen conditions because it
+also warns during range setup and scans index candidates before the owner
+filter. This fix does not model those indexed phases.
+
+An indexed candidate-count control added a row at `k=20`, outside the range:
+the warning count stayed fourteen. Adding one row at `k=12.75`, inside the
+range but with an owner absent from the outer table, raised it to twenty.
+Thus, in this fixture each range candidate contributes two warnings for each
+of the three outer rows before the owner filter; the two setup warnings are
+separate. This supports modeling diagnostics at the selected range access,
+not at the final matching rows.

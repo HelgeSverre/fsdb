@@ -9891,7 +9891,14 @@ and private isPlainRowPredicate (expression: Expr) : bool =
     | IsNull value
     | IsNotNull value -> isPlainRowPredicate value
     | In(value, candidates) -> isPlainRowPredicate value && List.forall isPlainRowPredicate candidates
-    | Between(value, lower, upper) -> List.forall isPlainRowPredicate [ value; lower; upper ]
+    | Between(value, lower, upper) ->
+        let truncatedNumericString = function
+            | LiteralValue(VString text) -> Value.coerceLeadingDouble text |> snd
+            | _ -> false
+        // The grouped shortcut evaluates local predicates once per inner row.
+        // A truncated bound warns for each outer scan instead.
+        not (truncatedNumericString lower || truncatedNumericString upper)
+        && List.forall isPlainRowPredicate [ value; lower; upper ]
     | _ -> false
 
 /// Splits a subquery's WHERE and inner-join ON clauses into top-level

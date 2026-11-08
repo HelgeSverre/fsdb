@@ -1711,6 +1711,32 @@ let tests =
               Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
               Expect.equal (current.Diagnostics |> List.map _.Code) [ 1292 ] "truncated DOUBLE warning"
 
+          testCase "scanned correlated BETWEEN retains per-outer conversion warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT,k DOUBLE,payload INT)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1),(1),(2)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7),(2,12.5,8)"
+              let current, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows i WHERE i.owner_id=o.id AND i.k BETWEEN '12.5x' AND '13x') c FROM outer_rows o ORDER BY o.id"
+              Expect.equal result
+                  (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ]))
+                  "pinned MySQL 8.4.11 counts"
+              Expect.equal (current.Diagnostics |> List.map _.Code) (List.replicate 6 1292)
+                  "pinned MySQL 8.4.11 scans each outer key and reports both truncated bounds"
+              let empty, emptyResult =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows i WHERE i.owner_id=o.id AND i.k BETWEEN '12.5x' AND '13x') c FROM outer_rows o WHERE o.id=9"
+              Expect.equal emptyResult (ResultSet([ "id"; "c" ], [])) "no outer row is returned"
+              Expect.equal empty.DiagnosticsCount 0 "scanned path emits no warning without outer rows"
+              let one, oneResult =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.payload) FROM inner_rows i WHERE i.owner_id=o.id AND i.k BETWEEN '12.5x' AND '13x') c FROM outer_rows o WHERE o.id=2"
+              Expect.equal oneResult (ResultSet([ "id"; "c" ], [ [ Some "2"; Some "1" ] ])) "one outer row matches"
+              Expect.equal one.DiagnosticsCount 2 "one scanned outer row evaluates both bounds once"
+
           testCase "ordinary correlated nullable counts retain conversion warning cardinality"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
