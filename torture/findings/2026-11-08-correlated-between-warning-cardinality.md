@@ -34,3 +34,33 @@ variant and four in the standalone grouped query. Fsdb's no-index grouped
 path still emits only four warnings; its ordinary path emits six. The index
 therefore changes MySQL's warning count even though the result rows stay the
 same.
+
+## Access-path follow-up (2026-11-08)
+
+On the same pinned oracle, `EXPLAIN` reports `range` on `ix_k` with `Using
+index condition; Using where`. `IGNORE INDEX(ix_k)` changes the inner access
+to `ALL` with `Using where`. `FORCE INDEX(ix_k)` retains the range path and
+the same warning count; reversing the two WHERE conjuncts does not change it.
+
+| Inner access | Outer rows evaluated | Inner rows | 1292 warnings |
+| --- | ---: | ---: | ---: |
+| `range` on `ix_k` | 3 | 2 | 14 |
+| `range` on `ix_k` | 1 | 2 | 6 |
+| `range` on `ix_k` | 0 | 2 | 2 |
+| `range` on `ix_k` | 3 | 0 | 2 |
+| `ALL`, index ignored | 3 | 2 | 6 |
+| `ALL`, index ignored | 1 | 2 | 2 |
+| `ALL`, index ignored | 0 | 2 | 0 |
+
+For this fixture, the indexed count is `2 + 4 × outer rows`, and the scanned
+count is `2 × outer rows`. Replacing the upper truncated string with numeric
+`13` yields seven warnings on the indexed three-row case, one per half of
+the two-bound pattern. The same counts occur when the scalar subquery has
+`LIMIT 1`, which prevents fsdb's grouped count path.
+
+The two indexed warnings with zero outer rows or an empty inner table are
+range-setup diagnostics, not row-filter diagnostics. A fix must represent
+both phases and choose them from the actual access path; adding warnings per
+materialized grouped row would fail the zero-row controls. These observations
+are bounded to the fixture and do not establish a general warning formula for
+all predicates or indexes.
