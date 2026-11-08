@@ -219,8 +219,10 @@ inner pass for exact integer and decimal values, including mixed decimal and
 unsigned keys above the double-precision integer boundary. Nullable tuples
 retain `=` versus `<=>` semantics while sharing that pass. Text and approximate
 numeric keys retain per-row coercion.
-For a missing physical argument to a correlated `COUNT`, binding now returns
-error 1054 before a local `DOUBLE` comparison can emit conversion warning 1292.
+For a missing qualified aggregate argument in a correlated scalar subquery,
+including `COUNT(DISTINCT ...)`, `SUM(...)`, and a derived source, binding now
+returns error 1054 before a local `DOUBLE` comparison can emit conversion
+warning 1292.
 Focused MySQL 8.4.11 controls also confirm that `COUNT(DISTINCT nullable_col)`
 and a HAVING clause with two nullable count arguments retain their ordinary
 fallback rows and one conversion warning.

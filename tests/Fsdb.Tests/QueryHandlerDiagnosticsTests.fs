@@ -1664,7 +1664,7 @@ let tests =
               Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
               Expect.equal (current.Diagnostics |> List.map _.Code) [ 1292 ] "truncated DOUBLE warning"
 
-          testCase "correlated count fallback preserves binding error and conversion diagnostics"
+          testCase "correlated aggregate fallback preserves binding error and conversion diagnostics"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
@@ -1681,6 +1681,13 @@ let tests =
                       "SELECT o.id,(SELECT COUNT(i.missing) FROM inner_rows i WHERE i.owner_id=o.id AND i.k='12.5x') c FROM outer_rows o WHERE o.id=9"
               Expect.equal (errorInfo emptyResult |> Option.map _.Code) (Some 1054) "unknown argument fails without outer rows"
               Expect.equal (empty.Diagnostics |> List.map _.Code) [ 1054 ] "empty result still reports only binding error"
+              for sql in
+                  [ "SELECT (SELECT COUNT(DISTINCT i.missing) FROM inner_rows i WHERE i.owner_id=o.id AND i.k='12.5x') FROM outer_rows o"
+                    "SELECT (SELECT SUM(i.missing) FROM inner_rows i WHERE i.owner_id=o.id AND i.k='12.5x') FROM outer_rows o"
+                    "SELECT (SELECT COUNT(d.missing) FROM (SELECT owner_id,k,payload FROM inner_rows) d WHERE d.owner_id=o.id AND d.k='12.5x') FROM outer_rows o" ] do
+                  let current, result = handle session sql
+                  Expect.equal (errorInfo result |> Option.map _.Code) (Some 1054) "unknown aggregate argument"
+                  Expect.equal (current.Diagnostics |> List.map _.Code) [ 1054 ] "binding error has no conversion warning"
               for sql, expected in
                   [ "SELECT o.id,(SELECT COUNT(DISTINCT i.payload) FROM inner_rows i WHERE i.owner_id=o.id AND i.k='12.5x') c FROM outer_rows o ORDER BY o.id",
                     [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
