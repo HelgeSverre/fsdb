@@ -446,3 +446,21 @@ do not by themselves reproduce Boost's endpoint-adjacent intersection
 geometry. The next change must classify ordered geographic intersection
 events, including endpoint contact and interior intervals, then use that
 same result for `ST_Intersection` and line relations.
+
+## Endpoint-contact classification trial
+
+The first residual starts at a coordinate-aligned hole edge, while the
+standalone point predicate calls that endpoint interior. Two temporary
+line-level overrides tested whether endpoint classification alone could
+resolve the relation mismatch. Marking an endpoint as boundary only when
+`geographicPointOnLineSegment` accepted it left the oracle at **11/448**
+mismatches. Using an exact coordinate-side point-on-segment check instead
+raised the count to **70/448**. The first new mismatch is a short
+endpoint-adjacent intersection that MySQL classifies as crossing; the
+override incorrectly removed its interior evidence. Point-relation and
+distance lanes stayed at zero mismatches in both trials.
+
+Both overrides were reverted, and the Release CLI was rebuilt from the
+committed source. Endpoint labels cannot replace the ordered overlay: MySQL
+can return a tiny line plus a separate point near the same endpoint, and the
+line relation depends on that intersection geometry.
