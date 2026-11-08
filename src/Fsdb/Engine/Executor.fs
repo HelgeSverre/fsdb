@@ -7477,7 +7477,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | MultipleResults _ -> Error nestedSubqueryResultsError
     | Subquery select ->
         match
-            tryCorrelatedCount ctx select
+            tryMissingCorrelatedCountArgument ctx select
+            |> Option.orElseWith (fun () -> tryCorrelatedCount ctx select)
             |> Option.orElseWith (fun () -> tryDecorrelatedCount ctx select)
             |> Option.orElseWith (fun () -> trySourceFreeScalarSubquery ctx select)
         with
@@ -9321,6 +9322,27 @@ and private isPlainCountRowsSelect (store: Store) (dbName: string) (registry: Re
 
 and private isPlainQualifiedColumnCountSelect (registry: Registry) (select: SelectStmt) =
     isPlainCountSelect registry select (function QualifiedCol _ -> true | _ -> false)
+
+/// A missing physical COUNT argument must fail during binding. Otherwise a
+/// correlated WHERE can emit conversion warnings before the ordinary executor
+/// reaches the aggregate projection, unlike MySQL's prepare-time error.
+and private tryMissingCorrelatedCountArgument (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
+    match select.Projections, select.From, select.Joins with
+    | [ { Expression = FuncCall(name, [ QualifiedCol(qualifier, columnName) ]) } ],
+      Some(FromTable source), []
+        when equalsIgnoreCase name "COUNT"
+             && not select.Distinct
+             && equalsIgnoreCase (source.Alias |> Option.defaultValue source.Table) qualifier ->
+        match physicalFastPathTable outer.Store outer.DbName source with
+        | Some (table: Table)
+            when table.Columns
+                 |> List.exists (fun (column: ColumnDef) -> equalsIgnoreCase column.Name columnName)
+                 |> not ->
+            match describeQueryColumnsInScope outer.Store outer.Registry outer.DbName (QueryBody(PlainSelect select)) (Some outer) (fun _ -> Ok()) with
+            | Error(InvalidDescription(Err(code, message))) -> Some(Error(code, message))
+            | _ -> None
+        | _ -> None
+    | _ -> None
 
 and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
     let countRows = isPlainCountRowsSelect outer.Store outer.DbName outer.Registry select

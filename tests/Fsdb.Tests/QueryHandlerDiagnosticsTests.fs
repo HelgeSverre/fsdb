@@ -1664,6 +1664,32 @@ let tests =
               Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
               Expect.equal (current.Diagnostics |> List.map _.Code) [ 1292 ] "truncated DOUBLE warning"
 
+          testCase "correlated count fallback preserves binding error and conversion diagnostics"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT,k DOUBLE,payload INT NULL,extra INT NULL)"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1),(1),(2)"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(1,12.5,7,NULL),(2,12.5,NULL,9)"
+              let unknown, result =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.missing) FROM inner_rows i WHERE i.owner_id=o.id AND i.k='12.5x') c FROM outer_rows o ORDER BY o.id"
+              Expect.equal (errorInfo result |> Option.map _.Code) (Some 1054) "unknown COUNT argument binds normally"
+              Expect.equal (unknown.Diagnostics |> List.map _.Code) [ 1054 ] "binding error precedes conversion"
+              let empty, emptyResult =
+                  handle session
+                      "SELECT o.id,(SELECT COUNT(i.missing) FROM inner_rows i WHERE i.owner_id=o.id AND i.k='12.5x') c FROM outer_rows o WHERE o.id=9"
+              Expect.equal (errorInfo emptyResult |> Option.map _.Code) (Some 1054) "unknown argument fails without outer rows"
+              Expect.equal (empty.Diagnostics |> List.map _.Code) [ 1054 ] "empty result still reports only binding error"
+              for sql, expected in
+                  [ "SELECT o.id,(SELECT COUNT(DISTINCT i.payload) FROM inner_rows i WHERE i.owner_id=o.id AND i.k='12.5x') c FROM outer_rows o ORDER BY o.id",
+                    [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]
+                    "SELECT o.id,EXISTS(SELECT 1 FROM inner_rows i WHERE i.owner_id=o.id AND i.k='12.5x' HAVING COUNT(i.payload)=1 AND COUNT(i.extra)=0) c FROM outer_rows o ORDER BY o.id",
+                    [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ] ] do
+                  let current, result = handle session sql
+                  Expect.equal result (ResultSet([ "id"; "c" ], expected)) "pinned MySQL 8.4.11 rows"
+                  Expect.equal (current.Diagnostics |> List.map _.Code) [ 1292 ] "one conversion warning"
+
           testCase "decorrelated nullable counts retain conversion warning cardinality"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -61,7 +61,7 @@ dictionary; other values follow ordinary evaluation.
 | A-01 | confirmed, warning count | With numeric outer keys `(1),(1),(2)` and two inner rows, correlated `COUNT(i.payload)` with residual `i.k='12.5x'` returns three correct counts. MySQL 8.4.11 emits one 1292 warning; baseline fsdb's grouped path emits zero. A trial that skips decorrelation during metadata probing emitted two, so probe caching explains loss but is not a complete fix. | Fixed and locally verified in changed batch: usable outer keys precede materialization; metadata/suppression cannot populate grouped counts; the correlated constant conversion reports once. Exact `=`, `IN`, nullable `HAVING`, NULL-safe, grouped, empty-outer, nested-derived, NULL-then-numeric and zero-limit controls passed in the 3,946-test suite. CI pending. |
 | A-03 | confirmed, warning count | The same query with scalar subquery `LIMIT 1` follows ordinary correlated evaluation: MySQL 8.4.11 emits one 1292 warning, baseline fsdb three. | Fixed in same batch by the statement-local conversion owner; focused and full-suite tests passed. CI pending. |
 | A-04 | confirmed, warning count | For indexed `i.k BETWEEN '12.5x' AND '13x'` with the same repeated outer rows and two inner rows, pinned MySQL emits 14 warnings for both ordinary `LIMIT 1` and decorrelated query; fsdb emits 6 and 4 respectively. Without the index, MySQL emits 6 in both correlated forms and fsdb emits 6 ordinary / 4 grouped. See the linked GAPS finding. | Unresolved: `BETWEEN` has access-path-sensitive warning cardinality beyond the constant-bound rule. Investigate predicate order and candidate scans before adding a committed exact regression. |
-| A-02 | coverage gap | Unsupported unknown, distinct, or second nullable `COUNT` argument must fall back to ordinary binding/evaluation. | No bug confirmed; add focused fallback controls if oracle confirms expected diagnostics. |
+| A-02 | confirmed and fixed | Unknown physical `COUNT` argument emitted conversion warning 1292 before binding error 1054; distinct and second nullable arguments already matched MySQL. | The missing argument is checked before correlated predicate evaluation; focused oracle controls cover all three shapes. |
 
 The first candidate for A-01 predicted duplicate warnings when an outer key was
 textual and rejected by the planner. A pinned MySQL 8.4.11 check and the new
@@ -95,7 +95,8 @@ hypothesis outside this planner cluster.
 - Sweep A Discover: three read-only reviewers assigned lifecycle, concurrency,
   and SQL consumer/coverage lenses at baseline `ec42b627`. Pinned MySQL and
   focused fsdb tests confirmed A-01 and A-03, and falsified the initial
-  duplicate-warning prediction. A-02 remains a coverage gap.
+  duplicate-warning prediction. A-02 was closed by a later focused oracle
+  control and binding-order fix.
 - Sweep A Challenge: three reviewers independently traced suppressed metadata
   cache contamination and the separate ordinary-path conversion count. They
   rejected a global warning deduplication rule.
@@ -120,6 +121,5 @@ hypothesis outside this planner cluster.
 CI on `4d6b49d2` passed all three jobs. The focused [performance
 comparison](../benchmarks/results/4d6b49d2-correlated-warning-comparison.md)
 found no material regression in the repeat run, although machine drift in the
-first run limits the claim. A-04 is an open compatibility gap; A-02 is a
-fallback-coverage gap. No broad concurrency safety claim is inferred from the
+first run limits the claim. A-04 is an open compatibility gap. No broad concurrency safety claim is inferred from the
 bounded suite.
