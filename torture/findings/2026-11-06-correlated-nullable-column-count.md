@@ -24,7 +24,7 @@ statement-local grouped count for a qualified physical column and exact
 numeric equality key. Pinned MySQL 8.4.11 returns true for an empty input
 under ungrouped `HAVING COUNT(column)=0`, but false for the corresponding
 grouped query because no group exists. For a grouped query whose grouping keys
-are fixed by correlated equality, the indexed matched-row count proves group
+are fixed by correlated equality, a grouped matched-row count proves group
 existence separately from the non-NULL count. The regression covers both,
 all-NULL matches, non-NULL matches, an unfixed grouping key, and mixed
 `COUNT(column)`/`COUNT(*)` predicates. Mixed `AND` and `OR` predicates now
@@ -42,3 +42,11 @@ the existing grouped-key planner. A four-category MySQL 8.4.11 oracle returns
 `AND COUNT(*)>0`. The corresponding 204-row fsdb control examined 4,714 rows
 before the plan and stays below 400 with it. The two synthetic count queries
 are memoized per statement, so each inner join is grouped once.
+
+The joined path also accepts a grouped HAVING when every requested group key
+is one of the grouped plan's inner correlation keys. For `GROUP BY l.cat_id`,
+MySQL and fsdb return `0,1,0,1` for the four-category nullable-count control,
+including the zero-row category. `GROUP BY sys.id` remains on ordinary
+evaluation and returns `1,1,0,1`, since one category has separate NULL and
+non-NULL groups. The 204-row fixed-key control examined 2,459 rows before
+this proof and stays below 400 afterward.

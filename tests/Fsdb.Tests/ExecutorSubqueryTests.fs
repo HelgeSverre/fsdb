@@ -149,10 +149,27 @@ let tests =
                               [ Some "3"; Some "1"; Some "0" ]
                               [ Some "4"; Some "1"; Some "1" ] ]))
                         "pinned MySQL 8.4.11 joined nullable count membership"
+                    let groupedSql =
+                        "SELECT cat.id,EXISTS(SELECT 1 FROM sys JOIN cat_sys l ON sys.id=l.sys_id WHERE cat.id=l.cat_id AND status='published' GROUP BY l.cat_id HAVING COUNT(sys.created_at)=0) AS fixed_group,"
+                        + "EXISTS(SELECT 1 FROM sys JOIN cat_sys l ON sys.id=l.sys_id WHERE cat.id=l.cat_id AND status='published' GROUP BY l.cat_id HAVING COUNT(sys.created_at)=0 AND COUNT(*)>0) AS mixed_group,"
+                        + "EXISTS(SELECT 1 FROM sys JOIN cat_sys l ON sys.id=l.sys_id WHERE cat.id=l.cat_id AND status='published' GROUP BY sys.id HAVING COUNT(sys.created_at)=0) AS independent_group FROM cat ORDER BY cat.id"
+                    Expect.equal
+                        (runDefault store groupedSql)
+                        (ResultSet(
+                            [ "id"; "fixed_group"; "mixed_group"; "independent_group" ],
+                            [ [ Some "1"; Some "0"; Some "0"; Some "1" ]
+                              [ Some "2"; Some "1"; Some "1"; Some "1" ]
+                              [ Some "3"; Some "0"; Some "0"; Some "0" ]
+                              [ Some "4"; Some "1"; Some "1"; Some "1" ] ]))
+                        "pinned MySQL 8.4.11 fixed and independent joined groups"
                     let extra = [ 100 .. 299 ] |> List.map (sprintf "(%d, 'bulk', NULL)") |> String.concat ","
                     runDefault store ("INSERT INTO cat VALUES " + extra) |> ignore
                     let _, examined = withExaminedRows (fun () -> runDefault store sql)
                     Expect.isLessThan examined 400L "joined nullable COUNT HAVING groups inner rows once"
+                    let fixedGroupSql =
+                        "SELECT cat.id,EXISTS(SELECT 1 FROM sys JOIN cat_sys l ON sys.id=l.sys_id WHERE cat.id=l.cat_id AND status='published' GROUP BY l.cat_id HAVING COUNT(sys.created_at)=0) FROM cat"
+                    let _, groupedExamined = withExaminedRows (fun () -> runDefault store fixedGroupSql)
+                    Expect.isLessThan groupedExamined 400L "fixed joined group reuses nullable counts"
 
                 testCase "the joined inner side is read once per statement rather than once per outer row"
                 <| fun _ ->

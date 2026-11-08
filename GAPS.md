@@ -2439,8 +2439,10 @@ correlations. The 204-row joined control fell from 4,714 examined rows to
 under 400, including a mixed `COUNT(column)`/`COUNT(*)` predicate.
 The pinned MySQL 8.4.11 control distinguishes empty input from a nonempty
 all-NULL group. Grouped HAVING also uses this path when every grouping key is
-fixed by the correlated equality and an indexed matched-row count establishes
-group existence. Predicates combining that count with `COUNT(*)` or another
+fixed by the correlated equality; the grouped `COUNT(*)` establishes group
+existence. This includes audited joined sources, where the 204-row fixed-key
+control fell from 2,459 examined rows to under 400. Predicates combining that
+count with `COUNT(*)` or another
 always-present count now use both values in audited `AND`/`OR` comparisons;
 ungrouped and fixed-key grouped 204-row controls stay below 400 examined rows.
 Grouping by an unfixed key or counting multiple nullable columns retains
