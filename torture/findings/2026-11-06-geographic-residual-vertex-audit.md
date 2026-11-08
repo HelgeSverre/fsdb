@@ -428,3 +428,21 @@ produces ordered boundary events and inside intervals. Its intersection
 geometry can serve `ST_Intersection` and the line relation predicates from
 the same topology decision. Treating the sampled point predicate as that
 authority is contradicted by the pinned MySQL endpoint trace above.
+
+## Boundary-event extraction
+
+The coordinate-side bisection is now a named `geographicBoundaryEvents`
+operation. Each ordered candidate retains its line fraction, interpolated
+point, and polygon boundary segment. The existing line relation still uses
+the fractions to classify intervals, so this is a behavior-preserving step
+toward a geographic overlay rather than a topology fix. A Release rerun of
+the complete native MySQL 8.4.11 edge oracle retained 11/448 line/polygon
+relation mismatches, with zero differences in 189 near-hole point relations,
+189 near-hole distances, 49 polar-corner points, and 100 seeded point-line
+distances. All eleven relation mismatches remain `Crosses` versus `Touches`.
+
+These coordinate-side candidates still miss wrapped-longitude segments and
+do not by themselves reproduce Boost's endpoint-adjacent intersection
+geometry. The next change must classify ordered geographic intersection
+events, including endpoint contact and interior intervals, then use that
+same result for `ST_Intersection` and line relations.

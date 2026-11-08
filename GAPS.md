@@ -3015,6 +3015,10 @@ implementation effort:
    corpus](torture/findings/2026-10-16-geographic-global-containment.md#validity-strategy-follow-up)
    still has the same two long-edge disagreements, cases 76 and 92.
    Numerical and topology gaps remain open.
+   The coordinate-side line/polygon crossing candidates now retain ordered
+   fractions, interpolated points, and boundary segments for a future
+   geographic overlay. The behavior-preserving extraction leaves the
+   11/448 `Crosses` versus `Touches` residual unchanged.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
 

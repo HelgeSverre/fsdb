@@ -948,6 +948,44 @@ type internal GeographicLinePolygonTopology =
       Touches: bool
       LineWithinPolygon: bool }
 
+/// A candidate event where the interpolated line crosses a polygon edge in
+/// coordinate space. The fraction and point can be reused by a geographic
+/// overlay; the relation check currently classifies the intervals between
+/// these candidates.
+type internal GeographicBoundaryEvent =
+    { Fraction: float
+      Point: float * float
+      Boundary: (float * float) * (float * float) }
+
+let internal geographicBoundaryEvents referenceSystem boundarySegments (start, endpoint) =
+    let length = geographicPointDistance referenceSystem start endpoint
+    let crossingEvent ((cx, cy), (dx, dy) as boundary) =
+        let sx, sy = dx - cx, dy - cy
+        let side (px, py) = sx * (py - cy) - sy * (px - cx)
+        let firstSide, lastSide = side start, side endpoint
+        let _, startLongitude = start
+        let _, endLongitude = endpoint
+        // A wrapped longitude needs its own unwrapped coordinate frame.
+        if abs (endLongitude - startLongitude) > 180.0
+           || abs sy > 180.0
+           || firstSide * lastSide >= 0.0 then None
+        else
+            let mutable lower = 0.0
+            let mutable upper = 1.0
+            for _ in 1 .. 48 do
+                let middle = (lower + upper) / 2.0
+                let point = geographicPointAlong referenceSystem start endpoint (length * middle)
+                if (side point > 0.0) = (firstSide > 0.0) then lower <- middle
+                else upper <- middle
+            let fraction = (lower + upper) / 2.0
+            let point = geographicPointAlong referenceSystem start endpoint (length * fraction)
+            let px, py = point
+            let along = ((px - cx) * sx + (py - cy) * sy) / (sx * sx + sy * sy)
+            if along > 0.0 && along < 1.0 then
+                Some { Fraction = fraction; Point = point; Boundary = boundary }
+            else None
+    boundarySegments |> List.choose crossingEvent |> List.sortBy _.Fraction
+
 let internal geographicLinePolygonTopology referenceSystem lines polygons =
     let boundarySegments = polygons |> List.collect id |> List.collect List.pairwise
     let exteriorBoundarySegments = polygons |> List.choose List.tryHead |> List.collect List.pairwise
@@ -993,39 +1031,14 @@ let internal geographicLinePolygonTopology referenceSystem lines polygons =
                     else
                         geographicPointPolygonPosition referenceSystem point polygons)
                 |> Array.toList))
-    // Refine coordinate-side crossings on the interpolated geographic line.
-    // Their intervals are candidates; midpoint classification decides contact.
-    let crossingFraction start endpoint length (cx, cy) (dx, dy) =
-        let sx, sy = dx - cx, dy - cy
-        let side (px, py) = sx * (py - cy) - sy * (px - cx)
-        let firstSide, lastSide = side start, side endpoint
-        let _, startLongitude = start
-        let _, endLongitude = endpoint
-        // A wrapped longitude needs its own unwrapped coordinate frame.
-        if abs (endLongitude - startLongitude) > 180.0
-           || abs sy > 180.0
-           || firstSide * lastSide >= 0.0 then None
-        else
-            let mutable lower = 0.0
-            let mutable upper = 1.0
-            for _ in 1 .. 48 do
-                let middle = (lower + upper) / 2.0
-                let point = geographicPointAlong referenceSystem start endpoint (length * middle)
-                if (side point > 0.0) = (firstSide > 0.0) then lower <- middle
-                else upper <- middle
-            let fraction = (lower + upper) / 2.0
-            let px, py = geographicPointAlong referenceSystem start endpoint (length * fraction)
-            let along = ((px - cx) * sx + (py - cy) * sy) / (sx * sx + sy * sy)
-            if along > 0.0 && along < 1.0 then Some fraction else None
+    // Candidate boundary events split the line for interval classification.
     let intervalPositions =
         lineSegments
         |> List.collect (fun (start, endpoint) ->
             let length = geographicPointDistance referenceSystem start endpoint
             let fractions =
-                boundarySegments
-                |> List.choose (fun (boundaryStart, boundaryEnd) ->
-                    crossingFraction start endpoint length boundaryStart boundaryEnd)
-                |> List.sort
+                geographicBoundaryEvents referenceSystem boundarySegments (start, endpoint)
+                |> List.map _.Fraction
             if fractions.IsEmpty then []
             else
                 let cuts = 0.0 :: (fractions @ [ 1.0 ])
