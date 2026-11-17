@@ -1,5 +1,6 @@
 """Check shared geographic endpoints and global rings against pinned MySQL."""
 
+import argparse
 import importlib.util
 import json
 import pathlib
@@ -18,9 +19,9 @@ VALIDITY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VALIDITY)
 
 
-def relation(connection, first, shared, second):
-    left = f"ST_GeomFromText('LINESTRING({first},{shared})',4326)"
-    right = f"ST_GeomFromText('LINESTRING({shared},{second})',4326)"
+def line_relation(connection, first, second):
+    left = f"ST_GeomFromText('LINESTRING({first})',4326)"
+    right = f"ST_GeomFromText('LINESTRING({second})',4326)"
     with connection.cursor() as cursor:
         cursor.execute(
             f"SELECT ST_Intersects({left},{right}),ST_Crosses({left},{right}),"
@@ -29,7 +30,47 @@ def relation(connection, first, shared, second):
         return cursor.fetchone()
 
 
+def relation(connection, first, shared, second):
+    return line_relation(connection, f"{first},{shared}", f"{shared},{second}")
+
+
+def check_crossing(mysql, fsdb):
+    first = ["13.81883866 96.65582728", "-16.27065705 -81.50116582"]
+    second = ["-5.47457294 82.28363800", "57.65336721 169.58817054"]
+    results = []
+    for left in [first, first[::-1]]:
+        for right in [second, second[::-1]]:
+            for a, b in [(left, right), (right, left)]:
+                a, b = ",".join(a), ",".join(b)
+                expected = line_relation(mysql, a, b)
+                actual = line_relation(fsdb, a, b)
+                assert expected == (1, 1, 0, 0.0), expected
+                results.append(
+                    {"first": a, "second": b, "mysql": expected, "fsdb": actual}
+                )
+    print(
+        json.dumps(
+            {
+                "mysql_version": VALIDITY.scalar(mysql, "SELECT VERSION()"),
+                "crossings": results,
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
+    assert all(row["mysql"] == row["fsdb"] for row in results), (
+        "known nonadjacent crossing still disagrees"
+    )
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--crossing",
+        action="store_true",
+        help="assert parity for the open ring-76 crossing",
+    )
+    args = parser.parse_args()
     address = subprocess.check_output(
         ["docker", "compose", "-f", "torture/compose.yaml", "port", "mysql", "3306"],
         cwd=REPO,
@@ -56,6 +97,9 @@ def main():
         fsdb = None
         try:
             fsdb = VALIDITY.connect(host="127.0.0.1", port=port)
+            if args.crossing:
+                check_crossing(mysql, fsdb)
+                return
             rng = random.Random(33092)
             endpoint_differences = []
             for case in range(1000):

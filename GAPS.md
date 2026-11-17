@@ -2999,7 +2999,10 @@ implementation effort:
    identified both edge pairs in public geographic `ST_Crosses`/`ST_Touches`
    results. The ring-92 touch now agrees, while the missed ring-76 crossing produces a
    183.6 km `ST_Distance` error, so both sampled-arc paths need the geographic
-   intersection correction.
+   intersection correction. A [native strategy trace](torture/findings/2026-11-17-geographic-intersection-strategy.md)
+   reproduces the remaining crossing in all eight endpoint/operand orders and
+   identifies sensitivity in the iterative solver and signed range checks;
+   even 4,096 interpolation samples miss this crossing.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)
    are covered for audited cases. [Point-to-polygon distance](torture/findings/2026-10-11-geographic-point-polygon-distance.md)

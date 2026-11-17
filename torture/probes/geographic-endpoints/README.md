@@ -24,6 +24,12 @@ for seed 9173. Any other mismatch, including an unexpected resolution, fails
 the run and must be investigated. The earlier case-92 difference is now a
 normal regression in the F# suite.
 
+To reproduce the remaining nonadjacent crossing directly, run
+`uv run python check.py --crossing`. This checks all eight endpoint-order and
+operand-order combinations against MySQL, prints their relation and distance
+results, and deliberately exits nonzero while the discrepancy remains open.
+It is a focused parity assertion, separate from the default known-gap corpus.
+
 The shared-endpoint triples compare ST_Intersects, ST_Crosses, ST_Touches,
 and ST_Distance. Ring generation reuses the maintained validity oracle so
 case numbers preserve their recorded meaning. The default SRS axis order is
