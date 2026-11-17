@@ -773,18 +773,16 @@ let private geographicSimpleRingIsValid referenceSystem ring =
             let (a, b) as first = segments.[firstIndex]
             let (c, d) as second = segments.[secondIndex]
             let adjacent = secondIndex = firstIndex + 1 || (firstIndex = 0 && secondIndex = last)
-            if adjacent then
-                geographicSegmentsProperlyCross referenceSystem first second
-                || pointPosition a second = GeographicPointLinePosition.Interior
-                || pointPosition b second = GeographicPointLinePosition.Interior
-                || pointPosition c first = GeographicPointLinePosition.Interior
-                || pointPosition d first = GeographicPointLinePosition.Interior
-            else
-                geographicSegmentsProperlyCross referenceSystem first second
-                || pointPosition a second <> GeographicPointLinePosition.Outside
-                || pointPosition b second <> GeographicPointLinePosition.Outside
-                || pointPosition c first <> GeographicPointLinePosition.Outside
-                || pointPosition d first <> GeographicPointLinePosition.Outside
+            let invalidContact point segment =
+                match pointPosition point segment with
+                | GeographicPointLinePosition.Outside -> false
+                | GeographicPointLinePosition.Interior -> true
+                | GeographicPointLinePosition.Boundary -> not adjacent
+            geographicSegmentsProperlyCross referenceSystem first second
+            || invalidContact a second
+            || invalidContact b second
+            || invalidContact c first
+            || invalidContact d first
         seq {
             for first in 0 .. last do
                 for second in first + 1 .. last do
