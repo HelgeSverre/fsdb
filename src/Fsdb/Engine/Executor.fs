@@ -1346,10 +1346,11 @@ let private tryStoredViewDefinition (store: Store) (dbName: string) (viewName: s
             with :? JsonException ->
                 []
 
-    match scan store "mysql" "views" with
+    match Storage.tableSnapshot store "mysql" "views" with
     | Error _ -> None
-    | Ok(_, rows) ->
-        rows
+    | Ok table when table.RowsArray.Count = 0 -> None
+    | Ok table ->
+        (table.RowsArray :> Value[] seq)
         |> Seq.choose SystemCatalog.View.tryRead
         |> Seq.tryFind (fun view -> equalsIgnoreCase view.Name viewName && equalsIgnoreCase view.Schema dbName)
         |> Option.map (fun view ->

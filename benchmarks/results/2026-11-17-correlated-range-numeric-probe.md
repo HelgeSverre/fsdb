@@ -75,3 +75,6 @@ were removed after analysis.
 Validation: the full `just check` gate passed all 3,954 tests, including the
 correlated diagnostics matrices and broad-candidate intersection regression.
 The trace-reader project built successfully and reproduced the saved summary.
+
+A follow-up [empty view-catalog check](2026-11-17-correlated-range-empty-view-catalog.md)
+reduced range allocations by a further 7.5% in its matched comparison.
