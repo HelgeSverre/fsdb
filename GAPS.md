@@ -3040,12 +3040,13 @@ implementation effort:
    measured five of 189 near-hole distance differences, 12 of 412 line
    relations, and one of 189 point relations. Switching all holes to the
    standalone-ring winding role regresses those relation counts and was reverted.
-   A current-head Release replay of the [geographic edge oracle](torture/findings/2026-11-06-geographic-residual-vertex-audit.md)
-   finds 11/448 line/polygon relation differences, with zero differences in
+   A recorded Release replay of the [geographic edge oracle](torture/findings/2026-11-06-geographic-residual-vertex-audit.md)
+   found 11/448 line/polygon relation differences, with zero differences in
    189 point relations, 189 near-hole point distances, 49 polar-corner points,
-   and 100 seeded point-to-line distances. The [300-ring geographic validity
-   corpus](torture/findings/2026-10-16-geographic-global-containment.md#validity-strategy-follow-up)
-   still has the same two long-edge disagreements, cases 76 and 92.
+   and 100 seeded point-to-line distances. The two long-edge disagreements in
+   the earlier 300-ring validity corpus are now resolved by the
+   [shared-endpoint and Sjöberg corrections](torture/findings/2026-11-17-geographic-intersection-fix.md);
+   the expanded 3,000-ring corpus agrees.
    Numerical and topology gaps remain open.
    The coordinate-side line/polygon crossing candidates now retain ordered
    fractions, interpolated points, and boundary segments for a future
