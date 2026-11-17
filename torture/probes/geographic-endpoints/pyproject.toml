@@ -1,0 +1,8 @@
+[project]
+name = "fsdb-geographic-endpoint-oracle"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["pymysql>=1.1,<2"]
+
+[dependency-groups]
+dev = ["ruff"]

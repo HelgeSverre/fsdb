@@ -746,20 +746,26 @@ let private geographicPointOnLineSegment referenceSystem point (start, endpoint)
     <> GeographicPointLinePosition.Outside
 
 let private geographicSegmentsProperlyCross referenceSystem (firstStart, firstEnd) (secondStart, secondEnd) =
-    let firstArcs = sampleGeographicSegment referenceSystem firstStart firstEnd |> Array.pairwise
-    let secondArcs = sampleGeographicSegment referenceSystem secondStart secondEnd |> Array.pairwise
-    let nearEndpoint intersection endpoint =
-        let x, y, z = intersection
-        let otherX, otherY, otherZ = geographicUnitVector endpoint
-        (x - otherX) ** 2.0 + (y - otherY) ** 2.0 + (z - otherZ) ** 2.0 < 1e-18
-    firstArcs
-    |> Array.exists (fun (firstArcStart, firstArcEnd) ->
-        secondArcs
-        |> Array.exists (fun (secondArcStart, secondArcEnd) ->
-            geographicArcIntersection firstArcStart firstArcEnd secondArcStart secondArcEnd
-            |> Option.exists (fun intersection ->
-                not (nearEndpoint intersection firstStart || nearEndpoint intersection firstEnd
-                     || nearEndpoint intersection secondStart || nearEndpoint intersection secondEnd))))
+    // Classify shared endpoints before sampling: long arcs can otherwise
+    // create spurious interior crossings.
+    if firstStart = secondStart || firstStart = secondEnd
+       || firstEnd = secondStart || firstEnd = secondEnd then
+        false
+    else
+        let firstArcs = sampleGeographicSegment referenceSystem firstStart firstEnd |> Array.pairwise
+        let secondArcs = sampleGeographicSegment referenceSystem secondStart secondEnd |> Array.pairwise
+        let nearEndpoint intersection endpoint =
+            let x, y, z = intersection
+            let otherX, otherY, otherZ = geographicUnitVector endpoint
+            (x - otherX) ** 2.0 + (y - otherY) ** 2.0 + (z - otherZ) ** 2.0 < 1e-18
+        firstArcs
+        |> Array.exists (fun (firstArcStart, firstArcEnd) ->
+            secondArcs
+            |> Array.exists (fun (secondArcStart, secondArcEnd) ->
+                geographicArcIntersection firstArcStart firstArcEnd secondArcStart secondArcEnd
+                |> Option.exists (fun intersection ->
+                    not (nearEndpoint intersection firstStart || nearEndpoint intersection firstEnd
+                         || nearEndpoint intersection secondStart || nearEndpoint intersection secondEnd))))
 
 let private geographicSimpleRingIsValid referenceSystem ring =
     // A zero-length edge between equal neighbors is allowed; remove it before

@@ -2991,12 +2991,13 @@ implementation effort:
    [Global and antipodal containment counterexamples](torture/findings/2026-10-16-geographic-global-containment.md)
    now use Boost-shaped geographic winding and ring orientation; 3,600 random
    global point probes and 1,200 random, vertex, and antipodal probes matched
-   MySQL 8.4.11. The same two global `ST_IsValid` disagreements remain in an
-   expanded 3,000-ring, three-seed oracle sample; broader geographic polygon
-   validity still needs the Boost geographic intersection decision. A
+   MySQL 8.4.11. A [shared-endpoint correction](torture/findings/2026-11-17-geographic-shared-endpoint.md)
+   resolves ring 92; only ring 76 remains different in the expanded
+   3,000-ring, three-seed oracle sample. Broader geographic polygon validity
+   still needs the Boost geographic intersection decision. The original
    [segment-relation diagnostic](torture/findings/2026-10-16-geographic-global-containment.md#sql-line-relation-diagnostic)
-   confirms that the same two edge pairs also disagree in public geographic
-   `ST_Crosses`/`ST_Touches` results. One missed crossing also produces a
+   identified both edge pairs in public geographic `ST_Crosses`/`ST_Touches`
+   results. The ring-92 touch now agrees, while the missed ring-76 crossing produces a
    183.6 km `ST_Distance` error, so both sampled-arc paths need the geographic
    intersection correction.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)

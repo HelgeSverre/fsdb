@@ -1269,6 +1269,21 @@ let tests =
                         (VInt 0L)
                         "invalid linear collection member"
 
+                testCase "long geographic segments sharing an endpoint touch without crossing"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text; VInt 4326L ]
+                    let a, shared, b = "-17.23251258 -93.57657163", "-1.62166186 119.40335360", "-27.07466083 -119.20350262"
+                    for first in [ a + "," + shared; shared + "," + a ] do
+                        for second in [ shared + "," + b; b + "," + shared ] do
+                            let lines = [ geometry ("LINESTRING(" + first + ")"); geometry ("LINESTRING(" + second + ")") ]
+                            Expect.equal (call "ST_Intersects" lines) (VInt 1L) "pinned MySQL 8.4.11 intersects at the shared endpoint"
+                            Expect.equal (call "ST_Crosses" lines) (VInt 0L) "the contact is not an interior crossing"
+                            Expect.equal (call "ST_Touches" lines) (VInt 1L) "endpoint contact is a touch in either direction"
+                            Expect.equal (call "ST_Distance" lines) (VDouble 0.0) "touching lines have zero distance"
+                    Expect.equal
+                        (call "ST_IsValid" [ geometry "POLYGON((76.07820371 172.37962882,-17.23251258 -93.57657163,-1.62166186 119.40335360,-27.07466083 -119.20350262,76.07820371 172.37962882))" ])
+                        (VInt 1L) "the shared endpoint does not invalidate the ring"
+
                 testCase "ST_IsValid uses geodesic crossings for simple geographic polygons"
                 <| fun _ ->
                     let valid text =
