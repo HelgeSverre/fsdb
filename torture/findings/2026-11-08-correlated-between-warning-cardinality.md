@@ -126,3 +126,11 @@ boundary, then attach candidate-first evaluation and statement-level setup
 to that access. A deliberately failing indexed regression confirmed six
 conditions versus MySQL's fourteen and was removed from the passing suite
 until the access contract is changed.
+
+`tryProjectedPhysicalRangeSelection` now retains the selected storage range
+lookup before row materialization. Its result distinguishes a NULL-bound
+empty range from an indexed range, including an indexed range with zero
+candidates. This distinction matters because an empty indexed range can
+still produce setup warnings. Candidate consumers currently materialize the
+same rows as before; carrying this selection through correlated source
+selection and planning setup before outer-row execution remains unfinished.

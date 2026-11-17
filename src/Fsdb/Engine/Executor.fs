@@ -142,6 +142,10 @@ type private RangeLookupBounds<'column, 'bound> =
       Lower: ('bound * bool) option
       Upper: ('bound * bool) option }
 
+type private PhysicalRangeSelection =
+    | EmptyPhysicalRange
+    | SelectedPhysicalRange of Storage.RangeLookup
+
 type private DecimalRangeCut =
     | ExactDecimalCut of decimal
     | ApproximateDoubleCut of double
@@ -17123,7 +17127,7 @@ and private tryProjectedPhysicalCorrelatedInLookup store registry dbName source 
                     None))
     | _ -> None
 
-and private tryProjectedPhysicalRangeCandidates
+and private tryProjectedPhysicalRangeSelection
     policy
     store
     (projection: PhysicalProjection)
@@ -17147,13 +17151,19 @@ and private tryProjectedPhysicalRangeCandidates
             | _ -> false
 
         if isNullBound bounds.Lower || isNullBound bounds.Upper then
-            Some []
+            Some EmptyPhysicalRange
         else
             Storage.trySecondaryRangeLookupInTableWith allowed store projection.PhysicalTable sourceColumn.Name bounds.Lower bounds.Upper
             |> Option.filter (fun lookup ->
                 (policy = CandidateNarrowing && safeBroadNumericRange)
                 || QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange)
-            |> Option.map (fun lookup -> lookup.RangeRows.Value))
+            |> Option.map SelectedPhysicalRange)
+
+and private tryProjectedPhysicalRangeCandidates policy store projection bounds =
+    tryProjectedPhysicalRangeSelection policy store projection bounds
+    |> Option.map (function
+        | EmptyPhysicalRange -> []
+        | SelectedPhysicalRange lookup -> lookup.RangeRows.Value)
 
 and private tryProjectedPhysicalRangeRows store registry dbName projection bounds =
     tryProjectedPhysicalRangeCandidates CostedRead store projection bounds
