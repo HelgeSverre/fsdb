@@ -1758,6 +1758,14 @@ let tests =
               let limited, limitedResult = handle session (query "LIMIT 0")
               Expect.equal limitedResult (ResultSet([ "id"; "c" ], [])) "outer LIMIT 0 returns no rows"
               Expect.equal limited.DiagnosticsCount 0 "pinned MySQL 8.4.11 suppresses candidate and setup diagnostics under outer LIMIT 0"
+              let session, _ = handle session "ALTER TABLE inner_rows ADD KEY ix_owner(owner_id)"
+              for index, warnings in [ "ix_k", 14; "ix_owner", 6 ] do
+                  let forced, forcedResult = handle session ((query "ORDER BY o.id").Replace("inner_rows i", "inner_rows i FORCE INDEX(" + index + ")"))
+                  Expect.equal forcedResult
+                      (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ]))
+                      "forcing either access preserves correlated counts"
+                  Expect.equal forced.DiagnosticsCount warnings "pinned MySQL 8.4.11 honors the forced correlated index"
+              let session, _ = handle session "ALTER TABLE inner_rows DROP INDEX ix_owner"
               let session, _ = handle session "INSERT INTO inner_rows VALUES(9,12.75)"
               let extra, _ = handle session (query "ORDER BY o.id")
               Expect.equal extra.DiagnosticsCount 20 "an in-range candidate warns even when its owner never matches"

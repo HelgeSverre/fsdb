@@ -33,7 +33,18 @@ the ordinary plan and for FORCE INDEX(ix_k), with `Using index condition;
 Using where`. Their warning counts still differ (sixteen versus fourteen),
 so the selected execution index alone does not describe all setup conversion
 diagnostics. FSDB currently prioritizes the stored owner equality lookup.
-The forced-range result also shows that index hints need to constrain that
+The forced-range result showed that index hints did not constrain that
 correlated equality choice. The next fix must distinguish optimizer setup
 diagnostics from execution-candidate diagnostics rather than infer both from
 the final row set.
+
+## Forced-index correction
+
+Correlated stored equality probes now filter index matches using the table's
+JOIN hint policy. Their single-column fallback also chooses only allowed
+indexes, and USE/FORCE hints prevent substituting a transient equality lookup.
+With both indexes present, FORCE INDEX(ix_k) now returns the same rows and
+fourteen warnings as MySQL; FORCE INDEX(ix_owner) preserves the same rows and
+six warnings. Both are covered by the diagnostics regression. The ordinary
+two-index plan and empty-inner cases remain open; the baseline table above
+records observations before this correction.

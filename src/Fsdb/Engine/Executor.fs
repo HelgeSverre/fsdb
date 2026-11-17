@@ -16588,6 +16588,9 @@ and private tryCorrelatedEqualityLookup
     (outer: EvalContext option)
     : (ColumnDef list * (RowId * Value[]) list) option =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
+    let hints = indexHintsFor IndexJoin tref
+    let allowed = indexAllowedBy hints
+    let restrictsIndexes = hints |> List.exists (fun hint -> hint.Kind = UseIndex || hint.Kind = ForceIndex)
 
     let transientLookup (tableDb: string) (column: string) (value: Value) =
         let key = tableDb.ToLowerInvariant(), tref.Table.ToLowerInvariant(), column.ToLowerInvariant()
@@ -16616,7 +16619,7 @@ and private tryCorrelatedEqualityLookup
                             conjuncts predicate |> List.exists (isTruncatedDoubleRangePredicate candidate))
                     | _ -> false)
 
-        if diagnosticRange then None
+        if restrictsIndexes || diagnosticRange then None
         else
             getMemoized lookups key (fun () -> Storage.tryBuildTransientEqualityLookup store tableDb tref.Table column)
             |> Option.bind (fun lookup ->
@@ -16630,12 +16633,15 @@ and private tryCorrelatedEqualityLookup
         |> Option.bind (fun equalities ->
             let tableDb = tref.Database |> Option.defaultValue dbName
 
-            tryStoredEqualityMatchLookup store table equalities
+            tryStoredEqualityMatchLookupWhere allowed store table equalities
             |> Option.map (fun (_, lookup) -> table.Columns, lookup.CandidateRows |> List.ofSeq)
             |> Option.orElseWith (fun () ->
                 equalities
                 |> List.tryPick (fun (column, value) ->
-                    Storage.tryEqualityLookup store tableDb tref.Table column value
+                    Storage.equalityIndexesForTransform table column None
+                    |> List.tryFind (fun index -> allowed index.Name)
+                    |> Option.bind (fun index -> Storage.tryEqualityLookupForIndex store table index [ value ])
+                    |> Option.map (fun rows -> table.Columns, rows)
                     |> Option.orElseWith (fun () -> transientLookup tableDb column value)))))
 
 and private tryCorrelatedEqualityUnionLookup
