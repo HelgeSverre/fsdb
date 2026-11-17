@@ -60,10 +60,12 @@ wall time as query throughput.
 ## Follow-up
 
 The new planner compares estimated ref work with a range and retains initial
-and recheck analysis phases. This workload now takes a range candidate path
-where the parent accepted actual one-row owner buckets. The experiment
-isolates the commit's aggregate effect; it does not isolate allocation or
-time by function. Profile repeated planning and candidate preparation before
+and recheck analysis phases. A later execution trace established that this
+numeric-literal workload attempted range planning but rejected the numeric
+DOUBLE bounds and fell back to equality candidates. Thus the regression
+includes unsuccessful planning overhead; it was not evidence that these
+queries switched to range candidate execution. The experiment isolates the
+commit's aggregate effect, not allocation or time by function. Profile repeated planning and candidate preparation before
 choosing an optimization. Preserve the MySQL diagnostic regressions and the
 existing broad-candidate intersection behavior when reducing this cost.
 

@@ -247,6 +247,11 @@ versus owner indexes in the audited nonempty fixture; broad forced ranges
 also retain their range access, and the forced empty-inner setup is covered.
 The outer LIMIT 0 metadata
 probe now suppresses candidate diagnostics, matching the oracle's zero warnings.
+[Exactly representable numeric DOUBLE bounds](torture/findings/2026-11-17-numeric-double-range-bounds.md)
+also form range cuts across integer, unsigned integer, and DECIMAL literal
+cases. Bounds that lose precision retain the conservative fallback. Oracle
+controls show that the ordinary owner-versus-range choice can change after
+ANALYZE TABLE; broader optimizer statistics parity remains open.
 [Correlated `ABS` equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-abs.md)
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete
 OR branches and exact `INT` minimum magnitude, while other operand types retain

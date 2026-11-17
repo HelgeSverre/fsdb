@@ -53,3 +53,13 @@ dotnet-trace report /tmp/range.nettrace topN -n 400 --inclusive
 The temporary trace, copied baseline binaries, and experimental Release
 outputs were removed after analysis. The regular correctness gate was not
 rerun for a rejected candidate; production source exactly matches HEAD.
+
+## Coverage correction
+
+A later trace showed that numeric DOUBLE bound normalization failed before
+the candidate's changed recheck branch. The unchanged allocations therefore
+do not rule out a benefit from reusing a selected range on other inputs.
+This was a valid observation of no effect on the measured workload, but an
+uninformative test of the proposed mechanism. See the
+[numeric DOUBLE bound investigation](../../torture/findings/2026-11-17-numeric-double-range-bounds.md)
+for the storage-level regression and MySQL controls.

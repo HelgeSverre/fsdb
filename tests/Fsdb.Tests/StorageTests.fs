@@ -2178,6 +2178,19 @@ let tests =
                         (matching.RangeRows.Value |> List.map (snd >> fun row -> row.[0]))
                         [ VInt 1L; VInt 2L ]
                         "range includes both numeric candidates and excludes the out-of-range row"
+                    for lower, upper in [ VDecimal 12.5m, VInt 13L; VInt 12L, VUInt 13UL ] do
+                        let numeric =
+                            trySecondaryRangeLookup store defaultDatabase "double_range" "k"
+                                (Some(lower, true)) (Some(upper, true))
+                            |> Option.defaultWith (fun () -> failtest "expected exact numeric DOUBLE bounds")
+                        Expect.equal
+                            (numeric.RangeRows.Value |> List.map (snd >> fun row -> row.[0]))
+                            [ VInt 1L; VInt 2L ]
+                            "numeric literal cases preserve the same exact DOUBLE range"
+                    for boundary in [ VInt 9007199254740993L; VDecimal 0.1m ] do
+                        Expect.isNone
+                            (trySecondaryRangeLookup store defaultDatabase "double_range" "k" (Some(boundary, true)) None)
+                            "inexact numeric-to-DOUBLE cuts retain the conservative fallback"
                     Expect.isNone
                         (trySecondaryRangeLookup store defaultDatabase "double_range" "k" (Some(VString "1e309x", true)) None)
                         "overflow-clamped bound remains on the scan path"

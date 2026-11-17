@@ -5653,6 +5653,13 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
 
 let private exactRangeProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
     match table.Columns.[index].Type, value with
+    // Exact numeric bounds share the DOUBLE key even when their Value cases differ.
+    | TDouble _, VInt number when Value.compareIntegerToDouble (bigint number) (float number) = 0 ->
+        Some(VDouble(float number))
+    | TDouble _, VUInt number when Value.compareIntegerToDouble (bigint number) (float number) = 0 ->
+        Some(VDouble(float number))
+    | TDouble _, VDecimal number when Value.compareDecimalToDouble number (float number) = 0 ->
+        Some(VDouble(float number))
     | TDouble _, VString text ->
         match Double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
         | true, number when Double.IsFinite number -> Some(VDouble number)
