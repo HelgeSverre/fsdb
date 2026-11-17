@@ -32,6 +32,15 @@ segments using seed 33076, with 1,000 pairs for each of WGS 84 (4326), GRS 1980
 (4258), and Clarke 1866 (4267). This checks intersects/crosses/touches and whether
 distance is zero. Nonzero distance accuracy is outside this mode's scope.
 
+Run `uv run python check.py --polygons` for the polygon-validity parity
+assertion. It covers holes, multipart shapes, collections, independently
+reversed rings, contact cycles, boundary-only vertices, and global shapes
+with seed 9176. It also rechecks the two recorded global component relations.
+This mode currently exits nonzero because geographic hole/multipart validity
+still returns error 1235. Its JSON records all fixed-fixture oracle results,
+the total disagreement count, error counts, and the first 20 examples.
+The verdict checks the complete corpus, rather than the truncated examples.
+
 The shared-endpoint triples compare ST_Intersects, ST_Crosses, ST_Touches,
 and ST_Distance. Ring generation reuses the maintained validity oracle so
 case numbers preserve their recorded meaning. The default SRS axis order is

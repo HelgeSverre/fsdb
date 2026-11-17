@@ -1,0 +1,669 @@
+{
+  "mysql_version": "8.4.11",
+  "cases": 707,
+  "mysql_valid": 270,
+  "difference_count": 707,
+  "fsdb_error_counts": {
+    "1235": 707
+  },
+  "fixture_results": [
+    {
+      "name": "hole_inside_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "hole_inside_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "hole_inside_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "hole_inside_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "hole_outside_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "hole_outside_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "hole_outside_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "hole_outside_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "hole_shell_vertex_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "hole_shell_vertex_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "hole_shell_vertex_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "hole_shell_vertex_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "hole_shell_edge_point_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "hole_shell_edge_point_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "hole_shell_edge_point_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "hole_shell_edge_point_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "hole_shell_edge_overlap_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "hole_shell_edge_overlap_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "hole_shell_edge_overlap_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "hole_shell_edge_overlap_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "hole_crosses_shell_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "hole_crosses_shell_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "hole_crosses_shell_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "hole_crosses_shell_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "two_shell_contacts_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "two_shell_contacts_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "two_shell_contacts_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "two_shell_contacts_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "holes_point_contact_orientation_000",
+      "mysql": 1
+    },
+    {
+      "name": "holes_point_contact_orientation_001",
+      "mysql": 1
+    },
+    {
+      "name": "holes_point_contact_orientation_010",
+      "mysql": 1
+    },
+    {
+      "name": "holes_point_contact_orientation_011",
+      "mysql": 1
+    },
+    {
+      "name": "holes_point_contact_orientation_100",
+      "mysql": 1
+    },
+    {
+      "name": "holes_point_contact_orientation_101",
+      "mysql": 1
+    },
+    {
+      "name": "holes_point_contact_orientation_110",
+      "mysql": 1
+    },
+    {
+      "name": "holes_point_contact_orientation_111",
+      "mysql": 1
+    },
+    {
+      "name": "holes_shared_edge_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "holes_shared_edge_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "holes_shared_edge_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "holes_shared_edge_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "holes_shared_edge_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "holes_shared_edge_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "holes_shared_edge_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "holes_shared_edge_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "holes_nested_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "holes_nested_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "holes_nested_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "holes_nested_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "holes_nested_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "holes_nested_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "holes_nested_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "holes_nested_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "duplicate_holes_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "duplicate_holes_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "duplicate_holes_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "duplicate_holes_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "duplicate_holes_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "duplicate_holes_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "duplicate_holes_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "duplicate_holes_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "contact_cycle_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "contact_cycle_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "contact_cycle_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "contact_cycle_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "contact_cycle_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "contact_cycle_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "contact_cycle_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "contact_cycle_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "common_contact_orientation_0000",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_0001",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_0010",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_0011",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_0100",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_0101",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_0110",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_0111",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_1000",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_1001",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_1010",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_1011",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_1100",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_1101",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_1110",
+      "mysql": 1
+    },
+    {
+      "name": "common_contact_orientation_1111",
+      "mysql": 1
+    },
+    {
+      "name": "components_disjoint",
+      "mysql": 1
+    },
+    {
+      "name": "components_disjoint_swapped",
+      "mysql": 1
+    },
+    {
+      "name": "components_point_contact",
+      "mysql": 1
+    },
+    {
+      "name": "components_point_contact_swapped",
+      "mysql": 1
+    },
+    {
+      "name": "components_edge_overlap",
+      "mysql": 0
+    },
+    {
+      "name": "components_edge_overlap_swapped",
+      "mysql": 0
+    },
+    {
+      "name": "components_overlap",
+      "mysql": 0
+    },
+    {
+      "name": "components_overlap_swapped",
+      "mysql": 0
+    },
+    {
+      "name": "component_inside_hole",
+      "mysql": 1
+    },
+    {
+      "name": "component_inside_hole_swapped",
+      "mysql": 1
+    },
+    {
+      "name": "component_inside_fill",
+      "mysql": 0
+    },
+    {
+      "name": "component_inside_fill_swapped",
+      "mysql": 0
+    },
+    {
+      "name": "components_identical",
+      "mysql": 0
+    },
+    {
+      "name": "components_identical_swapped",
+      "mysql": 0
+    },
+    {
+      "name": "hole_all_vertices_on_shell",
+      "mysql": 0
+    },
+    {
+      "name": "component_all_vertices_on_shell",
+      "mysql": 0
+    },
+    {
+      "name": "components_two_point_contacts",
+      "mysql": 1
+    },
+    {
+      "name": "components_common_contact",
+      "mysql": 1
+    },
+    {
+      "name": "hole_crosses_at_vertices",
+      "mysql": 0
+    },
+    {
+      "name": "recorded_global_components_1",
+      "mysql": 1
+    },
+    {
+      "name": "recorded_global_components_2",
+      "mysql": 1
+    },
+    {
+      "name": "collection_valid_hole",
+      "mysql": 1
+    },
+    {
+      "name": "collection_invalid_hole",
+      "mysql": 0
+    }
+  ],
+  "recorded_component_relations": [
+    {
+      "name": "recorded_global_components_1",
+      "mysql": [
+        0,
+        0
+      ],
+      "fsdb": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "recorded_global_components_2",
+      "mysql": [
+        0,
+        0
+      ],
+      "fsdb": [
+        0,
+        0
+      ]
+    }
+  ],
+  "boundary_vertex_relations": [
+    {
+      "point": [
+        0,
+        5
+      ],
+      "mysql": [
+        1,
+        0
+      ],
+      "fsdb": [
+        1,
+        0
+      ]
+    },
+    {
+      "point": [
+        5,
+        10
+      ],
+      "mysql": [
+        1,
+        0
+      ],
+      "fsdb": [
+        1,
+        0
+      ]
+    },
+    {
+      "point": [
+        5,
+        0
+      ],
+      "mysql": [
+        1,
+        0
+      ],
+      "fsdb": [
+        1,
+        0
+      ]
+    }
+  ],
+  "difference_examples": [
+    {
+      "name": "hole_inside_orientation_00",
+      "wkt": "POLYGON((0.00000000 0.00000000,0.00000000 10.00000000,10.00000000 10.00000000,10.00000000 0.00000000,0.00000000 0.00000000),(2.00000000 2.00000000,2.00000000 4.00000000,4.00000000 4.00000000,4.00000000 2.00000000,2.00000000 2.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_inside_orientation_01",
+      "wkt": "POLYGON((0.00000000 0.00000000,0.00000000 10.00000000,10.00000000 10.00000000,10.00000000 0.00000000,0.00000000 0.00000000),(4.00000000 2.00000000,4.00000000 4.00000000,2.00000000 4.00000000,2.00000000 2.00000000,4.00000000 2.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_inside_orientation_10",
+      "wkt": "POLYGON((10.00000000 0.00000000,10.00000000 10.00000000,0.00000000 10.00000000,0.00000000 0.00000000,10.00000000 0.00000000),(2.00000000 2.00000000,2.00000000 4.00000000,4.00000000 4.00000000,4.00000000 2.00000000,2.00000000 2.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_inside_orientation_11",
+      "wkt": "POLYGON((10.00000000 0.00000000,10.00000000 10.00000000,0.00000000 10.00000000,0.00000000 0.00000000,10.00000000 0.00000000),(4.00000000 2.00000000,4.00000000 4.00000000,2.00000000 4.00000000,2.00000000 2.00000000,4.00000000 2.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_outside_orientation_00",
+      "wkt": "POLYGON((0.00000000 0.00000000,0.00000000 10.00000000,10.00000000 10.00000000,10.00000000 0.00000000,0.00000000 0.00000000),(12.00000000 12.00000000,12.00000000 14.00000000,14.00000000 14.00000000,14.00000000 12.00000000,12.00000000 12.00000000))",
+      "mysql": 0,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_outside_orientation_01",
+      "wkt": "POLYGON((0.00000000 0.00000000,0.00000000 10.00000000,10.00000000 10.00000000,10.00000000 0.00000000,0.00000000 0.00000000),(14.00000000 12.00000000,14.00000000 14.00000000,12.00000000 14.00000000,12.00000000 12.00000000,14.00000000 12.00000000))",
+      "mysql": 0,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_outside_orientation_10",
+      "wkt": "POLYGON((10.00000000 0.00000000,10.00000000 10.00000000,0.00000000 10.00000000,0.00000000 0.00000000,10.00000000 0.00000000),(12.00000000 12.00000000,12.00000000 14.00000000,14.00000000 14.00000000,14.00000000 12.00000000,12.00000000 12.00000000))",
+      "mysql": 0,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_outside_orientation_11",
+      "wkt": "POLYGON((10.00000000 0.00000000,10.00000000 10.00000000,0.00000000 10.00000000,0.00000000 0.00000000,10.00000000 0.00000000),(14.00000000 12.00000000,14.00000000 14.00000000,12.00000000 14.00000000,12.00000000 12.00000000,14.00000000 12.00000000))",
+      "mysql": 0,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_vertex_orientation_00",
+      "wkt": "POLYGON((0.00000000 0.00000000,0.00000000 10.00000000,10.00000000 10.00000000,10.00000000 0.00000000,0.00000000 0.00000000),(0.00000000 0.00000000,1.00000000 2.00000000,2.00000000 1.00000000,0.00000000 0.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_vertex_orientation_01",
+      "wkt": "POLYGON((0.00000000 0.00000000,0.00000000 10.00000000,10.00000000 10.00000000,10.00000000 0.00000000,0.00000000 0.00000000),(2.00000000 1.00000000,1.00000000 2.00000000,0.00000000 0.00000000,2.00000000 1.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_vertex_orientation_10",
+      "wkt": "POLYGON((10.00000000 0.00000000,10.00000000 10.00000000,0.00000000 10.00000000,0.00000000 0.00000000,10.00000000 0.00000000),(0.00000000 0.00000000,1.00000000 2.00000000,2.00000000 1.00000000,0.00000000 0.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_vertex_orientation_11",
+      "wkt": "POLYGON((10.00000000 0.00000000,10.00000000 10.00000000,0.00000000 10.00000000,0.00000000 0.00000000,10.00000000 0.00000000),(2.00000000 1.00000000,1.00000000 2.00000000,0.00000000 0.00000000,2.00000000 1.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_edge_point_orientation_00",
+      "wkt": "POLYGON((0.00000000 0.00000000,0.00000000 10.00000000,10.00000000 10.00000000,10.00000000 0.00000000,0.00000000 0.00000000),(0.00000000 5.00000000,2.00000000 6.00000000,2.00000000 4.00000000,0.00000000 5.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_edge_point_orientation_01",
+      "wkt": "POLYGON((0.00000000 0.00000000,0.00000000 10.00000000,10.00000000 10.00000000,10.00000000 0.00000000,0.00000000 0.00000000),(2.00000000 4.00000000,2.00000000 6.00000000,0.00000000 5.00000000,2.00000000 4.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_edge_point_orientation_10",
+      "wkt": "POLYGON((10.00000000 0.00000000,10.00000000 10.00000000,0.00000000 10.00000000,0.00000000 0.00000000,10.00000000 0.00000000),(0.00000000 5.00000000,2.00000000 6.00000000,2.00000000 4.00000000,0.00000000 5.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_edge_point_orientation_11",
+      "wkt": "POLYGON((10.00000000 0.00000000,10.00000000 10.00000000,0.00000000 10.00000000,0.00000000 0.00000000,10.00000000 0.00000000),(2.00000000 4.00000000,2.00000000 6.00000000,0.00000000 5.00000000,2.00000000 4.00000000))",
+      "mysql": 1,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_edge_overlap_orientation_00",
+      "wkt": "POLYGON((0.00000000 0.00000000,0.00000000 10.00000000,10.00000000 10.00000000,10.00000000 0.00000000,0.00000000 0.00000000),(0.00000000 2.00000000,0.00000000 4.00000000,2.00000000 4.00000000,2.00000000 2.00000000,0.00000000 2.00000000))",
+      "mysql": 0,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_edge_overlap_orientation_01",
+      "wkt": "POLYGON((0.00000000 0.00000000,0.00000000 10.00000000,10.00000000 10.00000000,10.00000000 0.00000000,0.00000000 0.00000000),(2.00000000 2.00000000,2.00000000 4.00000000,0.00000000 4.00000000,0.00000000 2.00000000,2.00000000 2.00000000))",
+      "mysql": 0,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_edge_overlap_orientation_10",
+      "wkt": "POLYGON((10.00000000 0.00000000,10.00000000 10.00000000,0.00000000 10.00000000,0.00000000 0.00000000,10.00000000 0.00000000),(0.00000000 2.00000000,0.00000000 4.00000000,2.00000000 4.00000000,2.00000000 2.00000000,0.00000000 2.00000000))",
+      "mysql": 0,
+      "fsdb": {
+        "error": 1235
+      }
+    },
+    {
+      "name": "hole_shell_edge_overlap_orientation_11",
+      "wkt": "POLYGON((10.00000000 0.00000000,10.00000000 10.00000000,0.00000000 10.00000000,0.00000000 0.00000000,10.00000000 0.00000000),(2.00000000 2.00000000,2.00000000 4.00000000,0.00000000 4.00000000,0.00000000 2.00000000,2.00000000 2.00000000))",
+      "mysql": 0,
+      "fsdb": {
+        "error": 1235
+      }
+    }
+  ]
+}

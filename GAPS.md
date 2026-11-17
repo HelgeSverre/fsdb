@@ -2988,6 +2988,10 @@ implementation effort:
    Geographic [`ST_IsValid` for points, linework, and simple single-ring polygons](torture/findings/2026-10-16-geographic-validity.md)
    now accepts the audited geographic shapes, including collections of them;
    polygons with holes and multipolygons still need geodesic validity rules.
+   A [current validity matrix](torture/findings/2026-11-17-geographic-polygon-validity-baseline.md)
+   confirms the earlier global component-containment blockers now agree;
+   remaining work includes contact-turn classification, per-polygon interior
+   connectivity, and disjoint filled interiors between components.
    [Global and antipodal containment counterexamples](torture/findings/2026-10-16-geographic-global-containment.md)
    now use Boost-shaped geographic winding and ring orientation; 3,600 random
    global point probes and 1,200 random, vertex, and antipodal probes matched

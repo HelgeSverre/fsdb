@@ -10,6 +10,9 @@ import subprocess
 import sys
 import tempfile
 
+from polygon_cases import boundary_only_rings, polygon, recorded_components
+from polygon_cases import cases as polygon_cases
+
 REPO = pathlib.Path(__file__).resolve().parents[3]
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location(
@@ -101,6 +104,86 @@ def check_line_pairs(mysql, fsdb, count):
     assert not differences, "line topology or zero-distance classification differs"
 
 
+def check_polygons(mysql, fsdb, version):
+    def relation(connection, sql):
+        with connection.cursor() as cursor:
+            cursor.execute(sql)
+            return cursor.fetchone()
+
+    differences = []
+    fixtures = []
+    errors = {}
+    component_relations = []
+    boundary_relations = []
+    shell, inscribed = boundary_only_rings()
+    for latitude, longitude in inscribed:
+        point = f"ST_GeomFromText('POINT({latitude} {longitude})',4326)"
+        area = f"ST_GeomFromText('{polygon([shell])}',4326)"
+        sql = f"SELECT ST_Touches({point},{area}),ST_Within({point},{area})"
+        boundary_relations.append(
+            {
+                "point": [latitude, longitude],
+                "mysql": relation(mysql, sql),
+                "fsdb": relation(fsdb, sql),
+            }
+        )
+    for name, components in recorded_components():
+        first, second = [
+            f"ST_GeomFromText('{polygon([points])}',4326)" for points in components
+        ]
+        sql = f"SELECT ST_Intersects({first},{second}),ST_Within({second},{first})"
+
+        component_relations.append(
+            {"name": name, "mysql": relation(mysql, sql), "fsdb": relation(fsdb, sql)}
+        )
+    valid = total = 0
+    for name, wkt in polygon_cases():
+        sql = f"SELECT ST_IsValid(ST_GeomFromText('{wkt}',4326))"
+        expected = VALIDITY.scalar(mysql, sql)
+        valid += expected
+        total += 1
+        if not name.startswith("global_"):
+            fixtures.append({"name": name, "mysql": expected})
+        try:
+            actual = VALIDITY.scalar(fsdb, sql)
+        except VALIDITY.pymysql.MySQLError as error:
+            actual = {"error": error.args[0]}
+            errors[error.args[0]] = errors.get(error.args[0], 0) + 1
+        if expected != actual:
+            differences.append(
+                {
+                    "name": name,
+                    "wkt": wkt,
+                    "mysql": expected,
+                    "fsdb": actual,
+                }
+            )
+    print(
+        json.dumps(
+            {
+                "mysql_version": version,
+                "cases": total,
+                "mysql_valid": valid,
+                "difference_count": len(differences),
+                "fsdb_error_counts": errors,
+                "fixture_results": fixtures,
+                "recorded_component_relations": component_relations,
+                "boundary_vertex_relations": boundary_relations,
+                "difference_examples": differences[:20],
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
+    assert all(row["mysql"] == row["fsdb"] for row in component_relations), (
+        "recorded component relations differ"
+    )
+    assert all(
+        row["mysql"] == (1, 0) and row["fsdb"] == (1, 0) for row in boundary_relations
+    ), "boundary-only fixture classification changed"
+    assert not differences, "geographic polygon validity differs"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
@@ -111,6 +194,11 @@ def main():
     )
     mode.add_argument(
         "--line-pairs", type=int, help="compare independent random segments per SRS"
+    )
+    mode.add_argument(
+        "--polygons",
+        action="store_true",
+        help="compare polygons with holes and multipart validity",
     )
     args = parser.parse_args()
     if args.line_pairs is not None and args.line_pairs < 1:
@@ -146,6 +234,9 @@ def main():
                 return
             if args.line_pairs is not None:
                 check_line_pairs(mysql, fsdb, args.line_pairs)
+                return
+            if args.polygons:
+                check_polygons(mysql, fsdb, version)
                 return
             rng = random.Random(33092)
             endpoint_differences = []
