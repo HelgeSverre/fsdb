@@ -1,7 +1,7 @@
 # Correlated planner cleanup
 
-Status: locally verified; CI on the changed head is pending. This sweep covers
-the correlated `COUNT` and `EXISTS` planner after the nullable `HAVING` changes.
+This sweep covers the correlated `COUNT` and `EXISTS` planner after the
+nullable `HAVING` changes. The later geographic cleanup is recorded below.
 
 ## Scope and baseline
 
@@ -123,3 +123,38 @@ comparison](../benchmarks/results/4d6b49d2-correlated-warning-comparison.md)
 found no material regression in the repeat run, although machine drift in the
 first run limits the claim. A-04 is an open compatibility gap. No broad concurrency safety claim is inferred from the
 bounded suite.
+
+## Geographic validity cleanup
+
+This pass starts at `9f4a2a0b` (`v0.1.9`), with a clean worktree. It reviews the
+geographic polygon and intersection changes and indexed key comparison since
+`v0.1.8`. The source changes are confined to geographic validation in
+`GeometryOperations.fs`. Planar validity, public API, persistence, and wire
+handling are outside this pass.
+
+| Path | Invariant and transitions | Disposition |
+| --- | --- | --- |
+| Ring and polygon validity | A ring with equal neighbors drops the zero-length edges before adjacency checks. A malformed or self-intersecting ring rejects the polygon. A valid ring is oriented counterclockwise before contact and containment checks. A crossing, shared boundary interval, misplaced hole, or ring/contact cycle rejects the polygon. Union-find state belongs to one polygon check. | Preparation now returns accepted rings and stops preparing parts on the first failure. |
+| Multipolygon validity | Every component must be valid before comparing boundaries and filled interiors. Polar holes keep their hole winding role when checking fill. | Reuse `ValidGeographicPolygon` from `tryValidateGeographicPolygon`. The shell is required by the type, so component checks no longer retrieve it with a partial list operation or repeat normalization. |
+| Boundary contacts | Both segment directions and pair order feed the existing crossing and shared-interval tests. Only accepted vertex contacts enter the contact graph. | Stream segment and ring pairs. Rejected pairs stop further geometric checks at that level. |
+| Intersection convergence | The numerical solver tries Newton, then its bounded fallback when required. The topology caller checks that the resulting point is strictly inside both segments. | Retained. The solver and its SQL topology caller have distinct responsibilities. |
+| Indexed key comparison | The first unequal value decides ordering, while the full traversal still checks component widths. | Retained. The existing private walk owns both rules and avoids temporary lists. |
+
+Three reviewers inspected the baseline, challenged the patch, and reviewed its
+final form. The challenge found that an intermediate draft normalized all rings
+before rejecting an invalid early ring. The final preparation loop stops on the
+first failure and is shared by ring and component validation. Winding runs only
+after every ring in the polygon passes its simple-ring check.
+
+The release baseline passed its [GitHub checks](https://github.com/HelgeSverre/fsdb/actions/runs/44183256721).
+A local baseline run used the Debug CLI with SDK 10.0.401 on macOS and matched
+pinned MySQL 8.4.11 on all 1,169 seed 9176 polygon cases for SRID 4326.
+
+The final source patch (`a47c8ede8365` SHA-256 prefix) passed these checks on
+macOS with .NET SDK 10.0.401:
+
+| Gate | Tested artifact | Result |
+| --- | --- | --- |
+| `just check` | Debug `Fsdb.Tests.dll` (`9f2b3ab0a87b`) | 3,957 tests passed, zero build warnings or errors. |
+| [Geographic oracle](../torture/probes/geographic-endpoints/README.md) | Debug CLI and `Fsdb.dll` (`4fc2666b9d06`) | Zero differences against pinned MySQL 8.4.11 for 3,507 polygon checks across SRIDs 4326, 4258, and 4267, plus 4,000 endpoint and ring controls and all eight long-edge crossing orderings. The SRID 4326 report is identical to the baseline. |
+| `just package-check` | Release library (`b9f5a2df6f517`) | Package and symbols verified, and the isolated consumer returned 42. |
