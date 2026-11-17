@@ -2706,6 +2706,9 @@ implementation effort:
    correlated forms that cannot use a direct equality lookup over a physical
    or already-materialized source. Correctness holds, but scale still diverges
    from MySQL past small data.
+   A [profiled indexed-key traversal change](benchmarks/results/2026-11-17-index-key-walk.md)
+   reduces allocation in the audited eligible correlated range workload;
+   broader source preparation and evaluation-context costs remain open.
 
 2. Transaction scheduling. [Readers behind waiting writers under a global
    read lock](torture/findings/2026-11-06-global-read-waiting-writer-gate.md)

@@ -185,13 +185,19 @@ let private compareIndexedKeys
     (left: Value list)
     (right: Value list)
     =
-    List.zip3 left right (List.zip collations directions)
-    |> List.fold (fun comparison (left, right, (collation, direction)) ->
-        if comparison <> 0 then
-            comparison
-        else
-            let valueComparison = compareIndexedValues collation left right
-            if direction = Desc then -valueComparison else valueComparison) 0
+    // Validate every component's width even after an earlier value differs.
+    let rec walk comparison collations directions left right =
+        match collations, directions, left, right with
+        | [], [], [], [] -> comparison
+        | collation :: collations, direction :: directions, first :: left, second :: right ->
+            let comparison =
+                if comparison <> 0 then comparison
+                else
+                    let valueComparison = compareIndexedValues collation first second
+                    if direction = Desc then -valueComparison else valueComparison
+            walk comparison collations directions left right
+        | _ -> invalidArg "left" "Index values, collations, and directions must have matching widths"
+    walk 0 collations directions left right
 
 [<CustomEquality; CustomComparison>]
 type SecondaryOrderEntry = private { CollationNames: string option list; Directions: Direction list; Values: Value list; RowId: RowId } with
