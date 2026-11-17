@@ -17379,20 +17379,33 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                 merge
                 (snd >> List.length)))
 
-and private tryProjectedPhysicalCorrelatedRangeLookup
+and private tryProjectedPhysicalCorrelatedRangeAccess
     (store: Store)
     (registry: Registry)
     (dbName: string)
     (source: FromItem)
     (whereExpr: Expr option)
     (outer: EvalContext option)
-    : (ColumnDef list * Value[] list) option =
+    =
     FromItem.tryQualifier source
     |> Option.bind (fun qualifier ->
         tryPhysicalProjection store registry dbName source
         |> Option.bind (fun projection ->
             correlatedRangeBounds store projection (correlatedProbeSource qualifier projection.OutputColumns) whereExpr outer
-            |> List.tryPick (tryProjectedPhysicalRangeRows store registry dbName projection)))
+            |> List.tryPick (fun bounds ->
+                tryProjectedPhysicalRangeSelection CostedRead store projection bounds
+                |> Option.bind (fun access ->
+                    let candidates =
+                        match access with
+                        | EmptyPhysicalRange -> []
+                        | SelectedPhysicalRange lookup -> lookup.RangeRows.Value
+
+                    projectPhysicalLookupRows store registry dbName projection candidates
+                    |> Option.map (fun rows -> projection.PhysicalTableRef, access, rows)))))
+
+and private tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer =
+    tryProjectedPhysicalCorrelatedRangeAccess store registry dbName source whereExpr outer
+    |> Option.map (fun (_, _, rows) -> rows)
 
 and private tryProjectedPhysicalCorrelatedIntersectionLookup
     store

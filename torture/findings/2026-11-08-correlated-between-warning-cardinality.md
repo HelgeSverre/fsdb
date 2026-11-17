@@ -134,3 +134,8 @@ candidates. This distinction matters because an empty indexed range can
 still produce setup warnings. Candidate consumers currently materialize the
 same rows as before; carrying this selection through correlated source
 selection and planning setup before outer-row execution remains unfinished.
+`tryProjectedPhysicalCorrelatedRangeAccess` also preserves the physical table
+reference and selection alongside projected candidate rows. Its rows-only
+adapter retains the existing caller contract. The source candidate chooser
+must consume the richer result before diagnostics can depend on the winning
+access rather than on an eligible but unused index.
