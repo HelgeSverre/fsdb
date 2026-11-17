@@ -2,8 +2,10 @@
 
 Update: the [shared-endpoint correction](2026-11-17-geographic-shared-endpoint.md)
 resolves the later ring-92 validity and line-relation mismatch. A fresh
-3,000-ring comparison leaves only ring 76; its crossing and distance issue
-remains open. The observations below retain the earlier baseline results.
+3,000-ring comparison initially left only ring 76. The later
+[Sjöberg implementation](2026-11-17-geographic-intersection-fix.md) resolves
+that crossing and distance issue too; the corpus now has no differences.
+The observations below retain the earlier baseline results.
 
 The geographic `ST_IsValid` follow-up tested holes and multipolygons against
 the pinned MySQL 8.4.11 oracle before enabling them. Twelve handpicked

@@ -41,6 +41,7 @@
     <Compile Include="Sql/TemporalLocale.fs" />
     <Compile Include="Sql/Value.fs" />
     <Compile Include="Sql/SpatialReferenceSystems.fs" />
+    <Compile Include="Sql/GeographicIntersection.fs" />
     <Compile Include="Sql/GeometryOperations.fs" />
     <Compile Include="Sql/Privileges.fs" />
     <Compile Include="Sql/BooleanWordChars.fs" />
@@ -96,6 +97,7 @@
 
   <ItemGroup>
     <None Include="PackageReadme.md" Pack="true" PackagePath="README.md" />
+    <None Include="../../licenses/Boost-1.0.txt" Pack="true" PackagePath="licenses/Boost-1.0.txt" />
   </ItemGroup>
 
   <ItemGroup>

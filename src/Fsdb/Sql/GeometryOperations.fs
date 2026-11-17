@@ -443,15 +443,6 @@ let internal geographicPointLinePosition referenceSystem point lines =
         else GeographicPointLinePosition.Boundary
     else GeographicPointLinePosition.Outside
 
-let private geographicUnitVector (latitude, longitude) =
-    let latitude, longitude = radians latitude, radians longitude
-    cos latitude * cos longitude, cos latitude * sin longitude, sin latitude
-
-let private dot3 (ax, ay, az) (bx, by, bz) = ax * bx + ay * by + az * bz
-
-let private cross3 (ax, ay, az) (bx, by, bz) =
-    ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
-
 let private sampleGeographicSegment referenceSystem start endpoint =
     let length = geographicPointDistance referenceSystem start endpoint
     let steps = max 1 (min 256 (int (ceil (length / 25000.0))))
@@ -716,56 +707,48 @@ let internal geographicPointPolygonDistance referenceSystem point polygons =
     | GeographicPointPolygonPosition.Outside distance -> distance
     | _ -> Some 0.0
 
-let private geographicArcIntersection (firstStart: float * float) firstEnd secondStart secondEnd =
-    let magnitude (x, y, z) = sqrt (x * x + y * y + z * z)
-    let angle first second = atan2 (magnitude (cross3 first second)) (dot3 first second)
-    let firstStart, firstEnd = geographicUnitVector firstStart, geographicUnitVector firstEnd
-    let secondStart, secondEnd = geographicUnitVector secondStart, geographicUnitVector secondEnd
-    let intersection = cross3 (cross3 firstStart firstEnd) (cross3 secondStart secondEnd)
-    let size = magnitude intersection
-
-    if size < 1e-15 then None
-    else
-        let x, y, z = intersection
-        let candidate = x / size, y / size, z / size
-        let onArc start endpoint point =
-            abs (angle start point + angle point endpoint - angle start endpoint) < 1e-9
-        let crosses point = onArc firstStart firstEnd point && onArc secondStart secondEnd point
-        if crosses candidate then Some candidate
-        else
-            let opposite = -x / size, -y / size, -z / size
-            if crosses opposite then Some opposite else None
-
-let private geographicArcsIntersect firstStart firstEnd secondStart secondEnd =
-    geographicArcIntersection firstStart firstEnd secondStart secondEnd |> Option.isSome
-
 let private geographicLineSegments lines = lines |> List.collect List.pairwise
 
 let private geographicPointOnLineSegment referenceSystem point (start, endpoint) =
     geographicPointLinePosition referenceSystem point [ [ start; endpoint ] ]
     <> GeographicPointLinePosition.Outside
 
-let private geographicSegmentsProperlyCross referenceSystem (firstStart, firstEnd) (secondStart, secondEnd) =
-    // Classify shared endpoints before sampling: long arcs can otherwise
-    // create spurious interior crossings.
-    if firstStart = secondStart || firstStart = secondEnd
-       || firstEnd = secondStart || firstEnd = secondEnd then
-        false
+let private geographicSegmentsShareEndpoint (firstStart, firstEnd) (secondStart, secondEnd) =
+    firstStart = secondStart || firstStart = secondEnd
+    || firstEnd = secondStart || firstEnd = secondEnd
+
+let private geographicSegmentsProperlyCross referenceSystem first second =
+    let firstStart, firstEnd = first
+    let secondStart, secondEnd = second
+    if geographicSegmentsShareEndpoint first second then false
     else
-        let firstArcs = sampleGeographicSegment referenceSystem firstStart firstEnd |> Array.pairwise
-        let secondArcs = sampleGeographicSegment referenceSystem secondStart secondEnd |> Array.pairwise
-        let nearEndpoint intersection endpoint =
-            let x, y, z = intersection
-            let otherX, otherY, otherZ = geographicUnitVector endpoint
-            (x - otherX) ** 2.0 + (y - otherY) ** 2.0 + (z - otherZ) ** 2.0 < 1e-18
-        firstArcs
-        |> Array.exists (fun (firstArcStart, firstArcEnd) ->
-            secondArcs
-            |> Array.exists (fun (secondArcStart, secondArcEnd) ->
-                geographicArcIntersection firstArcStart firstArcEnd secondArcStart secondArcEnd
-                |> Option.exists (fun intersection ->
-                    not (nearEndpoint intersection firstStart || nearEndpoint intersection firstEnd
-                         || nearEndpoint intersection secondStart || nearEndpoint intersection secondEnd))))
+        let major = referenceSystem.SemiMajorAxis.Value
+        let minor = major * (1.0 - 1.0 / referenceSystem.InverseFlattening.Value)
+        let flattening = 1.0 - minor / major
+        let normalized = { referenceSystem with SemiMajorAxis = Some 1.0; InverseFlattening = Some(1.0 / flattening) }
+        let endpoints start endpoint =
+            let radians (latitude, longitude) = mysqlRadians latitude, mysqlRadians longitude
+            let start, endpoint = if fst start > fst endpoint then endpoint, start else start, endpoint
+            radians start, radians endpoint
+        let a, b = endpoints firstStart firstEnd
+        let c, d = endpoints secondStart secondEnd
+        let azimuth start endpoint = geographicSegmentAzimuthsRadians flattening start endpoint |> fst
+        let firstAzimuth, secondAzimuth = azimuth a b, azimuth c d
+        let side baseline start point =
+            let delta = normalizedLongitudeRadians (azimuth start point - baseline)
+            if boostGeoEqual delta 0.0 || boostGeoEqual (abs delta) Math.PI then 0
+            else Math.Sign delta
+        if side firstAzimuth a c * side firstAzimuth a d >= 0
+           || side secondAzimuth c a * side secondAzimuth c b >= 0 then false
+        else
+            GeographicIntersection.intersect flattening a b firstAzimuth c d secondAzimuth
+            |> Option.exists (fun point ->
+                let inside start endpoint baseline =
+                    let distance = geographicPointDistanceRadians normalized start point
+                    let length = geographicPointDistanceRadians normalized start endpoint
+                    abs (normalizedLongitudeRadians (azimuth start point - baseline)) <= Math.PI / 2.0
+                    && distance > 0.0 && distance < length
+                inside a b firstAzimuth && inside c d secondAzimuth)
 
 let private geographicSimpleRingIsValid referenceSystem ring =
     // A zero-length edge between equal neighbors is allowed; remove it before
@@ -904,28 +887,26 @@ let internal geographicLineLineTopology referenceSystem firstLines secondLines =
       SecondContainsFirst = secondContainsFirst }
 
 let internal geographicLineLineDistance referenceSystem firstLines secondLines =
-    let sample (start, endpoint) =
-        start, endpoint, sampleGeographicSegment referenceSystem start endpoint |> Array.pairwise
-    let firstSegments = firstLines |> List.collect List.pairwise |> List.map sample
-    let secondSegments = secondLines |> List.collect List.pairwise |> List.map sample
+    let firstSegments = geographicLineSegments firstLines
+    let secondSegments = geographicLineSegments secondLines
 
-    let segmentDistance (firstStart, firstEnd, firstArcs) (secondStart, secondEnd, secondArcs) =
-        let nearestEndpoint =
+    let segmentDistance (firstStart, firstEnd) (secondStart, secondEnd) =
+        let first, second = (firstStart, firstEnd), (secondStart, secondEnd)
+        let endpointContact =
+            geographicSegmentsShareEndpoint first second
+            || geographicPointOnLineSegment referenceSystem firstStart second
+            || geographicPointOnLineSegment referenceSystem firstEnd second
+            || geographicPointOnLineSegment referenceSystem secondStart first
+            || geographicPointOnLineSegment referenceSystem secondEnd first
+        // Endpoint contact and overlap remain zero even when Andoyer rounds
+        // an identical-point or collinear distance above zero.
+        if endpointContact || geographicSegmentsProperlyCross referenceSystem first second then 0.0
+        else
             [ geographicPointSegmentDistance referenceSystem firstStart secondStart secondEnd
               geographicPointSegmentDistance referenceSystem firstEnd secondStart secondEnd
               geographicPointSegmentDistance referenceSystem secondStart firstStart firstEnd
               geographicPointSegmentDistance referenceSystem secondEnd firstStart firstEnd ]
             |> List.min
-
-        if nearestEndpoint = 0.0 then 0.0
-        else
-            let intersects =
-                firstArcs
-                |> Array.exists (fun (firstArcStart, firstArcEnd) ->
-                    secondArcs
-                    |> Array.exists (fun (secondArcStart, secondArcEnd) ->
-                        geographicArcsIntersect firstArcStart firstArcEnd secondArcStart secondArcEnd))
-            if intersects then 0.0 else nearestEndpoint
 
     firstSegments
     |> List.fold (fun minimum first ->

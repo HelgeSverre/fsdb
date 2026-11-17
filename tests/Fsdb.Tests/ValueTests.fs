@@ -1272,17 +1272,37 @@ let tests =
                 testCase "long geographic segments sharing an endpoint touch without crossing"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text; VInt 4326L ]
-                    let a, shared, b = "-17.23251258 -93.57657163", "-1.62166186 119.40335360", "-27.07466083 -119.20350262"
-                    for first in [ a + "," + shared; shared + "," + a ] do
-                        for second in [ shared + "," + b; b + "," + shared ] do
-                            let lines = [ geometry ("LINESTRING(" + first + ")"); geometry ("LINESTRING(" + second + ")") ]
-                            Expect.equal (call "ST_Intersects" lines) (VInt 1L) "pinned MySQL 8.4.11 intersects at the shared endpoint"
-                            Expect.equal (call "ST_Crosses" lines) (VInt 0L) "the contact is not an interior crossing"
-                            Expect.equal (call "ST_Touches" lines) (VInt 1L) "endpoint contact is a touch in either direction"
-                            Expect.equal (call "ST_Distance" lines) (VDouble 0.0) "touching lines have zero distance"
+                    for a, shared, b in
+                        [ "-17.23251258 -93.57657163", "-1.62166186 119.40335360", "-27.07466083 -119.20350262"
+                          "-18.55080030 -106.78530718", "-46.75993561 -168.06356989", "52.82896007 -8.93614044" ] do
+                        for first in [ a + "," + shared; shared + "," + a ] do
+                            for second in [ shared + "," + b; b + "," + shared ] do
+                                let lines = [ geometry ("LINESTRING(" + first + ")"); geometry ("LINESTRING(" + second + ")") ]
+                                Expect.equal (call "ST_Intersects" lines) (VInt 1L) "pinned MySQL 8.4.11 intersects at the shared endpoint"
+                                Expect.equal (call "ST_Crosses" lines) (VInt 0L) "the contact is not an interior crossing"
+                                Expect.equal (call "ST_Touches" lines) (VInt 1L) "endpoint contact is a touch in either direction"
+                                Expect.equal (call "ST_Distance" lines) (VDouble 0.0) "touching lines have zero distance"
                     Expect.equal
                         (call "ST_IsValid" [ geometry "POLYGON((76.07820371 172.37962882,-17.23251258 -93.57657163,-1.62166186 119.40335360,-27.07466083 -119.20350262,76.07820371 172.37962882))" ])
                         (VInt 1L) "the shared endpoint does not invalidate the ring"
+
+                testCase "long geographic nonadjacent segments cross in either direction"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text; VInt 4326L ]
+                    let first = [ "13.81883866 96.65582728"; "-16.27065705 -81.50116582" ]
+                    let second = [ "-5.47457294 82.28363800"; "57.65336721 169.58817054" ]
+                    for a in [ first; List.rev first ] do
+                        for b in [ second; List.rev second ] do
+                            for left, right in [ a, b; b, a ] do
+                                let line points = geometry ("LINESTRING(" + String.concat "," points + ")")
+                                let lines = [ line left; line right ]
+                                Expect.equal (call "ST_Intersects" lines) (VInt 1L) "pinned MySQL 8.4.11 crossing"
+                                Expect.equal (call "ST_Crosses" lines) (VInt 1L) "interior crossing"
+                                Expect.equal (call "ST_Touches" lines) (VInt 0L) "not an endpoint touch"
+                                Expect.equal (call "ST_Distance" lines) (VDouble 0.0) "crossing distance"
+                    Expect.equal
+                        (call "ST_IsValid" [ geometry "POLYGON((13.81883866 96.65582728,-16.27065705 -81.50116582,-5.47457294 82.28363800,57.65336721 169.58817054,13.81883866 96.65582728))" ])
+                        (VInt 0L) "nonadjacent crossing invalidates the ring"
 
                 testCase "ST_IsValid uses geodesic crossings for simple geographic polygons"
                 <| fun _ ->

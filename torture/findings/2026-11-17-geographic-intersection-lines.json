@@ -1,0 +1,11 @@
+{
+  "mysql_version": "8.4.11",
+  "seed": 33076,
+  "pairs_per_srid": 1000,
+  "srids": [
+    4326,
+    4258,
+    4267
+  ],
+  "differences": []
+}

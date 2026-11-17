@@ -1,7 +1,8 @@
 # Long geographic segments sharing an endpoint
 
-Status: fixed for the audited shared-endpoint case and corpus. The unrelated
-nonadjacent intersection and distance discrepancy in ring 76 remains open.
+Status: fixed for the audited shared-endpoint case and corpus. The separate
+ring-76 discrepancy is also resolved by the later
+[Sjöberg correction](2026-11-17-geographic-intersection-fix.md).
 
 Pinned MySQL 8.4.11 reports `(intersects,crosses,touches,distance)=(1,0,1,0)`
 for these two EPSG 4326 lines:
@@ -36,6 +37,6 @@ backtracking checks also remain separate from this proper-crossing test.
 
 The [machine-readable result](2026-11-17-geographic-shared-endpoint.json)
 records the oracle version, seeds, counts, and mismatch sets. These tests do
-not establish general geodesic intersection parity. The remaining ring-76
-crossing and approximately 183.6 km distance error still require the full
-geographic intersection strategy described in the earlier finding.
+not establish general geodesic intersection parity. The later Sjöberg
+correction resolves the ring-76 crossing and approximately 183.6 km distance
+error that remained in this earlier validation.

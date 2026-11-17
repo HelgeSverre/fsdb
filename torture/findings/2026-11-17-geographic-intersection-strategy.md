@@ -1,8 +1,8 @@
 # Geographic intersection strategy: long-edge crossing
 
-Status: open. This investigation provides a focused failing SQL comparison
-and a native reference for the remaining ring-76 crossing. No production
-geometry algorithm changes are included.
+Status: resolved by the [Sjöberg implementation](2026-11-17-geographic-intersection-fix.md).
+This report preserves the failing SQL baseline and native reference used to
+investigate the ring-76 crossing.
 
 ## Reproduction
 
@@ -12,7 +12,7 @@ orders are tested, giving eight equivalent comparisons. Every MySQL result
 is `(intersects,crosses,touches,distance)=(1,1,0,0)`. FSDB reports `(0,0,0)`
 and a distance of approximately 183,641.78 metres.
 
-The focused assertion intentionally fails until parity is implemented:
+The focused assertion failed on the baseline and passes after the correction:
 
 ```sh
 docker compose -f torture/compose.yaml up -d --wait mysql
@@ -25,7 +25,7 @@ uv run python check.py --crossing
 The default `check.py` mode retains the existing known-gap corpus contract.
 The focused mode asserts parity rather than accepting the current mismatch.
 
-Validation: `just check` passed all 3,955 tests; the default probe matched
+Baseline validation: `just check` passed all 3,955 tests; the default probe matched
 all 1,000 endpoint triples and retained only ring 76 in the 3,000-ring corpus.
 Ruff linting and formatting passed. The native probe compiled without warnings
 under `-Wall -Wextra` and passed its audited outcome assertions.
@@ -85,7 +85,7 @@ A shared kernel must feed line topology, line distance, and ring validity.
 Replacing only the side test or increasing samples does not implement this
 contract. Earlier side-only trials introduced false invalid rings.
 
-The next implementation must preserve shared-endpoint and overlap handling
+The implementation must preserve shared-endpoint and overlap handling
 and validate the focused eight comparisons, the 1,000 endpoint triples,
 the three-seed 3,000-ring corpus, and existing geographic relation tests.
 

@@ -1,7 +1,7 @@
 """Compare geographic polygon validity with disposable MySQL 8.4 and fsdb servers.
 
 Build the Release CLI first, then run with ``uv run --with pymysql``.
-The reviewed remaining mismatch set is {76}; any change to it is reported.
+The reviewed mismatch set is empty; any difference is reported.
 """
 
 import argparse
@@ -17,10 +17,8 @@ import pymysql
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 FSDB = REPO / "src/Fsdb.Cli/bin/Release/net10.0/Fsdb.Cli.dll"
-KNOWN_MISMATCHES = {76: (0, 1)}
-KNOWN_RELATION_MISMATCHES = {
-    76: {(0, 2): ((1, 1, 0), (0, 0, 0))},
-}
+KNOWN_MISMATCHES = {}
+KNOWN_RELATION_MISMATCHES = {}
 
 
 def connect(**options):

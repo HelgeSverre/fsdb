@@ -2991,18 +2991,15 @@ implementation effort:
    [Global and antipodal containment counterexamples](torture/findings/2026-10-16-geographic-global-containment.md)
    now use Boost-shaped geographic winding and ring orientation; 3,600 random
    global point probes and 1,200 random, vertex, and antipodal probes matched
-   MySQL 8.4.11. A [shared-endpoint correction](torture/findings/2026-11-17-geographic-shared-endpoint.md)
-   resolves ring 92; only ring 76 remains different in the expanded
-   3,000-ring, three-seed oracle sample. Broader geographic polygon validity
-   still needs the Boost geographic intersection decision. The original
-   [segment-relation diagnostic](torture/findings/2026-10-16-geographic-global-containment.md#sql-line-relation-diagnostic)
-   identified both edge pairs in public geographic `ST_Crosses`/`ST_Touches`
-   results. The ring-92 touch now agrees, while the missed ring-76 crossing produces a
-   183.6 km `ST_Distance` error, so both sampled-arc paths need the geographic
-   intersection correction. A [native strategy trace](torture/findings/2026-11-17-geographic-intersection-strategy.md)
-   reproduces the remaining crossing in all eight endpoint/operand orders and
-   identifies sensitivity in the iterative solver and signed range checks;
-   even 4,096 interpolation samples miss this crossing.
+   MySQL 8.4.11. The [shared-endpoint correction](torture/findings/2026-11-17-geographic-shared-endpoint.md)
+   and [Sjöberg intersection implementation](torture/findings/2026-11-17-geographic-intersection-fix.md)
+   resolve both recorded global ring disagreements, including the missed
+   crossing's 183.6 km distance error. The three-seed, 3,000-ring corpus now
+   agrees with MySQL, as do 1,000 shared-endpoint triples and 3,000 independent
+   line pairs across WGS 84, GRS 1980, and Clarke 1866. A common proper-crossing
+   predicate feeds line topology, line distance, and simple-ring validity.
+   Broader hole/multipolygon validity and geographic polygon relation rules
+   remain open; these samples do not establish general intersection parity.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)
    are covered for audited cases. [Point-to-polygon distance](torture/findings/2026-10-11-geographic-point-polygon-distance.md)

@@ -19,9 +19,9 @@ VALIDITY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VALIDITY)
 
 
-def line_relation(connection, first, second):
-    left = f"ST_GeomFromText('LINESTRING({first})',4326)"
-    right = f"ST_GeomFromText('LINESTRING({second})',4326)"
+def line_relation(connection, first, second, srid=4326):
+    left = f"ST_GeomFromText('LINESTRING({first})',{srid})"
+    right = f"ST_GeomFromText('LINESTRING({second})',{srid})"
     with connection.cursor() as cursor:
         cursor.execute(
             f"SELECT ST_Intersects({left},{right}),ST_Crosses({left},{right}),"
@@ -63,14 +63,58 @@ def check_crossing(mysql, fsdb):
     )
 
 
+def check_line_pairs(mysql, fsdb, count):
+    rng = random.Random(33076)
+    differences = []
+    for case in range(count):
+        points = [
+            f"{rng.uniform(-85, 85):.8f} {rng.uniform(-180, 180):.8f}" for _ in range(4)
+        ]
+        first, second = ",".join(points[:2]), ",".join(points[2:])
+        for srid in [4326, 4258, 4267]:
+            expected = line_relation(mysql, first, second, srid)
+            actual = line_relation(fsdb, first, second, srid)
+            if expected[:3] != actual[:3] or (expected[3] == 0) != (actual[3] == 0):
+                differences.append(
+                    {
+                        "case": case,
+                        "srid": srid,
+                        "first": first,
+                        "second": second,
+                        "mysql": expected,
+                        "fsdb": actual,
+                    }
+                )
+    print(
+        json.dumps(
+            {
+                "mysql_version": VALIDITY.scalar(mysql, "SELECT VERSION()"),
+                "seed": 33076,
+                "pairs_per_srid": count,
+                "srids": [4326, 4258, 4267],
+                "differences": differences,
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
+    assert not differences, "line topology or zero-distance classification differs"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--crossing",
         action="store_true",
-        help="assert parity for the open ring-76 crossing",
+        help="assert parity for the recorded long-edge crossing",
+    )
+    mode.add_argument(
+        "--line-pairs", type=int, help="compare independent random segments per SRS"
     )
     args = parser.parse_args()
+    if args.line_pairs is not None and args.line_pairs < 1:
+        parser.error("--line-pairs must be positive")
     address = subprocess.check_output(
         ["docker", "compose", "-f", "torture/compose.yaml", "port", "mysql", "3306"],
         cwd=REPO,
@@ -99,6 +143,9 @@ def main():
             fsdb = VALIDITY.connect(host="127.0.0.1", port=port)
             if args.crossing:
                 check_crossing(mysql, fsdb)
+                return
+            if args.line_pairs is not None:
+                check_line_pairs(mysql, fsdb, args.line_pairs)
                 return
             rng = random.Random(33092)
             endpoint_differences = []
@@ -131,7 +178,7 @@ def main():
             }
             print(json.dumps(summary, indent=2), flush=True)
             assert not endpoint_differences, "new endpoint relation disagreement"
-            assert rings == {9173: {76: [0, 1]}, 9174: {}, 9175: {}}, (
+            assert rings == {9173: {}, 9174: {}, 9175: {}}, (
                 "global ring mismatch set changed; review against the oracle"
             )
         finally:

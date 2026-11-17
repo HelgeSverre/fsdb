@@ -19,16 +19,18 @@ uv run python check.py
 
 The probe compares 1,000 deterministic shared-endpoint triples and 1,000
 global rings for each of seeds 9173, 9174, and 9175. It requires no endpoint
-relation differences and exactly the previously reviewed ring-76 mismatch
-for seed 9173. Any other mismatch, including an unexpected resolution, fails
-the run and must be investigated. The earlier case-92 difference is now a
-normal regression in the F# suite.
+relation or ring-validity differences. Any mismatch fails the run and must
+be investigated. Both recorded long-edge cases are regressions in the F# suite.
 
-To reproduce the remaining nonadjacent crossing directly, run
+To check the recorded nonadjacent crossing directly, run
 `uv run python check.py --crossing`. This checks all eight endpoint-order and
 operand-order combinations against MySQL, prints their relation and distance
-results, and deliberately exits nonzero while the discrepancy remains open.
-It is a focused parity assertion, separate from the default known-gap corpus.
+results, and requires parity. It is separate from the default random corpus.
+
+Run `uv run python check.py --line-pairs 1000` to compare independent global
+segments using seed 33076, with 1,000 pairs for each of WGS 84 (4326), GRS 1980
+(4258), and Clarke 1866 (4267). This checks intersects/crosses/touches and whether
+distance is zero. Nonzero distance accuracy is outside this mode's scope.
 
 The shared-endpoint triples compare ST_Intersects, ST_Crosses, ST_Touches,
 and ST_Distance. Ring generation reuses the maintained validity oracle so

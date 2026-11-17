@@ -29,6 +29,10 @@ if ! grep -Fxq 'lib/net10.0/Fsdb.pdb' <<< "$symbol_entries"; then
     echo "Symbol package is missing Fsdb.pdb" >&2
     exit 1
 fi
+if ! unzip -p "$package" licenses/Boost-1.0.txt | cmp -s - "$repo_root/licenses/Boost-1.0.txt"; then
+    echo "Library package is missing the matching Boost license" >&2
+    exit 1
+fi
 
 project="$repo_root/examples/PackageConsumer/PackageConsumer.fsproj"
 if ! grep -q "Version=\"$version\"" "$project"; then

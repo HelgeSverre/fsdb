@@ -1,0 +1,12 @@
+{
+  "mysql_version": "8.4.11",
+  "endpoint_seed": 33092,
+  "endpoint_cases": 1000,
+  "endpoint_differences": [],
+  "rings_per_seed": 1000,
+  "ring_differences": {
+    "9173": {},
+    "9174": {},
+    "9175": {}
+  }
+}
