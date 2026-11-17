@@ -136,6 +136,10 @@ same rows as before; carrying this selection through correlated source
 selection and planning setup before outer-row execution remains unfinished.
 `tryProjectedPhysicalCorrelatedRangeAccess` also preserves the physical table
 reference and selection alongside projected candidate rows. Its rows-only
-adapter retains the existing caller contract. The source candidate chooser
-must consume the richer result before diagnostics can depend on the winning
-access rather than on an eligible but unused index.
+adapter has been replaced by `CorrelatedSourceCandidate`: the source chooser
+retains the selected projected range access, collects participating ranges
+when intersecting shared row candidates, and drops that metadata when another
+candidate replaces it. The correlated scalar count receives this richer
+result. The specialized physical intersection helper still returns rows only;
+its range provenance remains unfinished. Warning emission and statement-level
+setup are not yet connected, so the observable mismatch remains open.
