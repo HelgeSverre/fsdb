@@ -6007,11 +6007,7 @@ let private geometryIsValidFn: Scalar =
 
         let valid =
             if referenceSystem.SemiMajorAxis.IsSome then
-                match geographicValidity referenceSystem geometry with
-                | Some result -> result
-                | None ->
-                    requirePlanar "ST_ISVALID" geometry |> ignore
-                    false
+                geographicValidity referenceSystem geometry
             else geometryIsValidPlanar geometry
 
         VInt(if valid then 1L else 0L)

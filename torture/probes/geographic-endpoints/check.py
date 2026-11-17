@@ -104,7 +104,7 @@ def check_line_pairs(mysql, fsdb, count):
     assert not differences, "line topology or zero-distance classification differs"
 
 
-def check_polygons(mysql, fsdb, version):
+def check_polygons(mysql, fsdb, version, seed, srid):
     def relation(connection, sql):
         with connection.cursor() as cursor:
             cursor.execute(sql)
@@ -117,8 +117,8 @@ def check_polygons(mysql, fsdb, version):
     boundary_relations = []
     shell, inscribed = boundary_only_rings()
     for latitude, longitude in inscribed:
-        point = f"ST_GeomFromText('POINT({latitude} {longitude})',4326)"
-        area = f"ST_GeomFromText('{polygon([shell])}',4326)"
+        point = f"ST_GeomFromText('POINT({latitude} {longitude})',{srid})"
+        area = f"ST_GeomFromText('{polygon([shell])}',{srid})"
         sql = f"SELECT ST_Touches({point},{area}),ST_Within({point},{area})"
         boundary_relations.append(
             {
@@ -129,7 +129,7 @@ def check_polygons(mysql, fsdb, version):
         )
     for name, components in recorded_components():
         first, second = [
-            f"ST_GeomFromText('{polygon([points])}',4326)" for points in components
+            f"ST_GeomFromText('{polygon([points])}',{srid})" for points in components
         ]
         sql = f"SELECT ST_Intersects({first},{second}),ST_Within({second},{first})"
 
@@ -137,8 +137,8 @@ def check_polygons(mysql, fsdb, version):
             {"name": name, "mysql": relation(mysql, sql), "fsdb": relation(fsdb, sql)}
         )
     valid = total = 0
-    for name, wkt in polygon_cases():
-        sql = f"SELECT ST_IsValid(ST_GeomFromText('{wkt}',4326))"
+    for name, wkt in polygon_cases(seed):
+        sql = f"SELECT ST_IsValid(ST_GeomFromText('{wkt}',{srid}))"
         expected = VALIDITY.scalar(mysql, sql)
         valid += expected
         total += 1
@@ -162,6 +162,8 @@ def check_polygons(mysql, fsdb, version):
         json.dumps(
             {
                 "mysql_version": version,
+                "global_seed": seed,
+                "srid": srid,
                 "cases": total,
                 "mysql_valid": valid,
                 "difference_count": len(differences),
@@ -200,6 +202,12 @@ def main():
         action="store_true",
         help="compare polygons with holes and multipart validity",
     )
+    parser.add_argument(
+        "--polygon-seed", type=int, default=9176, help="global polygon corpus seed"
+    )
+    parser.add_argument(
+        "--polygon-srid", type=int, default=4326, help="SRS for polygon validity"
+    )
     args = parser.parse_args()
     if args.line_pairs is not None and args.line_pairs < 1:
         parser.error("--line-pairs must be positive")
@@ -236,7 +244,9 @@ def main():
                 check_line_pairs(mysql, fsdb, args.line_pairs)
                 return
             if args.polygons:
-                check_polygons(mysql, fsdb, version)
+                check_polygons(
+                    mysql, fsdb, version, args.polygon_seed, args.polygon_srid
+                )
                 return
             rng = random.Random(33092)
             endpoint_differences = []

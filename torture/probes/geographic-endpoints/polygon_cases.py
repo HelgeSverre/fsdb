@@ -58,7 +58,7 @@ def recorded_components():
     )
 
 
-def cases():
+def cases(seed=9176):
     shell = square(0, 10)
     hole = square(2, 4)
     local = [
@@ -84,14 +84,24 @@ def cases():
             ],
         ),
     ]
-    for name, rings in local:
-        for orientation in product([False, True], repeat=len(rings)):
-            oriented = [
-                points[::-1] if reverse else points
-                for points, reverse in zip(rings, orientation, strict=True)
-            ]
-            suffix = "".join("1" if reverse else "0" for reverse in orientation)
-            yield f"{name}_orientation_{suffix}", polygon(oriented)
+    regions = [
+        ("local", lambda lat, lon: (lat, lon)),
+        ("antimeridian", lambda lat, lon: (lat, lon + 175 if lon <= 5 else lon - 185)),
+        ("north", lambda lat, lon: (lat + 75, lon)),
+        ("south", lambda lat, lon: (lat - 75, lon)),
+    ]
+    for region, transform in regions:
+        for name, rings in local:
+            for orientation in product([False, True], repeat=len(rings)):
+                oriented = [
+                    [
+                        transform(lat, lon)
+                        for lat, lon in (points[::-1] if reverse else points)
+                    ]
+                    for points, reverse in zip(rings, orientation, strict=True)
+                ]
+                suffix = "".join("1" if reverse else "0" for reverse in orientation)
+                yield f"{region}_{name}_orientation_{suffix}", polygon(oriented)
     multipart = [
         ("components_disjoint", [[hole], [square(6, 8)]]),
         ("components_point_contact", [[hole], [square(4, 6)]]),
@@ -145,7 +155,24 @@ def cases():
         "collection_invalid_hole",
         "GEOMETRYCOLLECTION(POINT(0 0)," + polygon([shell, square(12, 14)]) + ")",
     )
-    rng = random.Random(9176)
+    for reverse in [False, True]:
+        cap = [(80, -120), (80, 0), (80, 120)]
+        polar_hole = [(85, -120), (85, 0), (85, 120)]
+        island = [(87, -120), (87, 0), (87, 120)]
+        hexagon = [(85, 180), (85, -120), (85, -60), (85, 0), (85, 60), (85, 120)]
+        south_island = [(84, -1), (84.01, -1), (84, -0.99)]
+        if reverse:
+            cap, polar_hole, island = cap[::-1], polar_hole[::-1], island[::-1]
+            hexagon, south_island = hexagon[::-1], south_island[::-1]
+        yield f"polar_hole_{reverse}", polygon([cap, polar_hole])
+        yield f"polar_island_{reverse}", multi([[cap, polar_hole], [island]])
+        yield f"polar_nested_fill_{reverse}", multi([[cap], [polar_hole]])
+        yield f"polar_boundary_island_{reverse}", multi([[cap, hexagon], [polar_hole]])
+        yield (
+            f"polar_south_island_{reverse}",
+            multi([[cap, polar_hole], [south_island]]),
+        )
+    rng = random.Random(seed)
     for case in range(300):
         shell = [(rng.uniform(-80, 80), rng.uniform(-179, 179)) for _ in range(4)]
         latitude, longitude = rng.uniform(-79, 79), rng.uniform(-178, 178)
@@ -156,3 +183,10 @@ def cases():
         ]
         yield f"global_hole_{case}", polygon([shell, triangle])
         yield f"global_components_{case}", multi([[shell], [triangle]])
+    for case in range(100):
+        first, second = [
+            [(rng.uniform(-80, 80), rng.uniform(-179, 179)) for _ in range(4)]
+            for _ in range(2)
+        ]
+        yield f"global_ring_hole_{case}", polygon([first, second])
+        yield f"global_ring_components_{case}", multi([[first], [second]])

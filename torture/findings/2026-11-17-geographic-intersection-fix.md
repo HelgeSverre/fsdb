@@ -1,7 +1,8 @@
 # Geographic long-edge crossing correction
 
 Status: fixed for both recorded long-edge cases and the audited corpus.
-Geographic polygon validity for holes and multipolygons remains unsupported.
+The later [polygon validity implementation](2026-11-17-geographic-polygon-validity.md)
+also supports audited holes and multipolygons.
 
 The [strategy investigation](2026-11-17-geographic-intersection-strategy.md)
 isolated the remaining ring-76 disagreement to geographic segment crossing.

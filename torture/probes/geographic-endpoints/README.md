@@ -1,7 +1,7 @@
-# Geographic endpoint oracle
+# Geographic topology and validity oracle
 
-Compare shared geographic endpoint topology and the recorded global ring
-corpus with the digest-pinned MySQL 8.4.11 oracle. The probe starts its own
+Compare geographic endpoints, line topology, and ring/polygon validity
+with the digest-pinned MySQL 8.4.11 oracle. The probe starts its own
 in-memory FSDB server, terminates that server afterward, and connects to the
 disposable MySQL service without modifying application databases.
 
@@ -34,12 +34,14 @@ distance is zero. Nonzero distance accuracy is outside this mode's scope.
 
 Run `uv run python check.py --polygons` for the polygon-validity parity
 assertion. It covers holes, multipart shapes, collections, independently
-reversed rings, contact cycles, boundary-only vertices, and global shapes
-with seed 9176. It also rechecks the two recorded global component relations.
-This mode currently exits nonzero because geographic hole/multipart validity
-still returns error 1235. Its JSON records all fixed-fixture oracle results,
-the total disagreement count, error counts, and the first 20 examples.
+reversed rings, contact cycles, boundary-only vertices, antimeridian and polar
+configurations, and global shapes with seed 9176. It also rechecks the two
+recorded global component relations. The mode requires parity; any mismatch
+exits nonzero. Its JSON records all fixed-fixture oracle results, the total
+disagreement count, error counts, and the first 20 examples.
 The verdict checks the complete corpus, rather than the truncated examples.
+Use `--polygon-seed 9177` for an independent global sample or
+`--polygon-srid 4258` / `--polygon-srid 4267` for GRS 1980 / Clarke 1866.
 
 The shared-endpoint triples compare ST_Intersects, ST_Crosses, ST_Touches,
 and ST_Distance. Ring generation reuses the maintained validity oracle so

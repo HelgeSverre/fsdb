@@ -1,5 +1,9 @@
 # Geographic `ST_IsValid` for point, line, and simple polygon shapes
 
+The [polygon validity follow-up](2026-11-17-geographic-polygon-validity.md)
+also supports audited holes, multipolygons, and collections. The results below
+describe the earlier point/line/simple-ring baseline.
+
 Pinned MySQL 8.4.11 evaluates `ST_IsValid` on SRID 4326 point, line,
 multiline, multipoint, polygon, and collection values. fsdb previously
 returned 1235 for every geographic value. For example, MySQL returns `1`

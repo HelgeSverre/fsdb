@@ -2985,13 +2985,12 @@ implementation effort:
    WGS 84 ellipsoidal operations but refuses cross-SRS transforms without a
    datum shift. [Inverse projected longitude wrapping](torture/findings/2026-10-11-projected-longitude-wrap.md)
    follows MySQL across geographic and projected targets.
-   Geographic [`ST_IsValid` for points, linework, and simple single-ring polygons](torture/findings/2026-10-16-geographic-validity.md)
-   now accepts the audited geographic shapes, including collections of them;
-   polygons with holes and multipolygons still need geodesic validity rules.
-   A [current validity matrix](torture/findings/2026-11-17-geographic-polygon-validity-baseline.md)
-   confirms the earlier global component-containment blockers now agree;
-   remaining work includes contact-turn classification, per-polygon interior
-   connectivity, and disjoint filled interiors between components.
+   Geographic [`ST_IsValid` for points, linework, polygons with holes, and multipolygons](torture/findings/2026-11-17-geographic-polygon-validity.md)
+   now accepts the audited shapes, including collections of them. Validation
+   uses geodesic ring contacts, containment, per-polygon interior connectivity,
+   and disjoint filled interiors between components. The expanded oracle
+   covers independent ring orientations, contact cycles, antimeridian and
+   polar cases, and global inputs across WGS 84, GRS 1980, and Clarke 1866.
    [Global and antipodal containment counterexamples](torture/findings/2026-10-16-geographic-global-containment.md)
    now use Boost-shaped geographic winding and ring orientation; 3,600 random
    global point probes and 1,200 random, vertex, and antipodal probes matched
@@ -3002,8 +3001,8 @@ implementation effort:
    agrees with MySQL, as do 1,000 shared-endpoint triples and 3,000 independent
    line pairs across WGS 84, GRS 1980, and Clarke 1866. A common proper-crossing
    predicate feeds line topology, line distance, and simple-ring validity.
-   Broader hole/multipolygon validity and geographic polygon relation rules
-   remain open; these samples do not establish general intersection parity.
+   Broader geographic polygon relation and precision rules remain open;
+   these samples do not establish general intersection parity.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)
    are covered for audited cases. [Point-to-polygon distance](torture/findings/2026-10-11-geographic-point-polygon-distance.md)

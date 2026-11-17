@@ -750,16 +750,18 @@ let private geographicSegmentsProperlyCross referenceSystem first second =
                     && distance > 0.0 && distance < length
                 inside a b firstAzimuth && inside c d secondAzimuth)
 
+let private geographicRingWithoutRepeatedNeighbors ring =
+    ring
+    |> List.fold (fun points point ->
+        match points with
+        | previous :: _ when previous = point -> points
+        | _ -> point :: points) []
+    |> List.rev
+
 let private geographicSimpleRingIsValid referenceSystem ring =
     // A zero-length edge between equal neighbors is allowed; remove it before
     // deciding which remaining edges are adjacent.
-    let ring =
-        ring
-        |> List.fold (fun points point ->
-            match points with
-            | previous :: _ when previous = point -> points
-            | _ -> point :: points) []
-        |> List.rev
+    let ring = geographicRingWithoutRepeatedNeighbors ring
     let vertices = ring |> List.take (max 0 (List.length ring - 1))
     if List.length ring < 4
        || List.head ring <> List.last ring
@@ -794,18 +796,161 @@ let private geographicSimpleRingIsValid referenceSystem ring =
         |> Seq.exists (fun (first, second) -> invalidPair first second)
         |> not
 
-/// None preserves the explicit unsupported boundary for geographic polygons
-/// with holes and multipolygons until their geodesic containment is validated.
-let rec internal geographicValidity referenceSystem (geometry: Geometry) : bool option =
+let private geographicCounterclockwiseRing referenceSystem ring =
+    let ring = geographicRingWithoutRepeatedNeighbors ring
+    if geographicRingAreaSign referenceSystem ring < 0.0 then List.rev ring else ring
+
+/// Bearings from the contact toward the preceding and following CCW neighbors.
+let private geographicRingDirections referenceSystem point ring =
+    let flattening = 1.0 / referenceSystem.InverseFlattening.Value
+    let radians (latitude, longitude) = mysqlRadians latitude, mysqlRadians longitude
+    let bearing other = geographicSegmentAzimuthsRadians flattening (radians point) (radians other) |> fst
+    let segments = List.pairwise ring
+    let incoming = segments |> List.tryPick (fun (a, b) -> if b = point && a <> point then Some(bearing a) else None)
+    let outgoing = segments |> List.tryPick (fun (a, b) -> if a = point && b <> point then Some(bearing b) else None)
+    match incoming, outgoing with
+    | Some previous, Some next -> Some(previous, next)
+    | _ ->
+        segments
+        |> List.tryPick (fun ((a, b) as segment) ->
+            if a <> b && geographicPointOnLineSegment referenceSystem point segment then Some(bearing a, bearing b)
+            else None)
+
+let private geographicBearingInside (previous, next) bearing =
+    let clockwise first second =
+        let angle = normalizedLongitudeRadians (second - first)
+        if angle < 0.0 then angle + 2.0 * Math.PI else angle
+    let offset, extent = clockwise previous bearing, clockwise previous next
+    offset > 0.0 && offset < extent
+    && not (boostGeoEqual offset 0.0 || boostGeoEqual offset extent)
+
+// A contact can be a crossing at a vertex even when no two open segments cross.
+let private geographicRingContactIsInvalid referenceSystem first second point =
+    match geographicRingDirections referenceSystem point first, geographicRingDirections referenceSystem point second with
+    | Some(a, b), Some(c, d) ->
+        let equalBearing first second = boostGeoEqual (normalizedLongitudeRadians (first - second)) 0.0
+        let coincident = [ a; b ] |> List.exists (fun first -> [ c; d ] |> List.exists (equalBearing first))
+        let order = [ a, 0; b, 0; c, 1; d, 1 ] |> List.sortBy fst |> List.map snd
+        let alternating = (order @ [ List.head order ]) |> List.pairwise |> List.forall (fun (a, b) -> a <> b)
+        coincident || alternating
+    | _ -> true
+
+let private geographicRingContacts referenceSystem first second =
+    let pairs =
+        [ for firstSegment in List.pairwise first do
+              for secondSegment in List.pairwise second do
+                  yield firstSegment, secondSegment ]
+    pairs
+    |> List.fold (fun contacts (firstSegment, secondSegment) ->
+        contacts
+        |> Option.bind (fun contacts ->
+            if geographicSegmentsProperlyCross referenceSystem firstSegment secondSegment then None
+            else
+                let a, b = firstSegment
+                let c, d = secondSegment
+                let common =
+                    [ a, secondSegment; b, secondSegment; c, firstSegment; d, firstSegment ]
+                    |> List.choose (fun (point, segment) ->
+                        if geographicPointOnLineSegment referenceSystem point segment then Some point else None)
+                    |> Set.ofList
+                // Two distinct common points imply a shared boundary interval.
+                if Set.count common > 1 then None else Some(Set.union contacts common))) (Some Set.empty)
+    |> Option.filter (fun contacts ->
+        contacts |> Set.forall (geographicRingContactIsInvalid referenceSystem first second >> not))
+
+[<RequireQualifiedAccess>]
+type private GeographicRingRole =
+    | Shell
+    | Hole
+
+let private geographicRingInside referenceSystem role inner outer =
+    let onBoundary point = List.pairwise outer |> List.exists (geographicPointOnLineSegment referenceSystem point)
+    match inner |> List.tryFind (onBoundary >> not) with
+    | Some point -> geographicRingContains referenceSystem (role = GeographicRingRole.Hole) point outer
+    | None ->
+        // If all vertices touch, the outgoing edge's local side decides the
+        // region. Vertex-only containment misses an inscribed component.
+        inner
+        |> List.exists (fun point ->
+            match geographicRingDirections referenceSystem point inner, geographicRingDirections referenceSystem point outer with
+            | Some(_, outgoing), Some directions -> geographicBearingInside directions outgoing
+            | _ -> false)
+
+let private geographicPolygonInteriorIsConnected ringCount contacts =
+    let contactRings =
+        contacts
+        |> List.fold (fun result (first, second, points) ->
+            points
+            |> Set.fold (fun result point ->
+                result |> Map.change point (fun rings ->
+                    rings |> Option.defaultValue Set.empty |> Set.add first |> Set.add second |> Some)) result) Map.empty
+    let parents = Array.init (ringCount + Map.count contactRings) id
+    let root node =
+        let mutable current = node
+        while parents.[current] <> current do
+            parents.[current] <- parents.[parents.[current]]
+            current <- parents.[current]
+        current
+    let mutable connected = true
+    // Ring nodes and contact-point nodes form a bipartite graph. Several rings
+    // meeting at one point form a star, not an interior-disconnecting cycle.
+    for offset, (_, rings) in contactRings |> Map.toList |> List.indexed do
+        for ring in rings do
+            let first, second = root ring, root (ringCount + offset)
+            if first = second then connected <- false
+            else parents.[first] <- second
+    connected
+
+let private geographicPolygonIsValid referenceSystem rings =
+    if List.isEmpty rings || not (List.forall (geographicSimpleRingIsValid referenceSystem) rings) then false
+    else
+        let rings = rings |> List.map (geographicCounterclockwiseRing referenceSystem) |> List.toArray
+        let contacts =
+            [ for first in 0 .. rings.Length - 1 do
+                  for second in first + 1 .. rings.Length - 1 do
+                      yield first, second ]
+            |> List.fold (fun contacts (first, second) ->
+                match contacts, geographicRingContacts referenceSystem rings.[first] rings.[second] with
+                | Some contacts, Some points -> Some((first, second, points) :: contacts)
+                | _ -> None) (Some [])
+        contacts
+        |> Option.exists (fun contacts ->
+            let holesInside = rings |> Array.skip 1 |> Array.forall (fun hole -> geographicRingInside referenceSystem GeographicRingRole.Shell hole rings.[0])
+            let holesSeparate =
+                contacts |> List.forall (fun (first, second, _) ->
+                    first = 0
+                    || (not (geographicRingInside referenceSystem GeographicRingRole.Shell rings.[first] rings.[second])
+                        && not (geographicRingInside referenceSystem GeographicRingRole.Shell rings.[second] rings.[first])))
+            holesInside && holesSeparate && geographicPolygonInteriorIsConnected rings.Length contacts)
+
+let private geographicMultiPolygonIsValid referenceSystem polygons =
+    if List.isEmpty polygons || not (List.forall (geographicPolygonIsValid referenceSystem) polygons) then false
+    else
+        let polygons = polygons |> List.map (List.map (geographicCounterclockwiseRing referenceSystem)) |> List.toArray
+        // Polar holes use their hole winding role, which can differ from the
+        // same ring interpreted as a standalone polygon.
+        let insideFill ring = function
+            | shell :: holes ->
+                geographicRingInside referenceSystem GeographicRingRole.Shell ring shell
+                && not (holes |> List.exists (geographicRingInside referenceSystem GeographicRingRole.Hole ring))
+            | [] -> false
+        [ for first in 0 .. polygons.Length - 1 do
+              for second in first + 1 .. polygons.Length - 1 do
+                  yield polygons.[first], polygons.[second] ]
+        |> List.forall (fun (first, second) ->
+            let boundariesSeparate =
+                first |> List.forall (fun a ->
+                    second |> List.forall (fun b -> geographicRingContacts referenceSystem a b |> Option.isSome))
+            boundariesSeparate
+            && not (insideFill (List.head first) second)
+            && not (insideFill (List.head second) first))
+
+let rec internal geographicValidity referenceSystem (geometry: Geometry) =
     match geometry.Shape with
-    | GPolygon [ ring ] -> Some(geographicSimpleRingIsValid referenceSystem ring)
-    | GPolygon _
-    | GMultiPolygon _ -> None
-    | GGeometryCollection geometries ->
-        let results = geometries |> List.map (geographicValidity referenceSystem)
-        if results |> List.exists Option.isNone then None
-        else Some(results |> List.forall ((=) (Some true)))
-    | _ -> Some(geometryIsValidPlanar geometry)
+    | GPolygon rings -> geographicPolygonIsValid referenceSystem rings
+    | GMultiPolygon polygons -> geographicMultiPolygonIsValid referenceSystem polygons
+    | GGeometryCollection geometries -> geometries |> List.forall (geographicValidity referenceSystem)
+    | _ -> geometryIsValidPlanar geometry
 
 let private geographicLineCovers referenceSystem covering covered =
     let coveredPoints = covered |> List.collect id |> List.distinct

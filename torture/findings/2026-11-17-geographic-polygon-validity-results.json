@@ -1,0 +1,1597 @@
+{
+  "mysql_version": "8.4.11",
+  "runs": [
+    {
+      "srid": 4326,
+      "global_seed": 9176,
+      "cases": 1169,
+      "mysql_valid": 397,
+      "difference_count": 0,
+      "fsdb_error_counts": {},
+      "difference_examples": []
+    },
+    {
+      "srid": 4326,
+      "global_seed": 9177,
+      "cases": 1169,
+      "mysql_valid": 392,
+      "difference_count": 0,
+      "fsdb_error_counts": {},
+      "difference_examples": []
+    },
+    {
+      "srid": 4326,
+      "global_seed": 9178,
+      "cases": 1169,
+      "mysql_valid": 396,
+      "difference_count": 0,
+      "fsdb_error_counts": {},
+      "difference_examples": []
+    },
+    {
+      "srid": 4258,
+      "global_seed": 9176,
+      "cases": 1169,
+      "mysql_valid": 397,
+      "difference_count": 0,
+      "fsdb_error_counts": {},
+      "difference_examples": []
+    },
+    {
+      "srid": 4267,
+      "global_seed": 9176,
+      "cases": 1169,
+      "mysql_valid": 397,
+      "difference_count": 0,
+      "fsdb_error_counts": {},
+      "difference_examples": []
+    }
+  ],
+  "fixture_srid": 4326,
+  "fixture_results": [
+    {
+      "name": "local_hole_inside_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_inside_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_inside_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_inside_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_outside_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "local_hole_outside_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "local_hole_outside_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "local_hole_outside_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "local_hole_shell_vertex_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_shell_vertex_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_shell_vertex_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_shell_vertex_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_shell_edge_point_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_shell_edge_point_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_shell_edge_point_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_shell_edge_point_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "local_hole_shell_edge_overlap_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "local_hole_shell_edge_overlap_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "local_hole_shell_edge_overlap_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "local_hole_shell_edge_overlap_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "local_hole_crosses_shell_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "local_hole_crosses_shell_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "local_hole_crosses_shell_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "local_hole_crosses_shell_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "local_two_shell_contacts_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "local_two_shell_contacts_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "local_two_shell_contacts_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "local_two_shell_contacts_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_point_contact_orientation_000",
+      "mysql": 1
+    },
+    {
+      "name": "local_holes_point_contact_orientation_001",
+      "mysql": 1
+    },
+    {
+      "name": "local_holes_point_contact_orientation_010",
+      "mysql": 1
+    },
+    {
+      "name": "local_holes_point_contact_orientation_011",
+      "mysql": 1
+    },
+    {
+      "name": "local_holes_point_contact_orientation_100",
+      "mysql": 1
+    },
+    {
+      "name": "local_holes_point_contact_orientation_101",
+      "mysql": 1
+    },
+    {
+      "name": "local_holes_point_contact_orientation_110",
+      "mysql": 1
+    },
+    {
+      "name": "local_holes_point_contact_orientation_111",
+      "mysql": 1
+    },
+    {
+      "name": "local_holes_shared_edge_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_shared_edge_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_shared_edge_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_shared_edge_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_shared_edge_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_shared_edge_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_shared_edge_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_shared_edge_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_nested_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_nested_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_nested_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_nested_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_nested_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_nested_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_nested_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "local_holes_nested_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "local_duplicate_holes_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "local_duplicate_holes_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "local_duplicate_holes_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "local_duplicate_holes_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "local_duplicate_holes_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "local_duplicate_holes_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "local_duplicate_holes_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "local_duplicate_holes_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "local_contact_cycle_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "local_contact_cycle_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "local_contact_cycle_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "local_contact_cycle_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "local_contact_cycle_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "local_contact_cycle_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "local_contact_cycle_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "local_contact_cycle_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "local_common_contact_orientation_0000",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_0001",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_0010",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_0011",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_0100",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_0101",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_0110",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_0111",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_1000",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_1001",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_1010",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_1011",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_1100",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_1101",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_1110",
+      "mysql": 1
+    },
+    {
+      "name": "local_common_contact_orientation_1111",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_inside_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_inside_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_inside_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_inside_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_outside_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_hole_outside_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_hole_outside_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_hole_outside_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_hole_shell_vertex_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_shell_vertex_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_shell_vertex_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_shell_vertex_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_shell_edge_point_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_shell_edge_point_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_shell_edge_point_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_shell_edge_point_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_hole_shell_edge_overlap_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_hole_shell_edge_overlap_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_hole_shell_edge_overlap_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_hole_shell_edge_overlap_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_hole_crosses_shell_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_hole_crosses_shell_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_hole_crosses_shell_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_hole_crosses_shell_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_two_shell_contacts_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_two_shell_contacts_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_two_shell_contacts_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_two_shell_contacts_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_point_contact_orientation_000",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_holes_point_contact_orientation_001",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_holes_point_contact_orientation_010",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_holes_point_contact_orientation_011",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_holes_point_contact_orientation_100",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_holes_point_contact_orientation_101",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_holes_point_contact_orientation_110",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_holes_point_contact_orientation_111",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_holes_shared_edge_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_shared_edge_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_shared_edge_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_shared_edge_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_shared_edge_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_shared_edge_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_shared_edge_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_shared_edge_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_nested_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_nested_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_nested_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_nested_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_nested_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_nested_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_nested_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_holes_nested_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_duplicate_holes_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_duplicate_holes_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_duplicate_holes_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_duplicate_holes_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_duplicate_holes_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_duplicate_holes_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_duplicate_holes_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_duplicate_holes_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_contact_cycle_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_contact_cycle_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_contact_cycle_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_contact_cycle_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_contact_cycle_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_contact_cycle_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_contact_cycle_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_contact_cycle_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_0000",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_0001",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_0010",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_0011",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_0100",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_0101",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_0110",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_0111",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_1000",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_1001",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_1010",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_1011",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_1100",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_1101",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_1110",
+      "mysql": 1
+    },
+    {
+      "name": "antimeridian_common_contact_orientation_1111",
+      "mysql": 1
+    },
+    {
+      "name": "north_hole_inside_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "north_hole_inside_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "north_hole_inside_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "north_hole_inside_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "north_hole_outside_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_outside_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_outside_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_outside_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_shell_vertex_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "north_hole_shell_vertex_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "north_hole_shell_vertex_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "north_hole_shell_vertex_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "north_hole_shell_edge_point_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_shell_edge_point_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_shell_edge_point_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_shell_edge_point_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_shell_edge_overlap_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_shell_edge_overlap_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_shell_edge_overlap_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_shell_edge_overlap_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_crosses_shell_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_crosses_shell_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_crosses_shell_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "north_hole_crosses_shell_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "north_two_shell_contacts_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "north_two_shell_contacts_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "north_two_shell_contacts_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "north_two_shell_contacts_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_point_contact_orientation_000",
+      "mysql": 1
+    },
+    {
+      "name": "north_holes_point_contact_orientation_001",
+      "mysql": 1
+    },
+    {
+      "name": "north_holes_point_contact_orientation_010",
+      "mysql": 1
+    },
+    {
+      "name": "north_holes_point_contact_orientation_011",
+      "mysql": 1
+    },
+    {
+      "name": "north_holes_point_contact_orientation_100",
+      "mysql": 1
+    },
+    {
+      "name": "north_holes_point_contact_orientation_101",
+      "mysql": 1
+    },
+    {
+      "name": "north_holes_point_contact_orientation_110",
+      "mysql": 1
+    },
+    {
+      "name": "north_holes_point_contact_orientation_111",
+      "mysql": 1
+    },
+    {
+      "name": "north_holes_shared_edge_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_shared_edge_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_shared_edge_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_shared_edge_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_shared_edge_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_shared_edge_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_shared_edge_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_shared_edge_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_nested_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_nested_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_nested_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_nested_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_nested_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_nested_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_nested_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "north_holes_nested_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "north_duplicate_holes_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "north_duplicate_holes_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "north_duplicate_holes_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "north_duplicate_holes_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "north_duplicate_holes_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "north_duplicate_holes_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "north_duplicate_holes_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "north_duplicate_holes_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "north_contact_cycle_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "north_contact_cycle_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "north_contact_cycle_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "north_contact_cycle_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "north_contact_cycle_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "north_contact_cycle_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "north_contact_cycle_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "north_contact_cycle_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "north_common_contact_orientation_0000",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_0001",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_0010",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_0011",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_0100",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_0101",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_0110",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_0111",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_1000",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_1001",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_1010",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_1011",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_1100",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_1101",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_1110",
+      "mysql": 1
+    },
+    {
+      "name": "north_common_contact_orientation_1111",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_inside_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_inside_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_inside_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_inside_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_outside_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "south_hole_outside_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "south_hole_outside_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "south_hole_outside_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "south_hole_shell_vertex_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_shell_vertex_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_shell_vertex_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_shell_vertex_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_shell_edge_point_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_shell_edge_point_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_shell_edge_point_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_shell_edge_point_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_shell_edge_overlap_orientation_00",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_shell_edge_overlap_orientation_01",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_shell_edge_overlap_orientation_10",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_shell_edge_overlap_orientation_11",
+      "mysql": 1
+    },
+    {
+      "name": "south_hole_crosses_shell_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "south_hole_crosses_shell_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "south_hole_crosses_shell_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "south_hole_crosses_shell_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "south_two_shell_contacts_orientation_00",
+      "mysql": 0
+    },
+    {
+      "name": "south_two_shell_contacts_orientation_01",
+      "mysql": 0
+    },
+    {
+      "name": "south_two_shell_contacts_orientation_10",
+      "mysql": 0
+    },
+    {
+      "name": "south_two_shell_contacts_orientation_11",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_point_contact_orientation_000",
+      "mysql": 1
+    },
+    {
+      "name": "south_holes_point_contact_orientation_001",
+      "mysql": 1
+    },
+    {
+      "name": "south_holes_point_contact_orientation_010",
+      "mysql": 1
+    },
+    {
+      "name": "south_holes_point_contact_orientation_011",
+      "mysql": 1
+    },
+    {
+      "name": "south_holes_point_contact_orientation_100",
+      "mysql": 1
+    },
+    {
+      "name": "south_holes_point_contact_orientation_101",
+      "mysql": 1
+    },
+    {
+      "name": "south_holes_point_contact_orientation_110",
+      "mysql": 1
+    },
+    {
+      "name": "south_holes_point_contact_orientation_111",
+      "mysql": 1
+    },
+    {
+      "name": "south_holes_shared_edge_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_shared_edge_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_shared_edge_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_shared_edge_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_shared_edge_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_shared_edge_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_shared_edge_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_shared_edge_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_nested_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_nested_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_nested_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_nested_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_nested_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_nested_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_nested_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "south_holes_nested_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "south_duplicate_holes_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "south_duplicate_holes_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "south_duplicate_holes_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "south_duplicate_holes_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "south_duplicate_holes_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "south_duplicate_holes_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "south_duplicate_holes_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "south_duplicate_holes_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "south_contact_cycle_orientation_000",
+      "mysql": 0
+    },
+    {
+      "name": "south_contact_cycle_orientation_001",
+      "mysql": 0
+    },
+    {
+      "name": "south_contact_cycle_orientation_010",
+      "mysql": 0
+    },
+    {
+      "name": "south_contact_cycle_orientation_011",
+      "mysql": 0
+    },
+    {
+      "name": "south_contact_cycle_orientation_100",
+      "mysql": 0
+    },
+    {
+      "name": "south_contact_cycle_orientation_101",
+      "mysql": 0
+    },
+    {
+      "name": "south_contact_cycle_orientation_110",
+      "mysql": 0
+    },
+    {
+      "name": "south_contact_cycle_orientation_111",
+      "mysql": 0
+    },
+    {
+      "name": "south_common_contact_orientation_0000",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_0001",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_0010",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_0011",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_0100",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_0101",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_0110",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_0111",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_1000",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_1001",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_1010",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_1011",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_1100",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_1101",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_1110",
+      "mysql": 1
+    },
+    {
+      "name": "south_common_contact_orientation_1111",
+      "mysql": 1
+    },
+    {
+      "name": "components_disjoint",
+      "mysql": 1
+    },
+    {
+      "name": "components_disjoint_swapped",
+      "mysql": 1
+    },
+    {
+      "name": "components_point_contact",
+      "mysql": 1
+    },
+    {
+      "name": "components_point_contact_swapped",
+      "mysql": 1
+    },
+    {
+      "name": "components_edge_overlap",
+      "mysql": 0
+    },
+    {
+      "name": "components_edge_overlap_swapped",
+      "mysql": 0
+    },
+    {
+      "name": "components_overlap",
+      "mysql": 0
+    },
+    {
+      "name": "components_overlap_swapped",
+      "mysql": 0
+    },
+    {
+      "name": "component_inside_hole",
+      "mysql": 1
+    },
+    {
+      "name": "component_inside_hole_swapped",
+      "mysql": 1
+    },
+    {
+      "name": "component_inside_fill",
+      "mysql": 0
+    },
+    {
+      "name": "component_inside_fill_swapped",
+      "mysql": 0
+    },
+    {
+      "name": "components_identical",
+      "mysql": 0
+    },
+    {
+      "name": "components_identical_swapped",
+      "mysql": 0
+    },
+    {
+      "name": "hole_all_vertices_on_shell",
+      "mysql": 0
+    },
+    {
+      "name": "component_all_vertices_on_shell",
+      "mysql": 0
+    },
+    {
+      "name": "components_two_point_contacts",
+      "mysql": 1
+    },
+    {
+      "name": "components_common_contact",
+      "mysql": 1
+    },
+    {
+      "name": "hole_crosses_at_vertices",
+      "mysql": 0
+    },
+    {
+      "name": "recorded_global_components_1",
+      "mysql": 1
+    },
+    {
+      "name": "recorded_global_components_2",
+      "mysql": 1
+    },
+    {
+      "name": "collection_valid_hole",
+      "mysql": 1
+    },
+    {
+      "name": "collection_invalid_hole",
+      "mysql": 0
+    },
+    {
+      "name": "polar_hole_False",
+      "mysql": 1
+    },
+    {
+      "name": "polar_island_False",
+      "mysql": 0
+    },
+    {
+      "name": "polar_nested_fill_False",
+      "mysql": 0
+    },
+    {
+      "name": "polar_boundary_island_False",
+      "mysql": 1
+    },
+    {
+      "name": "polar_south_island_False",
+      "mysql": 1
+    },
+    {
+      "name": "polar_hole_True",
+      "mysql": 1
+    },
+    {
+      "name": "polar_island_True",
+      "mysql": 0
+    },
+    {
+      "name": "polar_nested_fill_True",
+      "mysql": 0
+    },
+    {
+      "name": "polar_boundary_island_True",
+      "mysql": 1
+    },
+    {
+      "name": "polar_south_island_True",
+      "mysql": 1
+    }
+  ],
+  "recorded_component_relations": [
+    {
+      "name": "recorded_global_components_1",
+      "mysql": [
+        0,
+        0
+      ],
+      "fsdb": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "recorded_global_components_2",
+      "mysql": [
+        0,
+        0
+      ],
+      "fsdb": [
+        0,
+        0
+      ]
+    }
+  ],
+  "boundary_vertex_relations": [
+    {
+      "point": [
+        0,
+        5
+      ],
+      "mysql": [
+        1,
+        0
+      ],
+      "fsdb": [
+        1,
+        0
+      ]
+    },
+    {
+      "point": [
+        5,
+        10
+      ],
+      "mysql": [
+        1,
+        0
+      ],
+      "fsdb": [
+        1,
+        0
+      ]
+    },
+    {
+      "point": [
+        5,
+        0
+      ],
+      "mysql": [
+        1,
+        0
+      ],
+      "fsdb": [
+        1,
+        0
+      ]
+    }
+  ]
+}

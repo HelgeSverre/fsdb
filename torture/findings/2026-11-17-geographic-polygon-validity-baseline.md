@@ -1,11 +1,11 @@
 # Geographic hole and multipart validity baseline
 
-Status: open. The recorded long-edge crossing is corrected, but geographic
-`ST_IsValid` still rejects polygons containing holes and multipolygons with
-error 1235. This report defines the next validity corpus; no library behavior
-changes are included.
+Status: resolved for the audited corpus by the
+[polygon validity implementation](2026-11-17-geographic-polygon-validity.md).
+This report preserves the unsupported-response baseline recorded before that
+implementation.
 
-## Current-head evidence
+## Baseline evidence
 
 The [recorded result](2026-11-17-geographic-polygon-validity-baseline.json)
 compares source revision `d59b4380` with the digest-pinned MySQL 8.4.11 image:
@@ -83,7 +83,8 @@ uv run python check.py --polygons
 
 The command prints the complete fixed-fixture oracle outcomes, aggregate
 error counts, and the first 20 disagreement examples, then asserts parity
-over every case. It currently fails with `geographic polygon validity differs`.
+over every case. On the baseline it failed with `geographic polygon validity differs`;
+the expanded current corpus passes after the implementation.
 The shared-endpoint/ring default mode is unchanged, and `--crossing` still
 passes all eight recorded crossing orderings.
 

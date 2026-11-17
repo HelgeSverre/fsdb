@@ -1323,14 +1323,42 @@ let tests =
                         (valid "GEOMETRYCOLLECTION(POINT(0 0),POLYGON((0 0,0 2,2 0,0 0)))")
                         (VInt 1L)
                         "collection of supported shapes"
-                    for unsupported in
-                        [ "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,2 1,1 2,1 1))"
-                          "MULTIPOLYGON(((0 0,0 2,2 0,0 0)))" ] do
-                        try
-                            valid unsupported |> ignore
-                            failtest "geographic holes and multipolygons remain unsupported"
-                        with
-                        | Fsdb.Functions.SqlError(1235, _) -> ()
+                    Expect.equal
+                        (valid "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,2 1,1 2,1 1))")
+                        (VInt 1L) "geographic hole"
+                    Expect.equal (valid "MULTIPOLYGON(((0 0,0 2,2 0,0 0)))") (VInt 1L) "geographic multipart polygon"
+
+                testCase "geographic polygon validity checks holes contacts and multipart interiors"
+                <| fun _ ->
+                    let valid text =
+                        call "ST_IsValid" [ call "ST_GeomFromText" [ VString text; VInt 4326L ] ]
+                    let shell = "(0 0,0 10,10 10,10 0,0 0)"
+                    let hole = "(2 2,2 4,4 4,4 2,2 2)"
+                    let polarShell = "(80 -120,80 0,80 120,80 -120)"
+                    let polarHole = "(85 -120,85 0,85 120,85 -120)"
+                    let polygon rings = "POLYGON(" + String.concat "," rings + ")"
+                    let multi polygons =
+                        "MULTIPOLYGON(" + (polygons |> List.map (fun rings -> "(" + String.concat "," rings + ")") |> String.concat ",") + ")"
+                    let cases =
+                        [ polygon [ shell; hole ], 1L
+                          polygon [ shell; "(12 12,12 14,14 14,14 12,12 12)" ], 0L
+                          polygon [ shell; "(0 0,1 2,2 1,0 0)" ], 1L
+                          polygon [ shell; "(0 2,0 4,2 4,2 2,0 2)" ], 0L
+                          polygon [ shell; hole; "(4 2,4 4,6 4,6 2,4 2)" ], 0L
+                          polygon [ shell; "(1 0,2 2,3 0,2 -2,1 0)" ], 0L
+                          polygon [ shell; "(5 0,8 5,5 10,2 5,5 0)" ], 0L
+                          polygon [ shell; "(2 0,5 2,2 4,2 0)"; "(8 0,8 4,5 2,8 0)" ], 0L
+                          polygon [ shell; "(2 2,2 6,6 6,6 2,2 2)"; "(3 3,3 4,4 4,4 3,3 3)" ], 0L
+                          polygon [ shell; "(5 5,7 4,7 6,5 5)"; "(5 5,4 7,3 6,5 5)"; "(5 5,3 3,5 3,5 5)" ], 1L
+                          multi [ [ shell; "(2 2,2 8,8 8,8 2,2 2)" ]; [ "(3 3,3 4,4 4,4 3,3 3)" ] ], 1L
+                          multi [ [ shell ]; [ hole ] ], 0L
+                          multi [ [ shell ]; [ "(0 5,5 10,5 0,0 5)" ] ], 0L
+                          multi [ [ "(0 0,0 10,10 5,0 0)" ]; [ "(0 0,-1 4,0 10,-3 10,-3 0,0 0)" ] ], 1L
+                          multi [ [ polarShell; polarHole ]; [ "(87 -120,87 0,87 120,87 -120)" ] ], 0L
+                          multi [ [ polarShell; "(85 180,85 -120,85 -60,85 0,85 60,85 120,85 180)" ]; [ polarHole ] ], 1L
+                          multi [ [ polarShell; polarHole ]; [ "(84 -1,84.01 -1,84 -0.99,84 -1)" ] ], 1L ]
+                    for text, expected in cases do
+                        Expect.equal (valid text) (VInt expected) ("pinned MySQL 8.4.11: " + text)
 
                 testCase "geometry validity rejects malformed in-memory component shapes"
                 <| fun _ ->
