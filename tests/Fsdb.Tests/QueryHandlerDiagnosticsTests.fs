@@ -1765,6 +1765,13 @@ let tests =
                   "a broad forced range preserves correlated counts"
               Expect.equal broad.DiagnosticsCount 614 "pinned MySQL 8.4.11 visits every forced range candidate"
               let session, _ = handle session "ALTER TABLE inner_rows ADD KEY ix_owner(owner_id)"
+              for suffix, expectedRows, warnings in
+                  [ "ORDER BY o.id", [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ], 16
+                    "WHERE o.id=2", [ [ Some "2"; Some "1" ] ], 8
+                    "WHERE o.id=9", [], 4 ] do
+                  let ordinary, ordinaryResult = handle session (query suffix)
+                  Expect.equal ordinaryResult (ResultSet([ "id"; "c" ], expectedRows)) "estimated access selection preserves counts"
+                  Expect.equal ordinary.DiagnosticsCount warnings "pinned MySQL 8.4.11 compares estimated ref work and rechecks its range"
               for index, warnings in [ "ix_k", 14; "ix_owner", 6 ] do
                   let forced, forcedResult = handle session ((query "ORDER BY o.id").Replace("inner_rows i", "inner_rows i FORCE INDEX(" + index + ")"))
                   Expect.equal forcedResult
@@ -1788,6 +1795,13 @@ let tests =
                   (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "0" ]; [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ]))
                   "empty forced ranges preserve zero scalar counts"
               Expect.equal forcedEmpty.DiagnosticsCount 2 "pinned MySQL 8.4.11 warns during setup even with no inner candidates"
+              let ordinaryEmpty, ordinaryEmptyResult = handle session (query "ORDER BY o.id")
+              Expect.equal ordinaryEmptyResult forcedEmptyResult "ordinary and forced empty ranges preserve zero counts"
+              Expect.equal ordinaryEmpty.DiagnosticsCount 4 "an empty ordinary two-index plan retains both range setup phases"
+              let session, _ = handle session "DELETE FROM outer_rows"
+              let emptyBoth, emptyBothResult = handle session (query "ORDER BY o.id")
+              Expect.equal emptyBothResult (ResultSet([ "id"; "c" ], [])) "both empty tables return no rows"
+              Expect.equal emptyBoth.DiagnosticsCount 4 "both setup phases survive an empty outer table"
 
           testCase "scanned correlated BETWEEN retains per-outer conversion warnings"
           <| fun _ ->

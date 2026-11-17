@@ -240,8 +240,9 @@ one. Metadata planning retains two setup warnings when the outer query
 returns no rows. Broader correlated range shapes and specialized multi-index
 intersections still need diagnostic parity validation.
 An expanded [correlated range boundary audit](torture/findings/2026-11-17-correlated-range-boundaries.md)
-confirms remaining warning-count mismatches with the ordinary two-index plan
-and empty inner tables. Correlated equality probes now honor forced range
+now covers the ordinary full-key owner-index versus range choice, including
+empty inner tables. Estimated ref cardinality selects the audited range and
+retains both initial and recheck setup diagnostics. Correlated equality probes honor forced range
 versus owner indexes in the audited nonempty fixture; broad forced ranges
 also retain their range access, and the forced empty-inner setup is covered.
 The outer LIMIT 0 metadata

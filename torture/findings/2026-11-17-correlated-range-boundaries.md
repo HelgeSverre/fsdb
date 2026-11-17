@@ -103,3 +103,25 @@ from the replay immediately after the relevant index setup, then read
 Do not insert `SHOW COUNT(*) WARNINGS`: that is expanded to a SELECT and
 replaces the trace with the warning-count query's trace. Warning cardinality
 controls were collected separately with tracing disabled.
+
+## Estimated ref versus range correction
+
+The correlated chooser now compares a full-key stored equality estimate,
+using the existing uniform-cardinality estimator, with the eligible physical
+range count before accepting an actual one- or two-row owner bucket. When
+the range wins, it rechecks the range and retains both analyses as explicit
+`EstimateRange` and `RecheckRange` phases. Deferred setup preserves both
+phases when no outer rows execute. Range rows are materialized only after
+the estimated comparison selects the range.
+When the existing planner marks both equality and range candidate sets broad
+enough to probe their intersection, that path retains priority. A full-suite
+regression caught the initial range-only choice evaluating 402 residuals
+instead of keeping the intersection's residual work below twenty.
+
+The original regression reproduced six warnings instead of sixteen. Its
+focused rerun passed the 16/8/4 ordinary two-index matrix, the forced-index
+controls, and the four setup warnings with an empty inner table. The full
+gate also covers empty outer and inner tables together. These observations
+close the recorded fixture's ordinary-index mismatch; partial composite
+equality keys, specialized intersections, and broader optimizer cost parity
+remain outside this verified scope.

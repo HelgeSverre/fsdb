@@ -146,10 +146,14 @@ type private PhysicalRangeSelection =
     | EmptyPhysicalRange
     | SelectedPhysicalRange of Storage.RangeLookup
 
+type private CorrelatedRangePhase =
+    | EstimateRange
+    | RecheckRange
+
 type private CorrelatedSourceCandidate =
     { SourceColumns: ColumnDef list
       SourceRows: Value[] list
-      RangeAccesses: (TableRef * PhysicalRangeSelection) list }
+      RangeAccesses: (TableRef * PhysicalRangeSelection * CorrelatedRangePhase) list }
 
 type private DecimalRangeCut =
     | ExactDecimalCut of decimal
@@ -805,7 +809,7 @@ type private StatementMemo =
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
       CorrelatedNumericWarnings: Dictionary<Expr, CorrelatedNumericWarningState>
       CorrelatedRangeSetups: HashSet<Expr>
-      PendingCorrelatedRangeSetups: Dictionary<Expr, (TableRef * PhysicalRangeSelection) list>
+      PendingCorrelatedRangeSetups: Dictionary<Expr, (TableRef * PhysicalRangeSelection * CorrelatedRangePhase) list>
       HavingCountSelects: Dictionary<SelectStmt, HavingCountSelects>
       CountColumnPresence: Dictionary<SelectStmt, Dictionary<string * Expr, bool>>
       InnerExistsProjections: Dictionary<SelectStmt, bool>
@@ -856,7 +860,7 @@ let private freshStatementMemo () =
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
       CorrelatedNumericWarnings = Dictionary<Expr, CorrelatedNumericWarningState>(HashIdentity.Reference)
       CorrelatedRangeSetups = HashSet<Expr>(HashIdentity.Reference)
-      PendingCorrelatedRangeSetups = Dictionary<Expr, (TableRef * PhysicalRangeSelection) list>(HashIdentity.Reference)
+      PendingCorrelatedRangeSetups = Dictionary<Expr, (TableRef * PhysicalRangeSelection * CorrelatedRangePhase) list>(HashIdentity.Reference)
       HavingCountSelects = Dictionary<SelectStmt, HavingCountSelects>(HashIdentity.Reference)
       CountColumnPresence = Dictionary<SelectStmt, Dictionary<string * Expr, bool>>(HashIdentity.Reference)
       InnerExistsProjections = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
@@ -12658,7 +12662,7 @@ and private isTruncatedDoubleRangePredicate (candidate: CorrelatedSourceCandidat
             | _ -> false
 
         (truncated lower || truncated upper)
-        && (candidate.RangeAccesses |> List.exists (fun (table, access) ->
+        && (candidate.RangeAccesses |> List.exists (fun (table, access, _) ->
             match access with
             | SelectedPhysicalRange lookup ->
                 let column = lookup.RangeColumns.[lookup.RangeColumnIndex]
@@ -16614,7 +16618,7 @@ and private tryCorrelatedEqualityLookup
                         let candidate =
                             { SourceColumns = lookup.RangeColumns
                               SourceRows = []
-                              RangeAccesses = [ tref, SelectedPhysicalRange lookup ] }
+                              RangeAccesses = [ tref, SelectedPhysicalRange lookup, EstimateRange ] }
                         whereExpr |> Option.exists (fun predicate ->
                             conjuncts predicate |> List.exists (isTruncatedDoubleRangePredicate candidate))
                     | _ -> false)
@@ -17464,14 +17468,7 @@ and private tryProjectedPhysicalCorrelatedUnionLookup
                 merge
                 (snd >> List.length)))
 
-and private tryProjectedPhysicalCorrelatedRangeAccess
-    (store: Store)
-    (registry: Registry)
-    (dbName: string)
-    (source: FromItem)
-    (whereExpr: Expr option)
-    (outer: EvalContext option)
-    =
+and private tryProjectedPhysicalCorrelatedRangePlan store registry dbName source whereExpr outer =
     FromItem.tryQualifier source
     |> Option.bind (fun qualifier ->
         tryPhysicalProjection store registry dbName source
@@ -17479,14 +17476,19 @@ and private tryProjectedPhysicalCorrelatedRangeAccess
             correlatedRangeBounds store projection (correlatedProbeSource qualifier projection.OutputColumns) whereExpr outer
             |> List.tryPick (fun bounds ->
                 tryProjectedPhysicalRangeSelection CostedRead store projection bounds
-                |> Option.bind (fun access ->
-                    let candidates =
-                        match access with
-                        | EmptyPhysicalRange -> []
-                        | SelectedPhysicalRange lookup -> lookup.RangeRows.Value
+                |> Option.map (fun access -> projection, access))))
 
-                    projectPhysicalLookupRows store registry dbName projection candidates
-                    |> Option.map (fun rows -> projection.PhysicalTableRef, access, rows)))))
+and private projectCorrelatedRangeAccess store registry dbName (projection: PhysicalProjection, access) =
+    let candidates =
+        match access with
+        | EmptyPhysicalRange -> []
+        | SelectedPhysicalRange lookup -> lookup.RangeRows.Value
+    projectPhysicalLookupRows store registry dbName projection candidates
+    |> Option.map (fun rows -> projection.PhysicalTableRef, access, rows)
+
+and private tryProjectedPhysicalCorrelatedRangeAccess store registry dbName source whereExpr outer =
+    tryProjectedPhysicalCorrelatedRangePlan store registry dbName source whereExpr outer
+    |> Option.bind (projectCorrelatedRangeAccess store registry dbName)
 
 and private tryProjectedPhysicalCorrelatedIntersectionLookup
     store
@@ -18678,7 +18680,38 @@ and private tryCorrelatedSourceAccess
     let rangeAccess () =
         tryProjectedPhysicalCorrelatedRangeAccess store registry dbName source whereExpr outer
         |> Option.map (fun (table, access, (columns, rows)) ->
-            { SourceColumns = columns; SourceRows = rows; RangeAccesses = [ table, access ] })
+            { SourceColumns = columns; SourceRows = rows; RangeAccesses = [ table, access, EstimateRange ] })
+
+    let rangePreferredToEstimatedRef tableRef =
+        physicalFastPathTable store dbName tableRef
+        |> Option.filter (fun table -> storedRowsMatchReadRows store table.Columns)
+        |> Option.bind (fun table ->
+            let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+            correlatedProbeEqualities (correlatedProbeSource qualifier table.Columns) whereExpr outer
+            |> Option.bind (tryStoredEqualityMatchLookupWhere (indexHintsFor IndexJoin tableRef |> indexAllowedBy) store table)
+            |> Option.filter (fun (matched, _) -> matched.UsesFullKey && matched.UsesWholeStoredValues)
+            |> Option.bind (fun (matched, equalityLookup) ->
+                let estimatedRows =
+                    QueryPlanner.estimateUniformEqualityCandidates
+                        table.RowsArray.Count
+                        (Storage.equalityIndexDistinctKeyCount table matched.Index)
+                        1
+                tryProjectedPhysicalCorrelatedRangePlan store registry dbName source whereExpr outer
+                |> Option.filter (fun (_, access) ->
+                    let rows = match access with EmptyPhysicalRange -> 0 | SelectedPhysicalRange lookup -> lookup.RangeRowCount
+                    not (QueryPlanner.shouldProbeIndexIntersection [ equalityLookup.CandidateCount; rows ])
+                    && (rows < estimatedRows || (rows = 0 && estimatedRows = 0)))
+                |> Option.bind (fun (initialProjection, initialAccess) ->
+                    // Recheck the range after choosing it over the estimated ref
+                    // access, preserving diagnostics from both planning phases.
+                    tryProjectedPhysicalCorrelatedRangePlan store registry dbName source whereExpr outer
+                    |> Option.bind (projectCorrelatedRangeAccess store registry dbName)
+                    |> Option.map (fun (table, access, (columns, rows)) ->
+                        { SourceColumns = columns
+                          SourceRows = rows
+                          RangeAccesses =
+                              [ initialProjection.PhysicalTableRef, initialAccess, EstimateRange
+                                table, access, RecheckRange ] }))))
 
     let fewestRows candidates =
         candidates
@@ -18820,59 +18853,61 @@ and private tryCorrelatedSourceAccess
     match nullLikeCandidates, source with
     | Some candidates, _ -> Some candidates
     | None, FromTable table ->
-        let equality =
-            tryCorrelatedEqualityLookup store registry dbName table whereExpr outer
-            |> Option.map (fun (columns, rows) ->
-                { SourceColumns = columns; SourceRows = rows |> List.map snd; RangeAccesses = [] })
+        (if hasRangePredicate then rangePreferredToEstimatedRef table else None)
+        |> Option.orElseWith (fun () ->
+            let equality =
+                tryCorrelatedEqualityLookup store registry dbName table whereExpr outer
+                |> Option.map (fun (columns, rows) ->
+                    { SourceColumns = columns; SourceRows = rows |> List.map snd; RangeAccesses = [] })
 
-        let direct =
-            match equality with
-            // A pair is cheaper to filter than to probe through every other eligible index.
-            | Some candidate when candidate.SourceRows.Length <= 2 -> equality
-            | _ ->
-                let equalityUnion = rowsOnly (tryCorrelatedEqualityUnionLookup store registry dbName table whereExpr outer)
-                let projectedUnion =
-                    if hasRangePredicate || equalityUnion.IsNone then
-                        rowsOnly (tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer)
-                    else
-                        None
+            let direct =
+                match equality with
+                // A pair is cheaper to filter than to probe through every other eligible index.
+                | Some candidate when candidate.SourceRows.Length <= 2 -> equality
+                | _ ->
+                    let equalityUnion = rowsOnly (tryCorrelatedEqualityUnionLookup store registry dbName table whereExpr outer)
+                    let projectedUnion =
+                        if hasRangePredicate || equalityUnion.IsNone then
+                            rowsOnly (tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer)
+                        else
+                            None
 
-                let ordinary =
-                    [ equality
-                      equalityUnion
-                      projectedUnion
-                      nullLookup ()
-                      rowsOnly (tryProjectedPhysicalCorrelatedAbsoluteLookup store registry dbName source whereExpr outer)
-                      rowsOnly (tryProjectedPhysicalCorrelatedAffineLookup store registry dbName source whereExpr outer) ]
+                    let ordinary =
+                        [ equality
+                          equalityUnion
+                          projectedUnion
+                          nullLookup ()
+                          rowsOnly (tryProjectedPhysicalCorrelatedAbsoluteLookup store registry dbName source whereExpr outer)
+                          rowsOnly (tryProjectedPhysicalCorrelatedAffineLookup store registry dbName source whereExpr outer) ]
+                        |> fewestRows
+
+                    [ ordinary
+                      rowsOnly (tryCorrelatedFunctionalEqualityLookup
+                          store registry dbName source whereExpr outer
+                          (ordinary |> Option.map (fun candidate -> candidate.SourceRows.Length))) ]
                     |> fewestRows
 
-                [ ordinary
-                  rowsOnly (tryCorrelatedFunctionalEqualityLookup
-                      store registry dbName source whereExpr outer
-                      (ordinary |> Option.map (fun candidate -> candidate.SourceRows.Length))) ]
-                |> fewestRows
+            let physicalFastPath =
+                physicalFastPathTable store dbName table
+                |> Option.exists (fun physical -> storedRowsMatchReadRows store physical.Columns)
 
-        let physicalFastPath =
-            physicalFastPathTable store dbName table
-            |> Option.exists (fun physical -> storedRowsMatchReadRows store physical.Columns)
-
-        (if physicalFastPath then
-             (match direct with
-              | Some candidate when candidate.SourceRows.Length <= 2 -> None
-              | Some _ -> physicalIntersection ()
-              | None when hasMultipleConjunctiveRanges || (hasMembershipPredicate && hasRangePredicate) || hasNullTestPredicate -> physicalIntersection ()
-              | None -> None)
-             |> Option.orElseWith (fun () -> chooseWithRanges true direct)
-         else
-             physicalIntersection ()
-             |> Option.orElseWith (fun () ->
-                 [ direct
-                   nullLookup ()
-                   rowsOnly (tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer) ]
-                 |> fewestRows
-                 |> chooseWithRanges false))
-        |> Option.orElseWith materializedLookup
-        |> chooseWithMembership
+            (if physicalFastPath then
+                 (match direct with
+                  | Some candidate when candidate.SourceRows.Length <= 2 -> None
+                  | Some _ -> physicalIntersection ()
+                  | None when hasMultipleConjunctiveRanges || (hasMembershipPredicate && hasRangePredicate) || hasNullTestPredicate -> physicalIntersection ()
+                  | None -> None)
+                 |> Option.orElseWith (fun () -> chooseWithRanges true direct)
+             else
+                 physicalIntersection ()
+                 |> Option.orElseWith (fun () ->
+                     [ direct
+                       nullLookup ()
+                       rowsOnly (tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer) ]
+                     |> fewestRows
+                     |> chooseWithRanges false))
+            |> Option.orElseWith materializedLookup
+            |> chooseWithMembership)
     | None, FromSubquery _ ->
         (if hasLikePredicate then
              (if hasExpressionLikePredicate then materializedLookup () else None)
@@ -18905,7 +18940,7 @@ and private tryCorrelatedSourceAccess
 
 and private reportCorrelatedRangeSetup predicate accesses =
     if (currentStatementMemo ()).CorrelatedRangeSetups.Add predicate then
-        for table, access in accesses do
+        for table, access, _ in accesses do
             match access with
             | SelectedPhysicalRange lookup -> reportTruncatedDoubleRangeSetup table predicate (RangeAccess lookup)
             | EmptyPhysicalRange -> ()
