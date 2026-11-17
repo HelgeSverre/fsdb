@@ -24448,12 +24448,12 @@ and private runSelect
                     |> Result.bind (fun outputCols -> orderKeysOf probe outputCols |> Result.map (fun _ -> outputCols))))) with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeProjection when limit = Some 0 ->
-        // `LIMIT 0` still resolves row-dependent result metadata, but stored
-        // program bodies cannot run for a statement that returns no rows.
+        // `LIMIT 0` still resolves row-dependent result metadata. Those
+        // probes must not expose conversion diagnostics or assignments.
         let colNames = probeProjection |> List.map fst
 
         match
-            withMetadataProbe (fun () ->
+            withSourceMetadataProbe (fun () ->
                 rows
                 |> traverseSeq (fun row ->
                     matches row

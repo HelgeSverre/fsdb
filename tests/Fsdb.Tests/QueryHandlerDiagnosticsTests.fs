@@ -1755,6 +1755,9 @@ let tests =
                   Expect.all current.Diagnostics (fun diagnostic -> diagnostic.Code = 1292) "only truncated DOUBLE conditions"
               let ignored, _ = handle session ((query "ORDER BY o.id").Replace("inner_rows i", "inner_rows i IGNORE INDEX(ix_k)"))
               Expect.equal ignored.DiagnosticsCount 6 "ignoring the range index retains owner-first scan diagnostics"
+              let limited, limitedResult = handle session (query "LIMIT 0")
+              Expect.equal limitedResult (ResultSet([ "id"; "c" ], [])) "outer LIMIT 0 returns no rows"
+              Expect.equal limited.DiagnosticsCount 0 "pinned MySQL 8.4.11 suppresses candidate and setup diagnostics under outer LIMIT 0"
               let session, _ = handle session "INSERT INTO inner_rows VALUES(9,12.75)"
               let extra, _ = handle session (query "ORDER BY o.id")
               Expect.equal extra.DiagnosticsCount 20 "an in-range candidate warns even when its owner never matches"

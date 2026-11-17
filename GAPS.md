@@ -239,6 +239,10 @@ owner filter, matching fourteen warnings for three outer rows and six for
 one. Metadata planning retains two setup warnings when the outer query
 returns no rows. Broader correlated range shapes and specialized multi-index
 intersections still need diagnostic parity validation.
+An expanded [correlated range boundary audit](torture/findings/2026-11-17-correlated-range-boundaries.md)
+confirms remaining warning-count mismatches with both an owner and range
+index, forced range hints, and empty inner tables. The outer LIMIT 0 metadata
+probe now suppresses candidate diagnostics, matching the oracle's zero warnings.
 [Correlated `ABS` equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-abs.md)
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete
 OR branches and exact `INT` minimum magnitude, while other operand types retain
