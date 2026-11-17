@@ -17220,9 +17220,9 @@ and private tryProjectedPhysicalRangeSelection
     =
     tryPhysicalProjectionColumn projection bounds.Column
     |> Option.bind (fun sourceColumn ->
-        let allowed =
-            indexHintsFor IndexJoin projection.PhysicalTableRef
-            |> indexAllowedBy
+        let hints = indexHintsFor IndexJoin projection.PhysicalTableRef
+        let allowed = indexAllowedBy hints
+        let forced = hints |> List.exists (fun hint -> hint.Kind = ForceIndex)
         let isNullBound = function
             | Some(VNull, _) -> true
             | _ -> false
@@ -17240,7 +17240,7 @@ and private tryProjectedPhysicalRangeSelection
         else
             Storage.trySecondaryRangeLookupInTableWith allowed store projection.PhysicalTable sourceColumn.Name bounds.Lower bounds.Upper
             |> Option.filter (fun lookup ->
-                (policy = CandidateNarrowing && safeBroadNumericRange)
+                forced || (policy = CandidateNarrowing && safeBroadNumericRange)
                 || QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange)
             |> Option.map SelectedPhysicalRange)
 

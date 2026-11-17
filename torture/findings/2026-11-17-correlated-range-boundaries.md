@@ -46,5 +46,22 @@ indexes, and USE/FORCE hints prevent substituting a transient equality lookup.
 With both indexes present, FORCE INDEX(ix_k) now returns the same rows and
 fourteen warnings as MySQL; FORCE INDEX(ix_owner) preserves the same rows and
 six warnings. Both are covered by the diagnostics regression. The ordinary
-two-index plan and empty-inner cases remain open; the baseline table above
+two-index plan and ordinary empty-inner cases remain open; the baseline table above
 records observations before this correction.
+
+## Broad and empty forced ranges
+
+The forced empty-inner control already matches MySQL after the equality-hint
+correction: three zero counts and two setup warnings. It is now a regression.
+
+A broader pinned-oracle control forces `ix_k` with bounds `'0x'` and `'1000x'`
+before adding the owner index. All 102 inner rows are range candidates.
+MySQL EXPLAIN selects `range` on `ix_k`, and the statement reports 614 warnings:
+two during setup and two per candidate for each of three outer rows.
+FSDB at `bfc7a80b` returned the same counts but twelve warnings.
+
+The projected range selector now honors FORCE INDEX independently of its
+cost threshold, while retaining hint filtering and storage validation. This
+matches the existing forced-membership policy. The broad forced range is in
+the SQL replay and regression; the ordinary two-index optimizer setup counts
+remain a separate open issue.

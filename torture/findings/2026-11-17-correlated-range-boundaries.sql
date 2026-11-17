@@ -13,6 +13,9 @@ SELECT 'inner_limit_zero' AS audit_case;
 SELECT o.id,(SELECT COUNT(*) FROM inner_rows i  WHERE i.owner_id=o.id AND i.k BETWEEN '12.5x' AND '13x' LIMIT 0) c FROM outer_rows o ;
 SHOW COUNT(*) WARNINGS;
 
+SELECT 'broad_forced_range' AS audit_case;
+SELECT o.id,(SELECT COUNT(*) FROM inner_rows i FORCE INDEX(ix_k) WHERE i.owner_id=o.id AND i.k BETWEEN '0x' AND '1000x') c FROM outer_rows o;
+SHOW COUNT(*) WARNINGS;
 SELECT 'empty_outer_filter' AS audit_case;
 SELECT o.id,(SELECT COUNT(*) FROM inner_rows i  WHERE i.owner_id=o.id AND i.k BETWEEN '12.5x' AND '13x' ) c FROM outer_rows o WHERE o.id=9;
 SHOW COUNT(*) WARNINGS;

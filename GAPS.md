@@ -242,7 +242,9 @@ intersections still need diagnostic parity validation.
 An expanded [correlated range boundary audit](torture/findings/2026-11-17-correlated-range-boundaries.md)
 confirms remaining warning-count mismatches with the ordinary two-index plan
 and empty inner tables. Correlated equality probes now honor forced range
-versus owner indexes in the audited nonempty fixture. The outer LIMIT 0 metadata
+versus owner indexes in the audited nonempty fixture; broad forced ranges
+also retain their range access, and the forced empty-inner setup is covered.
+The outer LIMIT 0 metadata
 probe now suppresses candidate diagnostics, matching the oracle's zero warnings.
 [Correlated `ABS` equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-abs.md)
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete

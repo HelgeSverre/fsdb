@@ -1758,6 +1758,12 @@ let tests =
               let limited, limitedResult = handle session (query "LIMIT 0")
               Expect.equal limitedResult (ResultSet([ "id"; "c" ], [])) "outer LIMIT 0 returns no rows"
               Expect.equal limited.DiagnosticsCount 0 "pinned MySQL 8.4.11 suppresses candidate and setup diagnostics under outer LIMIT 0"
+              let broad, broadResult =
+                  handle session ((query "ORDER BY o.id").Replace("inner_rows i", "inner_rows i FORCE INDEX(ix_k)").Replace("'12.5x' AND '13x'", "'0x' AND '1000x'"))
+              Expect.equal broadResult
+                  (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ]))
+                  "a broad forced range preserves correlated counts"
+              Expect.equal broad.DiagnosticsCount 614 "pinned MySQL 8.4.11 visits every forced range candidate"
               let session, _ = handle session "ALTER TABLE inner_rows ADD KEY ix_owner(owner_id)"
               for index, warnings in [ "ix_k", 14; "ix_owner", 6 ] do
                   let forced, forcedResult = handle session ((query "ORDER BY o.id").Replace("inner_rows i", "inner_rows i FORCE INDEX(" + index + ")"))
@@ -1773,6 +1779,15 @@ let tests =
               let empty, emptyResult = handle session (query "ORDER BY o.id")
               Expect.equal emptyResult (ResultSet([ "id"; "c" ], [])) "an empty outer table returns no rows"
               Expect.equal empty.DiagnosticsCount 2 "range setup remains observable without any outer row"
+              let session, _ = handle session "ALTER TABLE inner_rows ADD KEY ix_owner(owner_id)"
+              let session, _ = handle session "DELETE FROM inner_rows"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1),(1),(2)"
+              let forcedEmpty, forcedEmptyResult =
+                  handle session ((query "ORDER BY o.id").Replace("inner_rows i", "inner_rows i FORCE INDEX(ix_k)"))
+              Expect.equal forcedEmptyResult
+                  (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "0" ]; [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ]))
+                  "empty forced ranges preserve zero scalar counts"
+              Expect.equal forcedEmpty.DiagnosticsCount 2 "pinned MySQL 8.4.11 warns during setup even with no inner candidates"
 
           testCase "scanned correlated BETWEEN retains per-outer conversion warnings"
           <| fun _ ->
