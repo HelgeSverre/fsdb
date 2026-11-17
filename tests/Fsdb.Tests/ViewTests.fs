@@ -20,7 +20,43 @@ let private setup () =
 let tests =
     testList
         "views"
-        [ testCase "window CTE natural join can update a nested checked view"
+        [ testCase "outer window CTE joins make nested checked views read only"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE outer_window_target(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE outer_window_source(id INT,flag INT)"
+                    "CREATE TABLE outer_window_aux(id INT PRIMARY KEY,aux INT)"
+                    "INSERT INTO outer_window_target VALUES(1,0),(2,0),(3,0)"
+                    "INSERT INTO outer_window_source VALUES(1,7),(1,8),(2,9)"
+                    "INSERT INTO outer_window_aux VALUES(1,5),(2,6),(3,7)"
+                    "CREATE VIEW outer_window_inner AS SELECT a.id,a.n,c.aux FROM outer_window_target a JOIN outer_window_aux c ON c.id=a.id WHERE a.n>=0 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              let definition =
+                  "CREATE VIEW outer_window_view AS WITH ranked AS (SELECT id,ROW_NUMBER() OVER(PARTITION BY id ORDER BY flag) rn FROM outer_window_source) SELECT v.id,v.n,v.aux,ranked.rn FROM outer_window_inner v LEFT JOIN ranked USING(id) WHERE v.n<10"
+              match run store (definition + " WITH CASCADED CHECK OPTION") with
+              | Err(1368, _) -> ()
+              | other -> failtestf "expected non-updatable CHECK OPTION error, got %A" other
+              expectOk (run store definition) "create read-only outer view"
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name='outer_window_view'")
+                  [ [ Some "NO" ] ] "MySQL marks the outer window join read only"
+              Expect.equal
+                  (rows store "SELECT id,n,aux,rn FROM outer_window_view ORDER BY id,rn")
+                  [ [ Some "1"; Some "0"; Some "5"; Some "1" ]
+                    [ Some "1"; Some "0"; Some "5"; Some "2" ]
+                    [ Some "2"; Some "0"; Some "6"; Some "1" ]
+                    [ Some "3"; Some "0"; Some "7"; None ] ]
+                  "the unmatched target survives with a NULL window result"
+              match run store "UPDATE outer_window_view SET n=1 WHERE id=1" with
+              | Err(1288, _) -> ()
+              | other -> failtestf "expected non-updatable view error, got %A" other
+              Expect.equal
+                  (rows store "SELECT id,n FROM outer_window_target ORDER BY id")
+                  [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ]
+                  "rejected mutation preserves the physical target"
+
+          testCase "window CTE natural join can update a nested checked view"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               for sql in

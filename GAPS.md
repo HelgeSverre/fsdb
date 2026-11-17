@@ -2934,7 +2934,10 @@ implementation effort:
    failure, or backpressure semantics. This addresses sustained-drain safety,
    not the measured write-throughput gap.
 
-3. Complex join-derived updatable views. Procedures, functions, and triggers
+3. Complex join-derived updatable views. An audited
+   [nested checked view LEFT JOINed to a window CTE](torture/findings/2026-11-17-nested-window-outer-view.md)
+   correctly remains read only, matching MySQL's metadata, rows, CHECK OPTION
+   rejection, and mutation rejection. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition
    handlers, SIGNAL/RESIGNAL, branches, labeled loops, cursors, and sequential
    data-changing statements.
