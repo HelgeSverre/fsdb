@@ -233,8 +233,10 @@ warnings by taking the ordinary correlated scan. An oracle follow-up
 identifies separate indexed range-setup and per-outer-row warnings; even an
 empty outer result retains two indexed warnings. A selective direct DOUBLE
 `BETWEEN` range now accepts finite truncated string bounds and matches MySQL's
-range-setup plus candidate warning count; the correlated range still filters
-in the wrong diagnostic order and lacks zero-outer-row setup warnings.
+range-setup plus candidate warning count. The audited selective correlated
+range now also reports setup once and evaluates range candidates before the
+owner filter, matching fourteen warnings for three outer rows and six for
+one; zero-outer-row setup warnings remain missing.
 [Correlated `ABS` equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-abs.md)
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete
 OR branches and exact `INT` minimum magnitude, while other operand types retain

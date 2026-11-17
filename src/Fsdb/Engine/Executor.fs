@@ -804,6 +804,7 @@ type private StatementMemo =
       EqualityIndexMatches: Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
       CorrelatedNumericWarnings: Dictionary<Expr, CorrelatedNumericWarningState>
+      CorrelatedRangeSetups: HashSet<Expr>
       HavingCountSelects: Dictionary<SelectStmt, HavingCountSelects>
       CountColumnPresence: Dictionary<SelectStmt, Dictionary<string * Expr, bool>>
       InnerExistsProjections: Dictionary<SelectStmt, bool>
@@ -853,6 +854,7 @@ let private freshStatementMemo () =
       EqualityIndexMatches = Dictionary<Table, Dictionary<string list, Storage.EqualityIndexMatch list>>(HashIdentity.Reference)
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
       CorrelatedNumericWarnings = Dictionary<Expr, CorrelatedNumericWarningState>(HashIdentity.Reference)
+      CorrelatedRangeSetups = HashSet<Expr>(HashIdentity.Reference)
       HavingCountSelects = Dictionary<SelectStmt, HavingCountSelects>(HashIdentity.Reference)
       CountColumnPresence = Dictionary<SelectStmt, Dictionary<string * Expr, bool>>(HashIdentity.Reference)
       InnerExistsProjections = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
@@ -9426,10 +9428,12 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
                         (singleQualifier qualifier columns)
                         (Some outer)
 
-                let matches = prepareWhereMatches context select.Where
+                let predicate = select.Where |> Option.map (orderCorrelatedRangePredicates candidate)
+                let matches = prepareWhereMatches context predicate
 
                 withMetadataProbe (fun () -> matches (probeRow columns))
                 |> Result.bind (fun _ ->
+                    prepareCorrelatedRangeSelect select candidate |> ignore
                     rows
                     |> List.fold
                         (fun countResult row ->
@@ -12643,6 +12647,31 @@ and private streamFilteredSourceRows
             | Error(code, message) -> raise (SqlError(code, message))
     }
 
+and private isTruncatedDoubleRangePredicate (candidate: CorrelatedSourceCandidate) = function
+    | Between(value, lower, upper) ->
+        let truncated = function
+            | LiteralValue(VString text) ->
+                let number, truncated = Value.coerceLeadingDouble text
+                truncated && System.Double.IsFinite number && abs number <> System.Double.MaxValue
+            | _ -> false
+
+        (truncated lower || truncated upper)
+        && (candidate.RangeAccesses |> List.exists (fun (table, access) ->
+            match access with
+            | SelectedPhysicalRange lookup ->
+                let column = lookup.RangeColumns.[lookup.RangeColumnIndex]
+                match column.Type with
+                | TDouble _ ->
+                    rangeColumnNameFor BareOrQualifiedColumn table value
+                    |> Option.exists (equalsIgnoreCase column.Name)
+                | _ -> false
+            | EmptyPhysicalRange -> false))
+    | _ -> false
+
+and private orderCorrelatedRangePredicates candidate predicate =
+    let ranges, remaining = conjuncts predicate |> List.partition (isTruncatedDoubleRangePredicate candidate)
+    ranges @ remaining |> List.reduce (fun left right -> BinOp(And, left, right))
+
 and private reportTruncatedDoubleRangeSetup (tableRef: TableRef) (predicate: Expr) access =
     match access with
     | RangeAccess lookup when (match lookup.RangeColumns.[lookup.RangeColumnIndex].Type with TDouble _ -> true | _ -> false) ->
@@ -15256,11 +15285,13 @@ and private runUnlockedSelectStmt
                             | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None (coveredSelect earlyPhysicalAccess)
                             | None ->
                                 let projectedLookup =
-                                    tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer
-                                    |> Option.orElseWith (fun () -> tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where)
+                                    tryCorrelatedSourceLookup store registry dbName fromItem select outer
+                                    |> Option.orElseWith (fun () ->
+                                        tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where
+                                        |> Option.map (fun (columns, rows) -> columns, rows, select))
 
                                 match projectedLookup with
-                                | Some(columns, rows) -> runArbitrary columns rows None select
+                                | Some(columns, rows, planned) -> runArbitrary columns rows None planned
                                 | None ->
                                     match indexOrder with
                                     | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
@@ -15296,11 +15327,13 @@ and private runUnlockedSelectStmt
             | Ok(columns, rows) -> runArbitrary columns rows None select
         | _ ->
             let projectedLookup =
-                tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer
-                |> Option.orElseWith (fun () -> tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where)
+                tryCorrelatedSourceLookup store registry dbName fromItem select outer
+                |> Option.orElseWith (fun () ->
+                    tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where
+                    |> Option.map (fun (columns, rows) -> columns, rows, select))
 
             match projectedLookup with
-            | Some(columns, rows) -> runArbitrary columns rows None select
+            | Some(columns, rows, planned) -> runArbitrary columns rows None planned
             | None ->
                 match resolveFromItemWithOuter store registry dbName outer fromItem with
                 | Error e -> e, [], []
@@ -16535,6 +16568,7 @@ and private correlatedFunctionalRangeBounds
 
 and private tryCorrelatedEqualityLookup
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
@@ -16546,10 +16580,35 @@ and private tryCorrelatedEqualityLookup
         let key = tableDb.ToLowerInvariant(), tref.Table.ToLowerInvariant(), column.ToLowerInvariant()
         let lookups = (currentStatementMemo ()).CorrelatedEqualities
 
-        getMemoized lookups key (fun () -> Storage.tryBuildTransientEqualityLookup store tableDb tref.Table column)
-        |> Option.bind (fun lookup ->
-            lookup.FindRows value
-            |> Option.map (fun rows -> lookup.TableColumns, rows))
+        let hasStringBetween =
+            whereExpr |> optionalConjuncts |> List.exists (function
+                | Between(_, LiteralValue(VString _), _)
+                | Between(_, _, LiteralValue(VString _)) -> true
+                | _ -> false)
+
+        let diagnosticRange =
+            if not hasStringBetween then false
+            else
+                physicalFastPathTable store dbName tref
+                |> Option.bind (fun table ->
+                    physicalAccessCandidatesInTableWith CostedRead store registry table tref whereExpr
+                    |> choosePhysicalAccess)
+                |> Option.exists (function
+                    | RangeAccess lookup ->
+                        let candidate =
+                            { SourceColumns = lookup.RangeColumns
+                              SourceRows = []
+                              RangeAccesses = [ tref, SelectedPhysicalRange lookup ] }
+                        whereExpr |> Option.exists (fun predicate ->
+                            conjuncts predicate |> List.exists (isTruncatedDoubleRangePredicate candidate))
+                    | _ -> false)
+
+        if diagnosticRange then None
+        else
+            getMemoized lookups key (fun () -> Storage.tryBuildTransientEqualityLookup store tableDb tref.Table column)
+            |> Option.bind (fun lookup ->
+                lookup.FindRows value
+                |> Option.map (fun rows -> lookup.TableColumns, rows))
 
     physicalFastPathTable store dbName tref
     |> Option.filter (fun table -> storedRowsMatchReadRows store table.Columns)
@@ -16568,6 +16627,7 @@ and private tryCorrelatedEqualityLookup
 
 and private tryCorrelatedEqualityUnionLookup
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
@@ -16587,7 +16647,7 @@ and private tryCorrelatedEqualityUnionLookup
     tryCompleteOrCandidates
         whereExpr
         (fun _ _ -> false)
-        (fun branch -> tryCorrelatedEqualityLookup store dbName tref (Some branch) outer)
+        (fun branch -> tryCorrelatedEqualityLookup store registry dbName tref (Some branch) outer)
         merge
         (snd >> List.length)
 
@@ -18742,7 +18802,7 @@ and private tryCorrelatedSourceAccess
     | Some candidates, _ -> Some candidates
     | None, FromTable table ->
         let equality =
-            tryCorrelatedEqualityLookup store dbName table whereExpr outer
+            tryCorrelatedEqualityLookup store registry dbName table whereExpr outer
             |> Option.map (fun (columns, rows) ->
                 { SourceColumns = columns; SourceRows = rows |> List.map snd; RangeAccesses = [] })
 
@@ -18751,7 +18811,7 @@ and private tryCorrelatedSourceAccess
             // A pair is cheaper to filter than to probe through every other eligible index.
             | Some candidate when candidate.SourceRows.Length <= 2 -> equality
             | _ ->
-                let equalityUnion = rowsOnly (tryCorrelatedEqualityUnionLookup store dbName table whereExpr outer)
+                let equalityUnion = rowsOnly (tryCorrelatedEqualityUnionLookup store registry dbName table whereExpr outer)
                 let projectedUnion =
                     if hasRangePredicate || equalityUnion.IsNone then
                         rowsOnly (tryProjectedPhysicalCorrelatedUnionLookup store registry dbName source whereExpr outer)
@@ -18824,9 +18884,21 @@ and private tryCorrelatedSourceAccess
         |> chooseWithMembership
     | None, _ -> materializedLookup () |> chooseWithMembership
 
-and private tryCorrelatedSourceLookup store registry dbName source whereExpr outer =
-    tryCorrelatedSourceAccess store registry dbName source whereExpr outer
-    |> Option.map (fun candidate -> candidate.SourceColumns, candidate.SourceRows)
+and private prepareCorrelatedRangeSelect select candidate =
+    match select.Where with
+    | Some predicate when not metadataProbe.Value && not candidate.RangeAccesses.IsEmpty ->
+        if (currentStatementMemo ()).CorrelatedRangeSetups.Add predicate then
+            for table, access in candidate.RangeAccesses do
+                match access with
+                | SelectedPhysicalRange lookup -> reportTruncatedDoubleRangeSetup table predicate (RangeAccess lookup)
+                | EmptyPhysicalRange -> ()
+        { select with Where = Some(orderCorrelatedRangePredicates candidate predicate) }
+    | _ -> select
+
+and private tryCorrelatedSourceLookup store registry dbName source select outer =
+    tryCorrelatedSourceAccess store registry dbName source select.Where outer
+    |> Option.map (fun candidate ->
+        candidate.SourceColumns, candidate.SourceRows, prepareCorrelatedRangeSelect select candidate)
 
 and private tryCorrelatedCountEqualityPredicate source context =
     let boundValue expression =

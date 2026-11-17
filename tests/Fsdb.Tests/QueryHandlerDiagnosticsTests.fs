@@ -1735,6 +1735,29 @@ let tests =
               Expect.equal current.DiagnosticsCount 1 "pinned MySQL 8.4.11 warns once"
               Expect.equal (current.Diagnostics |> List.map _.Code) [ 1292 ] "truncated DOUBLE warning"
 
+          testCase "indexed correlated BETWEEN warns for range candidates before owner filtering"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE outer_rows(id INT)"
+              let session, _ = handle session "CREATE TABLE inner_rows(owner_id INT,k DOUBLE,KEY ix_k(k))"
+              let session, _ = handle session "INSERT INTO outer_rows VALUES(1),(1),(2)"
+              let filler = [ 1 .. 100 ] |> List.map (fun i -> sprintf "(9,%d)" (100 + i)) |> String.concat ","
+              let session, _ = handle session ("INSERT INTO inner_rows VALUES(1,12.5),(2,12.5)," + filler)
+              let query suffix =
+                  "SELECT o.id,(SELECT COUNT(*) FROM inner_rows i WHERE i.owner_id=o.id AND i.k BETWEEN '12.5x' AND '13x') c FROM outer_rows o " + suffix
+              for suffix, expectedRows, warnings in
+                  [ "ORDER BY o.id", [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ], 14
+                    "WHERE o.id=2", [ [ Some "2"; Some "1" ] ], 6 ] do
+                  let current, result = handle session (query suffix)
+                  Expect.equal result (ResultSet([ "id"; "c" ], expectedRows)) "pinned MySQL 8.4.11 counts"
+                  Expect.equal current.DiagnosticsCount warnings "setup warns once and both bounds warn for each range candidate"
+                  Expect.all current.Diagnostics (fun diagnostic -> diagnostic.Code = 1292) "only truncated DOUBLE conditions"
+              let ignored, _ = handle session ((query "ORDER BY o.id").Replace("inner_rows i", "inner_rows i IGNORE INDEX(ix_k)"))
+              Expect.equal ignored.DiagnosticsCount 6 "ignoring the range index retains owner-first scan diagnostics"
+              let session, _ = handle session "INSERT INTO inner_rows VALUES(9,12.75)"
+              let extra, _ = handle session (query "ORDER BY o.id")
+              Expect.equal extra.DiagnosticsCount 20 "an in-range candidate warns even when its owner never matches"
+
           testCase "scanned correlated BETWEEN retains per-outer conversion warnings"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

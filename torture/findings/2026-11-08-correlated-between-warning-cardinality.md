@@ -141,5 +141,21 @@ retains the selected projected range access, collects participating ranges
 when intersecting shared row candidates, and drops that metadata when another
 candidate replaces it. The correlated scalar count receives this richer
 result. The specialized physical intersection helper still returns rows only;
-its range provenance remains unfinished. Warning emission and statement-level
-setup are not yet connected, so the observable mismatch remains open.
+its range provenance remains unfinished. At this contract stage, warning
+emission and statement-level setup were not yet connected.
+
+## Executed correlated range diagnostics
+
+The selective three-outer-row and one-outer-row controls now report fourteen
+and six warnings in FSDB. A transient equality lookup on the unindexed owner
+column previously won before the persistent range was considered. For the
+audited truncated DOUBLE bounds, that transient fallback now yields to a
+selected persistent range. The executor evaluates the range predicate before
+the remaining owner filter and emits setup diagnostics once per statement
+predicate. Stored equality lookups retain their existing priority.
+
+The regression also checks the ignored-index scan (six warnings) and an extra
+in-range row with an absent owner (twenty warnings). Setup with zero outer
+rows remains open: the correlated source still needs statement-level planning
+before row evaluation. Specialized physical intersections and broader scalar
+query shapes also remain outside this fix's verified scope.
