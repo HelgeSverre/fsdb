@@ -66,3 +66,8 @@ isolates the commit's aggregate effect; it does not isolate allocation or
 time by function. Profile repeated planning and candidate preparation before
 choosing an optimization. Preserve the MySQL diagnostic regressions and the
 existing broad-candidate intersection behavior when reducing this cost.
+
+A subsequent [allocation profile and numeric-probe experiment](2026-11-17-correlated-range-numeric-probe.md)
+reduced range allocations by 12.6% by avoiding warning scopes around numeric
+conversions that cannot warn. This recovers part of the regression; it does
+not establish full recovery to the parent revision measured here.

@@ -5617,11 +5617,15 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
 
     let coerced =
         match column.Type, value with
-        // In-range signed integers already have the exact stored representation.
-        // Avoid entering warning scopes when coercion cannot change the value.
+        // These numeric conversions cannot warn. The exactness checks below
+        // still reject bounds that change value during conversion.
         | TInt false, VInt number when number >= int64 Int32.MinValue && number <= int64 Int32.MaxValue ->
             Ok value
         | TBigInt false, VInt _ -> Ok value
+        | TDouble false, VDouble number when Double.IsFinite number && column.NumericDisplay.IsNone -> Ok value
+        | TDouble false, VInt number when column.NumericDisplay.IsNone -> Ok(VDouble(float number))
+        | TDouble false, VUInt number when column.NumericDisplay.IsNone -> Ok(VDouble(float number))
+        | TDouble false, VDecimal number when column.NumericDisplay.IsNone -> Ok(VDouble(float number))
         | _ -> Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) column value)
 
     match doubleStringProbe, coerced with

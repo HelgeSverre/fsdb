@@ -1,0 +1,812 @@
+{
+  "events": 238368,
+  "sampledBytes": 25413184336,
+  "types": [
+    {
+      "Key": "System.Collections.Generic.KeyValuePair\u00602[System.Threading.IAsyncLocal,System.Object][]",
+      "Value": 2865237104
+    },
+    {
+      "Key": "Microsoft.FSharp.Collections.FSharpList\u00601[Fsdb.Ast\u002BExpr]",
+      "Value": 1729601288
+    },
+    {
+      "Key": "EvalContext",
+      "Value": 1310885088
+    },
+    {
+      "Key": "Descend[System.Boolean]",
+      "Value": 537484944
+    },
+    {
+      "Key": "loop@122-5[System.Boolean]",
+      "Value": 536527136
+    },
+    {
+      "Key": "System.Threading.ExecutionContext",
+      "Value": 454655864
+    },
+    {
+      "Key": "Microsoft.FSharp.Core.FSharpOption\u00601[Fsdb.Value\u002BValue]",
+      "Value": 442931296
+    },
+    {
+      "Key": "Microsoft.FSharp.Collections.FSharpList\u00601[Fsdb.Value\u002BValue]",
+      "Value": 408606160
+    },
+    {
+      "Key": "get_Items@124[Microsoft.FSharp.Core.FSharpOption\u00601[System.Tuple\u00602[Fsdb.RowId,Fsdb.Value\u002BValue[]]]]",
+      "Value": 401141488
+    },
+    {
+      "Key": "Microsoft.FSharp.Collections.FSharpList\u00601[System.String]",
+      "Value": 366154272
+    },
+    {
+      "Key": "eval@6604",
+      "Value": 355946368
+    },
+    {
+      "Key": "get_Indexed@223[Fsdb.Value\u002BValue[]]",
+      "Value": 330994608
+    },
+    {
+      "Key": "MultiElementAsyncLocalValueMap",
+      "Value": 273436512
+    },
+    {
+      "Key": "Microsoft.FSharp.Core.FSharpOption\u00601[System.Tuple\u00602[Microsoft.FSharp.Collections.FSharpList\u00601[Fsdb.Ast\u002BColumnDef],System.Int32]]",
+      "Value": 253499928
+    },
+    {
+      "Key": "Microsoft.FSharp.Core.FSharpOption\u00601[System.Int32]",
+      "Value": 236550408
+    },
+    {
+      "Key": "Microsoft.FSharp.Collections.FSharpSet\u00601[System.String]",
+      "Value": 226741040
+    },
+    {
+      "Key": "System-Collections-Generic-IEnumerable\u003C\u0027Value\u003E-GetEnumerator@1134[System.String,System.Tuple\u00602[Microsoft.FSharp.Collections.FSharpList\u00601[Fsdb.Ast\u002BColumnDef],System.Int32]]",
+      "Value": 213303880
+    },
+    {
+      "Key": "IndexKeyGroup",
+      "Value": 200200184
+    },
+    {
+      "Key": "Microsoft.FSharp.Core.FSharpOption\u00601[System.String]",
+      "Value": 194974712
+    },
+    {
+      "Key": "Microsoft.FSharp.Core.FSharpOption\u00601[System.Boolean]",
+      "Value": 190284712
+    },
+    {
+      "Key": "RangeLookupBounds\u00602[System.String,System.Tuple\u00602[Fsdb.Ast\u002BExpr,Fsdb.Value\u002BValue]]",
+      "Value": 189539152
+    },
+    {
+      "Key": "resolveColumn@1580",
+      "Value": 187616632
+    },
+    {
+      "Key": "Microsoft.FSharp.Collections.SetTree\u00601[System.String]",
+      "Value": 186767152
+    },
+    {
+      "Key": "localColumn@3975-1",
+      "Value": 184740720
+    },
+    {
+      "Key": "Microsoft.FSharp.Collections.FSharpList\u00601[System.Tuple\u00602[System.String,Fsdb.Value\u002BValue]]",
+      "Value": 176107528
+    },
+    {
+      "Key": "System.String",
+      "Value": 162575544
+    },
+    {
+      "Key": "Microsoft.FSharp.Collections.SetTreeNode\u00601[System.String]",
+      "Value": 162145744
+    },
+    {
+      "Key": "Microsoft.FSharp.Collections.FSharpList\u00601[System.Int32]",
+      "Value": 157558240
+    },
+    {
+      "Key": "Microsoft.FSharp.Collections.FSharpList\u00601[Fsdb.Storage\u002BIndexKeyGroup]",
+      "Value": 154361328
+    },
+    {
+      "Key": "Microsoft.FSharp.Collections.FSharpList\u00601[Fsdb.Executor\u002BRangeLookupBounds\u00602[System.String,System.Tuple\u00602[Fsdb.Ast\u002BExpr,Fsdb.Value\u002BValue]]]",
+      "Value": 154255488
+    },
+    {
+      "Key": "System.Tuple\u00602[System.String,Fsdb.Value\u002BValue]",
+      "Value": 149350184
+    },
+    {
+      "Key": "Microsoft.FSharp.Core.FSharpOption\u00601[Microsoft.FSharp.Collections.FSharpList\u00601[Fsdb.Ast\u002BExpr]]",
+      "Value": 134317256
+    },
+    {
+      "Key": "Value[]",
+      "Value": 132185872
+    },
+    {
+      "Key": "ListEnumerator\u00601[System.String]",
+      "Value": 129734072
+    },
+    {
+      "Key": "ListEnumerator\u00601[Fsdb.Ast\u002BColumnDef]",
+      "Value": 129521584
+    },
+    {
+      "Key": "Microsoft.FSharp.Collections.FSharpList\u00601[Microsoft.FSharp.Collections.FSharpList\u00601[System.Tuple\u00602[System.String,Fsdb.Value\u002BValue]]]",
+      "Value": 125791256
+    },
+    {
+      "Key": "choose@238[Fsdb.Value\u002BValue[],Fsdb.Engine.SystemCatalog\u002BView\u002BEntry]",
+      "Value": 125045728
+    },
+    {
+      "Key": "Microsoft.FSharp.Core.FSharpOption\u00601[Fsdb.Executor\u002BSubqueryScope]",
+      "Value": 124510520
+    },
+    {
+      "Key": "map@126[System.Tuple\u00602[Fsdb.RowId,Fsdb.Value\u002BValue[]],Fsdb.Value\u002BValue[]]",
+      "Value": 118754816
+    },
+    {
+      "Key": "Microsoft.FSharp.Core.FSharpOption\u00601[Fsdb.Ast\u002BColumnDef]",
+      "Value": 117155536
+    }
+  ],
+  "frames": [
+    {
+      "Key": "Fsdb.Executor.runTopLevelSelect(class Store,class Registry,class System.String,class SelectStmt)",
+      "Value": 24494815880
+    },
+    {
+      "Key": "Fsdb.Executor.runSelectStmtCore(class Store,class Registry,class System.String,class SelectStmt,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 24437036816
+    },
+    {
+      "Key": "Fsdb.Executor.runSelectStmt(class Store,class Registry,class System.String,class SelectStmt,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 24437036816
+    },
+    {
+      "Key": "Fsdb.Executor.runUnmergedSelectStmt(class Store,class Registry,class System.String,class SelectStmt,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 24423071728
+    },
+    {
+      "Key": "Fsdb.Executor\u002BrunArbitrary@15191-1.Invoke(class System.Collections.Generic.IEnumerable\u00601\u003Cclass Value[]\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Table\u003E,class SelectStmt)",
+      "Value": 24326171192
+    },
+    {
+      "Key": "Fsdb.Executor.runSelect(class Store,class Registry,class System.String,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,class Microsoft.FSharp.Collections.FSharpMap\u00602\u003Cclass System.String,class System.Tuple\u00602\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,int32\u003E\u003E,class System.Collections.Generic.IEnumerable\u00601\u003Cclass Value[]\u003E,class GroupInputOrder,class SelectStmt,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 24299734128
+    },
+    {
+      "Key": "Fsdb.Executor.streamLimited(bool,int32,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003C!!0,value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003C!!1,!!2\u003E\u003E,!!3\u003E\u003E,class System.Collections.Generic.IEnumerable\u00601\u003C!!0\u003E)",
+      "Value": 23537849296
+    },
+    {
+      "Key": "Fsdb.Executor\u002Bevaluate@24448-18.Invoke(class Projection)",
+      "Value": 23146617400
+    },
+    {
+      "Key": "Fsdb.Executor.evalExpr(class EvalContext,class Expr)",
+      "Value": 22813173880
+    },
+    {
+      "Key": "Fsdb.Executor.evalExprCore(class EvalContext,class Expr)",
+      "Value": 22807089144
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedCount(class EvalContext,class SelectStmt)",
+      "Value": 22692065384
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedSourceAccess(class Store,class Registry,class System.String,class FromItem,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 15940955408
+    },
+    {
+      "Key": "Fsdb.Executor.rangePreferredToEstimatedRef@18685(class Store,class Registry,class System.String,class FromItem,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E,class TableRef)",
+      "Value": 9414670832
+    },
+    {
+      "Key": "Fsdb.Executor.tryProjectedPhysicalRangeSelection(class IndexAccessPolicy,class Store,class PhysicalProjection,class RangeLookupBounds\u00602\u003Cclass System.String,class Value\u003E)",
+      "Value": 4719372928
+    },
+    {
+      "Key": "Fsdb.Executor\u002BtryProjectedPhysicalCorrelatedRangePlan@17477.Invoke(class RangeLookupBounds\u00602\u003Cclass System.String,class Value\u003E)",
+      "Value": 4719372928
+    },
+    {
+      "Key": "Fsdb.Storage.exactProbeValue(class Store,class Table,int32,class Value)",
+      "Value": 3322888856
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedEqualityLookup(class Store,class Registry,class System.String,class TableRef,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 3315226888
+    },
+    {
+      "Key": "Fsdb.Storage.exactRangeProbeValue(class Store,class Table,int32,class Value)",
+      "Value": 3285152192
+    },
+    {
+      "Key": "Fsdb.Storage.normalizeBoundValue@6310(class Store,class Table,class IndexProbeValues,bool,int32,class SingleColumnKeyGroup,class Value)",
+      "Value": 3285152192
+    },
+    {
+      "Key": "Fsdb.Executor.tryStoredEqualityMatchLookupWhere(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass System.String,bool\u003E,class Store,class Table,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass System.Tuple\u00602\u003Cclass System.String,class Value\u003E\u003E)",
+      "Value": 2808969232
+    },
+    {
+      "Key": "Fsdb.Executor\u002BevalPaired@24568.Invoke(class Value[])",
+      "Value": 2394071400
+    },
+    {
+      "Key": "Fsdb.Executor.withTriggerSessionExecutor(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass TriggerSessionExecution,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass TriggerSessionStatement,class QueryResult\u003E\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 2157848512
+    },
+    {
+      "Key": "Fsdb.Executor\u002Bevaluate@11621-11.Invoke(class Expr,class Value[])",
+      "Value": 2009345280
+    },
+    {
+      "Key": "Fsdb.Executor.withGroupConcatMaxLen(int32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 1984684320
+    },
+    {
+      "Key": "Fsdb.Executor.withCteRecursionDepth(int64,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 1984577720
+    },
+    {
+      "Key": "Fsdb.Executor.withSynchronousVariableContext(class VariableContext,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 1965922464
+    },
+    {
+      "Key": "Fsdb.Executor\u002BwithSynchronousVariableContext@1057[System.__Canon].Invoke(class Microsoft.FSharp.Core.Unit)",
+      "Value": 1965815864
+    },
+    {
+      "Key": "Fsdb.Executor.withCommittedFullTextStore(class Store,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 1926902480
+    },
+    {
+      "Key": "Fsdb.Executor.withSynchronousFunctionDatabase(class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.String\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 1815083280
+    },
+    {
+      "Key": "Fsdb.Storage.tryEqualityLookupForMatch(class Store,class Table,class EqualityIndexMatch,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Value\u003E)",
+      "Value": 1786763232
+    },
+    {
+      "Key": "Fsdb.Executor.tryProjectedPhysicalCorrelatedRangePlan(class Store,class Registry,class System.String,class FromItem,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 1643171624
+    },
+    {
+      "Key": "Fsdb.Executor.tryStoredViewDefinition(class Store,class System.String,class System.String)",
+      "Value": 1641995440
+    },
+    {
+      "Key": "Fsdb.Storage.traverse(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003C!!0,value class Microsoft.FSharp.Core.FSharpResult\u00602\u003C!!1,!!2\u003E\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003C!!0\u003E)",
+      "Value": 1381779152
+    },
+    {
+      "Key": "Fsdb.Executor.projectRow@24445(class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],class EvalContext\u003E,bool,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Projection\u003E,class Microsoft.FSharp.Core.FSharpRef\u00601\u003Cint32\u003E,class Value[])",
+      "Value": 1355338760
+    },
+    {
+      "Key": "Fsdb.Executor.correlatedRangeBounds(class Store,class PhysicalProjection,class CorrelatedProbeSource,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 1338819096
+    },
+    {
+      "Key": "Fsdb.Executor.evaluate@24446-7(class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],class EvalContext\u003E,class Value[],class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Projection\u003E,class Microsoft.FSharp.Core.Unit)",
+      "Value": 1258010920
+    },
+    {
+      "Key": "Fsdb.Executor.physicalFastPathTable(class Store,class System.String,class TableRef)",
+      "Value": 1235840352
+    },
+    {
+      "Key": "Fsdb.Executor.evalProjection(class EvalContext,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,class Projection)",
+      "Value": 1148530224
+    },
+    {
+      "Key": "Fsdb.Executor\u002BprepareWhereMatches@11728-3.Invoke(class Value[])",
+      "Value": 1083503080
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedProbeEqualityPredicate(class CorrelatedProbeSource,class EvalContext,class Expr)",
+      "Value": 1062081160
+    },
+    {
+      "Key": "Fsdb.Executor.prepareWhereMatches(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],class EvalContext\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E)",
+      "Value": 1032972472
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedEqualityCount(class EvalContext,class FromItem,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E)",
+      "Value": 926052896
+    },
+    {
+      "Key": "Fsdb.Storage.indexKeyGroups(class Table)",
+      "Value": 885857040
+    },
+    {
+      "Key": "Fsdb.Storage.rangeKeyGroups(class Table)",
+      "Value": 871681928
+    },
+    {
+      "Key": "Fsdb.Executor\u002BoptionalConjuncts@5362-1.Invoke(class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E)",
+      "Value": 825521592
+    },
+    {
+      "Key": "Fsdb.Executor.correlatedProbeSource(class System.String,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E)",
+      "Value": 811991152
+    },
+    {
+      "Key": "Fsdb.Executor.collectClassifiedRangeBounds(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003C!!0,!!1\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Expr,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass RangeLookupBounds\u00602\u003C!!0,!!2\u003E\u003E\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E)",
+      "Value": 791735584
+    },
+    {
+      "Key": "Fsdb.Executor.correlatedProbeEqualities(class CorrelatedProbeSource,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 760289232
+    },
+    {
+      "Key": "Fsdb.Executor.lookup@3970(class System.String,class System.String,class EvalContext)",
+      "Value": 741843648
+    },
+    {
+      "Key": "Fsdb.Executor.resolveQualifiedCol(class EvalContext,class System.String,class System.String)",
+      "Value": 741843648
+    },
+    {
+      "Key": "Fsdb.Storage\u002BsecondaryKeyGroups@2839.Invoke(class IndexDef)",
+      "Value": 733839832
+    },
+    {
+      "Key": "Fsdb.Executor.tryEqualityPredicate(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Expr,class Microsoft.FSharp.Core.FSharpOption\u00601\u003C!!0\u003E\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Expr,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Value\u003E\u003E,class Expr)",
+      "Value": 703040936
+    },
+    {
+      "Key": "Fsdb.Executor.contextFactory(class Store,class Registry,class System.String,class Microsoft.FSharp.Collections.FSharpMap\u00602\u003Cclass System.String,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cint32\u003E\u003E,class Microsoft.FSharp.Collections.FSharpMap\u00602\u003Cclass System.String,class System.Tuple\u00602\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,int32\u003E\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 676265616
+    },
+    {
+      "Key": "Fsdb.Executor.columnIndexOf(class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E)",
+      "Value": 638649728
+    },
+    {
+      "Key": "Fsdb.Executor\u002BcontextFactory@3866.Invoke(class Value[])",
+      "Value": 609335616
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedOuterValue(class CorrelatedProbeSource,class EvalContext,class Expr)",
+      "Value": 596865168
+    },
+    {
+      "Key": "Fsdb.Executor.tryAllCorrelatedCountEqualities(class CorrelatedProbeSource,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 536846752
+    },
+    {
+      "Key": "Fsdb.Executor.conjuncts(class Expr)",
+      "Value": 447089104
+    },
+    {
+      "Key": "Fsdb.Executor\u002BtryCorrelatedOuterScope@16159.Invoke(class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass SubqueryScope\u003E,class Expr)",
+      "Value": 361594232
+    },
+    {
+      "Key": "Fsdb.Executor.bind@18971-3(class CorrelatedProbeSource,class EvalContext,class Expr,class Expr)",
+      "Value": 346349848
+    },
+    {
+      "Key": "Fsdb.Executor.executeAs(class Store,class Registry,class System.String,int64,int64,bool,class Account,class Statement)",
+      "Value": 337468440
+    },
+    {
+      "Key": "Fsdb.Executor.rangePredicatesFor(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Expr,class Microsoft.FSharp.Core.FSharpOption\u00601\u003C!!0\u003E\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Expr,class Microsoft.FSharp.Core.FSharpOption\u00601\u003C!!1\u003E\u003E,class Expr)",
+      "Value": 312451712
+    },
+    {
+      "Key": "Fsdb.Storage\u002BresolveKeyColumn@2782.Invoke(class IndexColumn)",
+      "Value": 295069304
+    },
+    {
+      "Key": "Fsdb.Storage\u002BinsertRowsPreparedCore@9856-1.Invoke(class Microsoft.FSharp.Core.Unit)",
+      "Value": 294932840
+    },
+    {
+      "Key": "Fsdb.Storage.captureIndexExpressionError(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,value class Microsoft.FSharp.Core.FSharpResult\u00602\u003C!!0,class StorageError\u003E\u003E)",
+      "Value": 294932840
+    },
+    {
+      "Key": "Fsdb.Storage\u002BinsertRowsPreparedCore@9856.Invoke(class Microsoft.FSharp.Core.Unit)",
+      "Value": 294932840
+    },
+    {
+      "Key": "Fsdb.Storage.withPermissiveIndexExpressions(bool,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 294932840
+    },
+    {
+      "Key": "Fsdb.Storage.insertRowsPreparedCore(bool,class Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E,class Store,class System.String,class System.String,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass System.String\u003E\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Value\u003E\u003E)",
+      "Value": 294932840
+    },
+    {
+      "Key": "Fsdb.Storage.insertRowsPreparedWithOrdinal(class Store,class System.String,class System.String,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass System.String\u003E\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Value\u003E\u003E,class Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E)",
+      "Value": 294932840
+    },
+    {
+      "Key": "Fsdb.Executor.insertPreparedRows@29511(class Store,class System.String,class System.String,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass System.String\u003E\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Value\u003E\u003E,class Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E,bool)",
+      "Value": 294932840
+    },
+    {
+      "Key": "Fsdb.Executor\u002BexecuteAs@31674-22.Invoke(class Store)",
+      "Value": 294932840
+    },
+    {
+      "Key": "Fsdb.Executor.finishInsert@29546(class Store,class Registry,class System.Tuple\u00602\u003Cint64,int64\u003E,bool,int64,int64,class System.String,class System.String,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Store,value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass InsertOutcome,class StorageError\u003E\u003E)",
+      "Value": 294932840
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedEqualityPredicate(class CorrelatedProbeSource,class EvalContext)",
+      "Value": 271198088
+    },
+    {
+      "Key": "Fsdb.Storage.trySecondaryOrderSliceInTable(class Store,class Table,class System.String,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass IndexTransform\u003E,class IndexProbeValues,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003Cclass Value,bool\u003E\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003Cclass Value,bool\u003E\u003E,bool,class DecimalDoubleRangeCut,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass System.String,bool\u003E)",
+      "Value": 248275656
+    },
+    {
+      "Key": "Fsdb.Storage.trySecondaryRangeLookupInTableWith(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass System.String,bool\u003E,class Store,class Table,class System.String,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003Cclass Value,bool\u003E\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003Cclass Value,bool\u003E\u003E)",
+      "Value": 248275656
+    },
+    {
+      "Key": "Fsdb.Storage.encodeEqualityValues(class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cint32\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Value\u003E)",
+      "Value": 239103464
+    },
+    {
+      "Key": "Fsdb.Executor.loop@5347(class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Expr\u003E,class Expr)",
+      "Value": 227063408
+    },
+    {
+      "Key": "Fsdb.Executor\u002BrunSelect@24484-13.Invoke(class Microsoft.FSharp.Core.Unit)",
+      "Value": 212243976
+    },
+    {
+      "Key": "Fsdb.Executor\u002BrunSelect@24485-14.Invoke(class Microsoft.FSharp.Core.Unit)",
+      "Value": 206167496
+    },
+    {
+      "Key": "Fsdb.Executor.orderCorrelatedRangePredicates(class CorrelatedSourceCandidate,class Expr)",
+      "Value": 204355856
+    }
+  ],
+  "leaves": [
+    {
+      "Key": "Fsdb.Storage.exactProbeValue(class Store,class Table,int32,class Value)",
+      "Value": 3219270928
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedSourceAccess(class Store,class Registry,class System.String,class FromItem,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 2121267736
+    },
+    {
+      "Key": "Fsdb.Executor.tryStoredViewDefinition(class Store,class System.String,class System.String)",
+      "Value": 1638477640
+    },
+    {
+      "Key": "Fsdb.Storage.tryEqualityLookupForMatch(class Store,class Table,class EqualityIndexMatch,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Value\u003E)",
+      "Value": 1148536896
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedCount(class EvalContext,class SelectStmt)",
+      "Value": 1047472024
+    },
+    {
+      "Key": "Fsdb.Executor.correlatedProbeSource(class System.String,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E)",
+      "Value": 811991152
+    },
+    {
+      "Key": "Fsdb.Executor.tryStoredEqualityMatchLookupWhere(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass System.String,bool\u003E,class Store,class Table,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass System.Tuple\u00602\u003Cclass System.String,class Value\u003E\u003E)",
+      "Value": 801219360
+    },
+    {
+      "Key": "Fsdb.Executor.lookup@3970(class System.String,class System.String,class EvalContext)",
+      "Value": 741843648
+    },
+    {
+      "Key": "Fsdb.Executor.contextFactory(class Store,class Registry,class System.String,class Microsoft.FSharp.Collections.FSharpMap\u00602\u003Cclass System.String,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cint32\u003E\u003E,class Microsoft.FSharp.Collections.FSharpMap\u00602\u003Cclass System.String,class System.Tuple\u00602\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,int32\u003E\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 676265616
+    },
+    {
+      "Key": "Fsdb.Executor\u002BcontextFactory@3866.Invoke(class Value[])",
+      "Value": 609335616
+    },
+    {
+      "Key": "Fsdb.Executor.columnIndexOf(class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E)",
+      "Value": 489620848
+    },
+    {
+      "Key": "Fsdb.Executor\u002BoptionalConjuncts@5362-1.Invoke(class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E)",
+      "Value": 476721312
+    },
+    {
+      "Key": "Fsdb.Executor.streamLimited(bool,int32,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003C!!0,value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003C!!1,!!2\u003E\u003E,!!3\u003E\u003E,class System.Collections.Generic.IEnumerable\u00601\u003C!!0\u003E)",
+      "Value": 449647400
+    },
+    {
+      "Key": "Fsdb.Executor.evalExprCore(class EvalContext,class Expr)",
+      "Value": 431741136
+    },
+    {
+      "Key": "Fsdb.Storage\u002BsecondaryKeyGroups@2839.Invoke(class IndexDef)",
+      "Value": 427259448
+    },
+    {
+      "Key": "Fsdb.Executor.prepareWhereMatches(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],class EvalContext\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E)",
+      "Value": 423102456
+    },
+    {
+      "Key": "Fsdb.Executor\u002Bevaluate@11621-11.Invoke(class Expr,class Value[])",
+      "Value": 383662976
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedEqualityLookup(class Store,class Registry,class System.String,class TableRef,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 361914896
+    },
+    {
+      "Key": "Fsdb.Executor\u002BtryCorrelatedOuterScope@16159.Invoke(class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass SubqueryScope\u003E,class Expr)",
+      "Value": 361594232
+    },
+    {
+      "Key": "Fsdb.Executor.tryProjectedPhysicalRangeSelection(class IndexAccessPolicy,class Store,class PhysicalProjection,class RangeLookupBounds\u00602\u003Cclass System.String,class Value\u003E)",
+      "Value": 357223496
+    },
+    {
+      "Key": "Fsdb.Executor.correlatedRangeBounds(class Store,class PhysicalProjection,class CorrelatedProbeSource,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 349761656
+    },
+    {
+      "Key": "Fsdb.Executor\u002Bevaluate@24448-18.Invoke(class Projection)",
+      "Value": 324177856
+    },
+    {
+      "Key": "Fsdb.Storage\u002BresolveKeyColumn@2782.Invoke(class IndexColumn)",
+      "Value": 293153192
+    },
+    {
+      "Key": "Fsdb.Executor.rangePredicatesFor(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Expr,class Microsoft.FSharp.Core.FSharpOption\u00601\u003C!!0\u003E\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Expr,class Microsoft.FSharp.Core.FSharpOption\u00601\u003C!!1\u003E\u003E,class Expr)",
+      "Value": 285907704
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedEqualityPredicate(class CorrelatedProbeSource,class EvalContext)",
+      "Value": 271198088
+    },
+    {
+      "Key": "Fsdb.Executor.collectClassifiedRangeBounds(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003C!!0,!!1\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Expr,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass RangeLookupBounds\u00602\u003C!!0,!!2\u003E\u003E\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E)",
+      "Value": 239322328
+    },
+    {
+      "Key": "Fsdb.Executor.loop@5347(class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Expr\u003E,class Expr)",
+      "Value": 227063408
+    },
+    {
+      "Key": "Fsdb.Executor.conjuncts(class Expr)",
+      "Value": 220025696
+    },
+    {
+      "Key": "Fsdb.Executor.evalExprCore$cont@6985-3(class EvalContext,class Expr,class Expr,class Expr,class Value,class Value,value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value,class System.Tuple\u00602\u003Cint32,class System.String\u003E\u003E,class Microsoft.FSharp.Core.Unit)",
+      "Value": 186127232
+    },
+    {
+      "Key": "Fsdb.Storage.encodeEqualityValues(class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cint32\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Value\u003E)",
+      "Value": 184740288
+    },
+    {
+      "Key": "Fsdb.Executor\u002BcorrelatedRangeBounds@16539.Invoke(class RangeLookupBounds\u00602\u003Cclass System.String,class System.Tuple\u00602\u003Cclass Expr,class Value\u003E\u003E)",
+      "Value": 175361544
+    },
+    {
+      "Key": "Fsdb.Executor.rangePreferredToEstimatedRef@18685(class Store,class Registry,class System.String,class FromItem,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E,class TableRef)",
+      "Value": 174188232
+    },
+    {
+      "Key": "Fsdb.Executor.isLiteralConstantExpression(class Registry,class Expr)",
+      "Value": 162034640
+    },
+    {
+      "Key": "Fsdb.Executor.physicalFastPathTable(class Store,class System.String,class TableRef)",
+      "Value": 160222760
+    },
+    {
+      "Key": "Fsdb.Executor.tryColumnDefForExpr(class EvalContext,class Expr)",
+      "Value": 152654848
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedOuterValue(class CorrelatedProbeSource,class EvalContext,class Expr)",
+      "Value": 149135840
+    },
+    {
+      "Key": "Fsdb.Storage.trySingleColumnKeyGroup(class IndexKeyGroup)",
+      "Value": 127601760
+    },
+    {
+      "Key": "Fsdb.Executor.tryDirectColumnForExpr(class EvalContext,class Expr)",
+      "Value": 124617584
+    },
+    {
+      "Key": "Fsdb.Executor.typesOf@24512(class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass ColumnMetadata\u003E\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass System.String\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Value[]\u003E)",
+      "Value": 123765640
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedEqualityCount(class EvalContext,class FromItem,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E)",
+      "Value": 123551720
+    }
+  ],
+  "asyncFrames": [
+    {
+      "Key": "Fsdb.Executor.runTopLevelSelect(class Store,class Registry,class System.String,class SelectStmt)",
+      "Value": 2800325152
+    },
+    {
+      "Key": "Fsdb.Executor.runUnmergedSelectStmt(class Store,class Registry,class System.String,class SelectStmt,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 2798193024
+    },
+    {
+      "Key": "Fsdb.Executor.runSelectStmtCore(class Store,class Registry,class System.String,class SelectStmt,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 2798193024
+    },
+    {
+      "Key": "Fsdb.Executor.runSelectStmt(class Store,class Registry,class System.String,class SelectStmt,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 2798193024
+    },
+    {
+      "Key": "Fsdb.Executor.runSelect(class Store,class Registry,class System.String,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,class Microsoft.FSharp.Collections.FSharpMap\u00602\u003Cclass System.String,class System.Tuple\u00602\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,int32\u003E\u003E,class System.Collections.Generic.IEnumerable\u00601\u003Cclass Value[]\u003E,class GroupInputOrder,class SelectStmt,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 2793822296
+    },
+    {
+      "Key": "Fsdb.Executor\u002BrunArbitrary@15191-1.Invoke(class System.Collections.Generic.IEnumerable\u00601\u003Cclass Value[]\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Table\u003E,class SelectStmt)",
+      "Value": 2793822296
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedCount(class EvalContext,class SelectStmt)",
+      "Value": 2767171880
+    },
+    {
+      "Key": "Fsdb.Executor.evalExprCore(class EvalContext,class Expr)",
+      "Value": 2767171880
+    },
+    {
+      "Key": "Fsdb.Executor.evalExpr(class EvalContext,class Expr)",
+      "Value": 2767171880
+    },
+    {
+      "Key": "Fsdb.Executor\u002Bevaluate@24448-18.Invoke(class Projection)",
+      "Value": 2767171880
+    },
+    {
+      "Key": "Fsdb.Executor.streamLimited(bool,int32,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003C!!0,value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003C!!1,!!2\u003E\u003E,!!3\u003E\u003E,class System.Collections.Generic.IEnumerable\u00601\u003C!!0\u003E)",
+      "Value": 2767171880
+    },
+    {
+      "Key": "Fsdb.Storage.exactProbeValue(class Store,class Table,int32,class Value)",
+      "Value": 2356007200
+    },
+    {
+      "Key": "Fsdb.Storage.exactRangeProbeValue(class Store,class Table,int32,class Value)",
+      "Value": 2356007200
+    },
+    {
+      "Key": "Fsdb.Storage.normalizeBoundValue@6310(class Store,class Table,class IndexProbeValues,bool,int32,class SingleColumnKeyGroup,class Value)",
+      "Value": 2356007200
+    },
+    {
+      "Key": "Fsdb.Executor.tryProjectedPhysicalRangeSelection(class IndexAccessPolicy,class Store,class PhysicalProjection,class RangeLookupBounds\u00602\u003Cclass System.String,class Value\u003E)",
+      "Value": 2356007200
+    },
+    {
+      "Key": "Fsdb.Executor\u002BtryProjectedPhysicalCorrelatedRangePlan@17477.Invoke(class RangeLookupBounds\u00602\u003Cclass System.String,class Value\u003E)",
+      "Value": 2356007200
+    },
+    {
+      "Key": "Fsdb.Executor.rangePreferredToEstimatedRef@18685(class Store,class Registry,class System.String,class FromItem,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E,class TableRef)",
+      "Value": 2356007200
+    },
+    {
+      "Key": "Fsdb.Executor.tryCorrelatedSourceAccess(class Store,class Registry,class System.String,class FromItem,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Expr\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass EvalContext\u003E)",
+      "Value": 2356007200
+    },
+    {
+      "Key": "Fsdb.Executor\u002BevalPaired@24568.Invoke(class Value[])",
+      "Value": 273965568
+    },
+    {
+      "Key": "Fsdb.Executor.withTriggerSessionExecutor(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass TriggerSessionExecution,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass TriggerSessionStatement,class QueryResult\u003E\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 244641248
+    },
+    {
+      "Key": "Fsdb.Executor.withCteRecursionDepth(int64,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 225030424
+    },
+    {
+      "Key": "Fsdb.Executor.withGroupConcatMaxLen(int32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 225030424
+    },
+    {
+      "Key": "Fsdb.Executor\u002BwithSynchronousVariableContext@1057[System.__Canon].Invoke(class Microsoft.FSharp.Core.Unit)",
+      "Value": 222578624
+    },
+    {
+      "Key": "Fsdb.Executor.withSynchronousVariableContext(class VariableContext,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 222578624
+    },
+    {
+      "Key": "Fsdb.Executor.withCommittedFullTextStore(class Store,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 218417648
+    },
+    {
+      "Key": "Fsdb.Executor.withSynchronousFunctionDatabase(class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.String\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 203919784
+    },
+    {
+      "Key": "Fsdb.Storage.traverse(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003C!!0,value class Microsoft.FSharp.Core.FSharpResult\u00602\u003C!!1,!!2\u003E\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003C!!0\u003E)",
+      "Value": 175789208
+    },
+    {
+      "Key": "Fsdb.Executor.projectRow@24445(class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],class EvalContext\u003E,bool,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Projection\u003E,class Microsoft.FSharp.Core.FSharpRef\u00601\u003Cint32\u003E,class Value[])",
+      "Value": 152013592
+    },
+    {
+      "Key": "Fsdb.Executor.evaluate@24446-7(class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],class EvalContext\u003E,class Value[],class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Projection\u003E,class Microsoft.FSharp.Core.Unit)",
+      "Value": 141460192
+    },
+    {
+      "Key": "Fsdb.Executor.evalProjection(class EvalContext,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass ColumnDef\u003E,class Projection)",
+      "Value": 130480224
+    },
+    {
+      "Key": "Fsdb.Storage.normalizeBound@6323(class Store,class Table,class IndexProbeValues,bool,class DecimalDoubleRangeCut,int32,class SingleColumnKeyGroup,bool,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003Cclass Value,!!0\u003E\u003E)",
+      "Value": 126002936
+    },
+    {
+      "Key": "Fsdb.Storage.trySecondaryOrderSliceInTable(class Store,class Table,class System.String,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass IndexTransform\u003E,class IndexProbeValues,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003Cclass Value,bool\u003E\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003Cclass Value,bool\u003E\u003E,bool,class DecimalDoubleRangeCut,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass System.String,bool\u003E)",
+      "Value": 126002936
+    },
+    {
+      "Key": "Fsdb.Storage.trySecondaryRangeLookupInTableWith(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass System.String,bool\u003E,class Store,class Table,class System.String,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003Cclass Value,bool\u003E\u003E,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass System.Tuple\u00602\u003Cclass Value,bool\u003E\u003E)",
+      "Value": 126002936
+    },
+    {
+      "Key": "Fsdb.Storage.captureIndexExpressionError(class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,value class Microsoft.FSharp.Core.FSharpResult\u00602\u003C!!0,class StorageError\u003E\u003E)",
+      "Value": 43701568
+    },
+    {
+      "Key": "Fsdb.Storage\u002BinsertRowsPreparedCore@9856-1.Invoke(class Microsoft.FSharp.Core.Unit)",
+      "Value": 43701568
+    },
+    {
+      "Key": "Fsdb.Storage\u002BinsertRowsPreparedCore@9856.Invoke(class Microsoft.FSharp.Core.Unit)",
+      "Value": 43701568
+    },
+    {
+      "Key": "Fsdb.Storage.withPermissiveIndexExpressions(bool,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Core.Unit,!!0\u003E)",
+      "Value": 43701568
+    },
+    {
+      "Key": "Fsdb.Storage.insertRowsPreparedCore(bool,class Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E,class Store,class System.String,class System.String,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass System.String\u003E\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Value\u003E\u003E)",
+      "Value": 43701568
+    },
+    {
+      "Key": "Fsdb.Storage.insertRowsPreparedWithOrdinal(class Store,class System.String,class System.String,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass System.String\u003E\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Value\u003E\u003E,class Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E)",
+      "Value": 43701568
+    },
+    {
+      "Key": "Fsdb.Executor.insertPreparedRows@29511(class Store,class System.String,class System.String,class Microsoft.FSharp.Core.FSharpOption\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass System.String\u003E\u003E,class Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Microsoft.FSharp.Collections.FSharpList\u00601\u003Cclass Value\u003E\u003E,class Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Microsoft.FSharp.Collections.FSharpSet\u00601\u003Cint32\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E\u003E,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cint32,class Microsoft.FSharp.Core.FSharpFunc\u00602\u003Cclass Value[],value class Microsoft.FSharp.Core.FSharpResult\u00602\u003Cclass Value[],class StorageError\u003E\u003E\u003E,bool)",
+      "Value": 43701568
+    }
+  ]
+}

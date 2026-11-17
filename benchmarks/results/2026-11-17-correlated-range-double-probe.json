@@ -1,0 +1,126 @@
+{
+  "before": "e66852e5",
+  "candidate": "skip coercion for finite signed DOUBLE without numeric display",
+  "samples": [
+    {
+      "repetition": 1,
+      "workload": "equality",
+      "revision": "before",
+      "queries": 32062,
+      "elapsed": 8.000756,
+      "allocated": 21194003448,
+      "queries_per_second": 4007.3713034118273,
+      "bytes_per_query": 661031.8585241096
+    },
+    {
+      "repetition": 1,
+      "workload": "equality",
+      "revision": "double_probe",
+      "queries": 32547,
+      "elapsed": 8.000163,
+      "allocated": 21434452232,
+      "queries_per_second": 4068.292108548288,
+      "bytes_per_query": 658569.2147356131
+    },
+    {
+      "repetition": 1,
+      "workload": "range",
+      "revision": "before",
+      "queries": 6522,
+      "elapsed": 8.000719,
+      "allocated": 21091323392,
+      "queries_per_second": 815.1767359908528,
+      "bytes_per_query": 3233873.5651640603
+    },
+    {
+      "repetition": 1,
+      "workload": "range",
+      "revision": "double_probe",
+      "queries": 6294,
+      "elapsed": 8.001552,
+      "allocated": 20381084184,
+      "queries_per_second": 786.5974001043797,
+      "bytes_per_query": 3238176.7054337463
+    },
+    {
+      "repetition": 2,
+      "workload": "equality",
+      "revision": "double_probe",
+      "queries": 32524,
+      "elapsed": 8.000142,
+      "allocated": 21419647288,
+      "queries_per_second": 4065.4278386558635,
+      "bytes_per_query": 658579.7345959906
+    },
+    {
+      "repetition": 2,
+      "workload": "equality",
+      "revision": "before",
+      "queries": 31491,
+      "elapsed": 8.000137,
+      "allocated": 20726422000,
+      "queries_per_second": 3936.3075907325083,
+      "bytes_per_query": 658169.6992791591
+    },
+    {
+      "repetition": 2,
+      "workload": "range",
+      "revision": "double_probe",
+      "queries": 6105,
+      "elapsed": 8.000432,
+      "allocated": 19765027984,
+      "queries_per_second": 763.0837934751523,
+      "bytes_per_query": 3237514.8212940213
+    },
+    {
+      "repetition": 2,
+      "workload": "range",
+      "revision": "before",
+      "queries": 6141,
+      "elapsed": 8.000773,
+      "allocated": 19929845920,
+      "queries_per_second": 767.5508354005294,
+      "bytes_per_query": 3245374.68164794
+    },
+    {
+      "repetition": 3,
+      "workload": "equality",
+      "revision": "before",
+      "queries": 31650,
+      "elapsed": 8.000014,
+      "allocated": 20759775472,
+      "queries_per_second": 3956.2430765746158,
+      "bytes_per_query": 655917.0765244865
+    },
+    {
+      "repetition": 3,
+      "workload": "equality",
+      "revision": "double_probe",
+      "queries": 31262,
+      "elapsed": 8.00012,
+      "allocated": 20667506672,
+      "queries_per_second": 3907.69138462923,
+      "bytes_per_query": 661106.3486661122
+    },
+    {
+      "repetition": 3,
+      "workload": "range",
+      "revision": "before",
+      "queries": 6052,
+      "elapsed": 8.001549,
+      "allocated": 19636631184,
+      "queries_per_second": 756.3535510436791,
+      "bytes_per_query": 3244651.550561798
+    },
+    {
+      "repetition": 3,
+      "workload": "range",
+      "revision": "double_probe",
+      "queries": 6238,
+      "elapsed": 8.000583,
+      "allocated": 20224315808,
+      "queries_per_second": 779.6931798595177,
+      "bytes_per_query": 3242115.3908303943
+    }
+  ]
+}
