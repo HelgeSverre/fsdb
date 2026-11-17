@@ -1,0 +1,126 @@
+{
+  "parent": "bf57ee65",
+  "current": "d77873f4",
+  "samples": [
+    {
+      "repetition": 1,
+      "workload": "equality",
+      "revision": "parent",
+      "queries": 31555,
+      "elapsed": 8.000136,
+      "allocated": 20867578504,
+      "queries_per_second": 3944.3079467649054,
+      "bytes_per_query": 661308.1446363493
+    },
+    {
+      "repetition": 1,
+      "workload": "equality",
+      "revision": "current",
+      "queries": 31889,
+      "elapsed": 8.000032,
+      "allocated": 21066120776,
+      "queries_per_second": 3986.1090555637784,
+      "bytes_per_query": 660607.7574085108
+    },
+    {
+      "repetition": 1,
+      "workload": "range",
+      "revision": "parent",
+      "queries": 9573,
+      "elapsed": 8.000571,
+      "allocated": 19330436920,
+      "queries_per_second": 1196.539596986265,
+      "bytes_per_query": 2019266.3658205369
+    },
+    {
+      "repetition": 1,
+      "workload": "range",
+      "revision": "current",
+      "queries": 5886,
+      "elapsed": 8.000659,
+      "allocated": 19087888096,
+      "queries_per_second": 735.6893975858738,
+      "bytes_per_query": 3242930.3594971118
+    },
+    {
+      "repetition": 2,
+      "workload": "equality",
+      "revision": "current",
+      "queries": 30453,
+      "elapsed": 8.000443,
+      "allocated": 20064693608,
+      "queries_per_second": 3806.4142198125774,
+      "bytes_per_query": 658874.1210389781
+    },
+    {
+      "repetition": 2,
+      "workload": "equality",
+      "revision": "parent",
+      "queries": 30255,
+      "elapsed": 8.000339,
+      "allocated": 20023288520,
+      "queries_per_second": 3781.7147498374757,
+      "bytes_per_query": 661817.5019005123
+    },
+    {
+      "repetition": 2,
+      "workload": "range",
+      "revision": "current",
+      "queries": 5846,
+      "elapsed": 8.00088,
+      "allocated": 18890356056,
+      "queries_per_second": 730.6696263411025,
+      "bytes_per_query": 3231330.1498460486
+    },
+    {
+      "repetition": 2,
+      "workload": "range",
+      "revision": "parent",
+      "queries": 9109,
+      "elapsed": 8.000469,
+      "allocated": 18399171208,
+      "queries_per_second": 1138.558252022475,
+      "bytes_per_query": 2019889.2532660007
+    },
+    {
+      "repetition": 3,
+      "workload": "equality",
+      "revision": "parent",
+      "queries": 30121,
+      "elapsed": 8.000121,
+      "allocated": 19825043600,
+      "queries_per_second": 3765.068053345693,
+      "bytes_per_query": 658180.1268218186
+    },
+    {
+      "repetition": 3,
+      "workload": "equality",
+      "revision": "current",
+      "queries": 30134,
+      "elapsed": 8.000205,
+      "allocated": 19914604888,
+      "queries_per_second": 3766.653479504588,
+      "bytes_per_query": 660868.2845954736
+    },
+    {
+      "repetition": 3,
+      "workload": "range",
+      "revision": "parent",
+      "queries": 9462,
+      "elapsed": 8.000806,
+      "allocated": 19115384080,
+      "queries_per_second": 1182.6308499418683,
+      "bytes_per_query": 2020226.5990276898
+    },
+    {
+      "repetition": 3,
+      "workload": "range",
+      "revision": "current",
+      "queries": 6142,
+      "elapsed": 8.000807,
+      "allocated": 19899291024,
+      "queries_per_second": 767.6725610304061,
+      "bytes_per_query": 3239871.5441224356
+    }
+  ]
+}
