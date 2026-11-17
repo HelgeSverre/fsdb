@@ -1747,7 +1747,8 @@ let tests =
                   "SELECT o.id,(SELECT COUNT(*) FROM inner_rows i WHERE i.owner_id=o.id AND i.k BETWEEN '12.5x' AND '13x') c FROM outer_rows o " + suffix
               for suffix, expectedRows, warnings in
                   [ "ORDER BY o.id", [ [ Some "1"; Some "1" ]; [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ], 14
-                    "WHERE o.id=2", [ [ Some "2"; Some "1" ] ], 6 ] do
+                    "WHERE o.id=2", [ [ Some "2"; Some "1" ] ], 6
+                    "WHERE o.id=9", [], 2 ] do
                   let current, result = handle session (query suffix)
                   Expect.equal result (ResultSet([ "id"; "c" ], expectedRows)) "pinned MySQL 8.4.11 counts"
                   Expect.equal current.DiagnosticsCount warnings "setup warns once and both bounds warn for each range candidate"
@@ -1757,6 +1758,10 @@ let tests =
               let session, _ = handle session "INSERT INTO inner_rows VALUES(9,12.75)"
               let extra, _ = handle session (query "ORDER BY o.id")
               Expect.equal extra.DiagnosticsCount 20 "an in-range candidate warns even when its owner never matches"
+              let session, _ = handle session "DELETE FROM outer_rows"
+              let empty, emptyResult = handle session (query "ORDER BY o.id")
+              Expect.equal emptyResult (ResultSet([ "id"; "c" ], [])) "an empty outer table returns no rows"
+              Expect.equal empty.DiagnosticsCount 2 "range setup remains observable without any outer row"
 
           testCase "scanned correlated BETWEEN retains per-outer conversion warnings"
           <| fun _ ->

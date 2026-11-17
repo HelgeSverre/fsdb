@@ -155,7 +155,18 @@ the remaining owner filter and emits setup diagnostics once per statement
 predicate. Stored equality lookups retain their existing priority.
 
 The regression also checks the ignored-index scan (six warnings) and an extra
-in-range row with an absent owner (twenty warnings). Setup with zero outer
-rows remains open: the correlated source still needs statement-level planning
-before row evaluation. Specialized physical intersections and broader scalar
-query shapes also remain outside this fix's verified scope.
+in-range row with an absent owner (twenty warnings).
+
+## Setup without outer rows
+
+Metadata probing now retains selected correlated range setups for statement
+completion. Executed subqueries emit setup once through the same statement
+memo, so completing the outer statement does not duplicate those warnings.
+The zero-matching-outer-row control now reports two warnings, matching the
+pinned oracle. The regression also covers an empty outer table. Candidate
+predicates are not evaluated to produce these two setup conditions.
+
+The LIMIT 0 path discards newly deferred range setups alongside its existing
+numeric-warning rollback. Specialized physical intersections and broader
+scalar query shapes remain outside this fix's verified scope; the selective
+fixture does not establish diagnostic parity for every possible index plan.

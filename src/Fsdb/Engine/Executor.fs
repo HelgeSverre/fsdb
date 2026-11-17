@@ -805,6 +805,7 @@ type private StatementMemo =
       DecorrelatedKeyCounts: Dictionary<SelectStmt, DecorrelatedKeyCounts option>
       CorrelatedNumericWarnings: Dictionary<Expr, CorrelatedNumericWarningState>
       CorrelatedRangeSetups: HashSet<Expr>
+      PendingCorrelatedRangeSetups: Dictionary<Expr, (TableRef * PhysicalRangeSelection) list>
       HavingCountSelects: Dictionary<SelectStmt, HavingCountSelects>
       CountColumnPresence: Dictionary<SelectStmt, Dictionary<string * Expr, bool>>
       InnerExistsProjections: Dictionary<SelectStmt, bool>
@@ -855,6 +856,7 @@ let private freshStatementMemo () =
       DecorrelatedKeyCounts = Dictionary<SelectStmt, DecorrelatedKeyCounts option>(HashIdentity.Reference)
       CorrelatedNumericWarnings = Dictionary<Expr, CorrelatedNumericWarningState>(HashIdentity.Reference)
       CorrelatedRangeSetups = HashSet<Expr>(HashIdentity.Reference)
+      PendingCorrelatedRangeSetups = Dictionary<Expr, (TableRef * PhysicalRangeSelection) list>(HashIdentity.Reference)
       HavingCountSelects = Dictionary<SelectStmt, HavingCountSelects>(HashIdentity.Reference)
       CountColumnPresence = Dictionary<SelectStmt, Dictionary<string * Expr, bool>>(HashIdentity.Reference)
       InnerExistsProjections = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
@@ -14724,11 +14726,22 @@ and private runSelectStmt
     let pendingBefore =
         if select.Limit.IsSome then Some(pendingCorrelatedNumericWarningCheckpoint ())
         else None
+    let rangeSetups = (currentStatementMemo ()).PendingCorrelatedRangeSetups
+    let rangesBefore =
+        if select.Limit.IsSome then Some(HashSet<Expr>(rangeSetups.Keys, HashIdentity.Reference))
+        else None
     let result = runSelectStmtCore store registry dbName select outer
     if hasZeroRowLimit select then
         pendingBefore |> Option.iter rollbackCorrelatedNumericWarnings
+        rangesBefore |> Option.iter (fun before ->
+            rangeSetups.Keys |> Seq.filter (before.Contains >> not) |> Seq.toList
+            |> List.iter (fun predicate -> rangeSetups.Remove predicate |> ignore))
     elif not metadataProbe.Value then
         flushCorrelatedNumericWarnings ()
+        if outer.IsNone then
+            for KeyValue(predicate, accesses) in rangeSetups do
+                reportCorrelatedRangeSetup predicate accesses
+            rangeSetups.Clear ()
     result
 
 and private runSelectStmtCore
@@ -18884,14 +18897,20 @@ and private tryCorrelatedSourceAccess
         |> chooseWithMembership
     | None, _ -> materializedLookup () |> chooseWithMembership
 
+and private reportCorrelatedRangeSetup predicate accesses =
+    if (currentStatementMemo ()).CorrelatedRangeSetups.Add predicate then
+        for table, access in accesses do
+            match access with
+            | SelectedPhysicalRange lookup -> reportTruncatedDoubleRangeSetup table predicate (RangeAccess lookup)
+            | EmptyPhysicalRange -> ()
+
 and private prepareCorrelatedRangeSelect select candidate =
     match select.Where with
-    | Some predicate when not metadataProbe.Value && not candidate.RangeAccesses.IsEmpty ->
-        if (currentStatementMemo ()).CorrelatedRangeSetups.Add predicate then
-            for table, access in candidate.RangeAccesses do
-                match access with
-                | SelectedPhysicalRange lookup -> reportTruncatedDoubleRangeSetup table predicate (RangeAccess lookup)
-                | EmptyPhysicalRange -> ()
+    | Some predicate when not (hasZeroRowLimit select) && not candidate.RangeAccesses.IsEmpty ->
+        if metadataProbe.Value then
+            (currentStatementMemo ()).PendingCorrelatedRangeSetups.[predicate] <- candidate.RangeAccesses
+        else
+            reportCorrelatedRangeSetup predicate candidate.RangeAccesses
         { select with Where = Some(orderCorrelatedRangePredicates candidate predicate) }
     | _ -> select
 

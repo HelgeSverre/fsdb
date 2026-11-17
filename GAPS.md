@@ -227,7 +227,7 @@ Focused MySQL 8.4.11 controls also confirm that `COUNT(DISTINCT nullable_col)`
 and a HAVING clause with two nullable count arguments retain their ordinary
 fallback rows and one conversion warning.
 [Correlated `BETWEEN` conversion warnings](torture/findings/2026-11-08-correlated-between-warning-cardinality.md)
-remain divergent when the `DOUBLE` column is indexed. The no-index
+now match for the audited selective indexed `DOUBLE` range. The no-index
 repeated-key nullable count now retains MySQL 8.4.11's six per-outer-row
 warnings by taking the ordinary correlated scan. An oracle follow-up
 identifies separate indexed range-setup and per-outer-row warnings; even an
@@ -236,7 +236,9 @@ empty outer result retains two indexed warnings. A selective direct DOUBLE
 range-setup plus candidate warning count. The audited selective correlated
 range now also reports setup once and evaluates range candidates before the
 owner filter, matching fourteen warnings for three outer rows and six for
-one; zero-outer-row setup warnings remain missing.
+one. Metadata planning retains two setup warnings when the outer query
+returns no rows. Broader correlated range shapes and specialized multi-index
+intersections still need diagnostic parity validation.
 [Correlated `ABS` equality over stable materialized sources](torture/findings/2026-10-15-correlated-materialized-abs.md)
 uses the two inverse signed keys for `TINYINT` through `INT`, including complete
 OR branches and exact `INT` minimum magnitude, while other operand types retain
