@@ -18703,10 +18703,9 @@ and private tryCorrelatedSourceAccess
                     not (QueryPlanner.shouldProbeIndexIntersection [ equalityLookup.CandidateCount; rows ])
                     && (rows < estimatedRows || (rows = 0 && estimatedRows = 0)))
                 |> Option.bind (fun (initialProjection, initialAccess) ->
-                    // Recheck the range after choosing it over the estimated ref
-                    // access, preserving diagnostics from both planning phases.
-                    tryProjectedPhysicalCorrelatedRangePlan store registry dbName source whereExpr outer
-                    |> Option.bind (projectCorrelatedRangeAccess store registry dbName)
+                    // Both analysis phases use the same immutable table snapshot
+                    // and bounds; reuse the selection while retaining diagnostics.
+                    projectCorrelatedRangeAccess store registry dbName (initialProjection, initialAccess)
                     |> Option.map (fun (table, access, (columns, rows)) ->
                         { SourceColumns = columns
                           SourceRows = rows

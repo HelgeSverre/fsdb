@@ -1,0 +1,9 @@
+{
+  "benchmark": "range 0 (ten warmup queries only)",
+  "selected_range_events": 1010,
+  "candidate_row_counts": [
+    2
+  ],
+  "setup_phases": 2,
+  "marker_removed_before_timing": true
+}

@@ -56,3 +56,8 @@ Validation: the full correctness gate passed all 3,954 tests. An expanded
 focused storage test also passed exact signed/unsigned/DECIMAL boundaries
 and conservative fallback for 2^53+1 and DECIMAL 0.1. No release-readiness
 claim follows from this checkpoint; the performance cost remains open.
+
+A subsequent [covered selection-reuse experiment](2026-11-17-eligible-range-reuse.md)
+reduced eligible-range allocations by 23.7% and improved median throughput
+33.8% against this corrected source revision. This recovers part of the
+successful-range execution cost, with both diagnostic phases retained.

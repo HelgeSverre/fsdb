@@ -63,3 +63,9 @@ This was a valid observation of no effect on the measured workload, but an
 uninformative test of the proposed mechanism. See the
 [numeric DOUBLE bound investigation](../../torture/findings/2026-11-17-numeric-double-range-bounds.md)
 for the storage-level regression and MySQL controls.
+
+The [covered eligible-range remeasurement](2026-11-17-eligible-range-reuse.md)
+retests this mechanism after numeric bound normalization. It confirms branch
+execution before timing and finds a substantial allocation and throughput
+improvement. This earlier rejected result applies only to the ineligible
+workload measured here.
