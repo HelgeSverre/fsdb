@@ -65,3 +65,41 @@ cost threshold, while retaining hint filtering and storage validation. This
 matches the existing forced-membership policy. The broad forced range is in
 the SQL replay and regression; the ordinary two-index optimizer setup counts
 remain a separate open issue.
+
+## Ordinary two-index optimizer trace
+
+Fresh pinned-oracle controls distinguish setup from execution:
+
+| Available indexes | Three outer rows | One outer row | Zero outer rows |
+| --- | ---: | ---: | ---: |
+| ix_k | 14 | 6 | 2 |
+| ix_k and ix_owner | 16 | 8 | 4 |
+
+The [two-index trace](2026-11-17-correlated-range-optimizer-trace.json)
+records an owner `ref` estimate of 34 rows with cost 4.15, compared with a
+range estimate of two rows and final access cost 1.16. It selects `ix_k`.
+The owner estimate agrees with the uniform average of 102 rows over three
+owner keys. FSDB's correlated shortcut instead probes the actual bound owner
+and immediately accepts a bucket with one or two rows. Thus EXPLAIN-like
+static range costing and per-row execution choice can disagree.
+
+The two-index trace contains two range analyses: one under `rows_estimation`
+and one under `attaching_conditions_to_tables` →
+`attached_conditions_computation` → `rechecking_index_usage`. Both choose
+the same `12.5 <= k <= 13` range. The
+[single-index trace](2026-11-17-correlated-single-range-optimizer-trace.json)
+has only the first analysis. Combined with the zero-outer-row counts, this
+supports the inference that the second analysis accounts for the extra pair
+of setup conversion conditions; the traces do not directly label warnings.
+
+The next implementation needs to compare statement-level estimated ref and
+range work, preserve the chosen access into execution, and represent the
+range recheck as a distinct setup phase. Adding two warnings merely because
+another index exists would not model this evidence.
+
+To collect these traces, enable `optimizer_trace`, execute the scalar query
+from the replay immediately after the relevant index setup, then read
+`TRACE` from `information_schema.optimizer_trace` immediately afterward.
+Do not insert `SHOW COUNT(*) WARNINGS`: that is expanded to a SELECT and
+replaces the trace with the warning-count query's trace. Warning cardinality
+controls were collected separately with tracing disabled.

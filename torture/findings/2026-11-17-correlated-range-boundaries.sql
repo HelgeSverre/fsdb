@@ -24,6 +24,12 @@ SELECT 'owner_index' AS audit_case;
 SELECT o.id,(SELECT COUNT(*) FROM inner_rows i  WHERE i.owner_id=o.id AND i.k BETWEEN '12.5x' AND '13x' ) c FROM outer_rows o ;
 SHOW COUNT(*) WARNINGS;
 
+SELECT 'owner_index_one_outer_row' AS audit_case;
+SELECT o.id,(SELECT COUNT(*) FROM inner_rows i WHERE i.owner_id=o.id AND i.k BETWEEN '12.5x' AND '13x') c FROM outer_rows o WHERE o.id=2;
+SHOW COUNT(*) WARNINGS;
+SELECT 'owner_index_zero_outer_rows' AS audit_case;
+SELECT o.id,(SELECT COUNT(*) FROM inner_rows i WHERE i.owner_id=o.id AND i.k BETWEEN '12.5x' AND '13x') c FROM outer_rows o WHERE o.id=9;
+SHOW COUNT(*) WARNINGS;
 SELECT 'forced_range' AS audit_case;
 SELECT o.id,(SELECT COUNT(*) FROM inner_rows i FORCE INDEX(ix_k) WHERE i.owner_id=o.id AND i.k BETWEEN '12.5x' AND '13x' ) c FROM outer_rows o ;
 SHOW COUNT(*) WARNINGS;

@@ -1,0 +1,428 @@
+{
+  "steps": [
+    {
+      "join_preparation": {
+        "select#": 1,
+        "steps": [
+          {
+            "join_preparation": {
+              "select#": 2,
+              "steps": [
+                {
+                  "expanded_query": "/* select#2 */ select count(0) from `inner_rows` `i` where ((`i`.`owner_id` = `o`.`id`) and (`i`.`k` between '12.5x' and '13x'))"
+                }
+              ]
+            }
+          },
+          {
+            "expanded_query": "/* select#1 */ select `o`.`id` AS `id`,(/* select#2 */ select count(0) from `inner_rows` `i` where ((`i`.`owner_id` = `o`.`id`) and (`i`.`k` between '12.5x' and '13x'))) AS `c` from `outer_rows` `o`"
+          }
+        ]
+      }
+    },
+    {
+      "join_optimization": {
+        "select#": 1,
+        "steps": [
+          {
+            "table_dependencies": [
+              {
+                "table": "`outer_rows` `o`",
+                "row_may_be_null": true,
+                "map_bit": 0,
+                "depends_on_map_bits": []
+              }
+            ]
+          },
+          {
+            "rows_estimation": [
+              {
+                "table": "`outer_rows` `o`",
+                "table_scan": {
+                  "rows": 3,
+                  "cost": 0.25
+                }
+              }
+            ]
+          },
+          {
+            "considered_execution_plans": [
+              {
+                "plan_prefix": [],
+                "table": "`outer_rows` `o`",
+                "best_access_path": {
+                  "considered_access_paths": [
+                    {
+                      "rows_to_scan": 3,
+                      "access_type": "scan",
+                      "resulting_rows": 3,
+                      "cost": 0.55,
+                      "chosen": true
+                    }
+                  ]
+                },
+                "condition_filtering_pct": 100,
+                "rows_for_plan": 3,
+                "cost_for_plan": 0.55,
+                "chosen": true
+              }
+            ]
+          },
+          {
+            "attaching_conditions_to_tables": {
+              "original_condition": null,
+              "attached_conditions_computation": [],
+              "attached_conditions_summary": [
+                {
+                  "table": "`outer_rows` `o`",
+                  "attached": null
+                }
+              ]
+            }
+          },
+          {
+            "finalizing_table_conditions": []
+          },
+          {
+            "refine_plan": [
+              {
+                "table": "`outer_rows` `o`"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "join_optimization": {
+        "select#": 2,
+        "steps": [
+          {
+            "condition_processing": {
+              "condition": "WHERE",
+              "original_condition": "((`i`.`owner_id` = `o`.`id`) and (`i`.`k` between '12.5x' and '13x'))",
+              "steps": [
+                {
+                  "transformation": "equality_propagation",
+                  "resulting_condition": "((`i`.`owner_id` = `o`.`id`) and (`i`.`k` between '12.5x' and '13x'))"
+                },
+                {
+                  "transformation": "constant_propagation",
+                  "resulting_condition": "((`i`.`owner_id` = `o`.`id`) and (`i`.`k` between '12.5x' and '13x'))"
+                },
+                {
+                  "transformation": "trivial_condition_removal",
+                  "resulting_condition": "((`i`.`owner_id` = `o`.`id`) and (`i`.`k` between '12.5x' and '13x'))"
+                }
+              ]
+            }
+          },
+          {
+            "substitute_generated_columns": {}
+          },
+          {
+            "table_dependencies": [
+              {
+                "table": "`inner_rows` `i`",
+                "row_may_be_null": false,
+                "map_bit": 0,
+                "depends_on_map_bits": []
+              }
+            ]
+          },
+          {
+            "ref_optimizer_key_uses": [
+              {
+                "table": "`inner_rows` `i`",
+                "field": "owner_id",
+                "equals": "`o`.`id`",
+                "null_rejecting": true
+              }
+            ]
+          },
+          {
+            "rows_estimation": [
+              {
+                "table": "`inner_rows` `i`",
+                "range_analysis": {
+                  "table_scan": {
+                    "rows": 102,
+                    "cost": 12.55
+                  },
+                  "potential_range_indexes": [
+                    {
+                      "index": "ix_k",
+                      "usable": true,
+                      "key_parts": [
+                        "k"
+                      ]
+                    },
+                    {
+                      "index": "ix_owner",
+                      "usable": false,
+                      "cause": "not_applicable"
+                    }
+                  ],
+                  "setup_range_conditions": [],
+                  "group_index_skip_scan": {
+                    "chosen": false,
+                    "cause": "not_group_by_or_distinct"
+                  },
+                  "skip_scan_range": {
+                    "potential_skip_scan_indexes": [
+                      {
+                        "index": "ix_k",
+                        "usable": false,
+                        "cause": "query_references_nonkey_column"
+                      }
+                    ]
+                  },
+                  "analyzing_range_alternatives": {
+                    "range_scan_alternatives": [
+                      {
+                        "index": "ix_k",
+                        "ranges": [
+                          "12.5 <= k <= 13"
+                        ],
+                        "index_dives_for_eq_ranges": true,
+                        "rowid_ordered": false,
+                        "using_mrr": false,
+                        "index_only": false,
+                        "in_memory": 1,
+                        "rows": 2,
+                        "cost": 0.96,
+                        "chosen": true
+                      }
+                    ],
+                    "analyzing_roworder_intersect": {
+                      "usable": false,
+                      "cause": "too_few_roworder_scans"
+                    }
+                  },
+                  "chosen_range_access_summary": {
+                    "range_access_plan": {
+                      "type": "range_scan",
+                      "index": "ix_k",
+                      "rows": 2,
+                      "ranges": [
+                        "12.5 <= k <= 13"
+                      ]
+                    },
+                    "rows_for_plan": 2,
+                    "cost_for_plan": 0.96,
+                    "chosen": true
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "considered_execution_plans": [
+              {
+                "plan_prefix": [],
+                "table": "`inner_rows` `i`",
+                "best_access_path": {
+                  "considered_access_paths": [
+                    {
+                      "access_type": "ref",
+                      "index": "ix_owner",
+                      "rows": 34,
+                      "cost": 4.15,
+                      "chosen": true
+                    },
+                    {
+                      "rows_to_scan": 2,
+                      "filtering_effect": [],
+                      "final_filtering_effect": 1,
+                      "access_type": "range",
+                      "range_details": {
+                        "used_index": "ix_k"
+                      },
+                      "resulting_rows": 2,
+                      "cost": 1.16,
+                      "chosen": true
+                    }
+                  ]
+                },
+                "condition_filtering_pct": 10,
+                "rows_for_plan": 0.2,
+                "cost_for_plan": 1.16,
+                "chosen": true
+              }
+            ]
+          },
+          {
+            "attaching_conditions_to_tables": {
+              "original_condition": "((`i`.`owner_id` = `o`.`id`) and (`i`.`k` between '12.5x' and '13x'))",
+              "attached_conditions_computation": [
+                {
+                  "table": "`inner_rows` `i`",
+                  "rechecking_index_usage": {
+                    "recheck_reason": "not_first_table",
+                    "range_analysis": {
+                      "table_scan": {
+                        "rows": 102,
+                        "cost": 12.55
+                      },
+                      "potential_range_indexes": [
+                        {
+                          "index": "ix_k",
+                          "usable": true,
+                          "key_parts": [
+                            "k"
+                          ]
+                        },
+                        {
+                          "index": "ix_owner",
+                          "usable": true,
+                          "key_parts": [
+                            "owner_id"
+                          ]
+                        }
+                      ],
+                      "setup_range_conditions": [],
+                      "group_index_skip_scan": {
+                        "chosen": false,
+                        "cause": "not_group_by_or_distinct"
+                      },
+                      "skip_scan_range": {
+                        "potential_skip_scan_indexes": [
+                          {
+                            "index": "ix_k",
+                            "usable": false,
+                            "cause": "query_references_nonkey_column"
+                          },
+                          {
+                            "index": "ix_owner",
+                            "usable": false,
+                            "cause": "query_references_nonkey_column"
+                          }
+                        ]
+                      },
+                      "analyzing_range_alternatives": {
+                        "range_scan_alternatives": [
+                          {
+                            "index": "ix_k",
+                            "ranges": [
+                              "12.5 <= k <= 13"
+                            ],
+                            "index_dives_for_eq_ranges": true,
+                            "rowid_ordered": false,
+                            "using_mrr": false,
+                            "index_only": false,
+                            "in_memory": 1,
+                            "rows": 2,
+                            "cost": 0.96,
+                            "chosen": true
+                          },
+                          {
+                            "index": "ix_owner",
+                            "chosen": false,
+                            "cause": "depends_on_unread_values"
+                          }
+                        ],
+                        "analyzing_roworder_intersect": {
+                          "usable": false,
+                          "cause": "too_few_roworder_scans"
+                        }
+                      },
+                      "chosen_range_access_summary": {
+                        "range_access_plan": {
+                          "type": "range_scan",
+                          "index": "ix_k",
+                          "rows": 2,
+                          "ranges": [
+                            "12.5 <= k <= 13"
+                          ]
+                        },
+                        "rows_for_plan": 2,
+                        "cost_for_plan": 0.96,
+                        "chosen": true
+                      }
+                    }
+                  }
+                }
+              ],
+              "attached_conditions_summary": [
+                {
+                  "table": "`inner_rows` `i`",
+                  "attached": "((`i`.`owner_id` = `o`.`id`) and (`i`.`k` between '12.5x' and '13x'))"
+                }
+              ]
+            }
+          },
+          {
+            "optimizing_distinct_group_by_order_by": {}
+          },
+          {
+            "finalizing_table_conditions": [
+              {
+                "table": "`inner_rows` `i`",
+                "original_table_condition": "((`i`.`owner_id` = `o`.`id`) and (`i`.`k` between '12.5x' and '13x'))",
+                "final_table_condition   ": "((`i`.`owner_id` = `o`.`id`) and (`i`.`k` between '12.5x' and '13x'))"
+              }
+            ]
+          },
+          {
+            "refine_plan": [
+              {
+                "table": "`inner_rows` `i`",
+                "pushed_index_condition": "(`i`.`k` between '12.5x' and '13x')",
+                "table_condition_attached": "(`i`.`owner_id` = `o`.`id`)"
+              }
+            ]
+          },
+          {
+            "considering_tmp_tables": []
+          }
+        ]
+      }
+    },
+    {
+      "join_execution": {
+        "select#": 1,
+        "steps": [
+          {
+            "subselect_execution": {
+              "select#": 2,
+              "steps": [
+                {
+                  "join_execution": {
+                    "select#": 2,
+                    "steps": []
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "subselect_execution": {
+              "select#": 2,
+              "steps": [
+                {
+                  "join_execution": {
+                    "select#": 2,
+                    "steps": []
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "subselect_execution": {
+              "select#": 2,
+              "steps": [
+                {
+                  "join_execution": {
+                    "select#": 2,
+                    "steps": []
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
