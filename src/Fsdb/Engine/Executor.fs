@@ -15330,7 +15330,7 @@ and private runUnlockedSelectStmt
                 if select.Limit.IsSome && select.OrderBy.IsEmpty then
                     None
                 else
-                    trySpatialLookup QualifiedColumn store dbName tref select.Where
+                    trySpatialLookup QualifiedColumn store registry dbName tref select.Where
                     |> Option.orElseWith (fun () -> tryQualifiedRangeLookup store registry dbName tref select.Where)
 
             match rangeLookup with
@@ -15885,7 +15885,7 @@ and private functionalRangeUsesStoredCollation
             (Col outputColumn.Name)
             bound)
 
-and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : SpatialLookupPredicate list =
+and private spatialLookupPredicates scope registry (tref: TableRef) whereExpr : SpatialLookupPredicate list =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
     let isGeometryTextConstructor (name: string) =
@@ -15893,7 +15893,7 @@ and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRe
         | "ST_GEOMFROMTEXT"
         | "ST_GEOMETRYFROMTEXT"
         | "GEOMFROMTEXT"
-        | "GEOMETRYFROMTEXT" -> true
+        | "GEOMETRYFROMTEXT" -> Functions.isUnmodifiedBuiltinScalar name registry
         | _ -> false
 
     let columnName = function
@@ -15901,16 +15901,26 @@ and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRe
         | QualifiedCol(qualifier, name) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
         | _ -> None
 
-    let geometry = function
-        | Lit(VGeometry value) -> Some value
-        | FuncCall(name, [ Lit(VString wkt) ]) when isGeometryTextConstructor name ->
-            tryGeometryFromText 0 wkt
-        | FuncCall(name, [ Lit(VString wkt); Lit(VInt srid) ])
-            when srid >= int64 System.Int32.MinValue
-                 && srid <= int64 System.Int32.MaxValue
-                 && isGeometryTextConstructor name ->
-            tryGeometryFromText (int32 srid) wkt
+    let geometryFromTextLiteral srid = function
+        | LiteralValue((VString _ | VEncodedString _) as value) ->
+            Value.toText value |> Option.bind (tryGeometryFromText srid)
         | _ -> None
+
+    let geometry expression =
+        let parsed =
+            match expression with
+            | LiteralValue(VGeometry value) -> Some value
+            | FuncCall(name, [ wkt ]) when isGeometryTextConstructor name ->
+                geometryFromTextLiteral 0 wkt
+            | FuncCall(name, [ wkt; Lit(VInt srid) ])
+                when 0L <= srid && srid <= int64 System.Int32.MaxValue && isGeometryTextConstructor name ->
+                geometryFromTextLiteral (int srid) wkt
+            | _ -> None
+
+        // The MBR builtin must still report errors for unknown or geographic SRSs.
+        parsed |> Option.filter (fun value ->
+            SpatialReferenceSystems.tryFind value.Srid
+            |> Option.exists (fun referenceSystem -> referenceSystem.SemiMajorAxis.IsNone))
 
     let predicate relation column value =
         Option.map2
@@ -15924,7 +15934,7 @@ and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRe
     whereExpr
     |> optionalConjuncts
     |> List.choose (function
-        | FuncCall(name, [ left; right ]) ->
+        | FuncCall(name, [ left; right ]) when Functions.isUnmodifiedBuiltinScalar name registry ->
             match name.ToUpperInvariant() with
             | "MBRINTERSECTS" ->
                 predicate SpatialIndex.Intersects left right
@@ -19144,12 +19154,13 @@ and private tryRangeAccess
 and private trySpatialAccessInTable
     (scope: ColumnReferenceScope)
     (store: Store)
+    (registry: Registry)
     (table: Table)
     (tref: TableRef)
     (whereExpr: Expr option)
     : Storage.SpatialLookup option =
     (if storedRowsMatchReadRows store table.Columns then
-         spatialLookupPredicates scope tref whereExpr
+         spatialLookupPredicates scope registry tref whereExpr
      else
          [])
     |> List.tryPick (fun predicate ->
@@ -19158,15 +19169,16 @@ and private trySpatialAccessInTable
 and private trySpatialAccess
     (scope: ColumnReferenceScope)
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     : Storage.SpatialLookup option =
     physicalFastPathTable store dbName tref
-    |> Option.bind (fun table -> trySpatialAccessInTable scope store table tref whereExpr)
+    |> Option.bind (fun table -> trySpatialAccessInTable scope store registry table tref whereExpr)
 
-and private trySpatialLookup scope store dbName tref whereExpr =
-    trySpatialAccess scope store dbName tref whereExpr
+and private trySpatialLookup scope store registry dbName tref whereExpr =
+    trySpatialAccess scope store registry dbName tref whereExpr
     |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows)
 
 and private physicalAccessCandidateCount = function
@@ -19321,7 +19333,7 @@ and private directPhysicalAccessCandidatesInTableWith
       |> Option.map EqualityAccess
       tryInAccessInTableWith policy store registry table tref whereExpr
       |> Option.map MembershipAccess
-      trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
+      trySpatialAccessInTable BareOrQualifiedColumn store registry table tref whereExpr
       |> Option.map SpatialAccess
       tryRangeAccessInTableWith policy BareOrQualifiedColumn store registry table tref whereExpr
       |> Option.map RangeAccess ]

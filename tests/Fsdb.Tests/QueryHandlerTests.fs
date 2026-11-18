@@ -1770,6 +1770,24 @@ let tests =
                       [ Some "a"; Some "b"; Some "c" ] "grouped sources share the query block"
               | other -> failtestf "expected grouped join plan: %A" other
 
+          testCase "spatial queries use the index for connection text literals"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE places (id INT PRIMARY KEY, location POINT NOT NULL SRID 0, SPATIAL KEY sx_places_location (location))"
+                        "INSERT INTO places VALUES (1,ST_GeomFromText('POINT(1 1)',0)),(2,ST_GeomFromText('POINT(2 2)',0)),(9,ST_GeomFromText('POINT(9 9)',0))" ]
+              let where = " WHERE MBRINTERSECTS(location, ST_GeomFromText('POLYGON((0 0,3 0,3 3,0 3,0 0))',0))"
+              let query = "SELECT id FROM places" + where
+              let scan = "SELECT id FROM places IGNORE INDEX (sx_places_location)" + where
+              for charset in [ "utf8mb4"; "utf8mb3" ] do
+                  TestSupport.Sql.expectOk (run ("SET NAMES " + charset)) charset
+                  let plan = run ("EXPLAIN " + query) |> TestSupport.Sql.explainRow
+                  Expect.equal plan.AccessType (Some "range") (charset + " access type")
+                  Expect.equal plan.Key (Some "sx_places_location") (charset + " spatial index")
+                  let expected = ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])
+                  Expect.equal (run (query + " ORDER BY id")) expected (charset + " indexed results")
+                  Expect.equal (run (scan + " ORDER BY id")) expected (charset + " scan results")
+
           testCase "grouped ON outer references mark dependent subqueries"
           <| fun _ ->
               let run = groupedJoinQuery ()
