@@ -10,8 +10,8 @@ original builtins.
 The new client regression failed with `ALL` on the old implementation.
 It now verifies range access and equal rows with and without the index
 under utf8mb4 and utf8mb3. The full 3,958-test suite and the isolated package
-consumer passed. A three-point probe produced the same rows on pinned
-native MySQL 8.4.11, which also chose the spatial index.
+consumer passed. A three-point probe produced the same rows on native
+MySQL 8.4.11, which also chose the spatial index.
 
 ## Native latency
 
