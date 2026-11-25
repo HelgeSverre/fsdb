@@ -16057,21 +16057,22 @@ let tests =
                     runDefault store "INSERT INTO parents VALUES (9999)" |> ignore
                     runDefault store "INSERT INTO children VALUES (9999,NULL,NULL)" |> ignore
 
-                    let readAggregate argument hint bounds expected =
+                    let readAggregate aggregate argument hint bounds expected =
                         let sql =
-                            $"SELECT SUM((SELECT COUNT({argument}) FROM children c {hint} WHERE c.parent_id=p.id AND {bounds})) FROM parents p"
+                            $"SELECT SUM((SELECT {aggregate}({argument}) FROM children c {hint} WHERE c.parent_id=p.id AND {bounds})) FROM parents p"
 
                         let before = System.GC.GetAllocatedBytesForCurrentThread()
                         let result = runDefault store sql
                         let allocated = System.GC.GetAllocatedBytesForCurrentThread() - before
 
                         match result with
-                        | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal actual expected sql
-                        | other -> failtestf "expected one correlated count, got %A" other
+                        | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal (decimal actual) (decimal expected) sql
+                        | other -> failtestf "expected one correlated aggregate, got %A" other
 
                         allocated
 
-                    let readCount = readAggregate "*"
+                    let readCountArgument = readAggregate "COUNT"
+                    let readCount = readCountArgument "*"
                     let between = "c.id BETWEEN p.id AND p.id+500"
                     let forced = readCount "FORCE INDEX (ix_child)" between "750"
                     let unhinted = readCount "" between "750"
@@ -16113,12 +16114,12 @@ let tests =
                           "c.id<=p.id+500 AND c.id<p.id+500", "400"
                           $"c.bucket<>1 AND {between}", "400"
                           $"c.bucket IS NULL AND {between}", "0" ] do
-                        let allocated = readAggregate "c.bucket" "" predicate expected
+                        let allocated = readCountArgument "c.bucket" "" predicate expected
                         Expect.isLessThan allocated (unhinted * 7L) $"the nullable count reads the composite slice for {predicate}"
 
-                    readAggregate "c.bucket" "IGNORE INDEX (ix_child)" between "600" |> ignore
+                    readCountArgument "c.bucket" "IGNORE INDEX (ix_child)" between "600" |> ignore
 
-                    let bareColumn = readAggregate "bucket" "" between "600"
+                    let bareColumn = readCountArgument "bucket" "" between "600"
                     Expect.isLessThan bareColumn (unhinted * 7L) "an unshadowed bare count argument uses the same slice"
 
                     for argument, expected in
@@ -16127,8 +16128,18 @@ let tests =
                           "c.bucket+1", "600"
                           "DISTINCT c.bucket", "600"
                           "DISTINCT CASE WHEN c.bucket<>1 THEN c.bucket END", "400" ] do
-                        let allocated = readAggregate argument "" between expected
+                        let allocated = readCountArgument argument "" between expected
                         Expect.isLessThan allocated (unhinted * 10L) $"the composite slice feeds COUNT({argument})"
+
+                    for aggregate, argument, expected in
+                        [ "SUM", "c.bucket", "600"
+                          "SUM", "DISTINCT CASE WHEN c.bucket<>1 THEN c.bucket END", "400"
+                          "AVG", "c.bucket", "200"
+                          "AVG", "DISTINCT c.bucket+1", "400"
+                          "MIN", "c.bucket+1", "200"
+                          "MAX", "c.bucket", "400" ] do
+                        let allocated = readAggregate aggregate argument "" between expected
+                        Expect.isLessThan allocated (unhinted * 10L) $"the composite slice feeds {aggregate}({argument})"
 
                     runDefault store "CREATE TABLE ranked (id INT PRIMARY KEY, parent_id INT, rank_value INT, KEY ix_rank(parent_id, rank_value DESC, id))" |> ignore
                     runDefault store "INSERT INTO ranked VALUES (10,1,NULL),(11,1,1),(12,1,2),(13,1,2),(14,1,3),(15,2,3),(16,2,4),(17,2,5),(18,NULL,3)" |> ignore

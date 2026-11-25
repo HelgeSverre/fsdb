@@ -9365,24 +9365,27 @@ and private countArgumentAlwaysPresentForSelect (store: Store) (dbName: string) 
                 present
         | _ -> proveColumn ()
 
+and private hasPlainAggregateShape (select: SelectStmt) =
+    select.GroupBy.IsEmpty
+    && select.Having.IsNone
+    && select.OrderBy.IsEmpty
+    && select.Limit.IsNone
+    && select.Offset.IsNone
+    && select.Windows.IsEmpty
+    && select.Ctes.IsEmpty
+    && not (SelectStmt.hasDestination select)
+    && select.Locking.IsEmpty
+    && not select.Distinct
+    && not select.CalculateFoundRows
+    && not select.Rollup
+
 and private isPlainCountSelect (registry: Registry) (select: SelectStmt) acceptsArgument =
     match select.Projections with
     | [ { Expression = FuncCall(name, [ argument ]) } ] ->
         name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
         && acceptsArgument argument
         && Functions.isUnmodifiedBuiltinAggregate name registry
-        && select.GroupBy.IsEmpty
-        && select.Having.IsNone
-        && select.OrderBy.IsEmpty
-        && select.Limit.IsNone
-        && select.Offset.IsNone
-        && select.Windows.IsEmpty
-        && select.Ctes.IsEmpty
-        && not (SelectStmt.hasDestination select)
-        && select.Locking.IsEmpty
-        && not select.Distinct
-        && not select.CalculateFoundRows
-        && not select.Rollup
+        && hasPlainAggregateShape select
     | _ -> false
 
 and private isPlainCountRowsSelect (store: Store) (dbName: string) (registry: Registry) (select: SelectStmt) =
@@ -19014,10 +19017,19 @@ and private prepareCorrelatedRangeSelect select candidate =
         { select with Where = Some(orderCorrelatedRangePredicates candidate predicate) }
     | _ -> select
 
-and private tryCorrelatedExpressionCountAccess registry source (select: SelectStmt) outer =
-    match source, outer, select.Projections with
-    | FromTable tableRef, Some context, [ { Expression = FuncCall(_, [ argument ]) } ]
-        when select.Joins.IsEmpty && isPlainCountSelect registry select (fun _ -> true) ->
+and private tryCorrelatedAggregateRangeAccess registry source (select: SelectStmt) outer =
+    let aggregate =
+        match select.Projections with
+        | [ { Expression = FuncCall(name, [ argument ]) } ] ->
+            match name.ToUpperInvariant() with
+            | ("COUNT" | "SUM" | "AVG" | "MIN" | "MAX") as builtin
+                when Functions.isUnmodifiedBuiltinAggregate name registry -> Some(builtin, argument)
+            | _ -> None
+        | _ -> None
+
+    match source, outer, aggregate with
+    | FromTable tableRef, Some context, Some(name, argument)
+        when select.Joins.IsEmpty && hasPlainAggregateShape select ->
         tryCorrelatedIntegerRangeAccess context source select.Where
         |> Option.bind (fun (lookup, _) ->
             let columns = lookup.OrderedColumns
@@ -19035,8 +19047,8 @@ and private tryCorrelatedExpressionCountAccess registry source (select: SelectSt
                     (innerColumn expression).IsSome
                     && (tryCorrelatedSignedIntegerColumn scope columns expression).IsSome
 
-            // COUNT is order independent when its argument cannot warn, fail,
-            // or change state. Keep other expressions on the ordinary path.
+            // Bounded integer expressions can run in index order without
+            // warnings, evaluation errors, or side effects.
             let rec silentInteger expression =
                 match expression with
                 | LiteralValue(VInt _) -> true
@@ -19052,11 +19064,25 @@ and private tryCorrelatedExpressionCountAccess registry source (select: SelectSt
                     | _ -> false
                 | _ -> smallInteger expression
 
-            let safeArgument = function
-                | Distinct inner -> (innerColumn inner).IsSome || silentInteger inner
-                | inner -> silentInteger inner
+            let exactColumn inner =
+                innerColumn inner
+                |> Option.bind (resolveColumn columns >> Result.toOption)
+                |> Option.exists (fun i ->
+                    match columns.[i].Type with
+                    | TBool | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
+                    // An int-sized row set of 19-digit coefficients fits the
+                    // decimal accumulator at the column's fixed scale.
+                    | TDecimal(precision, _, _) -> name = "MIN" || name = "MAX" || precision <= 19
+                    | _ -> false)
 
-            if safeArgument argument then
+            let safeArgument =
+                match name, argument with
+                | "COUNT", Distinct inner -> (innerColumn inner).IsSome || silentInteger inner
+                | "COUNT", inner -> silentInteger inner
+                | _, Distinct inner
+                | _, inner -> exactColumn inner || silentInteger inner
+
+            if safeArgument then
                 Some { SourceColumns = columns
                        SourceRows = Seq.toList lookup.OrderedRows
                        RangeAccesses = [] }
@@ -19064,7 +19090,7 @@ and private tryCorrelatedExpressionCountAccess registry source (select: SelectSt
     | _ -> None
 
 and private tryCorrelatedSourceLookup store registry dbName source select outer =
-    tryCorrelatedExpressionCountAccess registry source select outer
+    tryCorrelatedAggregateRangeAccess registry source select outer
     |> Option.orElseWith (fun () -> tryCorrelatedSourceAccess store registry dbName source select.Where outer)
     |> Option.map (fun candidate ->
         candidate.SourceColumns, candidate.SourceRows, prepareCorrelatedRangeSelect select candidate)

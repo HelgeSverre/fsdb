@@ -213,3 +213,50 @@ the shared host. [Per-pass p50 and p95 results](2026-11-25-correlated-expression
 ```sh
 dotnet fsi benchmarks/scripts/native-feature-peers.fsx -- MySQL 3391 1 expression-count-controls
 ```
+
+## Exact numeric aggregates
+
+Plain correlated `SUM`, `AVG`, `MIN`, and `MAX` can use the composite
+slice for direct integer columns and audited integer expressions.
+Direct fixed-scale decimal values can use it for extrema. Decimal
+`SUM` and `AVG` use it through precision 19, which fits the exact
+accumulator across an int-sized row set. The unchanged aggregate
+evaluator handles NULLs, DISTINCT, and result types. Approximate values
+and expressions with possible warnings or errors use the existing path.
+
+The native MySQL 8.4.11 check covered 974 queries and binding errors
+with forced, ignored, ascending, and descending indexes. Fsdb preserved
+its baseline values, wire type codes, and diagnostics throughout.
+SUM and the extrema matched MySQL numerically. The 490 AVG values
+that differed matched after rounding to MySQL's reported scale.
+Some MIN and MAX result columns still advertise BIGINT on Fsdb
+where MySQL advertises INT. Separate fallback cases with approximate
+values, wider sums, conversion warnings, and overflow preserved
+their baseline results and diagnostics.
+
+On the 250-parent, 5,000-child allocation fixture, the original SUM
+allocated 307 MB per query on the calling thread. The regression bounds
+allocation for SUM, AVG, MIN, MAX, and exact numeric DISTINCT relative
+to the indexed count control.
+
+The benchmark uses the same 500-parent, 10,000-child fixture and native
+durability settings. The baseline is `b6620a41`. The two passes reverse
+engine and workload order. Each lane has one preflight, four warmups,
+and 15 measured calls. The table averages the two per-pass medians.
+
+| Workload, p50 ms | Fsdb before | Fsdb after | MySQL 8.4.11 |
+| --- | ---: | ---: | ---: |
+| `COUNT(*)` control | 6.193 | 5.787 | 1.638 |
+| `SUM(CASE WHEN c.bucket<>1 THEN c.bucket END)` | 325.311 | 29.955 | 2.409 |
+| `AVG(c.bucket)` | 329.110 | 29.847 | 2.388 |
+| `MIN(c.bucket+1)` | 320.746 | 28.775 | 2.388 |
+| `MAX(DISTINCT c.bucket)` | 321.832 | 29.039 | 2.400 |
+
+The four aggregate workloads each improved about 11×. Fsdb took
+12–13× MySQL's median time on this fixture. The Fsdb candidate medians
+varied from 17.5 to 40.5 ms across workloads and passes.
+[Per-pass p50 and p95 results](2026-11-25-correlated-exact-aggregates.csv).
+
+```sh
+dotnet fsi benchmarks/scripts/native-feature-peers.fsx -- MySQL 3391 1 exact-aggregate-controls
+```

@@ -2762,6 +2762,8 @@ implementation effort:
    [Conditional and distinct counts](benchmarks/results/2026-11-25-correlated-integer-range-count.md#counting-expressions-and-distinct-values)
    pass the same narrow slice to the ordinary aggregate evaluator when
    their arguments are safe to evaluate in index order.
+   [Exact numeric SUM, AVG, MIN, and MAX](benchmarks/results/2026-11-25-correlated-integer-range-count.md#exact-numeric-aggregates)
+   also use the slice, including audited DISTINCT and conditional expressions.
    Other residual predicates, broader aggregates, and projected sources
    still need broader access planning.
 

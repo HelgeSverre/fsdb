@@ -11,9 +11,9 @@ let engine, port, pass, mode =
     match arguments with
     | [| engine; port; pass |] -> engine, int port, int pass, ""
     | [| engine; port; pass; mode |]
-        when List.contains mode [ "range-controls"; "prefix-controls"; "nullable-count-controls"; "expression-count-controls" ] ->
+        when List.contains mode [ "range-controls"; "prefix-controls"; "nullable-count-controls"; "expression-count-controls"; "exact-aggregate-controls" ] ->
         engine, int port, int pass, mode
-    | _ -> failwith "Usage: dotnet fsi native-feature-peers.fsx -- ENGINE PORT PASS [range-controls|prefix-controls|nullable-count-controls|expression-count-controls]"
+    | _ -> failwith "Usage: dotnet fsi native-feature-peers.fsx -- ENGINE PORT PASS [range-controls|prefix-controls|nullable-count-controls|expression-count-controls|exact-aggregate-controls]"
 
 CultureInfo.CurrentCulture <- CultureInfo.InvariantCulture
 
@@ -68,9 +68,11 @@ let correlatedEquality () =
     scalar "SELECT SUM((SELECT COUNT(*) FROM child c WHERE c.parent_id = p.id)) FROM parent p"
     |> require "correlated equality count" 10000L
 
-let correlatedRangeCount argument hint predicate expected () =
-    scalar $"SELECT SUM((SELECT COUNT({argument}) FROM child c {hint} WHERE c.parent_id = p.id AND {predicate})) FROM parent p"
-    |> require "correlated range count" expected
+let correlatedRangeAggregate name argument hint predicate expected () =
+    scalar $"SELECT SUM((SELECT {name}({argument}) FROM child c {hint} WHERE c.parent_id = p.id AND {predicate})) FROM parent p"
+    |> require "correlated range aggregate" expected
+
+let correlatedRangeCount = correlatedRangeAggregate "COUNT"
 
 let correlatedRange = correlatedRangeCount "*"
 
@@ -130,9 +132,12 @@ let readRangeControls () =
     for lane, hint, predicate, expected in ordered do
         probe lane (fun () -> measure lane 15 (correlatedRange hint predicate expected))
 
-let readCountArguments () =
+let seedNullableBuckets () =
     write "ALTER TABLE child ADD COLUMN bucket INT NULL"
     write "UPDATE child SET bucket=CASE WHEN MOD(id,5)=0 THEN NULL ELSE MOD(id,3) END"
+
+let readCountArguments () =
+    seedNullableBuckets ()
 
     let queries =
         if mode = "expression-count-controls" then
@@ -148,6 +153,20 @@ let readCountArguments () =
     let ordered = if pass % 2 = 0 then List.rev queries else queries
     for lane, argument, predicate, expected in ordered do
         probe lane (fun () -> measure lane 15 (correlatedRangeCount argument "" predicate expected))
+
+let readExactAggregates () =
+    seedNullableBuckets ()
+
+    let queries =
+        [ "count-rows", "COUNT", "*", 1500L
+          "sum-case", "SUM", "CASE WHEN c.bucket<>1 THEN c.bucket END", 800L
+          "avg", "AVG", "c.bucket", 400L
+          "min", "MIN", "c.bucket+1", 400L
+          "max-distinct", "MAX", "DISTINCT c.bucket", 800L ]
+
+    let ordered = if pass % 2 = 0 then List.rev queries else queries
+    for lane, name, argument, expected in ordered do
+        probe lane (fun () -> measure lane 15 (correlatedRangeAggregate name argument "" between expected))
 
 let viewUpdates () =
     probe "joined-view-update" (fun () ->
@@ -251,6 +270,7 @@ try
         let workloads =
             if mode = "range-controls" then [ readRangeControls ]
             elif mode = "nullable-count-controls" || mode = "expression-count-controls" then [ readCountArguments ]
+            elif mode = "exact-aggregate-controls" then [ readExactAggregates ]
             elif mode = "prefix-controls" then
                 write "CREATE VIEW positive_parent AS SELECT id, value FROM parent WHERE value > 0 WITH CASCADED CHECK OPTION"
                 [ viewPrefixUpdates ]
