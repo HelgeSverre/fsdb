@@ -5856,11 +5856,12 @@ let private prepareSerializedGeometry (functionName: string) axisOrder (geometry
     | Some _ -> SpatialReferenceSystems.withAxisOrder requestedOrder geometry
     | None -> geometry
 
+let private unsupportedGeographicFunction functionName =
+    raise (SqlError(1235, sprintf "This version of MySQL doesn't yet support '%s with nonzero SRIDs'" functionName))
+
 let private requirePlanar (functionName: string) (geometry: Geometry) =
     let referenceSystem = spatialReferenceSystem functionName geometry.Srid
-    if referenceSystem.SemiMajorAxis.IsSome then
-        raise (SqlError(1235, sprintf "This version of MySQL doesn't yet support '%s with nonzero SRIDs'" functionName))
-
+    if referenceSystem.SemiMajorAxis.IsSome then unsupportedGeographicFunction functionName
     geometry
 
 let private requireSameSrid (functionName: string) (first: Geometry) (second: Geometry) =
@@ -5869,21 +5870,19 @@ let private requireSameSrid (functionName: string) (first: Geometry) (second: Ge
 
     first, second
 
-let private requireSamePlanarSrid (functionName: string) (first: Geometry) (second: Geometry) =
-    let first, second = requireSameSrid functionName first second
-    requirePlanar functionName first |> ignore
-    first, second
-
-let private binaryGeometryFn functionName operation: Scalar =
+let private binaryGeometryWithSameSridFn functionName operation: Scalar =
     function
     | [ VNull; _ ]
     | [ _; VNull ] -> VNull
     | [ first; second ] ->
         let first, second =
-            requireSamePlanarSrid functionName (geometryArgument functionName first) (geometryArgument functionName second)
+            requireSameSrid functionName (geometryArgument functionName first) (geometryArgument functionName second)
 
         operation first second
     | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
+
+let private binaryGeometryFn functionName operation =
+    binaryGeometryWithSameSridFn functionName (fun first second -> operation (requirePlanar functionName first) second)
 
 let private geometryFromTextFn requiredKind functionName: Scalar =
     let construct value sridValue axisOrder =
@@ -6482,10 +6481,16 @@ let private geometryConvexHullFn: Scalar =
     | _ -> nativeParameterCountError "st_convexhull"
 
 let private geometryOverlayFn functionName operation =
-    binaryGeometryFn functionName (fun first second ->
-        match GeometryOperations.overlay operation first second with
-        | Ok result -> VGeometry result
-        | Error detail -> geometryError functionName detail)
+    binaryGeometryWithSameSridFn functionName (fun first second ->
+        let referenceSystem = spatialReferenceSystem functionName first.Srid
+        if referenceSystem.SemiMajorAxis.IsSome then
+            match tryGeographicOverlay referenceSystem operation first second with
+            | Some result -> VGeometry result
+            | None -> unsupportedGeographicFunction functionName
+        else
+            match GeometryOperations.overlay operation first second with
+            | Ok result -> VGeometry result
+            | Error detail -> geometryError functionName detail)
 
 let internal geometryBufferStrategyFn maxPointsPerCircle : Scalar =
     let wrongArguments () = raise (SqlError(1210, "Incorrect arguments to st_buffer_strategy"))

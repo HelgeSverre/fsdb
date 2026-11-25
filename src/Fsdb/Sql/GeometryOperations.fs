@@ -1426,6 +1426,171 @@ let internal overlay kind (first: Geometry) (second: Geometry) =
 
     attempt first.Srid (fun () -> OverlayNGRobust.Overlay(toNts first, toNts second, spatialFunction))
 
+// Points compare in radians. A cell is wider than the relative comparison
+// tolerance anywhere in the geographic coordinate domain.
+let private geographicPointIndex () =
+    let cellWidth = 8.0 * (Math.BitIncrement(1.0) - 1.0)
+    let cells = System.Collections.Generic.Dictionary<int64 * int64, ResizeArray<float * float>>()
+    let cell coordinate = int64 (floor (coordinate / cellWidth))
+    let radians (latitude, longitude) = mysqlRadians latitude, mysqlRadians longitude
+
+    let contains point =
+        let latitude, longitude = radians point
+        let x, y = cell latitude, cell longitude
+        let mutable found = false
+        for i in x - 1L .. x + 1L do
+            for j in y - 1L .. y + 1L do
+                if not found then
+                    match cells.TryGetValue((i, j)) with
+                    | true, candidates ->
+                        found <- candidates |> Seq.exists (fun (a, b) -> boostGeoEqual latitude a && boostGeoEqual longitude b)
+                    | _ -> ()
+
+        found
+
+    let add point =
+        let latitude, longitude = radians point
+        let key = cell latitude, cell longitude
+        match cells.TryGetValue key with
+        | true, candidates -> candidates.Add((latitude, longitude))
+        | _ -> cells.Add(key, ResizeArray([ latitude, longitude ]))
+
+    contains, add
+
+let private geographicPointResult points =
+    let contains, add = geographicPointIndex ()
+    let distinct =
+        points
+        |> List.filter (fun point ->
+            if contains point then false
+            else
+                add point
+                true)
+
+    match distinct with
+    | [] -> GEmpty
+    | [ (latitude, longitude) ] -> GPoint(latitude, longitude)
+    | points -> GMultiPoint points
+
+let private geographicPointMembers = function
+    | GPoint(latitude, longitude) -> Some [ latitude, longitude ]
+    | GMultiPoint points -> Some points
+    | _ -> None
+
+let private overlayGeographicPoints kind firstShape (first: (float * float) list) secondShape (second: (float * float) list) =
+    let membership points =
+        let contains, add = geographicPointIndex ()
+        points |> List.distinct |> List.iter add
+        contains
+
+    // MySQL dispatches a Point before a MultiPoint for the commutative
+    // operations, and walks the smaller MultiPoint in an intersection.
+    let pointFirst =
+        match firstShape, secondShape with
+        | GMultiPoint _, GPoint _ -> second, first
+        | _ -> first, second
+
+    let except points other = points |> List.filter (membership other >> not)
+    let points =
+        match kind with
+        | OverlayKind.Intersection ->
+            let left, right = pointFirst
+            if left.Length <= right.Length then left |> List.filter (membership right)
+            else right |> List.filter (membership left)
+        | OverlayKind.Difference -> except first second
+        | OverlayKind.Union ->
+            let left, right = pointFirst
+            left @ right
+        | OverlayKind.SymmetricDifference ->
+            let left, right = pointFirst
+            except left right @ except right left
+
+    geographicPointResult points
+
+let private orientGeographicPolygons referenceSystem =
+    let orient hole ring =
+        let area = geographicRingAreaSign referenceSystem ring
+        if (hole && area > 0.0) || (not hole && area < 0.0) then List.rev ring else ring
+
+    let polygon = List.mapi (fun index ring -> orient (index > 0) ring)
+
+    function
+    | GPolygon rings -> GPolygon(polygon rings)
+    | GMultiPolygon polygons -> GMultiPolygon(List.map polygon polygons)
+    | shape -> shape
+
+let private narrowGeographicOverlayShape = function
+    | GMultiPolygon [ rings ] -> GPolygon rings
+    | GMultiLineString [ line ] -> GLineString line
+    | GMultiPoint points -> geographicPointResult points
+    | shape -> shape
+
+let private geographicCoveredPoint referenceSystem =
+    let onLinework lines point =
+        geographicPointLinePosition referenceSystem point lines <> GeographicPointLinePosition.Outside
+
+    let inArea polygons point =
+        match geographicPointPolygonPosition referenceSystem point polygons with
+        | GeographicPointPolygonPosition.Outside _ -> false
+        | _ -> true
+
+    function
+    | GLineString line -> Some(onLinework [ line ])
+    | GMultiLineString lines -> Some(onLinework lines)
+    | GPolygon polygon -> Some(inArea [ polygon ])
+    | GMultiPolygon polygons -> Some(inArea polygons)
+    | _ -> None
+
+let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second: Geometry) =
+    let result shape = { Srid = first.Srid; Shape = shape }
+    let orient = orientGeographicPolygons referenceSystem
+    let normalize = orient >> narrowGeographicOverlayShape
+    let mixed pointsFirst points other =
+        geographicCoveredPoint referenceSystem other
+        |> Option.map (fun covered ->
+            match kind with
+            | OverlayKind.Intersection -> points |> List.filter covered |> geographicPointResult
+            | OverlayKind.Difference when pointsFirst -> points |> List.filter (covered >> not) |> geographicPointResult
+            | OverlayKind.Difference -> normalize other
+            | OverlayKind.Union
+            | OverlayKind.SymmetricDifference ->
+                let outside = points |> List.filter (covered >> not) |> geographicPointResult
+                let areaOrLine = orient other
+                if outside = GEmpty then narrowGeographicOverlayShape areaOrLine
+                else
+                    let components =
+                        // Union expands multipart members of a mixed result.
+                        // Symmetric difference keeps the higher-dimensional part.
+                        match kind, areaOrLine with
+                        | OverlayKind.Union, GMultiLineString lines -> List.map GLineString lines
+                        | OverlayKind.Union, GMultiPolygon polygons -> List.map GPolygon polygons
+                        | _, shape -> [ shape ]
+                    let points =
+                        match outside with
+                        | GMultiPoint members -> members |> List.map (fun (latitude, longitude) -> GPoint(latitude, longitude))
+                        | shape -> [ shape ]
+                    GGeometryCollection(List.map result (components @ points)))
+
+    let shape =
+        match first.Shape, second.Shape with
+        | GEmpty, other
+        | other, GEmpty ->
+            match kind with
+            | OverlayKind.Intersection -> Some GEmpty
+            | OverlayKind.Difference when first.Shape = GEmpty -> Some GEmpty
+            | _ ->
+                match other with
+                | GGeometryCollection _ -> None
+                | _ -> Some(normalize other)
+        | left, right ->
+            match geographicPointMembers left, geographicPointMembers right with
+            | Some points, Some other -> Some(overlayGeographicPoints kind left points right other)
+            | Some points, None -> mixed true points right
+            | None, Some points -> mixed false points left
+            | _ -> None
+
+    shape |> Option.map result
+
 type private BufferStrategyCategory =
     | End
     | Join

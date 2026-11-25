@@ -575,6 +575,43 @@ let tests =
                         | Fsdb.Functions.SqlError(1210, _) -> ()
                         | error -> failtestf "expected overflowing coordinates to be rejected, got %A" error)
 
+                testCase "geographic overlays keep point order and geodesic boundary membership"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry text = call "ST_GeomFromText" [ VString text; VInt 4326L; axis ]
+                    let overlay name first second =
+                        let result = call name [ geometry first; geometry second ]
+                        Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "the overlay keeps its geographic SRID"
+                        call "ST_AsText" [ result; axis ]
+
+                    let points = "MULTIPOINT((3 0),(1 0),(1 0),(2 0))"
+                    let other = "MULTIPOINT((4 0),(3 0),(1 0),(5 0))"
+                    let across = "LINESTRING(179 0,-179 0)"
+                    let meridianPoints = "MULTIPOINT((0 0),(180 0),(179 0))"
+                    let polygon = "POLYGON((0 0,4 0,4 4,0 4,0 0),(1 1,1 3,3 3,3 1,1 1))"
+                    let surrounding = "MULTIPOINT((1 0),(0 0),(1 1),(2 2),(3.5 2),(8 0),(1 0))"
+
+                    for name, first, second, expected in
+                        [ "ST_Intersection", points, other, "MULTIPOINT((3 0),(1 0))"
+                          "ST_Intersection", points, "MULTIPOINT((1 0),(3 0))", "MULTIPOINT((1 0),(3 0))"
+                          "ST_Difference", points, other, "POINT(2 0)"
+                          "ST_Union", points, other, "MULTIPOINT((3 0),(1 0),(2 0),(4 0),(5 0))"
+                          "ST_Union", points, "POINT(9 0)", "MULTIPOINT((9 0),(3 0),(1 0),(2 0))"
+                          "ST_SymDifference", other, points, "MULTIPOINT((4 0),(5 0),(2 0))"
+                          "ST_Union", "GEOMETRYCOLLECTION EMPTY", points, "MULTIPOINT((3 0),(1 0),(2 0))"
+                          "ST_Intersection", "POINT(3 0)", "POINT(3.00000000000001 0)", "POINT(3 0)"
+                          "ST_Intersection", "POINT(50 90)", "POINT(100 90)", "GEOMETRYCOLLECTION EMPTY"
+                          "ST_Intersection", across, meridianPoints, "MULTIPOINT((180 0),(179 0))"
+                          "ST_Difference", meridianPoints, across, "POINT(0 0)"
+                          "ST_Union", meridianPoints, across, "GEOMETRYCOLLECTION(LINESTRING(179 0,-179 0),POINT(0 0))"
+                          "ST_Union", "POINT(8 0)", "MULTILINESTRING((0 0,4 0))", "GEOMETRYCOLLECTION(LINESTRING(0 0,4 0),POINT(8 0))"
+                          "ST_SymDifference", "POINT(8 0)", "MULTILINESTRING((0 0,4 0))", "GEOMETRYCOLLECTION(MULTILINESTRING((0 0,4 0)),POINT(8 0))"
+                          "ST_Intersection", surrounding, polygon, "MULTIPOINT((1 0),(0 0),(1 1),(3.5 2))"
+                          "ST_Difference", surrounding, polygon, "MULTIPOINT((2 2),(8 0))"
+                          "ST_SymDifference", polygon, surrounding, "GEOMETRYCOLLECTION(" + polygon + ",POINT(2 2),POINT(8 0))"
+                          "ST_Difference", "POLYGON((0 0,0 4,4 4,4 0,0 0))", "POINT(3 0)", "POLYGON((0 0,4 0,4 4,0 4,0 0))" ] do
+                        Expect.equal (overlay name first second) (VString expected) $"{name} of {first} and {second}"
+
                 testCase "planar overlays and buffers cover non-point geometry"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]
@@ -945,7 +982,7 @@ let tests =
                     Expect.equal (call "ST_Equals" [ geographic; geographic ]) (VInt 1L) "point equals itself"
                     expectError 1235 (fun () -> call "ST_ConvexHull" [ geographic ])
                     expectError 3033 (fun () -> call "ST_Intersection" [ planar; geographic ])
-                    expectError 1235 (fun () -> call "ST_Union" [ geographic; geographic ])
+                    Expect.equal (call "ST_Union" [ geographic; geographic ]) geographic "a geographic point union collapses to the original point"
                     expectError 1235 (fun () -> call "ST_Buffer" [ geographic; VInt 1L ])
 
                 testCase "geographic polygon excludes its antipodal exterior"
