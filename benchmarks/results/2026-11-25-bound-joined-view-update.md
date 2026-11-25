@@ -275,6 +275,33 @@ no residual filter, a selective filter, and a filter rejecting every row.
 The transaction regression also verifies an independent write to the
 released boundary and to a row excluded by the partner filter.
 
-Locking unrelated outer read operands, join shapes without a proven
-partner range, and pending inserts into keyless partners remains open.
-The scan audit used one concurrent owner at a time.
+Locking outer read operands, join shapes without a proven partner range,
+and pending inserts into keyless partners remain open. The scan audit
+used one concurrent owner at a time.
+
+## Outer join operand locks
+
+The view `active` joins `parent(id,n)` to `partner(id,seq,delta)`. The
+outer statement also reads `gate(id,delta)`, where `id` is its primary key.
+
+```sql
+UPDATE active a JOIN gate g ON g.id=a.id
+SET a.n=a.n+a.delta+g.delta
+WHERE a.id=1 AND a.seq BETWEEN 20 AND 22 AND a.delta>=3;
+```
+
+With `parent.n=10`, `partner.delta=3`, and `gate.delta=7`, an owner
+holds a change to the outer row's delta from 7 to 19. Native MySQL
+8.4.11 waits and commits `n=32` when the owner commits, or `n=20`
+when the owner rolls back. A committed delete affects no rows. A
+pending insert for the initially absent key also causes a wait and,
+on commit, supplies the outer value. Fsdb completes the statement
+before the owner resolves in each of these cases.
+
+All 24 matching-key wait controls diverged over four isolation levels
+and both owner outcomes. Eight unrelated-key controls matched. A
+separate lock-retention probe used `FOR UPDATE NOWAIT` after the
+statement and before commit. MySQL returned error 3572 on the outer
+key in all twelve cases, including when `g.delta>=10` or
+`a.delta>=10` eliminated the update. Fsdb allowed the contender to
+lock that key. The unrelated key remained free in both engines.
