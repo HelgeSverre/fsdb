@@ -3114,6 +3114,10 @@ implementation effort:
    preserve the tested component order, contacts, shared spans, and
    duplicate removal. Near contacts off those axes and nonzero polar
    and half-turn segments remain open.
+   [Geographic line and area overlays](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#geographic-line-and-area-overlays)
+   split linework at geodesic polygon boundaries for all four overlay
+   operations. Seeded intersections still differ in isolated point
+   retention or order, and the near-hole relation differences remain.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
    [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)
@@ -3168,9 +3172,10 @@ implementation effort:
    the expanded 3,000-ring corpus agrees.
    Numerical and topology gaps remain open.
    The coordinate-side line/polygon crossing candidates now retain ordered
-   fractions, interpolated points, and boundary segments for a future
-   geographic overlay. The behavior-preserving extraction leaves the
-   11/448 `Crosses` versus `Touches` residual unchanged.
+   fractions, interpolated points, and boundary segments for the relation
+   predicates. The overlay uses geodesic crossings and returns the short
+   line fragments in those cases. The 11/448 `Crosses` versus `Touches`
+   residual remains.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
 

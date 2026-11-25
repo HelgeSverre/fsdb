@@ -693,6 +693,60 @@ let tests =
                         Expect.isLessThan (abs longitude) 1e-12 "longitude at the crossing"
                     | actual -> failtestf "expected a geographic crossing point, got %A" actual
 
+                testCase "geographic line and area overlays retain boundary pieces and source order"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry srid wkt = call "ST_GeomFromText" [ VString wkt; VInt srid; axis ]
+                    let box = "POLYGON((0 -2,4 -2,4 2,0 2,0 -2))"
+                    let patch = "POLYGON((0 -4,8 -4,8 4,0 4,0 -4),(2 -1,6 -1,6 1,2 1,2 -1))"
+                    let line = "LINESTRING(-1 0,0 0,4 0,5 0)"
+                    let holeLine = "LINESTRING(-1 0,0 0,2 0,6 0,8 0,9 0)"
+                    let disjoint = "MULTIPOLYGON(((0 -2,2 -2,2 2,0 2,0 -2)),((4 -2,6 -2,6 2,4 2,4 -2)))"
+                    for name, left, right, expected in
+                        [ "ST_Intersection", line, box, "LINESTRING(0 0,4 0)"
+                          "ST_Intersection", box, "LINESTRING(5 0,4 0,0 0,-1 0)", "LINESTRING(4 0,0 0)"
+                          "ST_Intersection", "LINESTRING(0 -3,0 3)", box, "LINESTRING(0 -2,0 2)"
+                          "ST_Intersection", "MULTILINESTRING((-2 0,0 0,-2 1),(6 0,4 0,6 1))", box, "GEOMETRYCOLLECTION(POINT(0 0),POINT(4 0))"
+                          "ST_Intersection", "LINESTRING(2 0,2 0)", box, "LINESTRING(2 0,2 0)"
+                          "ST_Intersection", patch, holeLine, "GEOMETRYCOLLECTION(LINESTRING(0 0,2 0),LINESTRING(6 0,8 0))"
+                          "ST_Difference", holeLine, patch, "MULTILINESTRING((-1 0,0 0),(2 0,6 0),(8 0,9 0))"
+                          "ST_Difference", "LINESTRING(-2 0,0 0,-2 1)", box, "LINESTRING(-2 0,0 0,-2 1)"
+                          "ST_Difference", box, line, box
+                          "ST_Union", box, line, "GEOMETRYCOLLECTION(POLYGON((0 -2,4 -2,4 2,0 2,0 -2)),LINESTRING(-1 0,0 0),LINESTRING(4 0,5 0))"
+                          "ST_SymDifference", disjoint, "LINESTRING(-1 0,0 0,2 0,4 0,6 0,7 0)",
+                          "GEOMETRYCOLLECTION(MULTIPOLYGON(((0 -2,2 -2,2 2,0 2,0 -2)),((4 -2,6 -2,6 2,4 2,4 -2))),LINESTRING(-1 0,0 0),LINESTRING(2 0,4 0),LINESTRING(6 0,7 0))" ] do
+                        let result = call name [ geometry 4326L left; geometry 4326L right ]
+                        Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "the clipped shape retains its SRID"
+                        Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{name} of {left} and {right}"
+
+                    for srid in [ 4326L; 4258L; 4267L ] do
+                        let area = "POLYGON((178 -2,-178 -2,-178 2,178 2,178 -2))"
+                        let clipped = call "ST_Intersection" [ geometry srid area; geometry srid "LINESTRING(175 0,-175 0)" ]
+                        match clipped with
+                        | VGeometry { Srid = outputSrid; Shape = GLineString [ (lat1, lon1); (lat2, lon2) ] } ->
+                            Expect.equal outputSrid (int srid) "the antimeridian result uses the original ellipsoid"
+                            Expect.isLessThan (abs lat1 + abs lat2) 1e-10 "the clipped segment stays on the equator"
+                            Expect.isLessThan (abs (lon1 - 178.0) + abs (lon2 + 178.0)) 1e-10 "the directed crossings straddle the antimeridian"
+                        | actual -> failtestf "expected one antimeridian fragment, got %A" actual
+
+                    let slopingLine = "LINESTRING(-137.81184633133 -9.99508270535,-137.97402002137 -10.35420722795,-137.90790118027 -11.02987053069)"
+                    let levelEdge = "POLYGON((-138.51046412597 -11.69818635654,-137.61835190465 -11.69818635654,-137.61835190465 -10.45082847467,-138.51046412597 -10.45082847467,-138.51046412597 -11.69818635654))"
+                    let clipped = call "ST_Intersection" [ geometry 4326L slopingLine; geometry 4326L levelEdge ]
+                    match clipped with
+                    | VGeometry { Shape = GGeometryCollection [ { Shape = GLineString [ (cutLatitude, _); _ ] }; { Shape = GPoint(contactLatitude, _) } ] } ->
+                        Expect.isLessThan (abs (cutLatitude - (-10.451124605106873))) 1e-10 "the line starts at the reversed edge's turn"
+                        Expect.isLessThan (abs (contactLatitude - (-10.451124603634351))) 1e-10 "the point uses the forward edge's turn"
+                    | actual -> failtestf "expected a line and a separate point, got %A" actual
+
+                    let nearHole = "POLYGON((0 40,4 40,4 44,0 44,0 40),(1 41,1 43,3 43,3 41,1 41))"
+                    let shortFragment = call "ST_Intersection" [ geometry 4326L nearHole; geometry 4326L "LINESTRING(2.99999 41,2.99999 43)" ]
+                    match shortFragment with
+                    | VGeometry { Shape = GGeometryCollection [ { Shape = GLineString [ (startLatitude, _); (cutLatitude, _) ] }; { Shape = GPoint(contactLatitude, _) } ] } ->
+                        Expect.equal startLatitude 41.0 "the line starts at its original endpoint"
+                        Expect.isLessThan (abs (cutLatitude - 41.000000118570696)) 1e-10 "a sub-centimetre crossing survives inverse-distance rounding"
+                        Expect.isLessThan (abs (contactLatitude - 41.00000008675716)) 1e-10 "the separate point lies beside the short fragment"
+                    | actual -> failtestf "expected the tiny clipped line and point, got %A" actual
+
                 testCase "geographic multiline overlays preserve component order and split shared spans"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

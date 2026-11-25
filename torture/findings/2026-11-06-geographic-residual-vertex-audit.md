@@ -464,3 +464,37 @@ Both overrides were reverted, and the Release CLI was rebuilt from the
 committed source. Endpoint labels cannot replace the ordered overlay: MySQL
 can return a tiny line plus a separate point near the same endpoint, and the
 line relation depends on that intersection geometry.
+
+## Geographic line and area overlays
+
+`ST_Intersection`, `ST_Difference`, `ST_Union`, and
+`ST_SymDifference` accept geographic line strings and multilines
+paired with polygons and multipolygons. Geodesic edge crossings split
+each line into intervals. Shared boundary spans count as covered, and
+the output retains the source direction and vertices. Intersection
+returns covered fragments and isolated contacts, while difference
+retains the outside fragments. Union and symmetric difference combine
+the outside fragments with the oriented area.
+
+MySQL derives the linear and point intersections separately. The two
+passes can traverse a level polygon edge in opposite directions. The
+Sjöberg solution can then place a point beside the output line instead
+of at its exact endpoint. Fsdb preserves those separate coordinates.
+The signed side checks also allow proper crossings whose inverse
+distance rounds to a segment endpoint. [MySQL intersection dispatcher](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/intersection_functor.cc)
+· [Boost geographic segment ratios](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
+
+Native MySQL 8.4.11 matched the output type, member order, and
+coordinates within 10⁻⁸ degrees in all 648 structured results across
+both operand orders and WGS 84, GRS 1980, and Clarke 1866. Those cases
+cover holes, boundary overlap, isolated touches, degenerate lines,
+antimeridian crossings, and multipart inputs. A separate 90-pair
+seeded run matched 344 of 360 results. The 16 differences were in
+point retention or point order in `ST_Intersection`.
+
+The 448-case near-edge probe matched 397 intersection geometries at
+that tolerance. Fsdb now returns a line fragment in all 11 cases whose
+relation predicates still differ. Near-edge contact retention and
+ordering remain open, along with the 11 `Crosses` versus `Touches`
+differences and overlays with nondegenerate polar or half-turn
+segments.
