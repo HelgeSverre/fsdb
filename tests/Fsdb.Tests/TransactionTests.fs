@@ -2337,6 +2337,41 @@ let tests =
                   | ResultSet(_, rows) -> Expect.equal rows expectedRows "the committed grouped target agrees with MySQL"
                   | result -> failtestf "expected grouped target rows, got %A" result
 
+          testCase "joined DELETE through a nested view waits and rechecks visibility"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql in
+                  [ "CREATE TABLE tx_joined_view_base(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE tx_joined_view_lookup(id INT PRIMARY KEY)"
+                    "INSERT INTO tx_joined_view_base VALUES(1,10)"
+                    "INSERT INTO tx_joined_view_lookup VALUES(1)"
+                    "CREATE VIEW tx_joined_view_inner AS SELECT id AS k,n FROM tx_joined_view_base WHERE n>0"
+                    "CREATE VIEW tx_joined_view_outer AS SELECT k,n FROM tx_joined_view_inner" ] do
+                  Expect.equal (handle setup sql |> snd |> errorInfo) None sql
+
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, changed = handle owner "UPDATE tx_joined_view_base SET n=-1 WHERE id=1"
+              Expect.equal changed (Affected 1UL) "the owner changes the view predicate"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter "DELETE v FROM tx_joined_view_lookup l JOIN tx_joined_view_outer v ON l.id=v.k WHERE l.id=1")
+
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the delete starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the delete resumes"
+              let waiter, deleted = waiting.GetAwaiter().GetResult()
+              Expect.isTrue blocked "the delete waits for the physical owner"
+              Expect.equal deleted (Affected 0UL) "the row is now hidden by the inner view"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the delete transaction commits"
+              match handle setup "SELECT id,n FROM tx_joined_view_base" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "-1" ] ]) -> ()
+              | result -> failtestf "expected the committed row to remain, got %A" result
+
           testCase "joined single-target delete waits for an updated target row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

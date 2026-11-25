@@ -85,6 +85,44 @@ let tests =
               Expect.equal (rows store "SELECT id FROM delete_left") [ [ Some "1" ] ] "the left base row remains"
               Expect.equal (rows store "SELECT id FROM delete_right") [ [ Some "1" ] ] "the right base row remains"
 
+          testCase "joined DELETE maps nested view projections to distinct base rows"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE delete_accounts(id INT,n INT)"
+                    "CREATE TABLE delete_matches(id INT PRIMARY KEY)"
+                    "INSERT INTO delete_accounts VALUES(1,10),(1,10),(2,20),(3,-1),(4,40)"
+                    "INSERT INTO delete_matches VALUES(1),(2),(3),(4)"
+                    "CREATE VIEW delete_inner AS SELECT id AS k,n,n*2 AS doubled FROM delete_accounts WHERE n>0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW delete_nested AS SELECT * FROM delete_inner WHERE k<4 WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (run store "DELETE s,v FROM delete_matches s JOIN delete_nested v ON s.id=v.k WHERE v.doubled=20")
+                  (Affected 3UL)
+                  "both identical keyless physical rows and the second target are deleted"
+
+              Expect.equal
+                  (run store "DELETE FROM v USING delete_nested v JOIN (SELECT id AS k FROM delete_matches) s USING(k) WHERE k IN (3,4)")
+                  (Affected 0UL)
+                  "the nested visibility predicates protect hidden rows"
+
+              expectOk
+                  (run store "CREATE TRIGGER delete_block BEFORE DELETE ON delete_accounts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='blocked'")
+                  "add a trigger on the physical view target"
+              match run store "DELETE s,v FROM delete_matches s JOIN delete_nested v ON s.id=v.k WHERE s.id=2" |> errorInfo with
+              | Some error -> Expect.equal (error.Code, error.State, error.Message) (1644, "45000", "blocked") "the base trigger rejects the statement"
+              | None -> failtest "expected the delete to be rejected by the base trigger"
+
+              Expect.equal
+                  (rows store "SELECT id,n FROM delete_accounts ORDER BY id")
+                  [ [ Some "2"; Some "20" ]; [ Some "3"; Some "-1" ]; [ Some "4"; Some "40" ] ]
+                  "hidden rows and the trigger-rejected base row remain"
+              Expect.equal
+                  (rows store "SELECT id FROM delete_matches ORDER BY id")
+                  [ [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ]
+                  "both targets roll back when a base trigger rejects the delete"
+
           testCase "window CTE natural join can update a nested checked view"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -1295,9 +1295,11 @@ Other set-operation compositions and layered security contexts remain open.
 now requires SELECT on the view when it serves as a read source. Naming a
 join view as a delete target returns 1395, and naming a read-only view
 returns 1288. A leading CTE now remains bound, including when it shadows
-a stored relation. MySQL also permits a mergeable single-table view as a target
-in this syntax, including a nested view with renamed columns. Mapping that
-target to its physical rows remains open.
+a stored relation. [Mergeable single-table view targets](torture/findings/2026-11-25-joined-delete-view-targets.md#writable-target-follow-up)
+now carry physical row identity through nested projections, computed
+columns, and multiple targets. The audited delete waits for a competing
+base-row writer and rechecks view visibility after the wait. More selective
+row locking and indexed predicates inside the view still need coverage.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
 now has a native MySQL contract and fsdb regression: duplicate derived rows

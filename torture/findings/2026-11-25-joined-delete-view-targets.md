@@ -34,6 +34,33 @@ even when a stored table or view has the same name. The regressions pin
 those errors, required and missing grants, both supported DELETE
 spellings, and preservation of the base rows after a refusal.
 Writable single-table view targets in multi-table DELETE still
-need physical row mapping. The baseline returned 1146 when their rows
-matched. MySQL's precedence when both the target and the JOIN condition
-are invalid also needs separate coverage.
+returned 1146 on the baseline when their rows matched. MySQL's precedence
+when both the target and the JOIN condition are invalid still needs
+separate coverage.
+
+## Writable target follow-up
+
+The same MySQL 8.4.11 image deleted two identical keyless base rows and
+one row in a second target in one statement. The named view projected
+renamed and computed columns through an outer `SELECT *`. Nested view
+filters retained excluded base rows, including with `DELETE FROM … USING`
+and an unqualified merged join key. A base-table trigger raised 1644
+with SQLSTATE 45000 and left both targets unchanged.
+
+With distinct view definers, MySQL accepted a user who held DELETE on the
+named view while the definers held SELECT on their respective sources.
+Revoking the inner definer's SELECT grant raised 1356 naming the outer
+view. With a competing transaction changing the base row from visible to
+hidden, the delete waited until commit, affected zero rows, and left the
+updated row intact.
+
+Fsdb now preserves a physical identity for each projected row through
+the nested view layers and passes it to the existing multi-target delete
+path. The transaction scheduler conservatively claims the base table's
+rows, then the delete rechecks visibility on the rebased snapshot.
+The focused regressions cover the row counts, trigger rollback, grants,
+and concurrent visibility change. Temporary tables that shadow a view's
+base table still need coverage. A separate probe with a `MATCH` predicate
+inside the target view deleted one row on MySQL and returned 1191 on
+Fsdb. Materializing the view input drops the physical index information
+needed by that predicate.

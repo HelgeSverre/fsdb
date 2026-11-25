@@ -72,6 +72,45 @@ let tests =
               | ResultSet(_, [ [ Some "3" ] ]) -> ()
               | other -> failtestf "expected only the unmodified target row, got %A" other
 
+          testCase "joined DELETE follows nested view read definers and the exposed DELETE grant"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root =
+                  [ "CREATE TABLE view_delete_base(id INT,n INT)"
+                    "CREATE TABLE view_delete_keys(id INT PRIMARY KEY)"
+                    "INSERT INTO view_delete_base VALUES(1,10),(1,11),(2,20)"
+                    "INSERT INTO view_delete_keys VALUES(1),(2)"
+                    "CREATE USER view_delete_inner_owner"
+                    "CREATE USER view_delete_outer_owner"
+                    "CREATE USER view_delete_writer"
+                    "GRANT SELECT ON fsdb.view_delete_base TO view_delete_inner_owner"
+                    "CREATE DEFINER='view_delete_inner_owner'@'%' VIEW view_delete_inner AS SELECT id AS k FROM view_delete_base WHERE n>0"
+                    "GRANT SELECT ON fsdb.view_delete_inner TO view_delete_outer_owner"
+                    "CREATE DEFINER='view_delete_outer_owner'@'%' VIEW view_delete_outer AS SELECT k AS id FROM view_delete_inner"
+                    "GRANT DELETE,SELECT ON fsdb.view_delete_outer TO view_delete_writer"
+                    "GRANT SELECT ON fsdb.view_delete_keys TO view_delete_writer" ]
+                  |> List.fold (fun session sql ->
+                      let session, result = handle session sql
+                      match result with
+                      | Affected _ -> session
+                      | other -> failtestf "%s returned %A" sql other) root
+
+              let writer = { create 2 store with User = "view_delete_writer" }
+              let delete id = $"DELETE v FROM view_delete_keys k JOIN view_delete_outer v ON v.id=k.id WHERE k.id={id}"
+              let writer, result = handle writer (delete 1)
+              Expect.equal result (Affected 2UL) "DELETE on the exposed view authorizes both rows"
+
+              let root, revoked = handle root "REVOKE SELECT ON fsdb.view_delete_base FROM view_delete_inner_owner"
+              Expect.equal revoked (Affected 0UL) "revoke the inner definer's read grant"
+              match handle writer (delete 2) |> snd with
+              | Err(1356, message) -> Expect.stringContains message "view_delete_outer" "the outer view reports the invalid chain"
+              | other -> failtestf "expected invalid view, got %A" other
+
+              match handle root "SELECT id,n FROM view_delete_base" |> snd with
+              | ResultSet(_, [ [ Some "2"; Some "20" ] ]) -> ()
+              | other -> failtestf "expected the denied target row to remain, got %A" other
+
           testCase "CURRENT_USER()/USER()/SESSION_USER() report the session's user, not a hardcoded name"
           <| fun _ ->
               let session = { create 1 (Fsdb.Storage.create ()) with User = "alice" }

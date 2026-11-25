@@ -382,9 +382,10 @@ let private columnOffsets (sources: MutationSource list) =
 type private MutationSourceOverride =
     { Columns: ColumnDef list
       Rows: Value[] list
-      IdentityOf: Value[] -> Value[] option }
+      IdentityOf: Value[] -> Value[] option
+      WriteTable: TableRef option }
 
-type private MutationSourceOverrides = Map<string, MutationSourceOverride>
+type private MutationSourceOverrides = Map<string, Lazy<Result<MutationSourceOverride, QueryResult>>>
 
 type private LockingReadSource =
     { Qualifier: string
@@ -13539,13 +13540,17 @@ and private prepareMutationJoinSource
 
         let resolved =
             match Map.tryFind (qualifier.ToLowerInvariant()) sourceOverrides with
-            | Some source -> Ok(source.Columns, source.Rows, source.IdentityOf)
+            | Some source ->
+                source.Value
+                |> Result.map (fun prepared ->
+                    prepared.Columns, prepared.Rows, prepared.IdentityOf, prepared.WriteTable |> Option.defaultValue tableRef)
             | None ->
                 resolveTableRef store registry dbName tableRef
-                |> Result.map (fun (columns, rows) -> columns, rows, Some)
+                |> Result.map (fun (columns, rows) -> columns, rows, Some, tableRef)
+
         resolved
-        |> Result.map (fun (columns, rows, identityOf) ->
-            [ { Qualifier = qualifier; PhysicalTable = Some tableRef; Columns = columns } ],
+        |> Result.map (fun (columns, rows, identityOf, writeTable) ->
+            [ { Qualifier = qualifier; PhysicalTable = Some writeTable; Columns = columns } ],
             rows |> List.map (fun row -> [ identityOf row ], row))
     | FromJsonTable(_, _, _, qualifier) ->
         prepareJoinSource store registry dbName scope Map.empty Map.empty source
@@ -13688,32 +13693,22 @@ and private runMutationJoin
     (from: TableRef)
     (joins: Join list)
     : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
-    let qualifier = from.Alias |> Option.defaultValue from.Table
+    let scope = joinEvaluationScope None
 
     let resolved =
         let cteNames = currentCteScope () |> Map.keys |> Set.ofSeq
         validateRelationNames dbName cteNames [] (Some(FromTable from)) joins
         |> Result.bind (fun () -> validateTableIndexHintSources store dbName cteNames (Some(FromTable from)) joins)
-        |> Result.bind (fun () ->
-            match Map.tryFind (qualifier.ToLowerInvariant()) sourceOverrides with
-            | Some source -> Ok(source.Columns, source.Rows, source.IdentityOf)
-            | None -> resolveTableRef store registry dbName from |> Result.map (fun (columns, rows) -> columns, rows, Some))
+        |> Result.bind (fun () -> prepareMutationJoinSource store registry dbName scope sourceOverrides (FromTable from))
 
     match resolved with
     | Error e -> Error e
-    | Ok(cols, rows, identityOf) ->
-        let baseQualifier = from.Alias |> Option.defaultValue from.Table
-        let initial =
-            [ { Qualifier = baseQualifier
-                PhysicalTable = Some from
-                Columns = cols } ],
-            (rows |> List.map (fun row -> [ identityOf row ], row))
-
+    | Ok initial ->
         joins
         |> List.fold
             (fun acc join ->
                 acc |> Result.bind (fun (state, leftOperand) ->
-                    applyMutationJoin store registry dbName (joinEvaluationScope None) sourceOverrides state (Some leftOperand) join
+                    applyMutationJoin store registry dbName scope sourceOverrides state (Some leftOperand) join
                     |> Result.map (fun state -> state, FromJoinGroup(leftOperand, [ join ]))))
             (Ok(initial, FromTable from))
         |> Result.map fst
@@ -23812,7 +23807,8 @@ and private fullTextMutationSources
                                     @ (synthetic
                                        |> List.map (fun (_, name) -> syntheticColumn name (TDouble false) false))
                                   Rows = rows
-                                  IdentityOf = identityOf },
+                                  IdentityOf = identityOf
+                                  WriteTable = None },
                                 synthetic
                             )))
                 |> Result.map (List.choose id)
@@ -23825,7 +23821,7 @@ and private fullTextMutationSources
 
                     let sources =
                         prepared
-                        |> List.map (fun (qualifier, source, _) -> qualifier, source)
+                        |> List.map (fun (qualifier, source, _) -> qualifier, lazy (Ok source))
                         |> Map.ofList
 
                     sources, substituteExprs replacements)))
@@ -25370,6 +25366,115 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
         match parseStoredViewStatement view with
         | Ok(Select select) -> updatableViewOfSelect store view select
         | _ -> None
+
+/// Carry a statement-local row ordinal through each view projection so equal
+/// projected values still identify different rows in a keyless base table.
+let private prepareDeleteViewSource store registry (stored: StoredView) (view: UpdatableView) =
+    let viewStore = storeForStoredView store
+    let marker = "_fsdb_delete_" + System.Guid.NewGuid().ToString("N")
+    let invalid () = Err(invalidViewError stored.Schema stored.Name)
+
+    let project registry (layer: StoredView) (input: TableRef) (select: SelectStmt) (columns: ColumnDef list, rows) =
+        let qualifier = input.Alias |> Option.defaultValue input.Table
+        let identities = rows |> List.map fst |> List.toArray
+        let binding =
+            { Columns = columns @ [ syntheticColumn marker (TBigInt false) false ]
+              Rows =
+                lazy
+                    (rows
+                     |> List.mapi (fun index (_, values) -> Array.append values [| VInt(int64 index) |])
+                     |> Ok)
+              Origins = List.replicate (columns.Length + 1) None
+              StatementStable = true
+              PhysicalProjection = None }
+
+        let projections =
+            select.Projections
+            |> List.collect (fun projection ->
+                match projection.Expression with
+                | Star owner when owner |> Option.forall (equalsIgnoreCase qualifier) ->
+                    columns
+                    |> List.map (fun column -> Projection.create (QualifiedCol(qualifier, column.Name)) (Some column.Name))
+                | _ -> [ projection ])
+        let source =
+            { input with
+                Database = None
+                Table = marker
+                Alias = Some qualifier
+                Partitions = []
+                IndexHints = [] }
+        let rewritten =
+            { select with
+                From = Some(FromTable source)
+                Projections = projections @ [ Projection.create (QualifiedCol(qualifier, marker)) (Some marker) ] }
+        let names = if layer.Columns.IsEmpty then [] else layer.Columns @ [ marker ]
+
+        DynamicScope.withValue cteScope (Map.ofList [ marker, binding ]) (fun () ->
+            withFunctionDatabase (Some layer.Schema) (fun () ->
+                resolveRelationBody viewStore registry layer.Schema names (PlainSelect rewritten) None))
+        |> Result.bind (fun (output, projected) ->
+            projected
+            |> traverse (fun row ->
+                match Array.tryLast row with
+                | Some(VInt index) when index >= 0L && index < int64 identities.Length ->
+                    Ok(identities.[int index], row.[.. row.Length - 2])
+                | _ -> Error(invalid ()))
+            |> Result.map (fun rows -> List.take (output.Length - 1) output, rows))
+
+    let rec read registry (layer: StoredView) =
+        match parseStoredViewStatement layer with
+        | Ok(Select ({ From = Some(FromTable input); Joins = [] } as select) as statement) ->
+            registryForView viewStore registry layer statement
+            |> Result.mapError Err
+            |> Result.bind (fun authorized ->
+                let inputDb = input.Database |> Option.defaultValue layer.Schema
+                let inputRows =
+                    match tryStoredView viewStore inputDb input.Table with
+                    | Some nested -> read authorized nested
+                    | None ->
+                        withoutCteScope (fun () -> resolveTableRef viewStore authorized layer.Schema input)
+                        |> Result.map (fun (columns, rows) -> columns, rows |> List.map (fun row -> row, row))
+
+                inputRows |> Result.bind (project authorized layer input select))
+        | _ -> Error(invalid ())
+
+    read registry stored
+    |> Result.mapError (function
+        | Err(1054, _) | Err(1142, _) | Err(1143, _) | Err(1146, _) | Err(1305, _) | Err(1356, _) -> invalid ()
+        | error -> error)
+    |> Result.map (fun (columns, rows) ->
+        let identities = Dictionary<Value[], Value[]>(HashIdentity.Reference)
+        for identity, row in rows do
+            identities.Add(row, identity)
+
+        { Columns = columns
+          Rows = rows |> List.map snd
+          IdentityOf = fun row ->
+              match identities.TryGetValue row with
+              | true, identity -> Some identity
+              | _ -> None
+          WriteTable = Some { view.UpdateFrom with Database = Some view.Database } })
+
+let private prepareDeleteViewSources store registry dbName (delete: DeleteStmt) =
+    let isTarget qualifier = delete.Targets |> List.exists (equalsIgnoreCase qualifier)
+    (FromTable delete.From :: (delete.Joins |> List.map _.Table))
+    |> List.collect FromItem.leaves
+    |> List.choose (function
+        | FromTable source when not (source.Database.IsNone && Map.containsKey (source.Table.ToLowerInvariant()) (currentCteScope ())) ->
+            let qualifier = source.Alias |> Option.defaultValue source.Table
+            let schema = source.Database |> Option.defaultValue dbName
+            if not (isTarget qualifier) then None
+            else
+                tryStoredView store schema source.Table
+                |> Option.bind (fun stored ->
+                    tryUpdatableView store schema source.Table
+                    |> Option.filter (fun view ->
+                        view.UpdateJoins.IsEmpty
+                        && not (Map.containsKey (view.Database.ToLowerInvariant(), view.Table.ToLowerInvariant()) store.TableShadows))
+                    |> Option.map (fun view -> qualifier.ToLowerInvariant(), stored, view))
+        | _ -> None)
+    |> List.map (fun (qualifier, stored, view) -> qualifier, lazy (prepareDeleteViewSource store registry stored view))
+    |> Map.ofList
 
 /// MySQL reports this view writable, but its UPDATE rewrite re-resolves the
 /// UNION's original duplicate output name in the order clause and raises 1052.
@@ -29381,9 +29486,12 @@ let rec executeAs
                 let overrideFor row =
                     Map.ofList
                         [ scope.Qualifier.ToLowerInvariant(),
-                          { Columns = columns
-                            Rows = [ row ]
-                            IdentityOf = fun _ -> None } ]
+                          lazy
+                              (Ok
+                                  { Columns = columns
+                                    Rows = [ row ]
+                                    IdentityOf = fun _ -> None
+                                    WriteTable = None }) ]
 
                 let joined row =
                     runMutationJoin runStore registry db (overrideFor row) from joins
@@ -32927,16 +33035,26 @@ let rec executeAs
             @ (deleteStmt.Joins |> List.collect (Join.conditions >> List.collect collectMatchAgainst))
             |> List.distinct
 
+        let viewSources = prepareDeleteViewSources store registry dbName deleteStmt
         let prepared =
             fullTextMutationSources store dbName deleteStmt.From deleteStmt.Joins matchNodes
             |> Result.bind (fun (sourceOverrides, rewrite) ->
+                let sources = Map.fold (fun sources name source -> Map.add name source sources) sourceOverrides viewSources
                 let rewritten =
                     { deleteStmt with
                         Joins = deleteStmt.Joins |> List.map (Join.mapConditions rewrite)
                         Where = deleteStmt.Where |> Option.map rewrite }
 
-                runMutationJoin store registry dbName sourceOverrides rewritten.From rewritten.Joins
-                |> Result.map (fun joined -> rewritten, joined))
+                runMutationJoin store registry dbName sources rewritten.From rewritten.Joins
+                |> Result.bind (fun ((sources, _) as joined) ->
+                    if rewritten.Joins |> List.exists joinCoalescesColumns then
+                        let query =
+                            { mutationSourceQuery (Some(FromTable rewritten.From)) rewritten.Joins [] [] with
+                                Where = rewritten.Where }
+                        rewriteNaturalSelect query (sources |> List.map (fun source -> source.Qualifier, source.Columns))
+                        |> Result.map (fun query -> { rewritten with Where = query.Where }, joined)
+                    else
+                        Ok(rewritten, joined)))
 
         match prepared with
         | Error e -> ids, e
@@ -33824,7 +33942,7 @@ let transactionWriteTargets
                                 else None)
         | _ -> []
 
-    let joinedTargets (from: TableRef) (joins: Join list) (names: string list) predicate =
+    let joinedTargets resolveTarget (from: TableRef) (joins: Join list) (names: string list) predicate =
         let joinedTables =
             joins
             |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
@@ -33838,7 +33956,7 @@ let transactionWriteTargets
             |> List.tryFind (fun table ->
                 let qualifier = table.Alias |> Option.defaultValue table.Table
                 equalsIgnoreCase qualifier name)
-            |> Option.bind (fun table -> targets table predicate)
+            |> Option.bind (fun table -> resolveTarget table predicate)
             |> function Some target -> Ok target | None -> Error())
         |> Result.toOption
         |> Option.defaultValue []
@@ -33868,7 +33986,7 @@ let transactionWriteTargets
                 if view.UpdateJoins.IsEmpty then
                     targets view.UpdateFrom predicate |> Option.toList
                 else
-                    joinedTargets view.UpdateFrom view.UpdateJoins [ target.Qualifier ] predicate
+                    joinedTargets targets view.UpdateFrom view.UpdateJoins [ target.Qualifier ] predicate
             | _ -> []
         | None ->
             let keys = pendingOrderedInsertKeys update.From update.Where update.OrderBy update.Limit
@@ -34013,7 +34131,7 @@ let transactionWriteTargets
                             match owners with
                             | [ (table, _) ] -> Some(table.Alias |> Option.defaultValue table.Table)
                             | _ -> None)
-            target :: (otherViewTargets @ joinedTargets update.From update.Joins externalNames None)
+            target :: (otherViewTargets @ joinedTargets targets update.From update.Joins externalNames None)
             |> combineTargets
         | None ->
             let projectedNames body =
@@ -34093,7 +34211,7 @@ let transactionWriteTargets
                             | _ -> None)
                     |> function Some name -> Ok name | None -> Error())
             |> Result.toOption
-            |> Option.map (fun names -> joinedTargets update.From update.Joins names update.Where)
+            |> Option.map (fun names -> joinedTargets targets update.From update.Joins names update.Where)
             |> Option.defaultValue []
     | Delete delete when delete.Joins.IsEmpty ->
         let viewDatabase = delete.From.Database |> Option.defaultValue dbName
@@ -34112,7 +34230,19 @@ let transactionWriteTargets
             |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
             |> Option.toList
     | Delete delete when not delete.Joins.IsEmpty ->
-        joinedTargets delete.From delete.Joins delete.Targets delete.Where
+        let resolveDeleteTarget (source: TableRef) predicate =
+            if source.Database.IsNone && Set.contains (source.Table.ToLowerInvariant()) cteNames then
+                None
+            else
+                let database = source.Database |> Option.defaultValue dbName
+                match tryUpdatableView store database source.Table with
+                | Some view when view.UpdateJoins.IsEmpty ->
+                    // The external join filters projected columns. Until those
+                    // bounds can be carried to the base table, claim its rows.
+                    targets { view.UpdateFrom with Database = Some view.Database } None
+                | _ -> targets source predicate
+
+        joinedTargets resolveDeleteTarget delete.From delete.Joins delete.Targets delete.Where
     | Insert(tableName, columns, rows, _, _)
     | Replace(tableName, columns, rows) -> literalInsertTargets tableName columns rows |> Option.toList
     | ReplaceSet(tableName, assignments) ->
