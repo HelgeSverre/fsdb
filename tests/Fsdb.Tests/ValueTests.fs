@@ -664,7 +664,16 @@ let tests =
                           "ST_Difference", across, acrossPart, "MULTILINESTRING((179 0,180 0),(-178 0,-177 0))"
                           "ST_SymDifference", second, first, "MULTILINESTRING((0 0,1 0),(3 0,4 0))"
                           "ST_Intersection", withTouch, sharedAndTouching, "GEOMETRYCOLLECTION(POINT(4 4),LINESTRING(2 0,4 0))"
-                          "ST_Intersection", "LINESTRING(4 0,2 2,0 0)", "LINESTRING(0 0,2 -2,4 0)", "MULTIPOINT((4 0),(0 0))" ] do
+                          "ST_Intersection", "LINESTRING(4 0,2 2,0 0)", "LINESTRING(0 0,2 -2,4 0)", "MULTIPOINT((4 0),(0 0))"
+                          "ST_Intersection", "LINESTRING(0 0,4 0)", "LINESTRING(4.00000000001 0,6 0)", "POINT(4 0)"
+                          "ST_Intersection", "LINESTRING(4.00000000001 0,6 0)", "LINESTRING(0 0,4 0)", "POINT(4.00000000001 0)"
+                          "ST_Intersection", "LINESTRING(0 0,4 0)", "LINESTRING(4.00000000002 0,6 0)", "GEOMETRYCOLLECTION EMPTY"
+                          "ST_Intersection", "LINESTRING(96 0,100 0)", "LINESTRING(100.00000000002 0,102 0)", "POINT(100 0)"
+                          "ST_Intersection", "LINESTRING(0 0,4 0)", "LINESTRING(3.9999999 0,6 0)", "POINT(4 0)"
+                          "ST_Intersection", "LINESTRING(0 0,4 0)", "LINESTRING(3.999999 0,6 0)", "LINESTRING(3.999999 0,4 0)"
+                          "ST_Difference", "LINESTRING(0 0,1 0)", "LINESTRING(0.9999999 0,5 0)", "LINESTRING(0 0,0.9999999 0)"
+                          "ST_Intersection", "LINESTRING(7 0,7 4)", "LINESTRING(7 3.9999999,7 6)", "POINT(7 4)"
+                          "ST_Intersection", "LINESTRING(7 0,7 4)", "LINESTRING(7 4.000000000001,7 6)", "GEOMETRYCOLLECTION EMPTY" ] do
                         let result = call name [ geometry left; geometry right ]
                         Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "line overlays retain the SRID"
                         Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{name} of {left} and {right}"

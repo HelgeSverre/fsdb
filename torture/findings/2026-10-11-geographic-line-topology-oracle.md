@@ -67,15 +67,16 @@ For two audited half-turns through the north pole, MySQL
 returns longitudes of approximately 61.18 and 64.46 degrees depending
 on the operand order, at latitude 89.9999999999995 degrees.
 
-A separate 48-result precision probe exposed ten intersection mismatches
-on nearly adjacent equatorial segments. For example, MySQL treats the
+## Near-endpoint precision
+
+A 48-result precision probe originally exposed ten intersection mismatches
+on nearly adjacent equatorial segments. MySQL treats the
 gap between longitude `4` and `4.000000000001` as a point contact and
 returns the first line's endpoint. It reports an empty intersection
-when the second start is `4.000000001`. Fsdb returns empty in both cases.
-The follow-up crossed gap and overlap sizes, operand orders, and segment
-lengths along the equator and a meridian. MySQL's result changes with the
-shorter segment and the rounding of the inverse distance. The precision
-gap remains separate from ordinary segment clipping.
+when the second start is `4.000000001`.
+The follow-up varied gap and overlap sizes, operand orders, and segment
+lengths along the equator and a meridian. The results follow the rounded
+inverse distance on a unit ellipsoid, measured from the shorter segment.
 [Boost geographic segment intersection](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
 
 Native MySQL 8.4.11 also matched an equatorial gap of `1e-11` degrees at
@@ -83,6 +84,20 @@ longitude 4 and separated a gap of `2e-11`. At longitude 100 the same
 transition fell between `2e-11` and `2.5e-11`. The measured brackets
 are consistent with one scaled section-envelope margin, so a fixed
 longitude tolerance would miss cases. [Boost section envelope expansion](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/sections/sectionalize.hpp).
+
+For adjacent segments on the equator or a shared meridian, Fsdb now
+distinguishes a point contact created by inverse-distance rounding from
+a short shared span. It retains the first operand's endpoint for rounded
+contacts and uses the coordinates to order the cuts of a genuine overlap.
+
+The native MySQL 8.4.11 wire comparison matched 45,304 results, including
+all 48 original repro results byte for byte. The corpus varies gaps,
+overlaps, and segment lengths, including equal-length segments, six
+coordinates, antimeridian crossings, and operand and traversal order.
+It covers EPSG 4326, 4258, and 4267. The largest coordinate difference was
+about `7.1e-15` degrees. The 5,112 ordinary-line results were byte-identical
+to the previous Fsdb run. Near-adjacent geodesics off the audited axes
+remain open.
 
 ## Zero-length line strings
 

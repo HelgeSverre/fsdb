@@ -73,7 +73,7 @@ let internal sphericalPointSetDistance radius toRadians firstPoints secondPoints
 
 /// Boost's first-order Andoyer inverse consumes radians. Cross-track Newton
 /// points must stay in radians here; a degree round trip changes edge distances.
-let private geographicPointDistanceRadians referenceSystem first second =
+let private geographicInverseDistanceRadians preserveTinyMeridians referenceSystem first second =
     match referenceSystem.SemiMajorAxis, referenceSystem.InverseFlattening with
     | Some semiMajorAxis, Some inverseFlattening ->
         let flattening = 1.0 / inverseFlattening
@@ -90,7 +90,7 @@ let private geographicPointDistanceRadians referenceSystem first second =
             |> min 1.0
 
         let tinyMeridionalDistance =
-            if cosineDistance = 1.0 && firstLongitude = secondLongitude && firstLatitude <> secondLatitude then
+            if preserveTinyMeridians && cosineDistance = 1.0 && firstLongitude = secondLongitude && firstLatitude <> secondLatitude then
                 let eccentricitySquared = flattening * (2.0 - flattening)
                 let middleLatitude = (firstLatitude + secondLatitude) / 2.0
                 let scale = 1.0 - eccentricitySquared * sin middleLatitude ** 2.0
@@ -123,6 +123,8 @@ let private geographicPointDistanceRadians referenceSystem first second =
         tinyMeridionalDistance
         |> Option.defaultValue (semiMajorAxis * (angularDistance + flatteningCorrection))
     | _ -> invalidArg (nameof referenceSystem) "a geographic reference system requires an ellipsoid"
+
+let private geographicPointDistanceRadians = geographicInverseDistanceRadians true
 
 /// MySQL converts each geographic coordinate with its SRS angular unit before
 /// calling Boost's Andoyer strategy.
@@ -1635,12 +1637,72 @@ let private narrowGeographicOverlayShape = function
     | GMultiPoint points -> geographicPointResult points
     | shape -> shape
 
+let private equatorialSegment ((startLatitude, _), (endLatitude, _)) =
+    startLatitude = 0.0 && endLatitude = 0.0
+
+let private geographicAxisOffset equatorial (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
+    if equatorial then longitudeDistanceRadians (mysqlRadians firstLongitude) (mysqlRadians secondLongitude)
+    else mysqlRadians secondLatitude - mysqlRadians firstLatitude
+
+let private tryAdjacentGeographicAxisContact referenceSystem ((a, b) as first) ((c, d) as second) =
+    let equatorial = equatorialSegment first && equatorialSegment second
+    let sharedMeridian = snd a = snd b && snd a = snd c && snd a = snd d
+    if not (equatorial || sharedMeridian) then None
+    else
+        let offset = geographicAxisOffset equatorial
+        let epsilon = Math.BitIncrement 1.0 - 1.0
+        // An inverse based on acos can round a close endpoint to zero distance.
+        // Keep the ordinary segment path outside this rounding region.
+        let near = 2.0 * sqrt epsilon
+        let length segment = abs (offset (fst segment) (snd segment))
+        let touches firstPoint firstAway secondPoint secondAway =
+            let gap = offset firstPoint secondPoint
+            if gap <> 0.0 && abs gap <= near
+               && offset firstPoint firstAway * offset secondPoint secondAway < 0.0
+               && abs gap < min (length first) (length second) then
+                let separated = gap * offset secondPoint secondAway > 0.0
+                // Boost tests the expanded longitude envelope before finding
+                // a common endpoint. Meridians keep their latitude ordering.
+                let margin = 1000.0 * epsilon * max 1.0 (abs (mysqlRadians (snd firstPoint)))
+                if separated && (not equatorial || abs gap > margin) then Some []
+                else
+                    let inverse left right =
+                        geographicInverseDistanceRadians false referenceSystem (geographicPointRadians left) (geographicPointRadians right)
+                        / referenceSystem.SemiMajorAxis.Value
+                    let segment, join, query =
+                        if inverse a b <= inverse c d then first, firstPoint, secondPoint
+                        else second, secondPoint, firstPoint
+                    let start, endpoint =
+                        let start, endpoint = segment
+                        if not equatorial && fst start > fst endpoint then endpoint, start else start, endpoint
+                    let distance = inverse start endpoint
+                    let projected =
+                        let magnitude = inverse start query
+                        if offset start query * offset start endpoint < 0.0 then -magnitude else magnitude
+                    let joiningStart = join = start
+                    let boundary = if joiningStart then 0.0 else distance
+                    if boostGeoEqual projected boundary then Some [ firstPoint ]
+                    elif (if joiningStart then projected > boundary else projected < boundary) then Some [ firstPoint; secondPoint ]
+                    else Some []
+            else None
+
+        [ a, b, c, d; a, b, d, c; b, a, c, d; b, a, d, c ]
+        |> List.tryPick (fun (firstPoint, firstAway, secondPoint, secondAway) -> touches firstPoint firstAway secondPoint secondAway)
+
 let private partitionGeographicLineSegment referenceSystem includeContacts otherSegments ((start, endpoint) as segment) =
-    let distance = geographicPointDistance referenceSystem start
+    let equatorial = equatorialSegment segment
+    let distance =
+        if equatorial || snd start = snd endpoint then
+            // Coordinate order remains distinct when the inverse rounds equal.
+            geographicAxisOffset equatorial start >> abs
+        else geographicPointDistance referenceSystem start
     let contacts, intervals =
         otherSegments
         |> List.fold (fun (contacts, intervals) other ->
-            match geographicSharedSegmentEndpoints referenceSystem segment other with
+            let points =
+                tryAdjacentGeographicAxisContact referenceSystem segment other
+                |> Option.defaultWith (fun () -> geographicSharedSegmentEndpoints referenceSystem segment other)
+            match points with
             | [ point ] -> (if includeContacts then point :: contacts else contacts), intervals
             | [] when includeContacts ->
                 let crossing =
