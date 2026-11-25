@@ -266,8 +266,9 @@ These tables summarize immutable, linked result artifacts. They are historical
 measurements, not claims about the current branch; use a fresh run for a current
 comparison.
 
-The [native peer comparison at `3de535d8`](results/3de535d8-peer-comparison.md)
-records checked point reads, durable updates, and MySQL feature probes.
+The [native peer comparison at `2da21f23`](results/2da21f23-peer-comparison.md)
+records checked point reads, durable updates, and MySQL feature probes,
+including correlated count expressions and exact numeric aggregates.
 The [earlier peer comparison](results/2026-11-25-peer-comparison.md)
 also covers Percona and TiDB.
 
