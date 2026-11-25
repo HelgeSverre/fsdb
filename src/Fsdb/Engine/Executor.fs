@@ -8596,13 +8596,17 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | "COUNT", _ -> simple TypeLongLong
         | ("SUM" | "AVG"), [ arg ] ->
             let isAverage = equalsIgnoreCase name "AVG"
-            let approximate length scale =
+            let approximate scale =
+                let width = if scale = 31 then 23 else 17 + scale
                 simple TypeDouble
-                |> Option.map (fun metadata -> { metadata with ColumnLength = length; Decimals = scale })
+                |> Option.map (fun metadata -> { metadata with ColumnLength = uint32 width; Decimals = byte scale })
             match numericMetadata arg with
             | metadata when metadata |> Option.forall (fun item -> item.TypeId = TypeNull) ->
                 let scale = if isAverage then divisionPrecisionIncrement () else 0
-                approximate (uint32 (17 + scale)) (byte scale)
+                approximate scale
+            | Some metadata when (metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat) && metadata.Decimals < 31uy ->
+                let increment = if isAverage then divisionPrecisionIncrement () else 0
+                approximate (min 31 (int metadata.Decimals + increment))
             | Some metadata when
                 metadata.TypeId = TypeDouble
                 || metadata.TypeId = TypeFloat
@@ -8611,7 +8615,7 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                 || metadata.TypeId = TypeBlob
                 || hasMetadataFlag (EnumFlag ||| SetFlag) metadata
                 ->
-                approximate 23u 31uy
+                approximate 31
             | metadata ->
                 let argument = decimalShape arg metadata
                 let increment = if isAverage then divisionPrecisionIncrement () else 22
@@ -23557,7 +23561,17 @@ and private runWindowedSelect
                         let column =
                             deriveColumns [ name ] [ collation ] [ metadata ]
                             |> List.head
-                        { column with Nullable = nullable })
+                        let display =
+                            match wf with
+                            | WindowOver(WinAggregate(aggregate, _), _)
+                                when metadata.TypeId = TypeDouble
+                                     && (equalsIgnoreCase aggregate "SUM" || equalsIgnoreCase aggregate "AVG")
+                                     && Functions.isUnmodifiedBuiltinAggregate aggregate registry ->
+                                Some { Width = Some(int metadata.ColumnLength)
+                                       Decimals = if metadata.Decimals < 31uy then Some(int metadata.Decimals) else None
+                                       ZeroFill = false }
+                            | _ -> column.NumericDisplay
+                        { column with Nullable = nullable; NumericDisplay = display })
                     |> Option.defaultValue (syntheticColumn name (TBigInt false) nullable))
 
             let extendedColumns = columns @ syntheticColumns

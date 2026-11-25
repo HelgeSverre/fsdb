@@ -4642,6 +4642,58 @@ let tests =
                       "SELECT (SELECT AVG(c.n) FROM child c WHERE c.pid=p.id) AS pos,(SELECT AVG(-c.n) FROM child c WHERE c.pid=p.id) AS neg FROM parent p WHERE p.id=4"
               Expect.equal midpoint (ResultSet([ "pos"; "neg" ], [ [ Some "0.0313"; Some "-0.0313" ] ])) "exact half-way values round away from zero"
 
+          testCase "fixed-scale approximate aggregates retain their result scales"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE parent(id INT PRIMARY KEY)"
+              let session, _ = handle session "CREATE TABLE child(id INT PRIMARY KEY,pid INT,f FLOAT(8,2),d DOUBLE(8,2),KEY ix_child(pid,id))"
+              let session, _ = handle session "INSERT INTO parent VALUES(1),(2)"
+              let session, _ = handle session "INSERT INTO child VALUES(1,1,0,0),(2,1,1,1),(3,1,1,1)"
+              let scalar aggregate =
+                  $"(SELECT {aggregate} FROM child c WHERE c.pid=p.id AND c.id BETWEEN 0 AND 3)"
+              let sum = scalar "SUM(c.f)"
+              let average = scalar "AVG(c.f)"
+              let distinctAverage = scalar "AVG(DISTINCT c.d)"
+              let sql = $"SELECT {sum} AS s,{average} AS a,{distinctAverage} AS b FROM parent p ORDER BY p.id"
+              let resultSession, result = handle session sql
+              Expect.equal result
+                  (ResultSet([ "s"; "a"; "b" ], [ [ Some "2.00"; Some "0.666667"; Some "0.500000" ]; [ None; None; None ] ]))
+                  "sum retains the input scale and average adds the division increment"
+              let descriptors (columns: ColumnMetadata list) =
+                  columns |> List.map (fun column -> column.TypeId, column.Decimals, column.ColumnLength)
+              let expected = [ TypeDouble, 2uy, 19u; TypeDouble, 6uy, 23u; TypeDouble, 6uy, 23u ]
+              Expect.equal (descriptors resultSession.LastResultColumnMetadata) expected "text result metadata"
+              match prepareStatementForSession session sql with
+              | Ok(statement, parameterCount) ->
+                  let _, columns = preparedMetadata session statement parameterCount
+                  Expect.equal (columns |> List.map _.Metadata |> descriptors) expected "prepared result metadata"
+              | Error error -> failtestf "expected the aggregate statement to prepare, got %A" error
+
+              let window, values = handle session "SELECT SUM(f) OVER () AS s,AVG(d) OVER () AS a FROM child ORDER BY id"
+              Expect.equal values (ResultSet([ "s"; "a" ], List.replicate 3 [ Some "2.00"; Some "0.666667" ]))
+                  "materializing a window result preserves its approximate output scale"
+              Expect.equal (descriptors window.LastResultColumnMetadata) (List.take 2 expected) "window result metadata"
+
+              let session, _ = handle session "SET SESSION div_precision_increment=0"
+              let _, comparison = handle session $"SELECT {average} AS a,{average}>0.66 AS same FROM parent p WHERE p.id=1"
+              Expect.equal comparison (ResultSet([ "a"; "same" ], [ [ Some "0.67"; Some "1" ] ]))
+                  "display rounding retains the computed value for comparisons"
+
+              let session, _ = handle session "SET SESSION div_precision_increment=30"
+              let unscaled, _ = handle session $"SELECT {average} AS a FROM parent p WHERE p.id=1"
+              Expect.equal (descriptors unscaled.LastResultColumnMetadata) [ TypeDouble, 31uy, 23u ]
+                  "scales at the floating-point ceiling use the unspecified descriptor"
+
+              let session, _ = handle session "CREATE TABLE fixed_inputs (id INT PRIMARY KEY, f FLOAT(8,2), d DOUBLE(50,30))"
+              let session, inserted = handle session "INSERT INTO fixed_inputs VALUES (1,0.125,1),(2,-0.125,-1)"
+              Expect.equal inserted (Affected 2UL) "fixed-scale floating-point columns accept scales up to 30"
+              let _, rounded = handle session "SELECT f,d FROM fixed_inputs ORDER BY id"
+              Expect.equal rounded
+                  (ResultSet([ "f"; "d" ],
+                      [ [ Some "0.12"; Some("1." + String.replicate 30 "0") ]
+                        [ Some "-0.12"; Some("-1." + String.replicate 30 "0") ] ]))
+                  "stored floating-point half-way values round to even"
+
           testCase "all-NULL rows retain declared and inferred result metadata"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

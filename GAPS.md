@@ -2766,7 +2766,8 @@ implementation effort:
    also use the slice, including audited DISTINCT and conditional expressions.
    [Scalar aggregate result metadata](benchmarks/results/2026-11-25-correlated-integer-range-count.md#scalar-aggregate-result-metadata)
    preserves the audited numeric type and display scale on text and
-   prepared results.
+   prepared results. [Fixed-scale floating-point aggregates](benchmarks/results/2026-11-25-correlated-integer-range-count.md#fixed-scale-floating-point-aggregates)
+   also preserve the audited scale through the window path.
    Other residual predicates, broader aggregates, and projected sources
    still need broader access planning.
 

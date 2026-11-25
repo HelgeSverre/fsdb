@@ -279,6 +279,27 @@ The fixtures include signed and unsigned columns, nullable and empty
 matches, conditional expressions, and DISTINCT.
 
 In a separate declared-type probe, `MIN(MEDIUMINT)` still reported
-`INT` where MySQL reported `MEDIUMINT`. Fixed-scale `FLOAT` and
-`DOUBLE` inputs also still differed in scalar `SUM` and `AVG`
-scale descriptors.
+`INT` where MySQL reported `MEDIUMINT`.
+
+### Fixed-scale floating-point aggregates
+
+`SUM` retains the input's floating-point scale. `AVG` adds
+`div_precision_increment`, with scale 31 denoting unspecified precision.
+Windowed sums and averages retain the descriptor through materialization.
+Binary results retain the computed value, and the text protocol formats
+it to the declared scale. [MySQL aggregate type resolution](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item_sum.cc).
+
+Storage rounds the scaled fractional part of a fixed-scale `FLOAT` or
+`DOUBLE` value to even, including declarations above 15 decimal places.
+For example, `FLOAT(8,2)` stores 0.125 and −0.125 as 0.12 and −0.12.
+The same path accepts `DOUBLE(50,30)` inserts.
+[MySQL floating-point field conversion](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/field.cc).
+Forced-index and scan controls agreed on stored values and range
+membership around the audited positive and negative boundaries.
+
+The native MySQL 8.4.11 comparison matched values, type codes, widths,
+and scales in 160 text cases across direct, correlated, and window
+aggregates. The binary prepared comparison matched 96 scalar and
+window column descriptors and 288 returned values across precision
+increments 0, 4, 12, and 30. A separate exact `DECIMAL` control still differs at
+30 fractional digits because Fsdb uses `System.Decimal`.

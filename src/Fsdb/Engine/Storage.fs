@@ -2081,10 +2081,14 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | TFloat unsigned ->
             let finish (value: float) =
                 let rounded =
-                    col.NumericDisplay
-                    |> Option.bind _.Decimals
-                    |> Option.map (fun decimals -> Math.Round(value, decimals, MidpointRounding.AwayFromZero))
-                    |> Option.defaultValue value
+                    match col.NumericDisplay |> Option.bind _.Decimals with
+                    | Some decimals when Double.IsFinite value ->
+                        // MySQL rounds the scaled fractional part to an even
+                        // integer. Scaling also covers declarations above 15 digits.
+                        let whole = Math.Floor value
+                        let scale = Math.Pow(10.0, float decimals)
+                        whole + Math.Round((value - whole) * scale) / scale
+                    | _ -> value
 
                 match col.Type with
                 | TFloat _ -> float32 rounded |> float |> VDouble |> Ok
