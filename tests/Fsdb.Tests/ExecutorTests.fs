@@ -2116,6 +2116,39 @@ let tests =
                     | ResultSet(_, [ [ Some "70" ] ]) -> ()
                     | result -> failtestf "EXPLAIN changed the data: %A" result
 
+                testCase "EXPLAIN UPDATE reports a range after the joined partner key prefix"
+                <| fun _ ->
+                    let store = newStore ()
+                    let run = runDefault store
+                    for sql in
+                        [ "CREATE TABLE parents (id INT PRIMARY KEY,n INT)"
+                          "CREATE TABLE partners (id INT,seq INT,delta INT,PRIMARY KEY(id,seq))"
+                          "INSERT INTO parents VALUES (1,10),(2,20),(3,30)"
+                          "INSERT INTO partners VALUES (1,20,7),(1,10,7),(1,30,7),(2,10,9),(3,10,11)"
+                          "CREATE VIEW checked_parent AS SELECT id,n FROM parents WHERE n>0 WITH CASCADED CHECK OPTION"
+                          "CREATE VIEW active AS SELECT p.id,p.n,s.delta,s.seq FROM checked_parent p JOIN partners s ON p.id=s.id" ] do
+                        match run sql with
+                        | Affected _ -> ()
+                        | result -> failtestf "setup failed for %s: %A" sql result
+
+                    let target = [ Some "1"; Some "UPDATE"; Some "parents"; None; Some "const"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; Some "const"; Some "1"; Some "100.00"; None ]
+                    let partner access reference extra =
+                        [ Some "1"; Some "SIMPLE"; Some "s"; None; Some access; Some "PRIMARY"; Some "PRIMARY"; Some "8"; reference; Some "1"; Some "100.00"; Some extra ]
+
+                    for statement, expected in
+                        [ "UPDATE active SET n=n+delta WHERE id=1 AND seq>10 AND 30>seq", partner "range" None "Using where"
+                          "UPDATE active SET n=n+1 WHERE id=1 AND seq BETWEEN 20 AND 20", partner "const" (Some "const,const") "Using index"
+                          "UPDATE active SET n=n+1 WHERE id=1 AND seq>99", partner "range" None "Using where; Using index" ] do
+                        match run ("EXPLAIN " + statement) with
+                        | ResultSet(_, rows) -> Expect.equal rows [ target; expected ] statement
+                        | result -> failtestf "expected a plan for %s, got %A" statement result
+
+                    Expect.equal (run "UPDATE active SET n=n+delta WHERE id=1 AND seq>10 AND 30>seq") (Affected 1UL) "the bounded partner updates the target once"
+                    Expect.equal (run "UPDATE active SET n=n+1 WHERE id=1 AND seq>99") (Affected 0UL) "an empty range updates no rows"
+                    match run "SELECT id,n FROM parents ORDER BY id" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1"; Some "17" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ] "committed rows"
+                    | result -> failtestf "expected the committed rows, got %A" result
+
                 testCase "EXPLAIN by a nullable VARCHAR(50) UNIQUE key reports key_len 203 (50*4+2+1 for the null flag)"
                 <| fun _ ->
                     // Probe values are key-relative even when the key column
@@ -13022,6 +13055,38 @@ let tests =
 
                     let small, large = measure 500, measure 5_000
                     Expect.isLessThan large (3L * small) $"allocations at 500 and 5000 rows were {small} and {large} bytes"
+
+                testCase "a joined view update probes a composite key range in source order"
+                <| fun _ ->
+                    let measure outOfRangeRows =
+                        let store = newStore ()
+                        let run = runDefault store
+                        let affected sql count = Expect.equal (run sql) (Affected count) sql
+                        affected "CREATE TABLE parents (id INT PRIMARY KEY,n INT)" 0UL
+                        affected "CREATE TABLE partners (id INT,seq INT,delta INT,PRIMARY KEY(id,seq))" 0UL
+                        affected "INSERT INTO parents VALUES (1,10),(2,20)" 2UL
+                        affected "INSERT INTO partners VALUES (1,21,3),(1,20,7),(1,5,99),(2,10,9)" 4UL
+
+                        for start in 100..250..(99 + outOfRangeRows) do
+                            let sequences = [ start .. min (99 + outOfRangeRows) (start + 249) ]
+                            let values = sequences |> List.map (fun seq -> $"(1,{seq},99)") |> String.concat ","
+                            affected $"INSERT INTO partners VALUES {values}" (uint64 sequences.Length)
+
+                        affected "CREATE VIEW active AS SELECT p.id,p.n,s.delta,s.seq FROM parents p JOIN partners s ON p.id=s.id" 0UL
+                        let update = "UPDATE active SET n=n+delta WHERE id=1 AND seq BETWEEN 20 AND 21"
+                        affected update 1UL
+                        let before = System.GC.GetAllocatedBytesForCurrentThread()
+                        for _ in 1..4 do affected update 1UL
+                        let allocated = System.GC.GetAllocatedBytesForCurrentThread() - before
+
+                        match run "SELECT id,n FROM parents ORDER BY id" with
+                        | ResultSet(_, rows) ->
+                            Expect.equal rows [ [ Some "1"; Some "25" ]; [ Some "2"; Some "20" ] ] "the first in-range partner in source order supplies the assignment"
+                        | other -> failtestf "expected committed rows, got %A" other
+                        allocated
+
+                    let small, large = measure 500, measure 5_000
+                    Expect.isLessThan large (3L * small) $"allocations at 500 and 5000 out-of-range rows were {small} and {large} bytes"
 
                 testCase "a broad composite left-prefix join prefers one hash build"
                 <| fun _ ->

@@ -122,6 +122,33 @@ either an existing or an absent target. Fsdb checks those grants before
 selecting an index prefix. Both engines leave the rows intact.
 MySQL estimates `filtered` at 33.33%
 for the residual partner predicate. Fsdb currently renders 100.00%.
-With `s.seq > 10` on the second partner key column, MySQL
-uses `range` with an eight-byte key. Fsdb's lookup still uses the equality
-prefix and applies the range predicate to its candidates.
+
+## Applying a range after the equality prefix
+
+Two-table inner updates can now apply signed-integer comparisons or
+`BETWEEN` to the key column after the equality prefix. Execution restores
+row-store order for the selected rows so the same first matching partner
+supplies the assignment. Equal `BETWEEN` endpoints can complete an exact key.
+
+MySQL 8.4.11 and Fsdb matched on all plan columns, affected counts, and
+committed rows for the primary-key fixture. It covers open endpoints,
+an empty range, and equal `BETWEEN` endpoints. A descending secondary key
+with a nullable range column also matched on key access, affected rows,
+and committed data. MySQL reports `Using index condition` on the secondary
+case. Fsdb reports `Using where`.
+
+The embedded `Db.Connection.Query` allocation probe used in-memory debug
+builds on .NET 10.0.12. Four measured autocommit updates followed one
+warmup. The matching two partner rows remain fixed while additional rows
+share their leading key and fall outside the suffix bounds. Both builds
+preserved the same first partner and committed values.
+
+| Out-of-range rows | `b347b3a5` allocated | With the range probe allocated |
+| ---: | ---: | ---: |
+| 500 | 21.22 MB | 9.65 MB |
+| 5,000 | 151.76 MB | 32.84 MB |
+
+The measured predicate was `id=1 AND seq >= 20 AND seq <= 21`. The
+executor regression also checks bounded allocation growth for an equivalent
+`BETWEEN` range. The table measures thread allocations through the embedded
+API.

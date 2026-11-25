@@ -2987,7 +2987,9 @@ implementation effort:
    5.01 ms to 3.29 ms. Two-table inner updates also use selective exact index
    prefixes while preserving source scan order. Traditional `EXPLAIN UPDATE`
    reports selected complete keys and prefixes with their key lengths.
-   Range bounds on later key parts, `filtered` estimates, broader join shapes,
+   For two-table inner updates, signed-integer bounds on the next key part can
+   narrow that prefix further and appear as `range` in the plan. `filtered`
+   estimates, secondary index condition reporting, broader join shapes,
    exact JSON and TREE formatting, and the remaining wire latency are open.
    The follow-up carries a complete target key into
    write-lock selection when the filter names the join partner's key.

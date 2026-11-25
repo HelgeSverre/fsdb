@@ -6636,7 +6636,7 @@ type OrderedKeyTerm =
       OrderedTransform: IndexTransform option
       OrderedDirection: Direction }
 
-let private tryOrderedIndexLookupWithPrefix
+let private tryOrderedIndexSliceWithPrefix
     (allowed: string -> bool)
     (store: Store)
     (table: Table option)
@@ -6644,7 +6644,7 @@ let private tryOrderedIndexLookupWithPrefix
     (prefixValues: Value list)
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
-    : OrderedLookup option =
+    =
     table
     |> Option.bind (fun table ->
         let columnNames = terms |> List.map _.OrderedColumnName
@@ -6765,16 +6765,17 @@ let private tryOrderedIndexLookupWithPrefix
                           First = first
                           AfterLast = afterLast }
 
-                    Some
-                        { OrderedIndexName = group.Name
-                          OrderedColumnIndices = indices
-                          OrderedColumns = table.Columns
-                          OrderedRowCount = afterLast - first
-                          OrderedRows =
-                            orderedEntries traversal slice
-                            |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
-                          OrderedGroups = orderedEntries traversal slice |> orderedGroupCounts indices.Length }
+                    Some(table, slice, traversal)
                 | _ -> None)))
+
+let private orderedLookup ((table: Table), (slice: SecondaryOrderSlice), traversal) : OrderedLookup =
+    let entries = orderedEntries traversal slice
+    { OrderedIndexName = slice.IndexName
+      OrderedColumnIndices = slice.ColumnIndices
+      OrderedColumns = table.Columns
+      OrderedRowCount = slice.AfterLast - slice.First
+      OrderedRows = entries |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
+      OrderedGroups = entries |> orderedGroupCounts slice.ColumnIndices.Length }
 
 let internal tryOrderedIndexLookupWith
     (allowed: string -> bool)
@@ -6783,7 +6784,8 @@ let internal tryOrderedIndexLookupWith
     (tableName: string)
     (terms: OrderedKeyTerm list)
     : OrderedLookup option =
-    tryOrderedIndexLookupWithPrefix allowed store (tableAt store dbName tableName) terms [] None None
+    tryOrderedIndexSliceWithPrefix allowed store (tableAt store dbName tableName) terms [] None None
+    |> Option.map orderedLookup
 
 let tryOrderedIndexLookup store dbName tableName terms =
     tryOrderedIndexLookupWith (fun _ -> true) store dbName tableName terms
@@ -6799,12 +6801,13 @@ let internal tryOrderedIndexPrefixLookupWith
     if prefixValues.IsEmpty || prefixValues.Length > terms.Length then
         None
     else
-        tryOrderedIndexLookupWithPrefix allowed store (tableAt store dbName tableName) terms prefixValues None None
+        tryOrderedIndexSliceWithPrefix allowed store (tableAt store dbName tableName) terms prefixValues None None
+        |> Option.map orderedLookup
 
 let internal tryOrderedIndexPrefixLookup store dbName tableName terms prefixValues =
     tryOrderedIndexPrefixLookupWith (fun _ -> true) store dbName tableName terms prefixValues
 
-let internal tryOrderedIndexPrefixRangeLookupInTableWith
+let private tryOrderedIndexPrefixRangeSliceInTableWith
     (allowed: string -> bool)
     (store: Store)
     (table: Table)
@@ -6812,11 +6815,20 @@ let internal tryOrderedIndexPrefixRangeLookupInTableWith
     (prefixValues: Value list)
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
-    : OrderedLookup option =
+    =
     if prefixValues.IsEmpty || prefixValues.Length >= terms.Length || (lower.IsNone && upper.IsNone) then
         None
     else
-        tryOrderedIndexLookupWithPrefix allowed store (Some table) terms prefixValues lower upper
+        tryOrderedIndexSliceWithPrefix allowed store (Some table) terms prefixValues lower upper
+
+let internal tryOrderedIndexPrefixRangeLookupInTableWith allowed store table terms prefixValues lower upper =
+    tryOrderedIndexPrefixRangeSliceInTableWith allowed store table terms prefixValues lower upper
+    |> Option.map orderedLookup
+
+let internal tryOrderedIndexPrefixRangeRowIdsInTableWith allowed store table terms prefixValues lower upper =
+    tryOrderedIndexPrefixRangeSliceInTableWith allowed store table terms prefixValues lower upper
+    |> Option.map (fun (_, slice, traversal) ->
+        slice.ColumnIndices, slice.AfterLast - slice.First, (orderedEntries traversal slice |> Seq.map _.RowId))
 
 let internal tryOrderedIndexPrefixRangeLookupWith allowed store dbName tableName terms prefixValues lower upper =
     tableAt store dbName tableName
