@@ -2774,6 +2774,9 @@ implementation effort:
    [MEDIUMINT result metadata](benchmarks/results/2026-11-25-correlated-integer-range-count.md#mediumint-result-metadata)
    preserves the native type on correlated extrema and reconciles it with
    other integer types in UNION results.
+   [COUNT metadata and comparison warnings](benchmarks/results/2026-11-25-correlated-integer-range-count.md#count-metadata-and-comparison-warnings)
+   cover scalar count descriptors and truncated narrow-integer bounds in
+   the audited correlated predicates.
    Other residual predicates, broader aggregates, and projected sources
    still need broader access planning.
 

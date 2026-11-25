@@ -376,3 +376,28 @@ after, with overlapping per-pass ranges.
 dotnet fsi benchmarks/scripts/native-feature-peers.fsx -- "$engine" "$port" "$pass" expression-count-controls
 dotnet fsi benchmarks/scripts/native-feature-peers.fsx -- "$engine" "$port" "$pass" exact-aggregate-controls
 ```
+
+### COUNT metadata and comparison warnings
+
+Built-in `COUNT` now advertises a 21-character `BIGINT` descriptor.
+Scalar count descriptors retain that width on empty outer results and
+carry the nullability of their subquery. An enclosing `SUM` sees the
+exact integer type and returns `DECIMAL(42,0)` with wire width 43.
+MySQL 8.4.11 text and prepare packets agreed on the audited counts over
+physical tables, joins, CTEs, and source-free subqueries. A binary client
+also matched the typed values and descriptors for prepared counts,
+their sum, and an empty result. Materialized derived and window result
+descriptors still have separate width or flag differences.
+
+Correlated comparisons and constant `IN` lists over narrow integer
+columns now share the existing literal-conversion diagnostics. The
+audited paths include the scalar aggregate fallback, indexed counts,
+reversed comparison operands, and integer and fractional prefixes.
+The probes check the result and warning 1292 together. The audited
+direct comparisons skip the warning when a decisive Boolean literal,
+a missing outer point lookup, or `LIMIT 0` eliminates evaluation.
+
+Other comparison diagnostics remain open, including top-level reads,
+`BIGINT` binding-time conversion, computed operands, `BETWEEN`, and
+warning timing for an empty outer range and a zero-limit `IN` list.
+[MySQL comparison binding](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item_cmpfunc.cc).

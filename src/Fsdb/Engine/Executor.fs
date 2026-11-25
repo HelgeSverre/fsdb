@@ -4389,6 +4389,9 @@ let private isIntegerType typeId =
 
 let private isIntegerMetadata (metadata: ColumnMetadata) = isIntegerType metadata.TypeId
 
+let private countResultMetadata =
+    { Value.columnMetadata TypeLongLong with ColumnLength = 21u; Flags = BinaryFlag ||| NotNullFlag }
+
 let private isBareNullProjection index (select: SelectStmt) =
     let hasStar =
         select.Projections |> List.exists (fun projection ->
@@ -7987,6 +7990,20 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
 
 and private tryScalarNumericAggregateMetadata (ctx: EvalContext) (select: SelectStmt) =
     match select.From, select.Projections with
+    | _, [ { Expression = FuncCall(name, _) } ]
+        when equalsIgnoreCase name "COUNT" && Functions.isUnmodifiedBuiltinAggregate name ctx.Registry ->
+        let sourceFree =
+            match select.From with
+            | None -> true
+            | Some(FromTable { Database = None; Table = table }) -> equalsIgnoreCase table "dual"
+            | _ -> false
+        let unconditionallyPresent =
+            sourceFree
+            && select.Joins.IsEmpty
+            && hasPlainAggregateShape select
+            && (select.Where |> Option.forall (fun predicate ->
+                possibleConditionTruths ctx predicate = Set.singleton (Some true)))
+        Some(if unconditionallyPresent then countResultMetadata else { countResultMetadata with Flags = BinaryFlag })
     | Some(FromTable tableRef), [ { Expression = FuncCall(name, [ _ ]) as projection } ]
         when (equalsIgnoreCase name "SUM" || equalsIgnoreCase name "AVG" || equalsIgnoreCase name "MIN" || equalsIgnoreCase name "MAX")
              && Functions.isUnmodifiedBuiltinAggregate name ctx.Registry
@@ -8642,12 +8659,19 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | FuncCall(RegisteredScalarResult metadata, _) -> Some metadata
     | FuncCall(name, args) ->
         match name.ToUpperInvariant(), args with
+        | "COUNT", _ when Functions.isUnmodifiedBuiltinAggregate name ctx.Registry -> Some countResultMetadata
         | "COUNT", _ -> simple TypeLongLong
         | ("SUM" | "AVG"), [ arg ] ->
             let isAverage = equalsIgnoreCase name "AVG"
+            let resultMetadata typeId =
+                simple typeId
+                |> Option.map (fun metadata ->
+                    if Functions.isUnmodifiedBuiltinAggregate name ctx.Registry then
+                        { metadata with Flags = BinaryFlag }
+                    else metadata)
             let approximate scale =
                 let width = if scale = 31 then 23 else 17 + scale
-                simple TypeDouble
+                resultMetadata TypeDouble
                 |> Option.map (fun metadata -> { metadata with ColumnLength = uint32 width; Decimals = byte scale })
             match numericMetadata arg with
             | metadata when metadata |> Option.forall (fun item -> item.TypeId = TypeNull) ->
@@ -8671,7 +8695,7 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                 let shape =
                     { Precision = min 65 (argument.Precision + increment)
                       Scale = if isAverage then min 30 (argument.Scale + increment) else argument.Scale }
-                simple TypeNewDecimal |> Option.map (withDecimalShape shape)
+                resultMetadata TypeNewDecimal |> Option.map (withDecimalShape shape)
         | ("STD" | "STDDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "VARIANCE" | "VAR_POP" | "VAR_SAMP"), _ -> simple TypeDouble
         | "GROUP_CONCAT", _ -> Some(ColumnWire.metadataOfType TText)
         | ("JSON_ARRAYAGG" | "JSON_OBJECTAGG"), _ -> json
@@ -9547,7 +9571,9 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
                         (Some outer)
 
                 let predicate = select.Where |> Option.map (orderCorrelatedRangePredicates candidate)
-                let matches = prepareWhereMatches context predicate
+                let matches =
+                    DynamicScope.withValue correlatedNumericWarningScope true (fun () ->
+                        prepareWhereMatches context predicate)
 
                 withMetadataProbe (fun () -> matches (probeRow columns))
                 |> Result.bind (fun _ ->
@@ -11811,6 +11837,7 @@ and private prepareWhereMatches
     (where: Expr option)
     : Value[] -> Result<bool, EvalError> =
     let context = { ctxFor [||] with Clause = WhereClause }
+    let correlatedBounds = correlatedNumericWarningScope.Value
     let evaluate expression row = evalExpr { ctxFor row with Clause = WhereClause } expression
 
     let canSkipComparedDivision =
@@ -11843,9 +11870,14 @@ and private prepareWhereMatches
         let validated = validateElidedPredicate expression
         fun _ -> validated |> Result.map (fun () -> truth)
 
-    let normalizeCorrelatedDoubleBound (column: ColumnDef) expression bound =
+    let usesApproximateBound integerBounds = function
+        | TDouble _ | TFloat _ -> true
+        | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ -> integerBounds
+        | _ -> false
+
+    let normalizeCorrelatedDoubleBound integerBounds (column: ColumnDef) expression bound =
         match column.Type, bound with
-        | (TDouble _ | TFloat _), VString text when correlatedNumericWarningScope.Value ->
+        | columnType, VString text when correlatedBounds && usesApproximateBound integerBounds columnType ->
             let number, truncated = Value.coerceLeadingDouble text
             if truncated && System.Double.IsFinite number then
                 recordCorrelatedNumericWarning expression text
@@ -11853,7 +11885,7 @@ and private prepareWhereMatches
             else bound
         | _ -> bound
 
-    let directComparison eager op columnExpression constantExpression columnOnLeft =
+    let directComparison eager integerBounds op columnExpression constantExpression columnOnLeft =
         match tryDirectColumnForExpr context columnExpression with
         | Some(index, column)
             when (match constantExpression with
@@ -11865,7 +11897,7 @@ and private prepareWhereMatches
             let boundResult =
                 lazy (
                     evalExpr context constantExpression
-                    |> Result.map (normalizeCorrelatedDoubleBound column constantExpression))
+                    |> Result.map (normalizeCorrelatedDoubleBound integerBounds column constantExpression))
             if eager then ignore boundResult.Value
             Some(fun (row: Value[]) ->
                 match boundResult.Value with
@@ -11879,21 +11911,26 @@ and private prepareWhereMatches
                         comparisonResultWithNulls context constantExpression None bound columnExpression (Some column) op stored)
         | _ -> None
 
-    let rec prepare eager expression =
+    let rec prepare eager integerBounds expression =
+        let prepareBranches eager decisive left right =
+            let integerBounds =
+                integerBounds
+                && diagnosticFreeLiteralTruth left <> Some decisive
+                && diagnosticFreeLiteralTruth right <> Some decisive
+            prepare eager integerBounds left, prepare eager integerBounds right
+
         match expression with
         | BinOp(And, left, right) ->
-            let evaluateLeft = prepare false left
-            let evaluateRight = prepare false right
+            let evaluateLeft, evaluateRight = prepareBranches false false left right
             fun row -> evalLogicalAnd (evaluateLeft row) (fun () -> evaluateRight row)
         | BinOp(Or, left, right) ->
-            let evaluateLeft = prepare eager left
-            let evaluateRight = prepare eager right
+            let evaluateLeft, evaluateRight = prepareBranches eager true left right
             fun row -> evalLogicalOr (evaluateLeft row) (fun () -> evaluateRight row)
         | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), left, right) ->
-            directComparison eager op left right true
-            |> Option.orElseWith (fun () -> directComparison eager op right left false)
+            directComparison eager integerBounds op left right true
+            |> Option.orElseWith (fun () -> directComparison eager integerBounds op right left false)
             |> Option.defaultWith (fun () -> evaluate expression)
-        | In(value, candidates) when correlatedNumericWarningScope.Value ->
+        | In(value, candidates) when correlatedBounds ->
             match tryDirectColumnForExpr context value with
             | Some(_, column) ->
                 let normalized =
@@ -11901,7 +11938,7 @@ and private prepareWhereMatches
                     |> List.map (fun candidate ->
                         match candidate with
                         | LiteralValue(VString text) ->
-                            match normalizeCorrelatedDoubleBound column candidate (VString text) with
+                            match normalizeCorrelatedDoubleBound integerBounds column candidate (VString text) with
                             | VDouble number -> Lit(VDouble number)
                             | _ -> candidate
                         | _ -> candidate)
@@ -11917,7 +11954,9 @@ and private prepareWhereMatches
         let result = evaluate expression [||] |> Result.map (truthy >> (=) (Some true))
         fun _ -> result
     | Some expression when storedRowsMatchReadRows context.Store (context.ColumnsByPosition |> Seq.choose id) ->
-        let prepared = prepare true expression
+        // A metadata probe can reach an integer predicate that execution skips.
+        let integerBounds = correlatedBounds && not metadataProbe.Value && not (Diagnostics.isSuppressed ())
+        let prepared = prepare true integerBounds expression
         fun row -> prepared row |> Result.map (truthy >> (=) (Some true))
     | Some expression ->
         fun row -> evaluate expression row |> Result.map (truthy >> (=) (Some true))

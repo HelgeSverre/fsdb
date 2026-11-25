@@ -4642,6 +4642,83 @@ let tests =
                       "SELECT (SELECT AVG(c.n) FROM child c WHERE c.pid=p.id) AS pos,(SELECT AVG(-c.n) FROM child c WHERE c.pid=p.id) AS neg FROM parent p WHERE p.id=4"
               Expect.equal midpoint (ResultSet([ "pos"; "neg" ], [ [ Some "0.0313"; Some "-0.0313" ] ])) "exact half-way values round away from zero"
 
+          testCase "correlated integer predicates warn once for each truncated literal"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE p(id INT PRIMARY KEY)"
+                        "CREATE TABLE c(id INT PRIMARY KEY,owner INT,n MEDIUMINT,KEY ix(owner,id),KEY ix_n(n))"
+                        "INSERT INTO p VALUES(1),(2),(3)"
+                        "INSERT INTO c VALUES(1,1,2),(2,1,3),(3,2,2),(4,2,1)" ]
+              let expectedWarnings values =
+                  ResultSet(
+                      [ "Level"; "Code"; "Message" ],
+                      values |> List.map (fun value ->
+                          [ Some "Warning"; Some "1292"; Some $"Truncated incorrect DOUBLE value: '{value}'" ]))
+
+              for predicate, rows, warnings in
+                  [ "c.n='2x'", [ Some "2"; Some "2"; None ], [ "2x" ]
+                    "'2x'=c.n", [ Some "2"; Some "2"; None ], [ "2x" ]
+                    "c.n<'2.1x'", [ Some "2"; Some "1"; None ], [ "2.1x" ]
+                    "c.n IN ('2x','3x')", [ Some "2"; Some "2"; None ], [ "2x"; "3x" ]
+                    "c.n='2x' AND 0", [ None; None; None ], []
+                    "c.n='2x' OR TRUE", [ Some "2"; Some "1"; None ], []
+                    "c.n='2 '", [ Some "2"; Some "2"; None ], [] ] do
+                  let sql =
+                      $"SELECT (SELECT MIN(c.n) FROM c WHERE c.owner=p.id AND c.id BETWEEN p.id AND p.id+20 AND ({predicate})) AS n FROM p ORDER BY p.id"
+                  Expect.equal (run sql) (ResultSet([ "n" ], rows |> List.map List.singleton)) sql
+                  Expect.equal (run "SHOW WARNINGS") (expectedWarnings warnings) predicate
+
+              let count = "SELECT (SELECT COUNT(*) FROM c WHERE c.owner=p.id AND c.n='2x') AS n FROM p ORDER BY p.id"
+              Expect.equal (run count) (ResultSet([ "n" ], [ [ Some "1" ]; [ Some "1" ]; [ Some "0" ] ])) count
+              Expect.equal (run "SHOW WARNINGS") (expectedWarnings [ "2x" ]) "indexed counts use the same diagnostics"
+
+              let zeroLimit = "SELECT (SELECT MIN(c.n) FROM c WHERE c.owner=p.id AND c.n='2x' LIMIT 0) AS n FROM p ORDER BY p.id"
+              Expect.equal (run zeroLimit) (ResultSet([ "n" ], List.replicate 3 [ None ])) zeroLimit
+              Expect.equal (run "SHOW WARNINGS") (expectedWarnings []) "a zero-row LIMIT skips this comparison"
+              let noOuter = "SELECT (SELECT MIN(c.n) FROM c WHERE c.owner=p.id AND c.n='2x') AS n FROM p WHERE p.id=100"
+              Expect.equal (run noOuter) (ResultSet([ "n" ], [])) noOuter
+              Expect.equal (run "SHOW WARNINGS") (expectedWarnings []) "a missing outer point read skips the comparison"
+
+          testCase "COUNT keeps its BIGINT descriptor through scalar subqueries"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE p(id INT PRIMARY KEY)"
+              let session, _ = handle session "CREATE TABLE c(id INT PRIMARY KEY,owner INT,n INT,KEY ix(owner,id))"
+              let session, _ = handle session "INSERT INTO p VALUES(1),(2)"
+              let session, _ = handle session "INSERT INTO c VALUES(1,1,2),(2,1,2),(3,1,NULL)"
+              let scalar argument = $"(SELECT COUNT({argument}) FROM c WHERE c.owner=p.id AND c.id BETWEEN p.id AND p.id+20)"
+              let count = scalar "*"
+              let distinctCount = scalar "DISTINCT n"
+              let columnTypes (metadata: ColumnMetadata list) =
+                  metadata |> List.map (fun column -> column.TypeId, column.ColumnLength, column.Flags)
+
+              for sql, expectedRows, flags in
+                  [ "SELECT COUNT(*) AS a,COUNT(DISTINCT n,id) AS b FROM c",
+                    [ [ Some "3"; Some "2" ] ], BinaryFlag ||| NotNullFlag
+                    "SELECT (SELECT COUNT(*)) AS a,(SELECT COUNT(NULL)) AS b",
+                    [ [ Some "1"; Some "0" ] ], BinaryFlag ||| NotNullFlag
+                    $"SELECT {count} AS a,{distinctCount} AS b FROM p ORDER BY id",
+                    [ [ Some "3"; Some "1" ]; [ Some "0"; Some "0" ] ], BinaryFlag
+                    $"SELECT {count} AS a,{distinctCount} AS b FROM p WHERE id=100",
+                    [], BinaryFlag ] do
+                  let resultSession, result = handle session sql
+                  Expect.equal result (ResultSet([ "a"; "b" ], expectedRows)) sql
+                  let expected = List.replicate 2 (TypeLongLong, 21u, flags)
+                  Expect.equal (columnTypes resultSession.LastResultColumnMetadata) expected sql
+                  match prepareStatementForSession session sql with
+                  | Ok(statement, parameterCount) ->
+                      let _, columns = preparedMetadata session statement parameterCount
+                      Expect.equal (columns |> List.map _.Metadata |> columnTypes) expected sql
+                  | Error error -> failtestf "expected COUNT to prepare, got %A" error
+
+              let sql = $"SELECT SUM({count}) AS total FROM p"
+              let resultSession, result = handle session sql
+              Expect.equal result (ResultSet([ "total" ], [ [ Some "3" ] ])) sql
+              Expect.equal
+                  (columnTypes resultSession.LastResultColumnMetadata)
+                  [ TypeNewDecimal, 43u, BinaryFlag ] "SUM receives the exact integer COUNT result"
+
           testCase "correlated MEDIUMINT extrema retain the INT24 wire type"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
