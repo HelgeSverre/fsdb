@@ -590,3 +590,29 @@ retained their match counts.
 A compact two-fragment regression checks that the contact spanning
 the split precedes contacts in the left half, including when an
 input crosses the antimeridian.
+
+### Unwrapped clipping longitudes
+
+The solver can return a crossing just outside the conventional
+longitude interval. MySQL 8.4.11 preserves that longitude in geographic
+line–area overlay output. For example, clipping
+`LINESTRING(-179 9,179.5 13)` against a rectangle spanning
+`178°E–178°W` and latitudes 10°–12° produces a cut at about
+`-180.12343490820842`. Both `ST_AsText` and `ST_AsWKB` retain
+the coordinate. Fsdb preserves the generated longitude in this
+overlay path. [Boost geographic segment intersections](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
+
+| Operation on the stepped antimeridian fixture | Cases | Differences before | Differences after |
+| --- | ---: | ---: | ---: |
+| `ST_Intersection` | 15 | 10 | 5 |
+| `ST_Difference` | 15 | 6 | 0 |
+| `ST_Union` | 15 | 9 | 0 |
+| `ST_SymDifference` | 15 | 9 | 0 |
+
+The five remaining `ST_Intersection` cases disagree on isolated
+points. The seeded, near-edge, multipart, and other stepped intersection
+fixtures retained their existing match counts. MySQL also reports
+error 3731 if `ST_Length` consumes the resulting line. The same
+error occurs for `ST_Distance`, `ST_IsValid`, `ST_SRID`, and
+`ST_X` on the unwrapped endpoint. All succeeded on the normalized
+control. Fsdb still accepts the unwrapped line in those calls.

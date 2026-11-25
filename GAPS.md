@@ -3121,8 +3121,10 @@ implementation effort:
    follows monotonic sections and preserves the audited collinear turn
    order. [Spatially partitioned contacts](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#contact-order-in-spatial-partitions)
    follow the audited section order across ordinary and antimeridian
-   splits. Residual geometry content, point coordinates, and near-hole
-   relation differences remain.
+   splits. [Unwrapped clipping longitudes](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#unwrapped-clipping-longitudes)
+   match MySQL's overlay output. Domain errors in functions consuming
+   those results, residual isolated points, and near-hole relation
+   differences remain.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
    [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)

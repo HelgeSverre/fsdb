@@ -747,6 +747,29 @@ let tests =
                         Expect.isLessThan (abs (contactLatitude - 41.00000008675716)) 1e-10 "the separate point lies beside the short fragment"
                     | actual -> failtestf "expected the tiny clipped line and point, got %A" actual
 
+                testCase "geographic area overlays preserve the computed longitude of antimeridian cuts"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let line = geometry "LINESTRING(-179 9,179.5 13)"
+                    let area = geometry "POLYGON((178 10,-178 10,-178 12,178 12,178 10))"
+                    for name in [ "ST_Intersection"; "ST_Difference"; "ST_Union"; "ST_SymDifference" ] do
+                        let result = call name [ line; area ]
+                        let rec vertices = function
+                            | GLineString points -> points
+                            | GMultiLineString lines -> List.concat lines
+                            | GGeometryCollection members -> members |> List.collect (fun part -> vertices part.Shape)
+                            | _ -> []
+                        match result with
+                        | VGeometry result ->
+                            let cuts = vertices result.Shape |> List.filter (fun (_, longitude) -> longitude < -180.0)
+                            match cuts with
+                            | [ latitude, longitude ] ->
+                                Expect.isLessThan (abs (latitude - 12.007120895734188)) 1e-10 "the clipping latitude stays on the last polygon edge"
+                                Expect.isLessThan (abs (longitude - (-180.12343490820842))) 1e-10 "the generated longitude retains its turn"
+                            | _ -> failtestf "%s expected one unwrapped cut, got %A" name cuts
+                        | actual -> failtestf "%s expected a geometry, got %A" name actual
+
                 testCase "geographic area intersections remove contacts covered by the final line"
                 <| fun _ ->
                     let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]

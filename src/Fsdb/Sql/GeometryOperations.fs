@@ -1649,9 +1649,9 @@ let private supportedGeographicOverlaySegment ((startLatitude, startLongitude), 
     abs startLatitude < 90.0 && abs endLatitude < 90.0
     && not (boostGeoEqual (abs (longitudeDistance startLongitude endLongitude)) 180.0)
 
-let private tryGeographicCrossingPoint referenceSystem first second =
+let private tryGeographicCrossingPoint mapLongitude referenceSystem first second =
     tryGeographicSegmentCrossing referenceSystem first second
-    |> Option.map (fun (latitude, longitude) -> latitude / mysqlRadians 1.0, normalizedLongitudeRadians longitude / mysqlRadians 1.0)
+    |> Option.map (fun (latitude, longitude) -> latitude / mysqlRadians 1.0, mapLongitude longitude / mysqlRadians 1.0)
 
 let private geographicAxisOffset equatorial (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
     if equatorial then longitudeDistanceRadians (mysqlRadians firstLongitude) (mysqlRadians secondLongitude)
@@ -1767,7 +1767,7 @@ let private partitionGeographicLineSegment referenceSystem pointContacts otherSe
             match points with
             | [ point ] -> (if includeContacts then point :: contacts else contacts), intervals
             | [] when includeContacts ->
-                let crossing = tryGeographicCrossingPoint referenceSystem segment other
+                let crossing = tryGeographicCrossingPoint normalizedLongitudeRadians referenceSystem segment other
                 Option.toList crossing @ contacts, intervals
             | [] -> contacts, intervals
             | points ->
@@ -2162,6 +2162,10 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
         [ { Start = start; End = endpoint; Covered = covered start; StartsSegment = true } ], []
     else
         let distance = geographicPointDistance referenceSystem start
+        // MySQL retains the solver's longitude in area overlay results,
+        // even when a cut just beyond the antimeridian uses an extra turn.
+        let crossing = tryGeographicCrossingPoint id referenceSystem segment
+
         let cuts, contacts, spans =
             boundarySegments
             |> List.fold (fun (cuts, contacts, spans) (section, ((a, b) as boundary)) ->
@@ -2175,11 +2179,11 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                     // The linear overlay traverses the polygon in the
                     // opposite direction to the point overlay. Equal-latitude
                     // edges can yield two distinct Sjöberg solutions.
-                    let cut = tryGeographicCrossingPoint referenceSystem segment (b, a)
+                    let cut = crossing (b, a)
                     let point =
                         if not includePoints then []
                         elif fst a <> fst b then Option.toList cut
-                        else tryGeographicCrossingPoint referenceSystem segment boundary |> Option.toList
+                        else crossing boundary |> Option.toList
                     Option.toList cut @ cuts, addContacts point, spans
                 | [ point ] -> point :: cuts, addContacts [ point ], spans
                 | points ->
