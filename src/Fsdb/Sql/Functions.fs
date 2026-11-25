@@ -6592,9 +6592,38 @@ let private geometryBufferFn: Scalar =
     | _ -> nativeParameterCountError "st_buffer"
 
 let private geometryPredicateFn functionName predicate =
-    let pointSet = function
-        | GPoint _ | GMultiPoint _ -> true
-        | _ -> false
+    let (|PointMembers|_|) = geographicPointMembers >> Option.filter (List.isEmpty >> not)
+
+    let (|EmptyGeography|_|) = function
+        | GEmpty | GGeometryCollection [] -> Some()
+        | _ -> None
+
+    let orderedMultipointPredicate first second =
+        let indexed, probed = if List.length first < List.length second then first, second else second, first
+        let contains = geographicOrderedPointMembership indexed
+
+        if functionName = "ST_EQUALS" then
+            List.forall contains probed && List.forall (geographicOrderedPointMembership probed) indexed
+        else
+            List.exists contains probed
+            && List.exists (contains >> not) probed
+            && List.exists (geographicOrderedPointMembership probed >> not) indexed
+
+    let pointSetPredicate (first: (float * float) list) (second: (float * float) list) =
+        let covers points other = List.forall (geographicPointMembership points) other
+        let intersects () =
+            if first.Length <= second.Length then List.exists (geographicPointMembership first) second
+            else List.exists (geographicPointMembership second) first
+
+        match functionName with
+        | "ST_EQUALS" -> Some(covers first second && covers second first)
+        | "ST_CONTAINS" -> Some(covers first second)
+        | "ST_WITHIN" -> Some(covers second first)
+        | "ST_INTERSECTS" -> Some(intersects ())
+        | "ST_DISJOINT" -> Some(not (intersects ()))
+        | "ST_OVERLAPS" -> Some(intersects () && not (covers first second || covers second first))
+        | "ST_TOUCHES" | "ST_CROSSES" -> None
+        | _ -> invalidArg (nameof functionName) "unsupported geographic topology predicate"
 
     let dimension = function
         | GPoint _ | GMultiPoint _ -> Some 0
@@ -6612,10 +6641,7 @@ let private geometryPredicateFn functionName predicate =
         | GMultiPolygon members when not members.IsEmpty -> Some members
         | _ -> None
 
-    let pointMembers = function
-        | GPoint(x, y) -> Some [ (x, y) ]
-        | GMultiPoint members when not members.IsEmpty -> Some members
-        | _ -> None
+    let pointMembers = (|PointMembers|_|)
 
     let pointLineShapes first second =
         match pointMembers first, linework second with
@@ -6718,7 +6744,18 @@ let private geometryPredicateFn functionName predicate =
 
         let referenceSystem = spatialReferenceSystem functionName first.Srid
         let result =
-            if referenceSystem.SemiMajorAxis.IsSome && not (pointSet first.Shape && pointSet second.Shape) then
+            match referenceSystem.SemiMajorAxis, first.Shape, second.Shape with
+            | None, _, _ -> predicate first second
+            | Some _, EmptyGeography, EmptyGeography ->
+                if functionName = "ST_EQUALS" then Some true else None
+            | Some _, EmptyGeography, _
+            | Some _, _, EmptyGeography ->
+                if functionName = "ST_EQUALS" then Some false else None
+            | Some _, GMultiPoint (_ :: _ as first), GMultiPoint (_ :: _ as second)
+                when functionName = "ST_EQUALS" || functionName = "ST_OVERLAPS" ->
+                Some(orderedMultipointPredicate first second)
+            | Some _, PointMembers first, PointMembers second -> pointSetPredicate first second
+            | _ ->
                 let undefinedDimensions =
                     match functionName, dimension first.Shape, dimension second.Shape with
                     | "ST_CROSSES", Some firstDimension, Some secondDimension ->
@@ -6769,8 +6806,6 @@ let private geometryPredicateFn functionName predicate =
                                         | "ST_WITHIN" -> Some topology.SecondContainsFirst
                                         | _ -> Some(topology.FirstContainsSecond && topology.SecondContainsFirst)
                                     | _ -> remainingGeographicPredicate referenceSystem first second
-            else predicate first second
-
         result
         |> Option.map (fun value -> VInt(if value then 1L else 0L))
         |> Option.defaultValue VNull

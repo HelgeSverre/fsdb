@@ -1426,16 +1426,21 @@ let internal overlay kind (first: Geometry) (second: Geometry) =
 
     attempt first.Srid (fun () -> OverlayNGRobust.Overlay(toNts first, toNts second, spatialFunction))
 
+let private geographicPointRadians (latitude, longitude) =
+    mysqlRadians latitude, mysqlRadians longitude
+
+let private equalGeographicCoordinates (latitude, longitude) (otherLatitude, otherLongitude) =
+    boostGeoEqual latitude otherLatitude && boostGeoEqual longitude otherLongitude
+
 // Points compare in radians. A cell is wider than the relative comparison
 // tolerance anywhere in the geographic coordinate domain.
 let private geographicPointIndex () =
     let cellWidth = 8.0 * (Math.BitIncrement(1.0) - 1.0)
     let cells = System.Collections.Generic.Dictionary<int64 * int64, ResizeArray<float * float>>()
     let cell coordinate = int64 (floor (coordinate / cellWidth))
-    let radians (latitude, longitude) = mysqlRadians latitude, mysqlRadians longitude
 
     let contains point =
-        let latitude, longitude = radians point
+        let latitude, longitude = geographicPointRadians point
         let x, y = cell latitude, cell longitude
         let mutable found = false
         for i in x - 1L .. x + 1L do
@@ -1443,13 +1448,13 @@ let private geographicPointIndex () =
                 if not found then
                     match cells.TryGetValue((i, j)) with
                     | true, candidates ->
-                        found <- candidates |> Seq.exists (fun (a, b) -> boostGeoEqual latitude a && boostGeoEqual longitude b)
+                        found <- candidates |> Seq.exists (equalGeographicCoordinates (latitude, longitude))
                     | _ -> ()
 
         found
 
     let add point =
-        let latitude, longitude = radians point
+        let latitude, longitude = geographicPointRadians point
         let key = cell latitude, cell longitude
         match cells.TryGetValue key with
         | true, candidates -> candidates.Add((latitude, longitude))
@@ -1472,17 +1477,106 @@ let private geographicPointResult points =
     | [ (latitude, longitude) ] -> GPoint(latitude, longitude)
     | points -> GMultiPoint points
 
-let private geographicPointMembers = function
+let internal geographicPointMembers = function
     | GPoint(latitude, longitude) -> Some [ latitude, longitude ]
     | GMultiPoint points -> Some points
     | _ -> None
 
-let private overlayGeographicPoints kind firstShape (first: (float * float) list) secondShape (second: (float * float) list) =
-    let membership points =
+let internal geographicPointMembership = function
+    | [] -> fun _ -> false
+    | [ point ] -> geographicPointRadians >> equalGeographicCoordinates (geographicPointRadians point)
+    | points ->
         let contains, add = geographicPointIndex ()
         points |> List.distinct |> List.iter add
         contains
 
+let private orderGeographicRelationPoints comparePoints (points: (float * float) array) =
+    let insertionThreshold = 16
+    let less first second = comparePoints first second < 0
+    let swap first second =
+        let value = points[first]
+        points[first] <- points[second]
+        points[second] <- value
+
+    let median first middle last =
+        if less points[first] points[middle] then
+            if less points[middle] points[last] then middle
+            elif less points[first] points[last] then last
+            else first
+        elif less points[first] points[last] then first
+        elif less points[middle] points[last] then last
+        else middle
+
+    let partition first endExclusive =
+        swap first (median (first + 1) (first + (endExclusive - first) / 2) (endExclusive - 1))
+        let pivot = points[first]
+        let mutable left = first + 1
+        let mutable right = endExclusive - 1
+        while left < right do
+            while left < endExclusive && less points[left] pivot do left <- left + 1
+            while right > first && less pivot points[right] do right <- right - 1
+            if left < right then
+                swap left right
+                left <- left + 1
+                right <- right - 1
+
+        if left = right && less points[left] pivot then left + 1 else left
+
+    let rec orderPartitions first endExclusive depth =
+        if endExclusive - first > insertionThreshold then
+            if depth = 0 then
+                let exactOrder =
+                    System.Collections.Generic.Comparer<_>.Create(fun (latitude, longitude) (otherLatitude, otherLongitude) ->
+                        Operators.compare (longitude, latitude) (otherLongitude, otherLatitude))
+
+                Array.Sort(points, first, endExclusive - first, exactOrder)
+            else
+                let split = partition first endExclusive
+                orderPartitions split endExclusive (depth - 1)
+                orderPartitions first split (depth - 1)
+
+    orderPartitions 0 points.Length (2 * System.Numerics.BitOperations.Log2(uint32 points.Length))
+
+    for index in 1 .. points.Length - 1 do
+        let point = points[index]
+        if index < insertionThreshold && less point points[0] then
+            Array.Copy(points, 0, points, 1, index)
+            points[0] <- point
+        else
+            let mutable target = index
+            while target > 0 && less point points[target - 1] do
+                points[target] <- points[target - 1]
+                target <- target - 1
+
+            points[target] <- point
+
+// MySQL's lower-bound search depends on the ordering of near-equal points
+// because the coordinate tolerance is not transitive. Match the oracle's
+// partition and insertion order, with bounds and an exact depth fallback.
+let internal geographicOrderedPointMembership points =
+    let compareCoordinate first second =
+        if boostGeoEqual first second then 0 else Operators.compare first second
+
+    let comparePoints (latitude, longitude) (otherLatitude, otherLongitude) =
+        match compareCoordinate longitude otherLongitude with
+        | 0 -> compareCoordinate latitude otherLatitude
+        | order -> order
+
+    let ordered = points |> List.map geographicPointRadians |> List.toArray
+    orderGeographicRelationPoints comparePoints ordered
+
+    fun point ->
+        let target = geographicPointRadians point
+        let mutable lower = 0
+        let mutable upper = ordered.Length
+        while lower < upper do
+            let middle = lower + (upper - lower) / 2
+            if comparePoints ordered[middle] target < 0 then lower <- middle + 1
+            else upper <- middle
+
+        lower < ordered.Length && comparePoints target ordered[lower] >= 0
+
+let private overlayGeographicPoints kind firstShape (first: (float * float) list) secondShape (second: (float * float) list) =
     // MySQL dispatches a Point before a MultiPoint for the commutative
     // operations, and walks the smaller MultiPoint in an intersection.
     let pointFirst =
@@ -1490,13 +1584,13 @@ let private overlayGeographicPoints kind firstShape (first: (float * float) list
         | GMultiPoint _, GPoint _ -> second, first
         | _ -> first, second
 
-    let except points other = points |> List.filter (membership other >> not)
+    let except points other = points |> List.filter (geographicPointMembership other >> not)
     let points =
         match kind with
         | OverlayKind.Intersection ->
             let left, right = pointFirst
-            if left.Length <= right.Length then left |> List.filter (membership right)
-            else right |> List.filter (membership left)
+            if left.Length <= right.Length then left |> List.filter (geographicPointMembership right)
+            else right |> List.filter (geographicPointMembership left)
         | OverlayKind.Difference -> except first second
         | OverlayKind.Union ->
             let left, right = pointFirst

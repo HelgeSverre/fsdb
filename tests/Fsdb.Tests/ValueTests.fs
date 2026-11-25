@@ -985,6 +985,53 @@ let tests =
                     Expect.equal (call "ST_Union" [ geographic; geographic ]) geographic "a geographic point union collapses to the original point"
                     expectError 1235 (fun () -> call "ST_Buffer" [ geographic; VInt 1L ])
 
+                testCase "geographic point predicates use tolerant membership and preserve empty semantics"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text; VInt 4326L; VString "axis-order=long-lat" ]
+                    let predicates = [ "ST_Equals"; "ST_Contains"; "ST_Within"; "ST_Intersects"; "ST_Disjoint"; "ST_Overlaps"; "ST_Touches"; "ST_Crosses" ]
+                    let check first second expected =
+                        let arguments = [ geometry first; geometry second ]
+                        let actual = predicates |> List.map (fun name -> call name arguments)
+                        let expected = expected |> List.map (Option.map VInt >> Option.defaultValue VNull)
+                        Expect.equal actual expected $"{first} and {second}"
+                    let point = "POINT(3 0)"
+                    let almost = "POINT(3.00000000000001 0)"
+                    let two = "MULTIPOINT((3.00000000000001 0),(8 0))"
+                    let empty = "GEOMETRYCOLLECTION EMPTY"
+                    let matchResult = [ Some 1L; Some 1L; Some 1L; Some 1L; Some 0L; Some 0L; None; None ]
+                    let distinctResult = [ Some 0L; Some 0L; Some 0L; Some 0L; Some 1L; Some 0L; None; None ]
+                    check point almost matchResult
+                    check almost point matchResult
+                    check point "POINT(3.0000000000001 0)" distinctResult
+                    check "POINT(50 90)" "POINT(100 90)" distinctResult
+                    check "POINT(180 0)" "POINT(-179.99999999999997 0)" distinctResult
+                    check point "MULTIPOINT((3.00000000000001 0),(3.00000000000001 0))" matchResult
+                    check point two [ Some 0L; Some 0L; Some 1L; Some 1L; Some 0L; Some 0L; None; None ]
+                    check two point [ Some 0L; Some 1L; Some 0L; Some 1L; Some 0L; Some 0L; None; None ]
+                    check "MULTIPOINT((3 0),(4 0))" two [ Some 0L; Some 0L; Some 0L; Some 1L; Some 0L; Some 1L; None; None ]
+                    check "MULTIPOINT((3 0),(3.00000000000001 0))" "POINT(3.00000000000002 0)" [ Some 0L; Some 1L; Some 0L; Some 1L; Some 0L; Some 0L; None; None ]
+                    let chain = "MULTIPOINT((3 0),(4 0),(3.00000000000001 0),(0 0),(0 0),(3.00000000000002 0))"
+                    let reordered = "MULTIPOINT((4 0),(0 0),(3.00000000000002 0),(3.00000000000001 0),(3.00000000000001 0),(4 0),(3 0))"
+                    let mutualCoverage = [ Some 0L; Some 1L; Some 1L; Some 1L; Some 0L; Some 0L; None; None ]
+                    check chain reordered mutualCoverage
+                    check reordered chain mutualCoverage
+                    let larger = "MULTIPOINT((3.00000000000002 0),(0 0),(3.00000000000002 0),(0 0),(4 0),(3.00000000000001 0),(3.00000000000004 0))"
+                    let smaller = "MULTIPOINT((3 1e-14),(3 0),(3 0),(4 0),(0 0))"
+                    check larger smaller [ Some 0L; Some 1L; Some 0L; Some 1L; Some 0L; Some 1L; None; None ]
+                    check smaller larger [ Some 0L; Some 0L; Some 1L; Some 1L; Some 0L; Some 1L; None; None ]
+                    let longitudes = [| "3"; "3.00000000000001"; "3.00000000000002"; "3.00000000000003"; "3.00000000000004"; "4" |]
+                    let fromOrder order =
+                        let members = order |> List.map (fun index -> $"({longitudes[index]} 0)") |> String.concat ","
+                        $"MULTIPOINT({members})"
+
+                    let firstOrder = fromOrder [ 2; 1; 1; 0; 3; 3; 3; 3; 5; 3; 2; 3; 3; 1; 3; 4; 3 ]
+                    let secondOrder = fromOrder [ 2; 0; 2; 3; 1; 5; 1; 3; 3; 3; 3; 4; 1; 3; 3; 3; 3 ]
+                    check firstOrder secondOrder matchResult
+                    check empty point (Some 0L :: List.replicate 7 None)
+                    check point empty (Some 0L :: List.replicate 7 None)
+                    check empty empty (Some 1L :: List.replicate 7 None)
+                    check empty "LINESTRING(1 1,2 2)" (Some 0L :: List.replicate 7 None)
+
                 testCase "geographic polygon excludes its antipodal exterior"
                 <| fun _ ->
                     let geography text = call "ST_GeomFromText" [ VString text; VInt 4326L ]

@@ -586,6 +586,10 @@ both overlay output and the line-relation decision.
 [Geographic point-set overlays](torture/findings/2026-11-25-geographic-point-overlays.md)
 cover all four set operations for points and multipoints, including
 combinations with geographic lines and polygons.
+[Geographic point-set predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
+follow the audited radian tolerance and empty-input semantics. Multipoint
+equality and overlap also account for the oracle's ordered lookup when
+near-equal coordinates form a chain.
 
 The [geographic strategy follow-up](torture/findings/2026-10-14-geographic-edge-topology-audit.md#geographic-strategy-follow-up)
 found zero distance on both engines for its line mismatches,
@@ -3033,6 +3037,8 @@ implementation effort:
    predicate feeds line topology, line distance, and simple-ring validity.
    [Geographic point-set overlays](torture/findings/2026-11-25-geographic-point-overlays.md)
    cover point membership on lines and in polygons, including hole boundaries.
+   [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
+   agree with the oracle for the audited near-equality, duplicate, and empty cases.
    Broader geographic polygon relation and precision rules remain open;
    these samples do not establish general intersection parity.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
