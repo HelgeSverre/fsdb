@@ -279,6 +279,21 @@ let tests =
               let index = buildIndexWithDocumentSettings rules collation [ 1, rules, [ "하늘"; "" ] ]
               Expect.equal (booleanScores index "하늘" |> Map.keys |> Seq.toList) [ 1 ] "short composed query reaches the Jamo posting"
 
+          testCase "Boolean ngram queries split words at ASCII apostrophes"
+          <| fun _ ->
+              let documents =
+                  [ 1, [ "東京" ]; 2, [ "東京駅" ]; 3, [ "東京'駅" ]; 4, [ "京駅" ]
+                    5, [ "北京" ]; 6, [ "飯店" ]; 7, [ "北京飯店" ]; 8, [ "北京'飯店" ]
+                    9, [ "北京 飯店" ]; 10, [ "하늘'나라" ]; 11, [ "하늘 나라" ]; 12, [ "하늘나라" ] ]
+
+              for name in [ "utf8mb4_bin"; "utf8mb4_0900_ai_ci"; "utf8mb4_ja_0900_as_cs" ] do
+                  let index = buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) (tryFind name |> Option.get) documents
+                  for query, expected in
+                      [ "\"東京'駅\"", []; "\"東'京駅\"", []; "+東'京駅", []
+                        "北京'飯店", [ 5; 6; 7; 8; 9 ]; "+北京'飯店", [ 5; 7; 8; 9 ]
+                        "\"北京'飯店\"", [ 8; 9 ]; "\"하늘'나라\"", [ 10; 11 ] ] do
+                      Expect.equal (booleanScores index query |> Map.keys |> Seq.toList) expected $"{name} {query}"
+
           testCase "general Unicode ngrams retain halfwidth voicing marks in relevance"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 6; Stopwords = StopwordPolicy.BuiltIn }

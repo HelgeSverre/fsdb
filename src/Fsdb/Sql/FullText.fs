@@ -859,6 +859,10 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
         | _ -> BooleanWordChars.contains
     let mutable i = 0
     let len = query.Length
+    let keepApostrophes =
+        match tokenizer with
+        | Words _ -> true
+        | Ngrams _ -> false
 
     let rec skipSpace () =
         if i < len && Char.IsWhiteSpace query.[i] then
@@ -867,7 +871,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
 
     let readWord () =
         let start = i
-        while i < len && (isWord query.[i] || (query.[i] = '\'' && i > start)) do
+        while i < len && (isWord query.[i] || (keepApostrophes && query.[i] = '\'' && i > start)) do
             i <- i + 1
         let text = query.Substring(start, i - start).Trim('\'')
         tokenWith collation text, text
@@ -879,7 +883,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                 let token = if utf8Words then tokenOfFolded collation else tokenWith collation
                 rawTokensBy isWord (not utf8Words) phrase |> Array.map token
             | Ngrams size ->
-                rawTokensBy isWord true phrase
+                rawTokensBy isWord false phrase
                 |> Array.collect (fun word ->
                     if runeLength word < size then [| tokenWith collation word |]
                     else tokensWith tokenizer collation word)

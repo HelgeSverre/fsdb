@@ -105,3 +105,26 @@ rebuilt postings that matched all 216 queries in that matrix.
 The maintained ngram corpus also matched all 8,901 searches across
 default and Chinese Unicode 9 collations at sizes 1–10 and Japanese
 kana-sensitive Unicode 9 at sizes 1, 2, and 10.
+
+## ASCII apostrophes in ngram queries
+
+MySQL's InnoDB Boolean lexer splits on ASCII apostrophes before the ngram
+parser turns words into grams. In a bare search, `+北京'飯店` requires
+`北京` and leaves `飯店` optional. In a quoted search, `"東京'駅"`
+contains a short trailing term, which yielded no matches in the tested
+bigram index. Fsdb now uses the same boundary for bare terms and phrases.
+[MySQL Boolean lexer](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/include/fts0tokenize.h)
+· [MySQL ngram parser](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/plugin/fulltext/ngram_parser/plugin_ngram.cc).
+
+The focused native MySQL 8.4.11 corpus matched all 960 queries in ordered
+document IDs and relevance rounded to five decimals across eight UTF-8
+collations and token sizes 1–10. The oracle refreshes table statistics
+before scoring. The maintained
+multi-column corpus matched all 1,935 queries at sizes 1, 2, 3, 5, and 10.
+
+In the 790-query binary punctuation corpus, mismatches against MySQL's
+optimized full-text index fell from 98 to 90. Eleven queries gained
+parity, while three ASCII uppercase Boolean terms exposed an existing
+phrase-verification difference. A separate wildcard control showed that
+`東京 駅*` matched only `東京` rows on a freshly populated MySQL index
+and included the additional `駅*` rows after full-text optimization.
