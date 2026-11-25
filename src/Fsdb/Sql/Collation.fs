@@ -1509,6 +1509,45 @@ let private legacySquaredCjkExceptionWeights unicode520 codepoint =
     | 0x33DF, true -> [ 0x120F; 0x055F; 0x135F ]
     | _ -> []
 
+let private legacyFullTextCase name =
+    match name with
+    | "utf8mb4_general_ci" | "utf8mb4_unicode_ci" -> Some LegacyFullTextCaseData.unicode400
+    | "utf8mb4_unicode_520_ci" -> Some LegacyFullTextCaseData.unicode520
+    | _ -> None
+
+let private lowercaseWith (ranges: (int * int * int * int)[]) (value: string) =
+    let lowerScalar scalar =
+        let rec search low high =
+            if low > high then scalar
+            else
+                let middle = low + (high - low) / 2
+                let first, last, step, delta = ranges[middle]
+                if scalar < first then search low (middle - 1)
+                elif scalar > last then search (middle + 1) high
+                elif (scalar - first) % step = 0 then scalar + delta
+                else scalar
+        search 0 (ranges.Length - 1)
+
+    let mutable chars = null
+    let mutable offset = 0
+    while offset < value.Length do
+        match Rune.TryGetRuneAt(value, offset) with
+        | true, rune ->
+            let lower = lowerScalar rune.Value
+            if lower <> rune.Value then
+                if isNull chars then chars <- value.ToCharArray()
+                // The generator verifies that each mapping preserves UTF-16 width.
+                Rune(lower).EncodeToUtf16(chars.AsSpan(offset)) |> ignore
+            offset <- offset + rune.Utf16SequenceLength
+        | _ -> offset <- offset + 1
+
+    if isNull chars then value else String(chars)
+
+let internal lowercaseForFullText name (value: string) =
+    match legacyFullTextCase name with
+    | Some ranges -> lowercaseWith ranges value
+    | None -> value.ToLowerInvariant()
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let chinese0900 = name = "utf8mb4_zh_0900_as_cs"
     let ci = compareInfoFor spec.Locale
@@ -1562,7 +1601,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
               |> foldUnicode520EnclosedImplicit |> foldUnicode520IdeographicSymbols
 
     let foldGeneral includeEqualityExceptions (value: string) =
-        value.Replace("ß", "s").Replace("ẞ", "s")
+        let value = if includeEqualityExceptions then value.Replace("ẞ", "s") else value
+        value.Replace("ß", "s")
         |> foldLegacySupplementary |> foldGeneralUnicodeJamo
         |> foldGeneralSyntheticWeights includeEqualityExceptions
 
@@ -1937,7 +1977,13 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             elif chinese0900 then
                 Convert.ToHexString(Zh0900Weights.weightOf s)
             else
-                Convert.ToHexString(ci.GetSortKey(fullTextKeyText s, spec.Fold).KeyData)
+                match legacyFullTextCase name with
+                | Some ranges ->
+                    let text = s |> lowercaseWith ranges |> fullTextKeyText
+                    // The pinned lowercase table defines the case distinctions for postings.
+                    let options = spec.Fold &&& ~~~CompareOptions.IgnoreCase
+                    Convert.ToHexString(ci.GetSortKey(text, options).KeyData)
+                | None -> Convert.ToHexString(ci.GetSortKey(fullTextKeyText s, spec.Fold).KeyData)
       WeightOf =
         fun s ->
             if spec.ByteOrder then

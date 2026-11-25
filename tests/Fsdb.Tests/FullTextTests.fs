@@ -212,6 +212,27 @@ let tests =
                       [ 1, rules, [ "中文Ꭰ" ]; 2, rules, [ "中文ꭰ" ]; 3, rules, [ "中文Ɥ" ]; 4, rules, [ "中文ɥ" ] ]
               Expect.equal (ids cherokee "\"中文Ꭰ\"") [ 1; 2; 3; 4 ] "the folded Cherokee capital ends the word"
 
+          testCase "legacy ngram postings respect the collation's lowercase mappings"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let documents =
+                  [ "中Ɥ"; "中ɥ"; "中Ꭰ"; "中ꭰ"; "中ẞ"; "中ß"; "日本語" ]
+                  |> List.mapi (fun i body -> i + 1, rules, [ body ])
+              let ids scores = scores |> Map.keys |> Seq.toList
+
+              for name in [ "utf8mb4_general_ci"; "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci" ] do
+                  let index = buildIndexWithDocumentSettings rules (tryFind name |> Option.get) documents
+                  let capitalSharpS, smallSharpS =
+                      if name = "utf8mb4_unicode_520_ci" then [ 5; 6 ], [ 5; 6 ] else [ 5 ], [ 6 ]
+
+                  for query, expected in
+                      [ "中Ɥ", [ 1 ]; "中ɥ", [ 2 ]; "中Ꭰ", [ 3 ]; "中ꭰ", [ 4 ]; "中ẞ", capitalSharpS; "中ß", smallSharpS ] do
+                      Expect.equal (naturalScores index query |> ids) expected (name + " natural " + query)
+                      Expect.equal (expansionScores index query |> ids) expected (name + " expansion " + query)
+
+                  for query, expected in [ "中ɥ", [ 2 ]; "中Ꭰ", [ 3 ]; "中ß", smallSharpS ] do
+                      Expect.equal (booleanScores index ("\"" + query + "\"") |> ids) expected (name + " Boolean " + query)
+
           testCase "Unicode 5.2 ngrams share padded space keys but retain Mongolian separator weight"
           <| fun _ ->
               let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get

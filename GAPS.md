@@ -1721,6 +1721,9 @@ is closed for audited cases. Boolean ngram word and phrase boundaries use
 MySQL 8.4's historical Unicode 5.0-draft character set with the boundary
 changes from the collation's lowercase table. Natural and query-expansion
 indexing continue to find later-assigned characters.
+The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
+keep later uppercase letters distinct where MySQL's older maps do, including
+mixed CJK bigrams with turned H, Cherokee, and sharp S.
 
 The [legacy vertical-punctuation follow-up](torture/findings/2026-10-15-legacy-ngram-punctuation.md#vertical-punctuation-block-follow-up)
 also distinguishes all U+FE10–U+FE19 forms under `utf8mb4_unicode_ci` and

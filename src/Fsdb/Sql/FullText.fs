@@ -219,14 +219,9 @@ let private tokenWith (collation: Collation) (text: string) =
     // InnoDB folds full-text case even for nonbinary case-sensitive collations.
     let foldedText =
         if isBinaryCollation collation then text
-        else text.ToLowerInvariant()
-    // Older collation weights can distinguish characters that current Unicode
-    // lowercasing merges, such as turned Latin and reversed C forms.
-    let keyText =
-        if collation.Name = "utf8mb4_unicode_ci" || collation.Name = "utf8mb4_general_ci" then text
-        else foldedText
+        else Collation.lowercaseForFullText collation.Name text
     { Text = foldedText
-      Key = collation.FullTextKeyOf keyText }
+      Key = collation.FullTextKeyOf foldedText }
 
 let private tokensWith tokenizer collation text =
     rawTokensWith tokenizer text |> Array.map (tokenWith collation)

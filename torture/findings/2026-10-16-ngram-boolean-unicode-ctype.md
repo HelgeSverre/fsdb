@@ -66,8 +66,9 @@ The wire fixture matched MySQL on all 452 bare and quoted Boolean
 membership checks built from the affected uppercase and lowercase forms.
 A separate Chinese fixture verifies that a folded Cherokee capital ends
 the word. The maintained Chinese 0900 and Unicode 5.2 corpora also match
-all 7,740 searches across token sizes 1–10. The word parser and legacy
-posting case folding have separate differences in the focused fixtures.
+all 7,740 searches across token sizes 1–10. The ordinary word parser has
+separate differences. The subsequent posting change uses the pinned
+[legacy lowercase tables](2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables).
 
 The Chinese Latin-extended lane matches all 384 searches at sizes 1 and 2.
 Run it with a Release CLI and native MySQL 8.4.11.

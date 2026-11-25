@@ -25,6 +25,37 @@ prefix keys. Index construction, query parsing, document removal, and
 recovery use that same normalization. Ordinary SQL collation behavior is
 unchanged.
 
+## Legacy lowercase tables
+
+MySQL keeps `中Ɥ` and `中ɥ` separate in `utf8mb4_general_ci`,
+`utf8mb4_unicode_ci`, and `utf8mb4_unicode_520_ci`. The same collations
+keep capital and lowercase Cherokee separate. Unicode 5.2 folds `ẞ`
+to `ß`, while the older collations keep the two characters distinct.
+
+Full-text normalization for these three collations now uses simple
+lowercase maps captured from all Unicode scalars on MySQL 8.4.11.
+The general and older Unicode collations share a map. The posting key
+uses the folded text with ICU's additional case folding disabled so it
+preserves the distinctions in the MySQL map.
+
+The mixed-script fixture matches MySQL in natural, Boolean, and
+query-expansion modes. All 11,610 maintained corpus searches match in
+membership and relevance across the three collations and token sizes
+1–10. A WAL and checkpoint written by `d54281b3` both rebuild the
+corrected postings, including after a subsequent UPDATE.
+
+Regenerate the tables against a running, isolated pinned oracle.
+The query pads each scalar before `LOWER` to provide room for case
+mappings that grow in UTF-8 byte length.
+
+```sh
+ruby torture/scripts/generate-legacy-fulltext-case.rb queries |
+  docker compose -p fsdb-legacy-casing -f torture/compose.yaml exec -T mysql \
+  sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -NB' > /tmp/fsdb-legacy-casing.tsv
+ruby torture/scripts/generate-legacy-fulltext-case.rb pack /tmp/fsdb-legacy-casing.tsv \
+  > src/Fsdb/Sql/LegacyFullTextCaseData.fs
+```
+
 ## Binary phrase verification
 
 Reproduce with `python3 torture/scripts/fulltext-binary-phrase-oracle.py`.
