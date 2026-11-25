@@ -1724,6 +1724,10 @@ indexing continue to find later-assigned characters.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.
+[Default UTF-8 word boundaries](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#default-utf-8-word-parser)
+now use the same historical character table and classify documents before
+folding and queries after folding. The pinned Unicode 9 lowercase map
+also preserves boundaries for later capitals.
 
 The [legacy vertical-punctuation follow-up](torture/findings/2026-10-15-legacy-ngram-punctuation.md#vertical-punctuation-block-follow-up)
 also distinguishes all U+FE10–U+FE19 forms under `utf8mb4_unicode_ci` and

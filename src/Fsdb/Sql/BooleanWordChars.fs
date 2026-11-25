@@ -105,9 +105,9 @@ let private ranges: (int * int)[] =
         0xFFC2, 0xFFC7; 0xFFCA, 0xFFCF; 0xFFD2, 0xFFD7; 0xFFDA, 0xFFDC;
     |]
 
-/// MySQL's historical Boolean-query word boundary, plus its underscore rule.
+/// MySQL's historical UTF-8 full-text word boundary, including underscore.
 let contains (c: char) =
-    if c = '_' then true
+    if System.Char.IsAscii c then System.Char.IsAsciiLetterOrDigit c || c = '_'
     else
         let value = int c
         let mutable low = 0

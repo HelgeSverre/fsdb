@@ -635,6 +635,45 @@ let tests =
                   (tryFlatBooleanScoresDictionary index "-\"生日快乐\"")
                   "a negative phrase still uses the general scorer"
 
+          testCase "UTF-8 word searches classify documents before folding and queries after folding"
+          <| fun _ ->
+              let documents =
+                  [ 1, "中華文㉎世界語"
+                    2, "中華文𠀀東京駅"
+                    3, "中華文Ɥ世界語"
+                    4, "中華文ɥ世界語"
+                    5, "中華文 世界語"
+                    6, "cobalt'quartz"
+                    7, "cobalt"
+                    8, "quartz"
+                    9, "cobalt quartz" ]
+
+              let ids scores = scores |> Map.keys |> Seq.toList
+              for collationName, foldedMatches in
+                  [ "utf8mb4_bin", [ 1; 2; 3; 5 ]
+                    "utf8mb4_0900_ai_ci", [ 4 ] ] do
+                  let index = buildIndexWithTokenizer defaultTokenizer (tryFind collationName |> Option.get) documents
+                  Expect.equal (ids (naturalScores index "中華文㉎世界語")) [ 1; 2; 3; 5 ] "newer BMP and supplementary characters separate words"
+                  Expect.equal (ids (naturalScores index "中華文Ɥ世界語")) foldedMatches "natural query fold order"
+                  Expect.equal (ids (booleanScores index "中華文Ɥ世界語")) foldedMatches "Boolean query fold order"
+                  Expect.equal (ids (naturalScores index "\"cobalt'quartz\"")) [ 6; 9 ] "apostrophes separate words in natural phrases"
+                  Expect.equal (ids (booleanScores index "+cobalt'quartz")) [ 6; 9 ] "the modifier applies to every word in the token group"
+                  Expect.equal (ids (booleanScores index "\"cobalt'quartz\"")) [ 6; 9 ] "apostrophes separate words in Boolean phrases"
+
+              let unicode9 = tryFind "utf8mb4_0900_ai_ci" |> Option.get
+              let modern =
+                  buildIndexWithTokenizer defaultTokenizer unicode9
+                      [ 1, "中華文Ʂ世界語"; 2, "中華文ʂ世界語"; 3, "中華文 世界語" ]
+
+              Expect.equal (ids (naturalScores modern "中華文Ʂ世界語")) [ 1; 3 ] "a post-Unicode-9 capital remains a separator"
+              Expect.equal (ids (booleanScores modern "中華文Ʂ世界語")) [ 1; 3 ] "Unicode 9 also governs the Boolean boundary"
+
+              let mb3General = tryFind "utf8mb3_general_ci" |> Option.get
+              let accents =
+                  buildIndexWithTokenizer defaultTokenizer mb3General
+                      [ 1, "café"; 2, "cafe\u0301" ]
+              Expect.equal (ids (naturalScores accents "cafe\u0301")) [ 2 ] "general_ci retains combining-mark distinctions"
+
           testCase "full-text terms follow collation case and accent sensitivity"
           <| fun _ ->
               let aiCi = tryFind "utf8mb4_0900_ai_ci" |> Option.get

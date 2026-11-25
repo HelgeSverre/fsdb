@@ -8,12 +8,13 @@ when "queries"
     letters AS (SELECT cp,CONVERT(CHAR(cp USING utf32) USING utf8mb4) AS letter FROM points WHERE cp NOT BETWEEN 55296 AND 57343)
     SELECT cp,
            HEX(LEFT(LOWER(CONCAT(letter,_utf8mb4'####') COLLATE utf8mb4_unicode_ci),1)),
-           HEX(LEFT(LOWER(CONCAT(letter,_utf8mb4'####') COLLATE utf8mb4_unicode_520_ci),1))
+           HEX(LEFT(LOWER(CONCAT(letter,_utf8mb4'####') COLLATE utf8mb4_unicode_520_ci),1)),
+           HEX(LEFT(LOWER(CONCAT(letter,_utf8mb4'####') COLLATE utf8mb4_0900_ai_ci),1))
     FROM letters ORDER BY cp;
   SQL
 when "pack"
   dump = ARGV.shift or abort "Usage: generate-legacy-fulltext-case.rb pack mysql.tsv"
-  tables = [[], []]
+  tables = [[], [], []]
   expected = 0
   File.foreach(dump) do |line|
     input, *outputs = line.chomp.split("\t", -1)
@@ -32,7 +33,7 @@ when "pack"
 
   puts "// Generated from MySQL 8.4.11 by torture/scripts/generate-legacy-fulltext-case.rb."
   puts "module internal Fsdb.LegacyFullTextCaseData"
-  %w[unicode400 unicode520].zip(tables).each do |name, pairs|
+  %w[unicode400 unicode520 unicode900].zip(tables).each do |name, pairs|
     ranges = []
     pairs.each do |scalar, delta|
       previous = ranges.last

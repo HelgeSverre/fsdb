@@ -89,27 +89,25 @@ let private isWordChar (c: char) =
         | Globalization.UnicodeCategory.EnclosingMark -> true
         | _ -> false)
 
-/// MySQL's word characters are alphanumerics plus `_` and an *in-word*
-/// apostrophe (`O'Brien` is one token, a trailing `'` is punctuation).
-let private rawTokensBy isWord (text: string) : string[] =
+let private rawTokensBy isWord keepApostrophes (text: string) : string[] =
     let tokens = ResizeArray<string>()
     let current = Text.StringBuilder()
 
     let flush () =
-        // Strip apostrophes that ended up at the token edge.
-        let t = current.ToString().Trim('\'')
+        let text = current.ToString()
+        let t = if keepApostrophes then text.Trim('\'') else text
         if t.Length > 0 then tokens.Add t
         current.Clear() |> ignore
 
     for c in text do
         if isWord c then current.Append c |> ignore
-        elif c = '\'' && current.Length > 0 then current.Append c |> ignore
+        elif keepApostrophes && c = '\'' && current.Length > 0 then current.Append c |> ignore
         else flush ()
 
     flush ()
     tokens.ToArray()
 
-let private rawTokens = rawTokensBy isWordChar
+let private rawTokens = rawTokensBy isWordChar true
 
 let private ngrams size (text: string) =
     let boundary (rune: Text.Rune) =
@@ -121,11 +119,6 @@ let private ngrams size (text: string) =
     |> Array.choose (fun runes ->
         if Array.exists boundary runes then None
         else runes |> Array.map string |> String.concat "" |> Some)
-
-let private rawTokensWith tokenizer text =
-    match tokenizer with
-    | Words _ -> rawTokens text
-    | Ngrams size -> ngrams size text
 
 let tokenize (text: string) : string[] = rawTokens text |> Array.map _.ToLowerInvariant()
 
@@ -215,16 +208,31 @@ type Corpus =
 let private isBinaryCollation (collation: Collation) =
     collation.Name = "binary" || collation.Name.EndsWith("_bin", StringComparison.Ordinal)
 
-let private tokenWith (collation: Collation) (text: string) =
+let private usesUtf8WordParser tokenizer (collation: Collation) =
+    match tokenizer with
+    | Words _ -> collation.Name.StartsWith("utf8", StringComparison.Ordinal)
+    | Ngrams _ -> false
+
+let private foldFullText (collation: Collation) text =
+    if isBinaryCollation collation then text
+    else Collation.lowercaseForFullText collation.Name text
+
+let private tokenOfFolded (collation: Collation) text =
+    { Text = text
+      Key = collation.FullTextKeyOf text }
+
+let private tokenWith collation text =
     // InnoDB folds full-text case even for nonbinary case-sensitive collations.
-    let foldedText =
-        if isBinaryCollation collation then text
-        else Collation.lowercaseForFullText collation.Name text
-    { Text = foldedText
-      Key = collation.FullTextKeyOf foldedText }
+    foldFullText collation text |> tokenOfFolded collation
+
+let private rawTokensWith tokenizer collation text =
+    match tokenizer with
+    | Words _ when usesUtf8WordParser tokenizer collation -> rawTokensBy BooleanWordChars.contains false text
+    | Words _ -> rawTokens text
+    | Ngrams size -> ngrams size text
 
 let private tokensWith tokenizer collation text =
-    rawTokensWith tokenizer text |> Array.map (tokenWith collation)
+    rawTokensWith tokenizer collation text |> Array.map (tokenWith collation)
 
 let private runeLength (text: string) = text.EnumerateRunes() |> Seq.length
 
@@ -551,7 +559,14 @@ let private phraseCandidates (view: ReadView<'id>) (words: Token[]) =
 
 /// Distinct searchable terms of a natural-language query.
 let private queryTokens (view: ReadView<'id>) query =
-    tokensWith view.Rules.Tokenizer view.Collation query
+    let tokenizer, collation = view.Rules.Tokenizer, view.Collation
+    if usesUtf8WordParser tokenizer collation then
+        // InnoDB folds query text before the lexer finds word boundaries.
+        foldFullText collation query
+        |> rawTokensWith tokenizer collation
+        |> Array.map (tokenOfFolded collation)
+    else
+        tokensWith tokenizer collation query
 
 let private naturalTerms (view: ReadView<'id>) (query: string) : string[] =
     let tokens = queryTokens view query
@@ -593,7 +608,7 @@ let private naturalWordClauses (view: ReadView<'id>) (query: string) =
     match view.Rules.Tokenizer with
     | Ngrams _ -> queryTokens view query |> Array.map (fun word -> NaturalWord word.Key)
     | Words _ ->
-        let words text = tokensWith view.Rules.Tokenizer view.Collation text
+        let words = queryTokens view
         let plain text = words text |> Array.filter (isExactLookup view.Rules) |> Array.map (fun word -> NaturalWord word.Key)
         let clauses = ResizeArray<NaturalClause>()
         let mutable start = 0
@@ -833,6 +848,8 @@ let private isUnicode900BooleanNgramChar c =
 
 let private parseBooleanQuery rules (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
     let policy, tokenizer = rules.Stopwords, rules.Tokenizer
+    let utf8Words = usesUtf8WordParser tokenizer collation
+    let query = if utf8Words then foldFullText collation query else query
     let isWord =
         match tokenizer with
         | Ngrams _ when not (isBinaryCollation collation) ->
@@ -858,9 +875,11 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
     let phraseWords phrase =
         let words =
             match tokenizer with
-            | Words _ -> rawTokensBy isWord phrase |> Array.map (tokenWith collation)
+            | Words _ ->
+                let token = if utf8Words then tokenOfFolded collation else tokenWith collation
+                rawTokensBy isWord (not utf8Words) phrase |> Array.map token
             | Ngrams size ->
-                rawTokensBy isWord phrase
+                rawTokensBy isWord true phrase
                 |> Array.collect (fun word ->
                     if runeLength word < size then [| tokenWith collation word |]
                     else tokensWith tokenizer collation word)
@@ -870,6 +889,27 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
             match tokenizer with
             | Words _ -> not (isSearchable rules word)
             | Ngrams _ -> containsNgramStopword policy word.Text)
+
+    let wordChunkBoundary = function
+        | '"' | ' ' | '\n' | '*' | '(' | ')' | '+' | '-' | '<' | '>' | '~' | '@' | '%' -> true
+        | _ -> false
+
+    let readWordChunk (lengths: StorageOptions.WordLengths) =
+        let start = i
+        while i < len && not (wordChunkBoundary query.[i]) do
+            i <- i + 1
+
+        let words =
+            rawTokensBy isWord false (query.Substring(start, i - start))
+            |> Array.filter (fun word -> word.Length <= lengths.Maximum)
+            |> Array.indexed
+            |> Array.choose (fun (index, word) ->
+                if index = 0 || word.Length >= lengths.Minimum then Some(tokenOfFolded collation word)
+                else None)
+
+        let prefix = i < len && query.[i] = '*'
+        if prefix then i <- i + 1
+        words |> Array.mapi (fun index word -> BWord(word, prefix && index = words.Length - 1))
 
     // Cap parenthesis nesting so a query like "((((...))))" with thousands
     // of groups can't overflow the recursive-descent stack (a
@@ -934,6 +974,12 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                         | Ngrams _ -> None
 
                     acc.Add(op, BPhrase(words, proximity))
+                elif utf8Words && not (wordChunkBoundary query.[i]) then
+                    match tokenizer with
+                    | Words lengths ->
+                        for term in readWordChunk lengths do
+                            acc.Add(op, term)
+                    | Ngrams _ -> ()
                 elif isWord query.[i] then
                     let w, sourceWord = readWord ()
                     let prefix = i < len && query.[i] = '*'

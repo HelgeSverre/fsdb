@@ -66,9 +66,8 @@ The wire fixture matched MySQL on all 452 bare and quoted Boolean
 membership checks built from the affected uppercase and lowercase forms.
 A separate Chinese fixture verifies that a folded Cherokee capital ends
 the word. The maintained Chinese 0900 and Unicode 5.2 corpora also match
-all 7,740 searches across token sizes 1–10. The ordinary word parser has
-separate differences. The subsequent posting change uses the pinned
-[legacy lowercase tables](2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables).
+all 7,740 searches across token sizes 1–10. The subsequent posting change
+uses the pinned [legacy lowercase tables](2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables).
 
 The Chinese Latin-extended lane matches all 384 searches at sizes 1 and 2.
 Run it with a Release CLI and native MySQL 8.4.11.
@@ -77,3 +76,32 @@ Run it with a Release CLI and native MySQL 8.4.11.
 uv run --with pymysql torture/scripts/ngram-multicol-oracle.py \
   --collation utf8mb4_zh_0900_as_cs --legacy-range A780:A7A0 1 2
 ```
+
+## Default UTF-8 word parser
+
+The default InnoDB word parser also uses the historical character table.
+It counts letters, numbers, marks, and underscores from that table.
+ASCII apostrophes, supplementary scalars, and later BMP characters
+such as `㉎` separate words. The tokenizer classifies the stored text
+before folding each document token. Search folds the query first, so
+`Ɥ` can separate words in a document and become the older letter `ɥ`
+in a query under a Unicode 9 collation. [MySQL token classifier](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/handler/ha_innodb.cc)
+· [MySQL query preparation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc).
+
+Fsdb now makes the same distinction on UTF-8 word indexes and queries.
+The Boolean lexer applies the modifier to each word in a punctuation-split
+term, while a trailing wildcard applies to its last retained word.
+`utf8mb3_general_ci` uses the same full-text combining-mark distinctions
+as its four-byte counterpart. Unicode 9 lowercase folding now uses the
+captured MySQL map, so later capitals such as `Ʂ` retain their boundaries.
+The generator checked all 1,112,064 input scalars and reproduced both
+earlier case tables byte for byte.
+
+The pinned MySQL 8.4.11 wire checks matched all 900 membership queries
+across nine UTF-8 collations and all 840 relevance values rounded to
+five decimals. The smaller mixed-script matrix had 173 differences
+before the change. Both an older checkpoint and an older WAL-only store
+rebuilt postings that matched all 216 queries in that matrix.
+The maintained ngram corpus also matched all 8,901 searches across
+default and Chinese Unicode 9 collations at sizes 1–10 and Japanese
+kana-sensitive Unicode 9 at sizes 1, 2, and 10.

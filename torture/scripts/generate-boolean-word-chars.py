@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate MySQL 8.4's BMP Boolean-query word classifier from Unicode 5.0.
+"""Generate MySQL 8.4's BMP full-text word classifier from Unicode 5.0.
 
 Usage: generate-boolean-word-chars.py UnicodeData.txt [output.fs]
 The input is https://www.unicode.org/Public/5.0.0/ucd/UnicodeData.txt.
@@ -68,9 +68,9 @@ def main() -> None:
         ) + ";" for i in range(0, len(pairs), 4)),
         "    |]",
         "",
-        "/// MySQL's historical Boolean-query word boundary, plus its underscore rule.",
+        "/// MySQL's historical UTF-8 full-text word boundary, including underscore.",
         "let contains (c: char) =",
-        "    if c = '_' then true",
+        "    if System.Char.IsAscii c then System.Char.IsAsciiLetterOrDigit c || c = '_'",
         "    else",
         "        let value = int c",
         "        let mutable low = 0",

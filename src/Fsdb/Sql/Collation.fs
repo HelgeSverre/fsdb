@@ -1511,7 +1511,8 @@ let private legacySquaredCjkExceptionWeights unicode520 codepoint =
 
 let private legacyFullTextCase name =
     match name with
-    | "utf8mb4_general_ci" | "utf8mb4_unicode_ci" -> Some LegacyFullTextCaseData.unicode400
+    | "utf8mb4_general_ci" | "utf8mb4_unicode_ci"
+    | "utf8mb3_general_ci" | "utf8mb3_unicode_ci" -> Some LegacyFullTextCaseData.unicode400
     | "utf8mb4_unicode_520_ci" -> Some LegacyFullTextCaseData.unicode520
     | _ -> None
 
@@ -1526,7 +1527,9 @@ let private lowercaseWith (ranges: (int * int * int * int)[]) (value: string) =
                 elif scalar > last then search (middle + 1) high
                 elif (scalar - first) % step = 0 then scalar + delta
                 else scalar
-        search 0 (ranges.Length - 1)
+        if scalar >= 0x80 then search 0 (ranges.Length - 1)
+        elif scalar >= int 'A' && scalar <= int 'Z' then scalar + 32
+        else scalar
 
     let mutable chars = null
     let mutable offset = 0
@@ -1543,10 +1546,13 @@ let private lowercaseWith (ranges: (int * int * int * int)[]) (value: string) =
 
     if isNull chars then value else String(chars)
 
-let internal lowercaseForFullText name (value: string) =
-    match legacyFullTextCase name with
-    | Some ranges -> lowercaseWith ranges value
-    | None -> value.ToLowerInvariant()
+let internal lowercaseForFullText (name: string) (value: string) =
+    if name.Contains("_0900_", StringComparison.Ordinal) then
+        lowercaseWith LegacyFullTextCaseData.unicode900 value
+    else
+        match legacyFullTextCase name with
+        | Some ranges -> lowercaseWith ranges value
+        | None -> value.ToLowerInvariant()
 
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let chinese0900 = name = "utf8mb4_zh_0900_as_cs"
@@ -1642,7 +1648,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
 
     let primaryText (s: string) = s |> foldText |> trim
     let fullTextKeyText (s: string) =
-        if name = "utf8mb4_general_ci" then
+        if name = "utf8mb4_general_ci" || name = "utf8mb3_general_ci" then
             foldGeneral false s |> trim
         elif name = "utf8mb4_unicode_520_ci" then
             // MySQL's ngram index keeps the older token equivalence classes.
