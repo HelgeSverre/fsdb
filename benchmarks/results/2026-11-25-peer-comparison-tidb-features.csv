@@ -1,0 +1,21 @@
+engine,pass,workload,status,samples,p50_ms,p95_ms,detail
+TiDB,1,correlated-equality,ok,60,3.475100,3.633400,
+TiDB,1,correlated-range,ok,60,60.795800,63.533300,
+TiDB,1,joined-view-update,mismatch,0,,,joined view updatability expected 1L got 0L
+TiDB,1,spatial-mbr,rejected,0,,,1064/42000
+TiDB,1,spatial-geographic,rejected,0,,,1305/42000
+TiDB,1,cjk-ngram-japanese,rejected,0,,,1105/HY000
+TiDB,1,cjk-ngram-chinese,rejected,0,,,1105/HY000
+TiDB,1,cjk-ngram-korean,rejected,0,,,1105/HY000
+TiDB,1,joined-view-prefix-500,rejected,0,,,1288/HY000
+TiDB,1,joined-view-prefix-5000,rejected,0,,,1288/HY000
+TiDB,2,cjk-ngram-japanese,rejected,0,,,1105/HY000
+TiDB,2,cjk-ngram-chinese,rejected,0,,,1105/HY000
+TiDB,2,cjk-ngram-korean,rejected,0,,,1105/HY000
+TiDB,2,spatial-mbr,rejected,0,,,1064/42000
+TiDB,2,spatial-geographic,rejected,0,,,1305/42000
+TiDB,2,joined-view-update,mismatch,0,,,joined view updatability expected 1L got 0L
+TiDB,2,correlated-range,ok,60,60.582400,62.975400,
+TiDB,2,correlated-equality,ok,60,3.249600,3.447000,
+TiDB,2,joined-view-prefix-5000,rejected,0,,,1288/HY000
+TiDB,2,joined-view-prefix-500,rejected,0,,,1288/HY000

@@ -266,6 +266,9 @@ These tables summarize immutable, linked result artifacts. They are historical
 measurements, not claims about the current branch; use a fresh run for a current
 comparison.
 
+The [2026-11-25 peer comparison](results/2026-11-25-peer-comparison.md)
+records checked point reads, durable updates, and MySQL feature probes.
+
 Each recipe writes one or more tracked `results/<git-sha>[-label].md` files
 with a provenance header (revision, date, OS, .NET, server mode, and dataset).
 Disposable MySQL data directories and BenchmarkDotNet intermediates remain
