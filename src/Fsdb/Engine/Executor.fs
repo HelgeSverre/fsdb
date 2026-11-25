@@ -7936,6 +7936,50 @@ and private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata opti
     finally
         if ownsCache then metadataInferenceCache.Value <- null
 
+and private tryScalarNumericAggregateMetadata (ctx: EvalContext) (select: SelectStmt) =
+    match select.From, select.Projections with
+    | Some(FromTable tableRef), [ { Expression = FuncCall(name, [ _ ]) as projection } ]
+        when (equalsIgnoreCase name "SUM" || equalsIgnoreCase name "AVG" || equalsIgnoreCase name "MIN" || equalsIgnoreCase name "MAX")
+             && Functions.isUnmodifiedBuiltinAggregate name ctx.Registry
+             && select.Joins.IsEmpty
+             && select.Ctes.IsEmpty
+             && not (tableRef.Database.IsNone && (currentCteScope () |> Map.containsKey (tableRef.Table.ToLowerInvariant()))) ->
+        let database = tableRef.Database |> Option.defaultValue ctx.DbName
+        let virtualSource = equalsIgnoreCase database "fsdb" && ctx.Store.VirtualTables.ContainsKey(tableRef.Table.ToLowerInvariant())
+        if virtualSource then None
+        else
+            InformationSchema.findTable ctx.Store.Catalog database tableRef.Table
+            |> Result.toOption
+            |> Option.bind (fun table ->
+                // Scalar aggregates derive integer precision from the type,
+                // independent of a stored display width or ZEROFILL.
+                let columns =
+                    table.Columns |> List.map (fun column ->
+                        let width =
+                            match column.Type with
+                            | TTinyInt unsigned -> Some(if unsigned then 3 else 4)
+                            | TSmallInt unsigned -> Some(if unsigned then 5 else 6)
+                            | TMediumInt unsigned -> Some(if unsigned then 8 else 9)
+                            | TInt unsigned -> Some(if unsigned then 10 else 11)
+                            | TBigInt _ -> Some 20
+                            | TBool -> Some 4
+                            | _ -> None
+                        match width with
+                        | Some width ->
+                            { column with NumericDisplay = Some { Width = Some width; Decimals = None; ZeroFill = false } }
+                        | None -> column)
+                let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+                let inner =
+                    contextFactory ctx.Store ctx.Registry ctx.DbName (columnIndexOf columns)
+                        (singleQualifier qualifier columns) (Some ctx) (probeRow columns)
+                metadataOfExpr inner projection)
+            |> Option.filter (fun metadata ->
+                isIntegerMetadata metadata || metadata.TypeId = TypeNewDecimal
+                || metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat)
+            |> Option.map (fun metadata ->
+                { metadata with Flags = BinaryFlag ||| (metadata.Flags &&& UnsignedFlag) })
+    | _ -> None
+
 and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
     let withCollation inner collation =
         metadataOfExpr ctx inner
@@ -8779,6 +8823,7 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Subquery select ->
         tryReducedScalarProjection ctx select
         |> Option.bind (metadataOfExpr ctx)
+        |> Option.orElseWith (fun () -> tryScalarNumericAggregateMetadata ctx select)
         |> Option.orElseWith (fun () ->
             selectProjectionColumns ctx.Store ctx.DbName select
             |> List.tryHead
@@ -8817,6 +8862,11 @@ and private outputFormatOfExpr ctx expr =
             | NamedFunction "AVG" _
             | NamedFunction "IFNULL" _ ->
                 metadataOfExpr ctx expr
+                |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
+                |> Option.map (fun metadata -> int metadata.Decimals)
+            | Subquery select ->
+                // The scalar value retains its guard digits for outer expressions.
+                tryScalarNumericAggregateMetadata ctx select
                 |> Option.filter (fun metadata -> metadata.TypeId = TypeNewDecimal)
                 |> Option.map (fun metadata -> int metadata.Decimals)
             | _ -> None
@@ -28095,7 +28145,8 @@ let statementNumericMetadata store registry schema statement =
                 let context = contextFactory store registry schema (columnIndexOf columns) (qualifierRanges sources) None (probeRow columns)
                 outputColumnWireOverrides context columns select
                 |> List.map (Option.filter (fun metadata ->
-                    metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat || metadata.TypeId = TypeLongLong))
+                    metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat || metadata.TypeId = TypeLongLong
+                    || (isIntegerMetadata metadata && hasMetadataFlag BinaryFlag metadata)))
                 |> Some)
     | _ -> None
 

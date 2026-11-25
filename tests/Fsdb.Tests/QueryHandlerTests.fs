@@ -4591,6 +4591,57 @@ let tests =
                       Expect.equal (resultSession.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLong ] sql
                   | other -> failtestf "unexpected scalar subquery result: %A" other
 
+          testCase "correlated numeric aggregates retain scalar wire types and display scales"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE parent(id INT PRIMARY KEY)"
+              let session, _ = handle session "CREATE TABLE child(id INT PRIMARY KEY,pid INT,n INT,d DECIMAL(8,2), KEY ix_child(pid,id))"
+              let session, _ = handle session "INSERT INTO parent VALUES(1),(2),(3)"
+              let session, _ = handle session "INSERT INTO child VALUES (1,1,0,0.00),(2,1,1,0.01),(3,1,1,0.01),(4,2,-1,-0.01),(5,2,-1,-0.01),(6,2,0,0.00)"
+              let scalar aggregate = $"(SELECT {aggregate} FROM child c WHERE c.pid=p.id AND c.id BETWEEN 0 AND 6)"
+              let fraction = scalar "AVG(c.n)"
+              let decimalAverage = scalar "AVG(c.d)"
+              let minimum = scalar "MIN(c.n)"
+              let maximum = scalar "MAX(DISTINCT c.n)"
+              let sql = $"SELECT {fraction} AS a,{decimalAverage} AS b,{minimum} AS m,{maximum} AS x FROM parent p ORDER BY p.id"
+              let resultSession, result = handle session sql
+              Expect.equal result
+                  (ResultSet([ "a"; "b"; "m"; "x" ],
+                      [ [ Some "0.6667"; Some "0.006667"; Some "0"; Some "1" ]
+                        [ Some "-0.6667"; Some "-0.006667"; Some "-1"; Some "0" ]
+                        [ None; None; None; None ] ]))
+                  "scalar AVG uses the aggregate scale at the result boundary"
+              let types (columns: ColumnMetadata list) =
+                  columns |> List.map (fun column -> column.TypeId, column.Decimals, column.ColumnLength, column.Flags)
+              let expected =
+                  [ TypeNewDecimal, 4uy, 16u, BinaryFlag
+                    TypeNewDecimal, 6uy, 14u, BinaryFlag
+                    TypeLong, 0uy, 11u, BinaryFlag
+                    TypeLong, 0uy, 11u, BinaryFlag ]
+              Expect.equal (types resultSession.LastResultColumnMetadata) expected "text result metadata"
+              match prepareStatementForSession session sql with
+              | Ok(statement, parameterCount) ->
+                  let _, columns = preparedMetadata session statement parameterCount
+                  Expect.equal (columns |> List.map _.Metadata |> types) expected "prepared result metadata"
+              | Error error -> failtestf "expected the aggregate statement to prepare, got %A" error
+
+              let empty, emptyResult = handle session $"SELECT {minimum} AS m FROM parent p WHERE 0"
+              Expect.equal emptyResult (ResultSet([ "m" ], [])) "empty outer result"
+              Expect.equal (types empty.LastResultColumnMetadata) [ TypeLong, 0uy, 11u, BinaryFlag ] "the extrema type does not depend on a runtime row"
+              let _, comparison = handle session $"SELECT {fraction}>0.66669 AS compared FROM parent p WHERE p.id=1"
+              Expect.equal comparison (ResultSet([ "compared" ], [ [ Some "0" ] ])) "outer expressions keep the average's guard digits"
+
+              let session, _ = handle session "INSERT INTO parent VALUES(4)"
+              let rows =
+                  [ 1..32 ]
+                  |> List.map (fun i -> $"({100 + i},4,{if i = 1 then 1 else 0},NULL)")
+                  |> String.concat ","
+              let session, _ = handle session ("INSERT INTO child VALUES " + rows)
+              let _, midpoint =
+                  handle session
+                      "SELECT (SELECT AVG(c.n) FROM child c WHERE c.pid=p.id) AS pos,(SELECT AVG(-c.n) FROM child c WHERE c.pid=p.id) AS neg FROM parent p WHERE p.id=4"
+              Expect.equal midpoint (ResultSet([ "pos"; "neg" ], [ [ Some "0.0313"; Some "-0.0313" ] ])) "exact half-way values round away from zero"
+
           testCase "all-NULL rows retain declared and inferred result metadata"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -2764,6 +2764,9 @@ implementation effort:
    their arguments are safe to evaluate in index order.
    [Exact numeric SUM, AVG, MIN, and MAX](benchmarks/results/2026-11-25-correlated-integer-range-count.md#exact-numeric-aggregates)
    also use the slice, including audited DISTINCT and conditional expressions.
+   [Scalar aggregate result metadata](benchmarks/results/2026-11-25-correlated-integer-range-count.md#scalar-aggregate-result-metadata)
+   preserves the audited numeric type and display scale on text and
+   prepared results.
    Other residual predicates, broader aggregates, and projected sources
    still need broader access planning.
 

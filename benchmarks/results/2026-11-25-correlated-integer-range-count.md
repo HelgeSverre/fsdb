@@ -260,3 +260,25 @@ varied from 17.5 to 40.5 ms across workloads and passes.
 ```sh
 dotnet fsi benchmarks/scripts/native-feature-peers.fsx -- MySQL 3391 1 exact-aggregate-controls
 ```
+
+### Scalar aggregate result metadata
+
+Scalar `SUM`, `AVG`, `MIN`, and `MAX` over one physical source now
+derive their numeric metadata from the inner projection. Integer
+precision uses the underlying integer type, independent of stored
+display width. Exact decimal results use the declared scale at output,
+including rounding halfway values away from zero. The scalar value
+retains guard digits for comparisons and arithmetic in the outer query.
+
+The MySQL 8.4.11 wire probe matched 48 text projections, including
+the value, width, scale, type code, and flags. It also checked three
+outer comparisons and the type of an empty outer result. The binary
+prepared comparison used the same data and matched all eight projected
+column descriptors and rows at each of three division precision settings.
+The fixtures include signed and unsigned columns, nullable and empty
+matches, conditional expressions, and DISTINCT.
+
+In a separate declared-type probe, `MIN(MEDIUMINT)` still reported
+`INT` where MySQL reported `MEDIUMINT`. Fixed-scale `FLOAT` and
+`DOUBLE` inputs also still differed in scalar `SUM` and `AVG`
+scale descriptors.

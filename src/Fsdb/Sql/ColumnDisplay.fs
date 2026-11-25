@@ -45,7 +45,9 @@ let renderOutputValue format value =
             format.DecimalScale |> Option.map (fun scale -> (decimal number).ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
         | _, VDecimal number ->
             match format.DecimalScale with
-            | Some scale -> Some(number.ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
+            | Some scale ->
+                let rounded = System.Math.Round(number, min 28 scale, System.MidpointRounding.AwayFromZero)
+                Some(rounded.ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
             | None -> Value.toText value
         | _ ->
             match format.Fsp with
