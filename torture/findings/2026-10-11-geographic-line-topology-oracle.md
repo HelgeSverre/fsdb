@@ -61,8 +61,8 @@ WKT. The audit includes shared and disjoint geodesics, mixed line and
 point results, segmented and reversed paths, endpoint contacts,
 antimeridian crossings, and seeded local and global lines.
 
-Multipart input and nonzero segments with a polar endpoint or a
-180-degree longitude change remain outside the implemented path.
+Nonzero segments with a polar endpoint or a 180-degree longitude
+change remain outside the implemented path.
 For two audited half-turns through the north pole, MySQL
 returns longitudes of approximately 61.18 and 64.46 degrees depending
 on the operand order, at latitude 89.9999999999995 degrees.
@@ -99,6 +99,15 @@ about `7.1e-15` degrees. The 5,112 ordinary-line results were byte-identical
 to the previous Fsdb run. Near-adjacent geodesics off the audited axes
 remain open.
 
+A separate 108-result axis check varies nearly contained spans, where
+the endpoints at one end almost coincide. Twenty results differ in
+the selected endpoint or in whether the result is a point or a span.
+For example, intersecting the equatorial `LINESTRING(4 0,0 0)` with
+`LINESTRING(-0.0000005 0,6 0)` gives the first line in MySQL and
+`POINT(4 0)` in Fsdb.
+Fsdb returned byte-identical results on both sides of the multipart
+change for this check.
+
 ## Zero-length line strings
 
 For a line whose vertices repeat one coordinate, intersection returns a
@@ -115,3 +124,34 @@ four overlay operations, including interior and endpoint visits,
 repeated vertices, closed lines, and identical and distinct polar
 coordinates. The 5,112 ordinary-line wire results were byte-identical
 to the previous Fsdb run.
+
+## Multipart line overlays
+
+Geographic `MULTILINESTRING` now participates in intersection, union,
+difference, and symmetric difference with line strings and with other
+multilines. In the tested mixed cases the commutative operations follow
+the single line's traversal in either operand order. Two multilines
+follow the first operand's component order. Difference always starts
+with the left operand.
+
+Intersection preserves cuts between separately covered components and
+retains source vertices when adjacent pieces belong to the same span.
+The order of the covering components matters when they meet at a turn.
+The result removes duplicate lines and keeps isolated point contacts
+separate from shared spans. Union keeps uncovered fragments that survive
+clipping, including when a repeated point lies inside the original
+component.
+
+The native MySQL 8.4.11 wire checks matched all 3,456 results across
+general multipart linework, fragmented networks, and reordered corner
+cases. They include all four operations, both operand orders, and
+EPSG 4326, 4258, and 4267. Geometry types, SRIDs, and component order
+matched, and computed coordinates differed by at most `1.7e-12`
+degrees. Of those results, 2,929 matched byte for byte. The previous
+5,112 single-line results also remained byte-identical.
+
+Run the focused fixtures with this command.
+
+```sh
+just test --filter-test-case 'geographic multiline overlays'
+```

@@ -685,6 +685,37 @@ let tests =
                         Expect.isLessThan (abs longitude) 1e-12 "longitude at the crossing"
                     | actual -> failtestf "expected a geographic crossing point, got %A" actual
 
+                testCase "geographic multiline overlays preserve component order and split shared spans"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let line = "LINESTRING(0 0,4 0)"
+                    let parts = "MULTILINESTRING((1 0,3 0),(5 0,6 0))"
+                    let touching = "MULTILINESTRING((0 0,2 0),(2 0,4 0))"
+                    let first = "MULTILINESTRING((0 0,4 0),(7 0,8 0))"
+                    let second = "MULTILINESTRING((3 0,1 0),(5 0,6 0))"
+
+                    for name, left, right, expected in
+                        [ "ST_Intersection", parts, line, "LINESTRING(1 0,3 0)"
+                          "ST_Intersection", touching, line, touching
+                          "ST_Intersection", line, touching, touching
+                          "ST_Intersection", second, first, "LINESTRING(3 0,1 0)"
+                          "ST_Intersection", "LINESTRING(0 4,0 0,3 0,3 2)", "MULTILINESTRING((0 0,8 0),(0 0,0 4))", "LINESTRING(0 4,0 0,3 0)"
+                          "ST_Intersection", "LINESTRING(0 4,0 0,3 0)", "MULTILINESTRING((0 0,0 4),(0 0,8 0))", "MULTILINESTRING((0 4,0 0),(0 0,3 0))"
+                          "ST_Intersection", "MULTILINESTRING((0 0,4 0),(4 0,0 0))", "MULTILINESTRING((0 0,3 0),(2 0,4 0))", line
+                          "ST_Union", parts, line, "MULTILINESTRING((0 0,4 0),(5 0,6 0))"
+                          "ST_Union", second, first, "MULTILINESTRING((3 0,1 0),(5 0,6 0),(0 0,1 0),(3 0,4 0),(7 0,8 0))"
+                          "ST_Union", "MULTILINESTRING((0 4,0 0),(0 0,3 0),(0 0,0 0,0 0))", "MULTILINESTRING((0 4,0 0,3 0,3 3),(7 1,8 2))", "MULTILINESTRING((0 4,0 0),(0 0,3 0),(0 0,0 0,0 0),(3 0,3 3),(7 1,8 2))"
+                          "ST_Difference", first, second, "MULTILINESTRING((0 0,1 0),(3 0,4 0),(7 0,8 0))"
+                          "ST_Difference", second, first, "LINESTRING(5 0,6 0)"
+                          "ST_SymDifference", parts, line, "MULTILINESTRING((0 0,1 0),(3 0,4 0),(5 0,6 0))"
+                          "ST_Intersection", "MULTILINESTRING((-123 -17,-123 -19),(-123 -19,-120 -19),(-123 -19,-123 -19,-123 -19))", "MULTILINESTRING((-123 -17,-123 -19,-120 -19,-118 -16),(-121 -23,-119 -14))", "MULTILINESTRING((-123 -17,-123 -19),(-123 -19,-120 -19))"
+                          "ST_Intersection", "MULTILINESTRING((0 0,6 0),(4 0,4 4))", "MULTILINESTRING((1 0,3 0),(4 4,5 4),(6 0,7 3))", "GEOMETRYCOLLECTION(MULTIPOINT((6 0),(4 4)),LINESTRING(1 0,3 0))"
+                          "ST_Intersection", "MULTILINESTRING((2 0,2 0),(7 0,8 0))", line, "POINT(2 0)" ] do
+                        let result = call name [ geometry left; geometry right ]
+                        Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "multipart overlays retain the SRID"
+                        Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{name} of {left} and {right}"
+
                 testCase "geographic overlays keep zero-length line operands and point contacts"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

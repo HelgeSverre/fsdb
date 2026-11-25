@@ -3084,9 +3084,11 @@ implementation effort:
    [Geographic line-string overlays](torture/findings/2026-10-11-geographic-line-topology-oracle.md#geographic-line-string-overlays)
    cover shared spans, isolated contacts, computed crossings, and audited
    zero-length operands. [Near-endpoint contacts](torture/findings/2026-10-11-geographic-line-topology-oracle.md#near-endpoint-precision)
-   also match the audited equatorial and meridional cases. Multipart
-   linework, near contacts off those axes, and nonzero polar and half-turn
-   segments remain open.
+   match the audited adjacent equatorial and meridional cases.
+   [Multipart line overlays](torture/findings/2026-10-11-geographic-line-topology-oracle.md#multipart-line-overlays)
+   preserve the tested component order, contacts, shared spans, and
+   duplicate removal. Additional near-coincident axis cases, near contacts
+   off those axes, and nonzero polar and half-turn segments remain open.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
    [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)
