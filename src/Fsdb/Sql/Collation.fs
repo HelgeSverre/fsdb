@@ -1510,6 +1510,7 @@ let private legacySquaredCjkExceptionWeights unicode520 codepoint =
     | _ -> []
 
 let private makeCollation (name: string) (spec: Spec) : Collation =
+    let chinese0900 = name = "utf8mb4_zh_0900_as_cs"
     let ci = compareInfoFor spec.Locale
     let trim (s: string) =
         if not spec.PadSpace then s
@@ -1883,6 +1884,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             0
         elif spec.ByteOrder then
             compareBinary a b
+        elif chinese0900 then
+            Zh0900Weights.compare a b
         elif name = "utf8mb4_ja_0900_as_cs_ks" then
             (japaneseKanaKey (trim a)).AsSpan().SequenceCompareTo((japaneseKanaKey (trim b)).AsSpan())
         else
@@ -1896,6 +1899,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             // trimmed-equal under PAD SPACE: the extra-space side sorts
             // first (MySQL-verified), same tie-break as the ICU branch.
             if c <> 0 then c else countTrailingSpaces b - countTrailingSpaces a
+        elif chinese0900 then
+            Zh0900Weights.compare a b
         else
             let primary = comparePrimary a b
 
@@ -1919,6 +1924,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         fun s ->
             if spec.ByteOrder then
                 "B" + Convert.ToHexString(binaryBytes s)
+            elif chinese0900 then
+                Convert.ToHexString(Zh0900Weights.weightOf s)
             elif name = "utf8mb4_ja_0900_as_cs_ks" then
                 Convert.ToHexString(japaneseKanaKey (trim s))
             else
@@ -1933,6 +1940,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         fun s ->
             if spec.ByteOrder then
                 binaryWeight s
+            elif chinese0900 then
+                Zh0900Weights.weightOf s
             else
                 legacyWeight s
                 |> Option.defaultWith (fun () -> ci.GetSortKey(foldText s, spec.Fold).KeyData)
@@ -1940,6 +1949,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         fun s ->
             if spec.ByteOrder then
                 hash (binaryBytes s)
+            elif chinese0900 then
+                hash (Zh0900Weights.weightOf s)
             elif name = "utf8mb4_ja_0900_as_cs_ks" then
                 hash (japaneseKanaKey (trim s))
             else
@@ -1947,7 +1958,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
       CharEquals =
         if spec.ByteOrder then
             fun a b -> binaryBytes (string a) = binaryBytes (string b)
-        elif name = "utf8mb4_ja_0900_as_cs_ks" then
+        elif chinese0900 || name = "utf8mb4_ja_0900_as_cs_ks" then
             fun a b -> comparePrimary (string a) (string b) = 0
         else
             fun a b -> ci.Compare(primaryText (string a), primaryText (string b), spec.Fold) = 0

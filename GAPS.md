@@ -1676,20 +1676,15 @@ ngram sizes. The supported `utf8mb4_0900_as_ci` and
 `utf8mb4_0900_as_cs` collations also match all 387 searches at each size
 1–10 in the maintained native oracle. Broader
 UCA 9 corpora remain open.
-The [Chinese 0900 collation probe](torture/findings/2026-11-06-zh-0900-han-order.md)
-finds that `utf8mb4_zh_0900_as_cs` matches the 387-search two-column
-ngram corpus at each token size 1–10, but its Han ordering is not fully
-compatible: among U+4E00–U+4EFF, MySQL sorts 乾 (U+4E7E) before 亁
-(U+4E81), while fsdb places it later. All 64 sampled U+4E00–U+4E3F
-`WEIGHT_STRING` byte sequences differ as well. The same pair disagrees on
-the SQL `<` predicate, and a forced indexed `body < '亁文'` range omits
-乾文 in fsdb. Chinese collation ordering, range predicates, and exact
-weight bytes remain open even where full-text
-membership and relevance agree.
-The same ordering gap [changes the top full-text result when scores tie](torture/findings/2026-11-06-zh-0900-han-order.md#full-text-top-result-when-scores-tie).
-The 4,096-character Han ordering audit finds 3,721 displaced positions
-and 41,213 pairwise inversions, so this needs broader Chinese tailoring
-rather than a one-character correction.
+The [Chinese 0900 collation audit](torture/findings/2026-11-06-zh-0900-han-order.md#oracle-derived-sql-weights)
+now uses pinned MySQL weights for `utf8mb4_zh_0900_as_cs` SQL ordering,
+equality, index keys, and `WEIGHT_STRING`. The implementation matches all
+Unicode singleton weights, 6,850 mixed strings, and the 4,096-character Han
+ordering and full-text reproduction. It also fixes the `LIMIT 1` title
+tie-break when ngram scores match. The historical 4,096-character run had
+3,721 displaced positions and 41,213 pairwise inversions. Full-text token
+keys retain their existing encoding, and linguistic prefix and substring
+matching retain the host locale path.
 The independent CLDR 30 pinyin sequence exactly reproduces MySQL's
 ranked Han order in three audited blocks (1,020, 4,092, and 4,088
 characters); a fourth 4,087-character block differs by one moved
@@ -1700,8 +1695,8 @@ reduced a 400-value mixed corpus from 193 to 8 order inversions by permuting
 Han characters into host ICU rank positions, but still left 13 of 400 indexed
 ranges wrong. MySQL singleton weights compose exactly for 406 of 409 tested
 strings; three tailored Chinese sequences require contraction handling.
-The permutation was rejected as a production fix. A consistent Chinese
-weight source across Han and other scripts remains necessary.
+The production key uses oracle-derived weights and contractions across
+Han and other scripts.
 The [general Unicode mathematical-operator audit](torture/findings/2026-10-17-general-ci-mathematical-weights.md)
 also matches MySQL's distinct U+2200–U+22FF primary weights in the same
 two-column ngram lane at token sizes 1–10.

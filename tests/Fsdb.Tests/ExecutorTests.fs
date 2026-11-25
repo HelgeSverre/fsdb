@@ -2912,6 +2912,36 @@ let tests =
                         | ResultSet(_, []) -> ()
                         | result -> failtestf "expected no ngram Boolean matches for %A, got %A" query result
 
+                testCase "Chinese ngram score ties and SQL ranges use MySQL collation weights"
+                <| fun _ ->
+                    let store = newStore ()
+                    let run = runDefault store
+                    let expectRows sql expected =
+                        match run sql with
+                        | ResultSet(_, rows) -> Expect.equal rows expected sql
+                        | other -> failtestf "expected rows for %s, got %A" sql other
+
+                    Expect.equal
+                        (run "CREATE TABLE docs (id INT PRIMARY KEY, title VARCHAR(40) NOT NULL, body TEXT NOT NULL, KEY ix_title(title), FULLTEXT KEY ix_body(body) WITH PARSER ngram) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_zh_0900_as_cs")
+                        (Affected 0UL)
+                        "create Chinese ngram corpus"
+                    Expect.equal
+                        (run "INSERT INTO docs VALUES (1,'乾文','搜尋文件'),(2,'亁文','搜尋文件'),(3,'中文','無關內容')")
+                        (Affected 3UL)
+                        "insert documents"
+                    expectRows
+                        "SELECT id,title FROM docs WHERE MATCH(body) AGAINST ('搜尋' IN BOOLEAN MODE) ORDER BY MATCH(body) AGAINST ('搜尋' IN BOOLEAN MODE) DESC,title,id LIMIT 1"
+                        [ [ Some "1"; Some "乾文" ] ]
+                    expectRows "SELECT id FROM docs FORCE INDEX(ix_title) WHERE title < '亁文' ORDER BY title,id" [ [ Some "1" ] ]
+
+                    for input, expected in
+                        [ "乾A😀", "3D19BDC415FB00000020002000200000000200080002"
+                          "重庆", "2AD77BC5F645000000200020000000020002"
+                          "e\u0302\u0304", "BE2700000020011600000002" ] do
+                        expectRows $"SELECT HEX(WEIGHT_STRING(_utf8mb4'{input}' COLLATE utf8mb4_zh_0900_as_cs))" [ [ Some expected ] ]
+
+                    expectRows "SELECT _utf8mb4'가' COLLATE utf8mb4_zh_0900_as_cs = _utf8mb4'가'" [ [ Some "1" ] ]
+
                 testCase "FULLTEXT functional key parts are rejected before catalog publication"
                 <| fun _ ->
                     let store = newStore ()

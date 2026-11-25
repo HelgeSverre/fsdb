@@ -2398,6 +2398,7 @@ let load (dataDir: string) : Store =
                 false)
 
     if loadedFromNew then
+        validateRecoveredChineseKeys store
         loadedFormat |> Option.iter ensureRootGrantsForFormat
 
         File.WriteAllText(walPath, "")
@@ -2419,6 +2420,7 @@ let load (dataDir: string) : Store =
 
         // Derived indexes are rebuilt once after all physical events land.
         reindexAllForReplay store
+        validateRecoveredChineseKeys store
 
         // Discard a torn or invalid WAL suffix after the last valid frame.
         if File.Exists walPath && FileInfo(walPath).Length <> goodOffset then

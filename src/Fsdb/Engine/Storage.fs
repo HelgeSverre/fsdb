@@ -12329,6 +12329,28 @@ let reindexAllForReplay (store: Store) : unit =
     for KeyValue(_, slot) in store.Databases do
         slot.Value <- slot.Value |> Map.map (fun _ table -> reindexTableWithFullTextIndexes table.FullTextIndexes table)
 
+/// A persisted table may have been written with the old host ICU keys.
+/// Detect newly equal unique keys before recovery alters any files.
+let internal validateRecoveredChineseKeys (store: Store) =
+    for KeyValue(database, slot) in store.Databases do
+        for KeyValue(_, table) in slot.Value do
+            let usesChineseWeights index =
+                table.Columns[index].Collation
+                |> Option.exists (fun name -> String.Equals(name, "utf8mb4_zh_0900_as_cs", StringComparison.OrdinalIgnoreCase))
+
+            for group in uniqueKeyGroups table do
+                if group.Indices |> List.exists usesChineseWeights then
+                    let indexed = table.UniqueIndex[group.Name].Count
+                    if indexed < table.RowsArray.Count then
+                        let nonNull =
+                            table.RowsArray
+                            |> Seq.choose (encodeUniqueKey table.Columns group)
+                            |> Seq.length
+
+                        if nonNull <> indexed then
+                            raise (System.IO.InvalidDataException(
+                                $"Chinese collation upgrade found duplicate values for unique index '{group.Name}' on '{database}.{table.OriginalName}'. Resolve the conflicting rows with the previous Fsdb version before upgrading."))
+
 /// Startup-only configuration; existing documents retain their indexing tokenizer.
 let internal configureFullTextWordLengths lengths (store: Store) =
     if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"

@@ -2947,6 +2947,32 @@ let tests =
                   Expect.equal table.TableCollation (Some "utf8mb4_unicode_ci") "the declared collation survives the restart"
               | Error e -> failtestf "expected table 'decl' to reload, got %A" e
 
+          testCase "Chinese collation upgrade preserves the snapshot when old unique keys collide"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = create ()
+              let session = Fsdb.Session.create 1 store
+              Expect.equal
+                  (handle session "CREATE TABLE old_keys (label VARCHAR(16) COLLATE utf8mb4_bin UNIQUE)" |> snd)
+                  (Affected 0UL)
+                  "create old-key fixture"
+              Expect.equal (handle session "INSERT INTO old_keys VALUES ('ſ'),('ꞅ'),(NULL),(NULL)" |> snd) (Affected 4UL) "seed distinct old keys"
+              let database = store.Catalog[defaultDatabase]
+              let table = database["old_keys"]
+              let previous =
+                  { table with Columns = table.Columns |> List.map (fun column -> { column with Collation = Some "utf8mb4_zh_0900_as_cs" }) }
+              setCatalog store (store.Catalog |> Map.add defaultDatabase (database |> Map.add "old_keys" previous))
+              snapshotNow dir store
+
+              let path = snapshotPath dir
+              let original = File.ReadAllBytes path
+              Expect.throwsC
+                  (fun () -> load dir |> ignore)
+                  (function
+                  | :? InvalidDataException as error -> Expect.stringContains error.Message "old_keys" "identify the blocked table"
+                  | other -> failtestf "expected a collation-upgrade error, got %A" other)
+              Expect.equal (File.ReadAllBytes path) original "the original snapshot remains available for recovery"
+
           testCase "composite primary declaration order survives WAL and snapshot recovery"
           <| fun _ ->
               let dir = tempDataDir ()
