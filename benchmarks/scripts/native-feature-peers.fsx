@@ -158,15 +158,16 @@ let readExactAggregates () =
     seedNullableBuckets ()
 
     let queries =
-        [ "count-rows", "COUNT", "*", 1500L
-          "sum-case", "SUM", "CASE WHEN c.bucket<>1 THEN c.bucket END", 800L
-          "avg", "AVG", "c.bucket", 400L
-          "min", "MIN", "c.bucket+1", 400L
-          "max-distinct", "MAX", "DISTINCT c.bucket", 800L ]
+        [ "count-rows", "COUNT", "*", between, 1500L
+          "sum-case", "SUM", "CASE WHEN c.bucket<>1 THEN c.bucket END", between, 800L
+          "avg", "AVG", "c.bucket", between, 400L
+          "avg-nonnull", "AVG", "c.bucket", $"c.bucket IS NOT NULL AND {between}", 400L
+          "min", "MIN", "c.bucket+1", between, 400L
+          "max-distinct", "MAX", "DISTINCT c.bucket", between, 800L ]
 
     let ordered = if pass % 2 = 0 then List.rev queries else queries
-    for lane, name, argument, expected in ordered do
-        probe lane (fun () -> measure lane 15 (correlatedRangeAggregate name argument "" between expected))
+    for lane, name, argument, predicate, expected in ordered do
+        probe lane (fun () -> measure lane 15 (correlatedRangeAggregate name argument "" predicate expected))
 
 let viewUpdates () =
     probe "joined-view-update" (fun () ->

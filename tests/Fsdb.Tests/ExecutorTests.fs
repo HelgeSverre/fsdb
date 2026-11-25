@@ -16129,7 +16129,7 @@ let tests =
                           "DISTINCT c.bucket", "600"
                           "DISTINCT CASE WHEN c.bucket<>1 THEN c.bucket END", "400" ] do
                         let allocated = readCountArgument argument "" between expected
-                        Expect.isLessThan allocated (unhinted * 10L) $"the composite slice feeds COUNT({argument})"
+                        Expect.isLessThan allocated (unhinted * 3L) $"the composite slice feeds COUNT({argument}) directly"
 
                     for aggregate, argument, expected in
                         [ "SUM", "c.bucket", "600"
@@ -16139,7 +16139,10 @@ let tests =
                           "MIN", "c.bucket+1", "200"
                           "MAX", "c.bucket", "400" ] do
                         let allocated = readAggregate aggregate argument "" between expected
-                        Expect.isLessThan allocated (unhinted * 10L) $"the composite slice feeds {aggregate}({argument})"
+                        Expect.isLessThan allocated (unhinted * 3L) $"the composite slice feeds {aggregate}({argument}) directly"
+
+                    let residualAverage = readAggregate "AVG" "c.bucket" "" $"{between} AND c.bucket IS NOT NULL" "200"
+                    Expect.isLessThan residualAverage (unhinted * 4L) "the aggregate filters the candidate slice once"
 
                     runDefault store "CREATE TABLE ranked (id INT PRIMARY KEY, parent_id INT, rank_value INT, KEY ix_rank(parent_id, rank_value DESC, id))" |> ignore
                     runDefault store "INSERT INTO ranked VALUES (10,1,NULL),(11,1,1),(12,1,2),(13,1,2),(14,1,3),(15,2,3),(16,2,4),(17,2,5),(18,NULL,3)" |> ignore

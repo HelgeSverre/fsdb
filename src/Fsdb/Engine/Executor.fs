@@ -155,6 +155,13 @@ type private CorrelatedSourceCandidate =
       SourceRows: Value[] list
       RangeAccesses: (TableRef * PhysicalRangeSelection * CorrelatedRangePhase) list }
 
+type private CorrelatedAggregateRange =
+    { Lookup: Storage.OrderedLookup
+      CoversWhere: bool
+      Qualifier: string
+      Name: string
+      Argument: Expr }
+
 type private DecimalRangeCut =
     | ExactDecimalCut of decimal
     | ApproximateDoubleCut of double
@@ -7588,6 +7595,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         match
             tryMissingCorrelatedAggregateArgument ctx select
             |> Option.orElseWith (fun () -> tryCorrelatedCount ctx select)
+            |> Option.orElseWith (fun () -> tryFoldCorrelatedRangeAggregate ctx select)
             |> Option.orElseWith (fun () -> tryDecorrelatedCount ctx select)
             |> Option.orElseWith (fun () -> trySourceFreeScalarSubquery ctx select)
         with
@@ -9602,6 +9610,38 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
                             countRangeCandidates countsRow lookup))
             | _ -> None
     | _ -> None
+
+and private tryFoldCorrelatedRangeAggregate (outer: EvalContext) (select: SelectStmt) =
+    let memo = (currentStatementMemo ()).ExpressionSubqueries
+    match memo.TryGetValue select with
+    | true, MemoizedSubquery _ -> None
+    | classified, _ ->
+        select.From
+        |> Option.bind (fun source -> tryPlanCorrelatedAggregateRange outer.Registry source select (Some outer))
+        |> Option.bind (fun range ->
+            if not classified && isStatementStableSelect outer.Store outer.Registry outer.DbName emptySubqueryScope select then
+                None
+            else
+                if not classified then memo.[select] <- UnmemoizedSubquery
+                let columns = range.Lookup.OrderedColumns
+                let context =
+                    contextFactory outer.Store outer.Registry outer.DbName
+                        (columnIndexOf columns) (singleQualifier range.Qualifier columns) (Some outer)
+
+                let rows = range.Lookup.OrderedRows
+                let filtered =
+                    if range.CoversWhere then Ok(Seq.toList rows)
+                    else
+                        let matches = prepareWhereMatches context select.Where
+                        rows
+                        |> traverseSeq (fun row ->
+                            matches row |> Result.map (fun keep -> if keep then Some row else None))
+
+                // Reuse the grouped SELECT fold without building a result set.
+                filtered
+                |> Result.bind (fun matching -> evalAggregate outer.Registry context matching range.Name [ range.Argument ])
+                |> Result.map Value.materialize
+                |> Some)
 
 and private plainExistsProjection (projection: Projection) =
     match projection.Expression with
@@ -19119,7 +19159,7 @@ and private prepareCorrelatedRangeSelect select candidate =
         { select with Where = Some(orderCorrelatedRangePredicates candidate predicate) }
     | _ -> select
 
-and private tryCorrelatedAggregateRangeAccess registry source (select: SelectStmt) outer =
+and private tryPlanCorrelatedAggregateRange registry source (select: SelectStmt) outer : CorrelatedAggregateRange option =
     let aggregate =
         match select.Projections with
         | [ { Expression = FuncCall(name, [ argument ]) } ] ->
@@ -19133,7 +19173,7 @@ and private tryCorrelatedAggregateRangeAccess registry source (select: SelectStm
     | FromTable tableRef, Some context, Some(name, argument)
         when select.Joins.IsEmpty && hasPlainAggregateShape select ->
         tryCorrelatedIntegerRangeAccess context source select.Where
-        |> Option.bind (fun (lookup, _) ->
+        |> Option.bind (fun (lookup, covered) ->
             let columns = lookup.OrderedColumns
             let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
             let scope = correlatedProbeSource qualifier columns
@@ -19185,14 +19225,20 @@ and private tryCorrelatedAggregateRangeAccess registry source (select: SelectStm
                 | _, inner -> exactColumn inner || silentInteger inner
 
             if safeArgument then
-                Some { SourceColumns = columns
-                       SourceRows = Seq.toList lookup.OrderedRows
-                       RangeAccesses = [] }
+                Some { Lookup = lookup
+                       CoversWhere = covered
+                       Qualifier = qualifier
+                       Name = name
+                       Argument = argument }
             else None)
     | _ -> None
 
 and private tryCorrelatedSourceLookup store registry dbName source select outer =
-    tryCorrelatedAggregateRangeAccess registry source select outer
+    tryPlanCorrelatedAggregateRange registry source select outer
+    |> Option.map (fun range ->
+        { SourceColumns = range.Lookup.OrderedColumns
+          SourceRows = Seq.toList range.Lookup.OrderedRows
+          RangeAccesses = [] })
     |> Option.orElseWith (fun () -> tryCorrelatedSourceAccess store registry dbName source select.Where outer)
     |> Option.map (fun candidate ->
         candidate.SourceColumns, candidate.SourceRows, prepareCorrelatedRangeSelect select candidate)

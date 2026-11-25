@@ -319,3 +319,60 @@ unsigned maximum, NULL and empty scalar results, 36 pairs of integer
 UNION operands, and prepared reads with explicit `Int24` and `UInt24`
 parameters. Raw window execution descriptors still differ in the
 generic numeric flag even where type, width, scale, and values agree.
+
+### Direct folds over correlated ranges
+
+An eligible scalar aggregate now evaluates the indexed candidate rows
+with the same fold as grouped SELECT. The index can cover the whole
+predicate. When it covers only part, the evaluator applies the predicate
+to the candidates before folding. Eligibility uses the existing exact
+integer range and aggregate argument rules.
+
+The pinned MySQL 8.4.11 probe compared 1,728 rows across 216 queries
+covering descending ranges, reversed and NULL bounds, residual
+predicates, nullable and DISTINCT arguments, collated strings,
+fixed-scale decimals, unsigned extrema, and forced and ignored indexes.
+Prepared checks matched the returned values across three division
+precision settings. The CTE and LIMIT controls also preserved
+their results. Two earlier differences reproduced on both Fsdb builds.
+The prepared scalar `COUNT(DISTINCT c.n)` result reported display width
+0 where MySQL reported 21, and a fallback comparison with the string
+`'2x'` missed MySQL's truncation warning.
+
+The [native fixture](../scripts/native-feature-peers.fsx) uses 500
+parents and 10,000 children. The baseline is `6ee5339c`. The four passes
+alternate engine order on the shared Apple M2 Max host. Both Fsdb
+builds use Release .NET 10.0.12, Server GC, and WAL. Native MySQL 8.4.11
+uses a 256 MiB InnoDB buffer pool, ordinary commit flushing, and binary
+logging disabled. The table averages the four per-pass medians after
+one preflight and four warmups, with 15 measured calls per lane.
+
+| Workload, p50 ms | Fsdb before | Fsdb after | MySQL | Fsdb speedup |
+| --- | ---: | ---: | ---: | ---: |
+| `COUNT(CASE … END)` | 31.599 | 13.238 | 2.465 | 2.4× |
+| `COUNT(DISTINCT c.bucket)` | 31.137 | 9.898 | 2.489 | 3.1× |
+| `COUNT(DISTINCT CASE … END)` | 32.591 | 13.032 | 2.521 | 2.5× |
+| `SUM(CASE … END)` | 20.040 | 8.000 | 2.497 | 2.5× |
+| `AVG(c.bucket)` | 18.341 | 7.846 | 2.484 | 2.3× |
+| `AVG(c.bucket)` with a non-NULL residual | 19.122 | 12.629 | 2.488 | 1.5× |
+| `MIN(c.bucket+1)` | 17.890 | 8.699 | 2.528 | 2.1× |
+| `MAX(DISTINCT c.bucket)` | 17.250 | 8.612 | 2.467 | 2.0× |
+
+The warmed 250-parent allocation fixture measured 23–27 MB per
+eligible query on the calling thread before the change and 5–7.4 MB
+after it. The `AVG` with a residual allocated 26.8 MB before and 8.1 MB
+after. The existing `COUNT(*)` allocated 4.25 MB in both builds.
+The tightened allocation regression fails on the baseline and passes
+on the candidate.
+The short benchmark's `COUNT(*)` control averaged 4.82 ms before and
+7.23 ms after, with per-pass medians spanning roughly 3–11 ms in each
+build. An isolated control followed 80 warmups with 60 measurements
+in each of four passes. Its mean p50 was 7.14 ms before and 7.05 ms
+after, with overlapping per-pass ranges.
+
+[Per-pass p50 and p95 results](2026-11-25-correlated-direct-fold.csv).
+
+```sh
+dotnet fsi benchmarks/scripts/native-feature-peers.fsx -- "$engine" "$port" "$pass" expression-count-controls
+dotnet fsi benchmarks/scripts/native-feature-peers.fsx -- "$engine" "$port" "$pass" exact-aggregate-controls
+```

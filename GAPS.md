@@ -2764,6 +2764,9 @@ implementation effort:
    their arguments are safe to evaluate in index order.
    [Exact numeric SUM, AVG, MIN, and MAX](benchmarks/results/2026-11-25-correlated-integer-range-count.md#exact-numeric-aggregates)
    also use the slice, including audited DISTINCT and conditional expressions.
+   [Direct scalar folds](benchmarks/results/2026-11-25-correlated-integer-range-count.md#direct-folds-over-correlated-ranges)
+   feed eligible ranges to the grouped aggregate evaluator and filter
+   supported residual predicates on those candidates.
    [Scalar aggregate result metadata](benchmarks/results/2026-11-25-correlated-integer-range-count.md#scalar-aggregate-result-metadata)
    preserves the audited numeric type and display scale on text and
    prepared results. [Fixed-scale floating-point aggregates](benchmarks/results/2026-11-25-correlated-integer-range-count.md#fixed-scale-floating-point-aggregates)
