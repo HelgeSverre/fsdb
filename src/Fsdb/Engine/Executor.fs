@@ -28844,6 +28844,125 @@ let private truncateHashPartitions
                     | Error(code, message) -> Error(ExpressionError(code, message)))
                 |> Result.map ignore)
 
+let private qualifiedLiteralEqualities conditions =
+    conditions
+    |> List.choose (function
+        | BinOp(Eq, QualifiedCol(owner, column), (LiteralValue _ as value))
+        | BinOp(Eq, (LiteralValue _ as value), QualifiedCol(owner, column)) -> Some(owner, column, value)
+        | _ -> None)
+
+let private qualifiedColumnEqualities conditions =
+    conditions
+    |> List.choose (function
+        | BinOp(Eq, QualifiedCol(leftOwner, leftColumn), QualifiedCol(rightOwner, rightColumn)) ->
+            Some((leftOwner, leftColumn), (rightOwner, rightColumn))
+        | _ -> None)
+
+let private mutationColumnKey (owner: string, column: string) = owner.ToLowerInvariant(), column.ToLowerInvariant()
+
+let private isSignedJoinKey = function
+    | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false -> true
+    | _ -> false
+
+let private signedJoinEdge columnTypes (left, right) =
+    let left, right = mutationColumnKey left, mutationColumnKey right
+    match Map.tryFind left columnTypes, Map.tryFind right columnTypes with
+    | Some leftType, Some rightType when leftType = rightType && isSignedJoinKey leftType -> Some(left, right)
+    | _ -> None
+
+let private signedJoinBounds columnTypes equalities conditions =
+    let edges = equalities |> List.choose (signedJoinEdge columnTypes)
+
+    let rec reachable seen pending =
+        match pending with
+        | [] -> seen
+        | column :: rest when Set.contains column seen -> reachable seen rest
+        | column :: rest ->
+            let neighbors =
+                edges
+                |> List.choose (fun (left, right) ->
+                    if column = left then Some right
+                    elif column = right then Some left
+                    else None)
+            reachable (Set.add column seen) (neighbors @ rest)
+
+    qualifiedLiteralEqualities conditions
+    |> List.collect (function
+        | owner, name, LiteralValue(VInt _ as value) ->
+            let column = mutationColumnKey (owner, name)
+            match Map.tryFind column columnTypes with
+            | Some columnType when isSignedJoinKey columnType ->
+                reachable Set.empty [ column ] |> Set.toList |> List.map (fun key -> key, value)
+            | _ -> []
+        | _ -> [])
+    |> Map.ofList
+
+let private boundUpdateJoinSources store dbName (from: TableRef) (joins: Join list) where : MutationSourceOverrides option =
+    let whereConditions = optionalConjuncts where
+
+    let physicalOperand = function
+        | FromTable source when source.IndexHints.IsEmpty ->
+            physicalFastPathTable store dbName source
+            |> Option.map (fun table ->
+                (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant(), table)
+        | _ -> None
+
+    if (qualifiedLiteralEqualities whereConditions).IsEmpty then None
+    elif joins |> List.exists (fun join -> (join.Kind <> InnerJoin && join.Kind <> StraightJoin) || not join.Using.IsEmpty) then None
+    else
+        FromTable from :: (joins |> List.map _.Table)
+        |> List.map physicalOperand
+        |> tryAllSome
+        |> Option.bind (fun operands ->
+            let columnTypes =
+                operands
+                |> List.collect (fun (owner, table) ->
+                    table.Columns |> List.map (fun column -> mutationColumnKey (owner, column.Name), column.Type))
+                |> Map.ofList
+
+            let positions = operands |> List.mapi (fun index (owner, _) -> owner, index) |> Map.ofList
+            let safeWhere = function
+                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, column), LiteralValue(VInt _))
+                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue(VInt _), QualifiedCol(owner, column)) ->
+                    Map.tryFind (mutationColumnKey (owner, column)) columnTypes |> Option.exists isSignedJoinKey
+                | _ -> false
+
+            let joinKeys =
+                joins
+                |> List.mapi (fun index join ->
+                    let conditions = conjuncts join.On
+                    let keys = qualifiedColumnEqualities conditions
+                    let inScope ((left, _), (right, _)) =
+                        positions[left] <= index + 1 && positions[right] <= index + 1
+
+                    if keys.Length = conditions.Length
+                       && keys |> List.forall (fun key -> signedJoinEdge columnTypes key |> Option.exists inScope) then Some keys
+                    else None)
+                |> tryAllSome
+                |> Option.map List.concat
+
+            // Keep expressions that can fail or warn in the ordinary path.
+            if positions.Count <> operands.Length || not (List.forall safeWhere whereConditions) then None
+            else
+                joinKeys |> Option.bind (fun equalities ->
+                    let bounds = signedJoinBounds columnTypes equalities whereConditions
+                    let probe (owner, table: Table) =
+                        let keys = Storage.primaryKeyColumns table
+
+                        keys
+                        |> List.map (fun column -> Map.tryFind (mutationColumnKey (owner, column)) bounds |> Option.map (fun value -> column, value))
+                        |> tryAllSome
+                        |> Option.bind (tryStoredEqualityMatchLookupWhere (equalsIgnoreCase "PRIMARY") store table)
+                        |> Option.filter (fun (matched, _) -> matched.UsesFullKey)
+                        |> Option.map (fun (_, lookup) ->
+                            owner,
+                            lazy (Ok { Columns = table.Columns
+                                       Rows = lookup.CandidateRows |> Seq.map snd |> List.ofSeq
+                                       IdentityOf = Some
+                                       WriteTable = None }))
+
+                    operands |> List.map probe |> tryAllSome |> Option.map Map.ofList))
+
 /// Executes a statement under `currentAccount`; `ids` carries the OK-packet
 /// and generated AUTO_INCREMENT identities between statements.
 let rec executeAs
@@ -32699,6 +32818,12 @@ let rec executeAs
                             Joins = updateStmt.Joins |> List.map (Join.mapConditions rewrite)
                             Where = updateStmt.Where |> Option.map rewrite }
 
+                    let sourceOverrides =
+                        if sourceOverrides.IsEmpty then
+                            boundUpdateJoinSources snapshot dbName rewritten.From rewritten.Joins rewritten.Where
+                            |> Option.defaultValue sourceOverrides
+                        else sourceOverrides
+
                     runMutationJoin snapshot registry dbName sourceOverrides rewritten.From rewritten.Joins
                     |> Result.map (fun joined -> rewritten, joined))
 
@@ -33478,20 +33603,6 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
         let singleTarget = delete.Targets |> List.forall (equalsIgnoreCase target)
         check delete.From delete.Joins delete.Where delete.Limit singleTarget
     | _ -> Ok()
-
-let private qualifiedLiteralEqualities conditions =
-    conditions
-    |> List.choose (function
-        | BinOp(Eq, QualifiedCol(owner, column), (LiteralValue _ as value))
-        | BinOp(Eq, (LiteralValue _ as value), QualifiedCol(owner, column)) -> Some(owner, column, value)
-        | _ -> None)
-
-let private qualifiedColumnEqualities conditions =
-    conditions
-    |> List.choose (function
-        | BinOp(Eq, QualifiedCol(leftOwner, leftColumn), QualifiedCol(rightOwner, rightColumn)) ->
-            Some((leftOwner, leftColumn), (rightOwner, rightColumn))
-        | _ -> None)
 
 let transactionWriteTargets
     (store: Store)
@@ -34281,15 +34392,10 @@ let transactionWriteTargets
             |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
             |> Option.toList
     | Delete delete when not delete.Joins.IsEmpty ->
-        let normalize (owner: string, column: string) = owner.ToLowerInvariant(), column.ToLowerInvariant()
         let tableQualifier (source: TableRef) = source.Alias |> Option.defaultValue source.Table
         let isCte (source: TableRef) =
             source.Database.IsNone && Set.contains (source.Table.ToLowerInvariant()) cteNames
         let baseReference (view: UpdatableView) = { view.UpdateFrom with Database = Some view.Database }
-        let signedInteger = function
-            | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false -> true
-            | _ -> false
-
         let primaryBounds =
             lazy (
                 let columnTypes =
@@ -34300,7 +34406,7 @@ let transactionWriteTargets
                             let qualifier = tableQualifier source
                             match physicalFastPathTable store dbName source with
                             | Some table ->
-                                table.Columns |> List.map (fun column -> normalize (qualifier, column.Name), column.Type)
+                                table.Columns |> List.map (fun column -> mutationColumnKey (qualifier, column.Name), column.Type)
                             | None ->
                                 let database = source.Database |> Option.defaultValue dbName
                                 match tryUpdatableView store database source.Table with
@@ -34312,7 +34418,7 @@ let transactionWriteTargets
                                         |> List.choose (fun (name, target) ->
                                             table.Columns
                                             |> List.tryFind (fun column -> equalsIgnoreCase column.Name target.Column)
-                                            |> Option.map (fun column -> normalize (qualifier, name), column.Type)))
+                                            |> Option.map (fun column -> mutationColumnKey (qualifier, name), column.Type)))
                                     |> Option.defaultValue []
                                 | _ -> []
                         | _ -> [])
@@ -34325,38 +34431,7 @@ let transactionWriteTargets
                         []
 
                 let conditions = optionalConjuncts delete.Where @ innerConditions
-                let edges =
-                    qualifiedColumnEqualities conditions
-                    |> List.choose (fun (left, right) ->
-                        let left, right = normalize left, normalize right
-                        match Map.tryFind left columnTypes, Map.tryFind right columnTypes with
-                        | Some leftType, Some rightType when leftType = rightType && signedInteger leftType ->
-                            Some(left, right)
-                        | _ -> None)
-
-                let rec reachable seen pending =
-                    match pending with
-                    | [] -> seen
-                    | column :: rest when Set.contains column seen -> reachable seen rest
-                    | column :: rest ->
-                        let neighbors =
-                            edges
-                            |> List.choose (fun (left, right) ->
-                                if column = left then Some right
-                                elif column = right then Some left
-                                else None)
-                        reachable (Set.add column seen) (neighbors @ rest)
-
-                qualifiedLiteralEqualities conditions
-                |> List.collect (function
-                    | owner, name, LiteralValue(VInt _ as value) ->
-                        let column = normalize (owner, name)
-                        match Map.tryFind column columnTypes with
-                        | Some columnType when signedInteger columnType ->
-                            reachable Set.empty [ column ] |> Set.toList |> List.map (fun key -> key, value)
-                        | _ -> []
-                    | _ -> [])
-                |> Map.ofList)
+                signedJoinBounds columnTypes (qualifiedColumnEqualities conditions) conditions)
 
         let resolveDeleteTarget (source: TableRef) predicate =
             if isCte source then
@@ -34378,7 +34453,7 @@ let transactionWriteTargets
                             |> Map.toList
                             |> List.tryPick (fun (name, target) ->
                                 if equalsIgnoreCase key target.Column then
-                                    Map.tryFind (normalize (qualifier, name)) primaryBounds.Value
+                                    Map.tryFind (mutationColumnKey (qualifier, name)) primaryBounds.Value
                                 else
                                     None))
                         |> tryAllSome

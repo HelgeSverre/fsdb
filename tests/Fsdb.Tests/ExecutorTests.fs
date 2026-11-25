@@ -12809,6 +12809,49 @@ let tests =
                         ()
                     | other -> failtestf "expected a composite left-prefix join plan, got %A" other
 
+                testCase "a bound joined view update allocates independently of source size"
+                <| fun _ ->
+                    let measure sourceRows =
+                        let store = newStore ()
+                        let run = runDefault store
+                        let expectAffected sql count = Expect.equal (run sql) (Affected count) sql
+
+                        expectAffected "CREATE TABLE parent (tenant INT, id INT, n INT NOT NULL, PRIMARY KEY (tenant,id))" 0UL
+                        expectAffected "CREATE TABLE partner (tenant INT, id INT, enabled INT NOT NULL, PRIMARY KEY (tenant,id))" 0UL
+
+                        for start in 1..250..sourceRows do
+                            let values = [ start .. min sourceRows (start + 249) ]
+                            let batch value = values |> List.map (fun id -> $"(1,{id},{value})") |> String.concat ","
+                            expectAffected $"INSERT INTO parent VALUES {batch 10}" (uint64 values.Length)
+                            expectAffected $"INSERT INTO partner VALUES {batch 1}" (uint64 values.Length)
+
+                        expectAffected "INSERT INTO parent VALUES (2,1,99)" 1UL
+                        expectAffected "INSERT INTO partner VALUES (2,1,1)" 1UL
+                        expectAffected "CREATE VIEW positive_parent AS SELECT tenant,id,n FROM parent WHERE n>0 WITH CASCADED CHECK OPTION" 0UL
+                        expectAffected "CREATE VIEW active_parent AS SELECT p.tenant,p.id,p.n,s.id AS partner_id FROM positive_parent p JOIN partner s ON s.id=p.id AND s.tenant=p.tenant WHERE s.enabled=1" 0UL
+
+                        let update = "UPDATE active_parent SET n=n+1 WHERE tenant=1 AND partner_id=1"
+                        expectAffected update 1UL
+                        let before = System.GC.GetAllocatedBytesForCurrentThread()
+                        for _ in 1..4 do expectAffected update 1UL
+                        let allocated = System.GC.GetAllocatedBytesForCurrentThread() - before
+
+                        expectAffected "UPDATE active_parent SET n=7 WHERE tenant=1 AND partner_id=100000" 0UL
+                        match run "UPDATE active_parent SET n=0 WHERE tenant=1 AND partner_id=1" with
+                        | Err(1369, _) -> ()
+                        | other -> failtestf "expected CHECK OPTION error, got %A" other
+
+                        match run "SELECT tenant,id,n FROM parent WHERE id IN (1,2) ORDER BY tenant,id" with
+                        | ResultSet(_, rows) ->
+                            Expect.equal rows [ [ Some "1"; Some "1"; Some "15" ]; [ Some "1"; Some "2"; Some "10" ]; [ Some "2"; Some "1"; Some "99" ] ] "only the bound key changes"
+                        | other -> failtestf "expected committed rows, got %A" other
+
+                        allocated
+
+                    let small = measure 500
+                    let large = measure 5_000
+                    Expect.isLessThan large (3L * small) $"allocations at 500 and 5000 rows were {small} and {large} bytes"
+
                 testCase "a broad composite left-prefix join prefers one hash build"
                 <| fun _ ->
                     let store = newStore ()

@@ -2985,7 +2985,12 @@ implementation effort:
    failure, or backpressure semantics. This addresses sustained-drain safety,
    not the measured write-throughput gap.
 
-3. Complex join-derived updatable views. An audited
+3. Complex join-derived updatable views. [Bound joined-view updates](benchmarks/results/2026-11-25-bound-joined-view-update.md)
+   probe fully bound physical primary keys for audited inner joins with
+   signed-integer predicates. The native point-update median fell from
+   5.01 ms to 3.29 ms. View-target `EXPLAIN UPDATE` and the remaining wire
+   latency are open. The lock probe still waits on an unrelated target
+   row when only the join partner's key is named. An audited
    [nested checked view LEFT JOINed to a window CTE](torture/findings/2026-11-17-nested-window-outer-view.md)
    correctly remains read only, matching MySQL's metadata, rows, CHECK OPTION
    rejection, and mutation rejection. Procedures, functions, and triggers
