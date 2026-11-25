@@ -26309,6 +26309,10 @@ let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list)
 type private BoundUpdateRange =
     { IndexName: string
       ColumnIndices: int list
+      Terms: Storage.OrderedKeyTerm list
+      PrefixValues: Value list
+      Lower: (Value * bool) option
+      Upper: (Value * bool) option
       CandidateCount: int
       RowIds: RowId seq }
 
@@ -26337,11 +26341,19 @@ let private tryBoundUpdateRange store where (source: BoundUpdateSource) =
                 |> Option.bind (fun matched ->
                     let prefixValues =
                         matched.Terms |> List.take matched.PinnedCount |> List.map (fun term -> pins[term.Column.ToLowerInvariant()])
+                    let terms = storageOrderTerms matched.Terms
 
                     Storage.tryOrderedIndexPrefixRangeRowIdsInTableWith
-                        (equalsIgnoreCase index.Name) store table (storageOrderTerms matched.Terms) prefixValues range.Lower range.Upper
+                        (equalsIgnoreCase index.Name) store table terms prefixValues range.Lower range.Upper
                     |> Option.map (fun (indices, count, ids) ->
-                        { IndexName = index.Name; ColumnIndices = indices; CandidateCount = count; RowIds = ids }))))
+                        { IndexName = index.Name
+                          ColumnIndices = indices
+                          Terms = terms
+                          PrefixValues = prefixValues
+                          Lower = range.Lower
+                          Upper = range.Upper
+                          CandidateCount = count
+                          RowIds = ids }))))
         |> List.sortBy _.CandidateCount
         |> List.tryHead
 
@@ -34785,6 +34797,29 @@ let transactionWriteTargets
         |> Option.toList
     | _ -> []
 
+let private tryJoinedRangeReadRows store (database: string) (source: BoundUpdateSource) range =
+    let databaseKey = database.ToLowerInvariant()
+    let tableKey = source.Reference.Table.ToLowerInvariant()
+    let tableIn catalog = catalog |> Map.tryFind databaseKey |> Option.bind (Map.tryFind tableKey)
+
+    // A transaction can move a committed row into the range under its row
+    // lock. Probe its published index too, using the stable committed row ID.
+    TransactionRegistry.entries store
+    |> List.choose (fun (_, transaction) ->
+        if Set.contains (databaseKey, tableKey) transaction.ChangedTables then
+            match tableIn transaction.BaseCatalog, tableIn transaction.Catalog with
+            | Some original, Some table when not (obj.ReferenceEquals(table, source.Table)) -> Some(original, table)
+            | _ -> None
+        else None)
+    |> List.map (fun (original, table) ->
+        let visible rowId =
+            (original.RowsArray.TryFind rowId).IsSome && (source.Table.RowsArray.TryFind rowId).IsSome
+        Storage.tryOrderedIndexPrefixRangeRowIdsInTableWith
+            (equalsIgnoreCase range.IndexName) store table range.Terms range.PrefixValues range.Lower range.Upper
+        |> Option.map (fun (_, _, rowIds) -> Seq.filter visible rowIds))
+    |> tryAllSome
+    |> Option.map (fun pendingRows -> Seq.concat (range.RowIds :: pendingRows) |> List.ofSeq)
+
 let transactionWriteReadTargets
     (store: Store)
     (registry: Registry)
@@ -34916,6 +34951,15 @@ let transactionWriteReadTargets
                     let sourceLiterals = literalEqualities predicate
                     let sourceJoins = joinedEqualities view.UpdateFrom view.UpdateJoins
 
+                    let accesses =
+                        lazy (
+                            if not (update.Joins.IsEmpty && update.Ctes.IsEmpty) then None
+                            else
+                                boundUpdateJoinKeys store dbName view.UpdateFrom view.UpdateJoins predicate
+                                |> Option.bind (fun sources ->
+                                    chooseBoundUpdateAccess store dbName predicate sources
+                                    |> Option.map (fun accesses -> sources, accesses)))
+
                     let sourcePredicate (source: TableRef) =
                         let qualifier = source.Alias |> Option.defaultValue source.Table
                         boundFor qualifier sourceJoins sourceLiterals
@@ -34955,15 +34999,24 @@ let transactionWriteReadTargets
                             else
                                 physicalFastPathTable store dbName source
                                 |> Option.map (fun table ->
-                                    let rows =
-                                        if materialized then table.RowsArray.Indexed |> Seq.toList
+                                    let indexedRows () = table.RowsArray.Indexed |> Seq.map fst |> Seq.toList
+                                    let rowIds =
+                                        if materialized then indexedRows ()
                                         else
-                                            tryPhysicalCandidates store registry dbName source sourceBound
-                                            |> Option.orElseWith (fun () -> tryPhysicalCandidates store registry dbName source predicate)
-                                            |> Option.map snd
-                                            |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> Seq.toList)
+                                            let qualifier = (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant()
+                                            let rangeRows =
+                                                accesses.Value |> Option.bind (fun (sources, chosen) ->
+                                                    match Map.tryFind qualifier chosen with
+                                                    | Some(UpdateRange range) -> tryJoinedRangeReadRows store sourceDatabase sources[qualifier] range
+                                                    | _ -> None)
 
-                                    sourceDatabase, source.Table, rows |> List.map fst))
+                                            rangeRows |> Option.defaultWith (fun () ->
+                                                tryPhysicalCandidates store registry dbName source sourceBound
+                                                |> Option.orElseWith (fun () -> tryPhysicalCandidates store registry dbName source predicate)
+                                                |> Option.map (snd >> List.map fst)
+                                                |> Option.defaultWith indexedRows)
+
+                                    sourceDatabase, source.Table, rowIds))
                 | _ -> []
             | _ -> []
 

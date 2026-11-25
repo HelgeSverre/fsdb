@@ -152,3 +152,35 @@ The measured predicate was `id=1 AND seq >= 20 AND seq <= 21`. The
 executor regression also checks bounded allocation growth for an equivalent
 `BETWEEN` range. The table measures thread allocations through the embedded
 API.
+
+## Preparing read locks from the same range
+
+An EventPipe allocation trace of 60 warmed, embedded updates against a
+5,001-row partner at `d3e48cbd` found that transaction preparation still
+enumerated the equality prefix and acquired read locks across it. The
+largest sampled allocation stacks passed through partner candidate
+materialization and acquisition of transaction read targets.
+
+Read-lock preparation now uses the selected index range for a standalone
+joined-view update. It probes published changes to the partner table from
+active transactions, so a row with an existing identity can be claimed
+when a pending update moves its key into the range. The statement then
+rebases and reads the committed value after waiting.
+
+In the default repeatable-read wire fixture, Fsdb and MySQL 8.4.11 let
+the update pass held rows outside the range and wait on a matching row
+or a move into or out of the range. A move into the range from another
+prefix also waits. The transaction regression verifies that the writer
+reads the moved row after commit. MySQL also waits for an uncommitted
+insert into the range. Fsdb still has a gap there. The same fixture at
+READ COMMITTED exposes separate differences in which rows cause a wait.
+
+The embedded allocation probe used a single qualifying partner and four
+updates after one warmup, with `id=1 AND seq>=20 AND seq<=21`. The extra
+rows share the leading key and fall outside the range. In-memory debug
+builds on .NET 10.0.12 produced the same committed value.
+
+| Out-of-range rows | `d3e48cbd` allocated | With range-based read claims |
+| ---: | ---: | ---: |
+| 500 | 9.61 MB | 6.83 MB |
+| 5,000 | 32.80 MB | 6.74 MB |

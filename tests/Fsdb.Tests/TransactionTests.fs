@@ -5632,6 +5632,58 @@ let tests =
               Expect.equal result (Affected 1UL) "the matching view row updates"
               Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the view writer commits"
 
+          testCase "a joined view range waits only for relevant partner rows and key moves"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for sql, count in
+                  [ "CREATE TABLE parent (id INT PRIMARY KEY,n INT)", 0UL
+                    "CREATE TABLE partner (id INT,seq INT,delta INT,PRIMARY KEY(id,seq))", 0UL
+                    "INSERT INTO parent VALUES (1,10),(2,20)", 2UL
+                    "INSERT INTO partner VALUES (1,20,3),(1,100,7),(1,1000,9),(2,100,11)", 4UL
+                    "CREATE VIEW active AS SELECT p.id,p.n,s.delta,s.seq FROM parent p JOIN partner s ON p.id=s.id", 0UL ] do
+                  run setup sql (Affected count) |> ignore
+
+              let owner = run (create 2 store) "BEGIN" (Affected 0UL)
+              let owner = run owner "UPDATE partner SET delta=99 WHERE id=1 AND seq=100" (Affected 1UL)
+              let waiter = run (create 3 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+              let update = "UPDATE active SET n=n+delta WHERE id=1 AND seq>=20 AND seq<=21"
+              let _, disjoint = handle waiter update
+              run owner "ROLLBACK" (Affected 0UL) |> ignore
+              Expect.equal disjoint (Affected 1UL) "the next out-of-range row does not block the writer"
+
+              for ownerSql in
+                  [ "UPDATE partner SET delta=99 WHERE id=1 AND seq=20"
+                    "UPDATE partner SET seq=21 WHERE id=1 AND seq=100" ] do
+                  let owner = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let owner = run owner ownerSql (Affected 1UL)
+                  let _, result = handle waiter update
+                  run owner "ROLLBACK" (Affected 0UL) |> ignore
+                  match result with
+                  | Err(1205, _) -> ()
+                  | other -> failtestf "expected lock wait for %s, got %A" ownerSql other
+
+              let owner = run (create 2 store) "BEGIN" (Affected 0UL)
+              let owner = run owner "UPDATE partner SET id=1,seq=21 WHERE id=2 AND seq=100" (Affected 1UL)
+              let waiter = run (create 3 store) "SET innodb_lock_wait_timeout=5" (Affected 0UL)
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle waiter "UPDATE active SET n=n+delta WHERE id=1 AND seq>=21 AND seq<=22")
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              run owner "COMMIT" (Affected 0UL) |> ignore
+              Expect.isTrue blocked "the initially empty range waits for the pending key"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the view writer resumes after the move"
+              Expect.equal (waiting.GetAwaiter().GetResult() |> snd) (Affected 1UL) "the writer reads the new partner key"
+
+              match handle setup "SELECT n FROM parent WHERE id=1" |> snd with
+              | ResultSet(_, [ [ Some "24" ] ]) -> ()
+              | result -> failtestf "expected both committed updates, got %A" result
+
           testCase "joined view update rechecks a changed read source after waiting"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
