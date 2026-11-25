@@ -1301,7 +1301,11 @@ columns, and multiple targets. The audited delete waits for a competing
 base-row writer and rechecks view visibility after the wait. A view layer
 now retains its [physical ngram index scores](torture/findings/2026-11-25-joined-delete-view-targets.md#indexed-match-follow-up)
 through joined DELETE, including when an outer view filters a projected
-score. More selective row locking and temporary-table shadowing remain open.
+score. A [bound integer primary key](torture/findings/2026-11-25-joined-delete-view-targets.md#primary-key-locking-follow-up)
+now avoids locking disjoint base rows. The audited cases cover a literal on
+the view column and an equality propagated from its joined table. Missing
+keys still claim existing rows to wait for primary-key moves.
+Temporary-table shadowing and broader lock narrowing remain open.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
 now has a native MySQL contract and fsdb regression: duplicate derived rows

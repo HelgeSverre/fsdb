@@ -33479,6 +33479,20 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
         check delete.From delete.Joins delete.Where delete.Limit singleTarget
     | _ -> Ok()
 
+let private qualifiedLiteralEqualities conditions =
+    conditions
+    |> List.choose (function
+        | BinOp(Eq, QualifiedCol(owner, column), (LiteralValue _ as value))
+        | BinOp(Eq, (LiteralValue _ as value), QualifiedCol(owner, column)) -> Some(owner, column, value)
+        | _ -> None)
+
+let private qualifiedColumnEqualities conditions =
+    conditions
+    |> List.choose (function
+        | BinOp(Eq, QualifiedCol(leftOwner, leftColumn), QualifiedCol(rightOwner, rightColumn)) ->
+            Some((leftOwner, leftColumn), (rightOwner, rightColumn))
+        | _ -> None)
+
 let transactionWriteTargets
     (store: Store)
     (registry: Registry)
@@ -34267,16 +34281,117 @@ let transactionWriteTargets
             |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
             |> Option.toList
     | Delete delete when not delete.Joins.IsEmpty ->
+        let normalize (owner: string, column: string) = owner.ToLowerInvariant(), column.ToLowerInvariant()
+        let tableQualifier (source: TableRef) = source.Alias |> Option.defaultValue source.Table
+        let isCte (source: TableRef) =
+            source.Database.IsNone && Set.contains (source.Table.ToLowerInvariant()) cteNames
+        let baseReference (view: UpdatableView) = { view.UpdateFrom with Database = Some view.Database }
+        let signedInteger = function
+            | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false -> true
+            | _ -> false
+
+        let primaryBounds =
+            lazy (
+                let columnTypes =
+                    (FromTable delete.From :: (delete.Joins |> List.map _.Table))
+                    |> List.collect FromItem.leaves
+                    |> List.collect (function
+                        | FromTable source when not (isCte source) ->
+                            let qualifier = tableQualifier source
+                            match physicalFastPathTable store dbName source with
+                            | Some table ->
+                                table.Columns |> List.map (fun column -> normalize (qualifier, column.Name), column.Type)
+                            | None ->
+                                let database = source.Database |> Option.defaultValue dbName
+                                match tryUpdatableView store database source.Table with
+                                | Some view when view.UpdateJoins.IsEmpty ->
+                                    physicalFastPathTable store dbName (baseReference view)
+                                    |> Option.map (fun table ->
+                                        view.Targets
+                                        |> Map.toList
+                                        |> List.choose (fun (name, target) ->
+                                            table.Columns
+                                            |> List.tryFind (fun column -> equalsIgnoreCase column.Name target.Column)
+                                            |> Option.map (fun column -> normalize (qualifier, name), column.Type)))
+                                    |> Option.defaultValue []
+                                | _ -> []
+                        | _ -> [])
+                    |> Map.ofList
+
+                let innerConditions =
+                    if delete.Joins |> List.forall (fun join -> join.Kind = InnerJoin || join.Kind = StraightJoin) then
+                        delete.Joins |> List.collect (_.On >> conjuncts)
+                    else
+                        []
+
+                let conditions = optionalConjuncts delete.Where @ innerConditions
+                let edges =
+                    qualifiedColumnEqualities conditions
+                    |> List.choose (fun (left, right) ->
+                        let left, right = normalize left, normalize right
+                        match Map.tryFind left columnTypes, Map.tryFind right columnTypes with
+                        | Some leftType, Some rightType when leftType = rightType && signedInteger leftType ->
+                            Some(left, right)
+                        | _ -> None)
+
+                let rec reachable seen pending =
+                    match pending with
+                    | [] -> seen
+                    | column :: rest when Set.contains column seen -> reachable seen rest
+                    | column :: rest ->
+                        let neighbors =
+                            edges
+                            |> List.choose (fun (left, right) ->
+                                if column = left then Some right
+                                elif column = right then Some left
+                                else None)
+                        reachable (Set.add column seen) (neighbors @ rest)
+
+                qualifiedLiteralEqualities conditions
+                |> List.collect (function
+                    | owner, name, LiteralValue(VInt _ as value) ->
+                        let column = normalize (owner, name)
+                        match Map.tryFind column columnTypes with
+                        | Some columnType when signedInteger columnType ->
+                            reachable Set.empty [ column ] |> Set.toList |> List.map (fun key -> key, value)
+                        | _ -> []
+                    | _ -> [])
+                |> Map.ofList)
+
         let resolveDeleteTarget (source: TableRef) predicate =
-            if source.Database.IsNone && Set.contains (source.Table.ToLowerInvariant()) cteNames then
+            if isCte source then
                 None
             else
                 let database = source.Database |> Option.defaultValue dbName
                 match tryUpdatableView store database source.Table with
                 | Some view when view.UpdateJoins.IsEmpty ->
-                    // The external join filters projected columns. Until those
-                    // bounds can be carried to the base table, claim its rows.
-                    targets { view.UpdateFrom with Database = Some view.Database } None
+                    let reference = baseReference view
+                    let qualifier = tableQualifier source
+
+                    physicalFastPathTable store dbName reference
+                    |> Option.bind (fun table ->
+                        // A partial key could become a match after a writer
+                        // commits. Narrow only when every PK part is fixed.
+                        Storage.primaryKeyColumns table
+                        |> List.map (fun key ->
+                            view.Targets
+                            |> Map.toList
+                            |> List.tryPick (fun (name, target) ->
+                                if equalsIgnoreCase key target.Column then
+                                    Map.tryFind (normalize (qualifier, name)) primaryBounds.Value
+                                else
+                                    None))
+                        |> tryAllSome
+                        |> Option.bind (Storage.tryPrimaryWriteLockTargets store table)
+                        |> Option.map (fun claims ->
+                            // INSERT claims the destination key. An UPDATE
+                            // can move an existing row there under a row lock.
+                            let rows =
+                                if claims.RowIds.IsEmpty then table.RowsArray.Indexed |> Seq.map fst |> Seq.toList
+                                else claims.RowIds
+
+                            view.Database, view.Table, { claims with RowIds = rows }))
+                    |> Option.orElseWith (fun () -> targets reference None)
                 | _ -> targets source predicate
 
         joinedTargets resolveDeleteTarget delete.From delete.Joins delete.Targets delete.Where
@@ -34301,25 +34416,13 @@ let transactionWriteReadTargets
     (dbName: string)
     (statement: Statement)
     : (string * string * RowId list) list =
-    let literalEqualities predicate =
-        predicate
-        |> optionalConjuncts
-        |> List.choose (function
-            | BinOp(Eq, QualifiedCol(owner, column), (LiteralValue _ as value))
-            | BinOp(Eq, (LiteralValue _ as value), QualifiedCol(owner, column)) ->
-                Some(owner, column, value)
-            | _ -> None)
+    let literalEqualities = optionalConjuncts >> qualifiedLiteralEqualities
     let joinedEqualities (first: TableRef) joins =
         let explicit =
             joins
             |> List.filter (fun (join: Join) -> join.Kind = InnerJoin || join.Kind = StraightJoin)
             |> List.collect (fun join ->
-                join.On
-                |> conjuncts
-                |> List.choose (function
-                    | BinOp(Eq, QualifiedCol(leftOwner, leftColumn), QualifiedCol(rightOwner, rightColumn)) ->
-                        Some((leftOwner, leftColumn), (rightOwner, rightColumn))
-                    | _ -> None))
+                join.On |> conjuncts |> qualifiedColumnEqualities)
         let firstColumns =
             physicalFastPathTable store dbName first
             |> Option.map (fun table ->

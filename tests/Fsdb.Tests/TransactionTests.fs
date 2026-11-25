@@ -2372,6 +2372,59 @@ let tests =
               | ResultSet(_, [ [ Some "1"; Some "-1" ] ]) -> ()
               | result -> failtestf "expected the committed row to remain, got %A" result
 
+          testCase "joined DELETE through a view claims the bound primary key"
+          <| fun _ ->
+              let cases =
+                  [ "v.renamed=1", "INSERT INTO tx_view_key VALUES(3,30)", [ [ Some "2"; Some "21" ] ]
+                    "l.id=1", "UPDATE tx_view_key SET id=3 WHERE id=2", [] ]
+
+              for predicate, publishKey, remaining in cases do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  for sql in
+                      [ "CREATE TABLE tx_view_key(id INT PRIMARY KEY,n INT)"
+                        "CREATE TABLE tx_view_lookup(id INT PRIMARY KEY)"
+                        "INSERT INTO tx_view_key VALUES(1,10),(2,20)"
+                        "INSERT INTO tx_view_lookup VALUES(1),(2),(3)"
+                        "CREATE VIEW tx_view_key_inner AS SELECT id AS k,n FROM tx_view_key WHERE n>0"
+                        "CREATE VIEW tx_view_key_outer AS SELECT k AS renamed,n FROM tx_view_key_inner" ] do
+                      Expect.isNone (handle setup sql |> snd |> errorInfo) sql
+
+                  let delete predicate = $"DELETE v FROM tx_view_lookup l JOIN tx_view_key_outer v ON l.id=v.renamed WHERE {predicate}"
+                  let owner, _ = handle (create 2 store) "BEGIN"
+                  let owner, changed = handle owner "UPDATE tx_view_key SET n=21 WHERE id=2"
+                  Expect.equal changed (Affected 1UL) "the owner holds the disjoint row"
+                  let waiter, _ = handle (create 3 store) "BEGIN"
+                  let waiting = Threading.Tasks.Task.Run(fun () -> handle waiter (delete predicate))
+                  let completedWhileOwned = waiting.Wait(TimeSpan.FromMilliseconds 500.0)
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the disjoint writer commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the joined delete finishes"
+                  let waiter, deleted = waiting.GetAwaiter().GetResult()
+                  Expect.isTrue completedWhileOwned $"the delete avoids locking row 2 with {predicate}"
+                  Expect.equal deleted (Affected 1UL) "the delete affects row 1"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the delete commits"
+
+                  let owner, _ = handle (create 4 store) "BEGIN"
+                  let owner, changed = handle owner publishKey
+                  Expect.equal changed (Affected 1UL) "the owner makes a matching key pending"
+                  let waiter, _ = handle (create 5 store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter (delete "l.id=3"))
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the delete starts"
+                  let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the key writer commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the delete resumes"
+                  let waiter, deleted = waiting.GetAwaiter().GetResult()
+                  Expect.isTrue blocked "the delete waits for the pending key"
+                  Expect.equal deleted (Affected 1UL) "the delete rechecks and removes the new row"
+                  Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the second delete commits"
+                  match handle setup "SELECT id,n FROM tx_view_key" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows remaining "only unmatched rows remain"
+                  | result -> failtestf "expected remaining base rows, got %A" result
+
           testCase "joined single-target delete waits for an updated target row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

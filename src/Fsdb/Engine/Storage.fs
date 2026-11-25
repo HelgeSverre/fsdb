@@ -5657,6 +5657,25 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
         | _ -> None
     | _ -> None
 
+/// Claims an exact primary key even before its row appears in the snapshot.
+let internal tryPrimaryWriteLockTargets (store: Store) (table: Table) (values: Value list) : WriteLockTargets option =
+    uniqueKeyGroups table
+    |> List.tryFind (fun group -> group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
+    |> Option.filter (fun group -> sameLength group.Indices values)
+    |> Option.bind (fun group ->
+        List.zip group.Indices values
+        |> traverse (fun (index, value) ->
+            match exactProbeValue store table index value with
+            | Some exact when exact <> VNull -> Ok exact
+            | _ -> Error())
+        |> Result.toOption
+        |> Option.map (fun exact ->
+            let key = encodeEqualityValues table.Columns group.Indices exact
+            let rowId = table.UniqueIndex |> Map.tryFind group.Name |> Option.bind (Map.tryFind key)
+
+            { RowIds = Option.toList rowId
+              Keys = [ group.Name + "\u0000" + key ] }))
+
 let private exactRangeProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
     match table.Columns.[index].Type, value with
     // Exact numeric bounds share the DOUBLE key even when their Value cases differ.

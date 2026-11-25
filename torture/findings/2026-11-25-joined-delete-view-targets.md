@@ -75,3 +75,19 @@ materializing the view input. The ordinary projection and filter consume
 those scores alongside the physical identities. Star expansion uses
 the original visible columns, and the join restricts the delete targets
 while the complete indexed corpus determines relevance.
+
+## Primary-key locking follow-up
+
+MySQL 8.4.11 deleted base row 1 while a separate transaction held row 2.
+This worked both with a literal on the view's renamed key and with a
+literal on the other table's matching integer key. The baseline Fsdb
+statement waited for row 2. In separate trials MySQL waited for an
+uncommitted insert at the matching key or for an update moving a row to
+that key, then deleted the committed row.
+
+Fsdb now carries qualified signed-integer equalities through the audited
+inner joins and maps each bound view column back to its base column. A
+complete primary key claims the stored row and the key used by pending
+inserts. If the matching row is absent, Fsdb retains the existing full
+row claim as well because an update can change a row's primary key
+under a row lock. Other predicate shapes retain conservative row claims.
