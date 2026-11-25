@@ -1725,6 +1725,10 @@ indexing continue to find later-assigned characters.
 now separate terms before ngram phrase conversion. The binary punctuation
 corpus matches after MySQL full-text optimization. The same corpus still
 shows cache-dependent wildcard differences on a fresh MySQL index.
+[Short Boolean ngram wildcard ranking](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#short-boolean-ngram-wildcard-ranking)
+now uses the first matching gram's term frequency and counts each
+matching gram's postings toward document frequency on the audited
+optimized MySQL indexes.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.

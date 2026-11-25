@@ -632,6 +632,38 @@ let tests =
               Expect.equal (booleanScores replaced "生*" |> ids) [ 3 ] "replacement clears the old generation"
               Expect.equal (naturalScores replaced "中文检" |> ids) [ 1 ] "replacement uses the current generation"
 
+          testCase "ngram prefixes use per-word document frequency and the first matching word"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_bin" |> Option.get
+              let build documents =
+                  documents
+                  |> List.map (fun (id, text) -> id, [ text ])
+                  |> buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation
+
+              let index = build [ 1, "東京 東北 東京"; 2, "東海"; 3, "大阪"; 4, "札幌" ]
+              for query, first, second in
+                  [ "東*", 0.031219376251101494, 0.015609688125550747
+                    "+(東*)", 0.031219376251101494, 0.015609688125550747
+                    "東* 東*", 0.062016263604164124, 0.031008131802082062
+                    "+(東*) 東*", 0.062016263604164124, 0.031008131802082062 ] do
+                  let scores = booleanScores index query
+                  Expect.equal (scores |> Map.keys |> Seq.toList) [ 1; 2 ] query
+                  closeTo first scores.[1] $"first matched document for {query}"
+                  closeTo second scores.[2] $"second matched document for {query}"
+
+              let bounded = tryFlatBooleanScoresDictionaryWithin (Some(set [ 2 ])) index "東*" |> Option.get
+              Expect.equal (bounded.Keys |> Seq.toList) [ 2 ] "bounded prefix results"
+              closeTo 0.015609688125550747 bounded.[2] "the bounded query keeps corpus-wide document frequency"
+
+              let frequent = build [ 1, "東京 東北 東京 東海 東西"; 2, "東南 東口"; 3, "大阪" ]
+              let scores = booleanScores frequent "東*"
+              closeTo 0.1812381148338318 scores.[1] "prefix document frequency may exceed the corpus size"
+              closeTo 0.0906190574169159 scores.[2] "the second document uses the same prefix IDF"
+
+              let replacement = index |> removeDocument 1 |> addDocument 2 "東海 東南" |> addDocument 5 "東京"
+              let rebuilt = build [ 2, "東海 東南"; 3, "大阪"; 4, "札幌"; 5, "東京" ]
+              Expect.equal (booleanScores replacement "東*") (booleanScores rebuilt "東*") "writes maintain the prefix posting counts"
+
           testCase "Boolean short ngrams do not reach collapsed current-size postings"
           <| fun _ ->
               let collation = tryFind "utf8mb4_general_ci" |> Option.get

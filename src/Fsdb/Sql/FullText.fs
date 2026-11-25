@@ -134,11 +134,15 @@ type private Document =
     { Fields: Token[][]
       Rules: IndexingRules }
 
+type private PrefixPosting<'id when 'id: comparison> =
+    { Rows: Map<'id, int>
+      GramDocumentCount: int64 }
+
 type Index<'id when 'id: comparison> =
     private
         { Documents: Map<'id, Document>
           Postings: Map<string, Map<'id, int>>
-          PrefixPostings: Map<string, Map<'id, int>>
+          PrefixPostings: Map<string, PrefixPosting<'id>>
           Collation: Collation
           Rules: IndexingRules
           StopwordSource: string option
@@ -168,7 +172,7 @@ type internal ReadView<'id when 'id: comparison> =
     private
         { Documents: Map<'id, Document>
           Postings: Map<string, Map<'id, int>>
-          PrefixPostings: Map<string, Map<'id, int>>
+          PrefixPostings: Map<string, PrefixPosting<'id>>
           Collation: Collation
           Rules: IndexingRules
           DocumentCount: int
@@ -300,6 +304,31 @@ let private prefixKeys (collation: Collation) (token: Token) =
            collation.FullTextKeyOf(token.Text.Substring(0, length)) |]
     |> Array.distinct
 
+let private documentPrefixes collation tokenizer tokens (words: (string * Token[])[]) =
+    match tokenizer with
+    | Words _ ->
+        tokens
+        |> Array.collect (prefixKeys collation)
+        |> Array.countBy id
+        |> Array.map (fun (key, frequency) -> key, (frequency, 0L))
+    | Ngrams _ ->
+        // InnoDB keeps the first matching gram's TF but tallies every gram's posting.
+        let prefixes = Collections.Generic.Dictionary<string, int * int64>()
+
+        for _, grams in Array.sortBy fst words do
+            let keys =
+                grams
+                |> Array.distinctBy _.Text
+                |> Array.collect (prefixKeys collation)
+                |> Array.distinct
+
+            for key in keys do
+                match prefixes.TryGetValue key with
+                | true, (frequency, count) -> prefixes.[key] <- frequency, count + 1L
+                | false, _ -> prefixes.Add(key, (grams.Length, 1L))
+
+        prefixes |> Seq.map (fun (KeyValue(key, counts)) -> key, counts) |> Seq.toArray
+
 let private removePosting id key postings =
     match Map.tryFind key postings with
     | None -> postings
@@ -358,19 +387,22 @@ let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
     | None -> index
     | Some document ->
         let tokens = indexedTokens document
-        let frequencies = tokens |> Array.countBy _.Key
-        let prefixes =
-            tokens
-            |> Array.collect (prefixKeys index.Collation)
-            |> Array.countBy (fun key -> key)
+        let words = tokens |> Array.groupBy _.Key
+        let prefixes = documentPrefixes index.Collation document.Rules.Tokenizer tokens words
 
         let postings =
-            frequencies
+            words
             |> Array.fold (fun postings (key, _) -> removePosting id key postings) index.Postings
 
         let prefixPostings =
             prefixes
-            |> Array.fold (fun postings (key, _) -> removePosting id key postings) index.PrefixPostings
+            |> Array.fold (fun postings (key, (_, gramCount)) ->
+                postings
+                |> Map.change key (Option.bind (fun posting ->
+                    let remaining = Map.remove id posting.Rows
+                    if remaining.IsEmpty then None
+                    else Some { Rows = remaining; GramDocumentCount = posting.GramDocumentCount - gramCount })))
+                index.PrefixPostings
 
         { index with
             Documents = Map.remove id index.Documents
@@ -380,10 +412,10 @@ let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
 let private addDocumentData id (document: Document) (index: Index<'id>) =
     let index = removeDocument id index
     let postingTokens = indexedTokens document
+    let words = postingTokens |> Array.groupBy _.Key
 
     let postings =
-        postingTokens
-        |> Array.groupBy _.Key
+        words
         |> Array.fold
             (fun postings (key, tokens) ->
                 let rows = postings |> Map.tryFind key |> Option.defaultValue Map.empty
@@ -391,13 +423,14 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
             index.Postings
 
     let prefixPostings =
-        postingTokens
-        |> Array.collect (prefixKeys index.Collation)
-        |> Array.countBy (fun key -> key)
+        documentPrefixes index.Collation document.Rules.Tokenizer postingTokens words
         |> Array.fold
-            (fun postings (key, frequency) ->
-                let rows = postings |> Map.tryFind key |> Option.defaultValue Map.empty
-                Map.add key (Map.add id frequency rows) postings)
+            (fun postings (key, (frequency, gramCount)) ->
+                postings
+                |> Map.change key (fun existing ->
+                    let posting = existing |> Option.defaultValue { Rows = Map.empty; GramDocumentCount = 0L }
+                    Some { Rows = Map.add id frequency posting.Rows
+                           GramDocumentCount = posting.GramDocumentCount + gramCount }))
             index.PrefixPostings
 
     { index with
@@ -1051,15 +1084,13 @@ let private proximityMatches (doc: Token[]) (words: Token[]) distance =
 
         matched
 
-/// `TF×IDF²` for a prefix wildcard, whose document frequency belongs to the
-/// prefix posting rather than any one complete-token posting.
-let private scoresFromTfsWithDocumentFrequency
-    (view: ReadView<'id>)
-    (documentFrequency: int)
-    (tfs: Map<'id, int>)
-    : Map<'id, float> =
-    let weight = idf view documentFrequency
-    tfs |> Map.map (fun _ tf -> float tf * weight * weight)
+let private prefixWeight (view: ReadView<'id>) occurrences (posting: PrefixPosting<'id>) =
+    match view.Rules.Tokenizer with
+    | Ngrams _ when posting.GramDocumentCount > 0L ->
+        let frequency = float posting.GramDocumentCount * float occurrences
+        let documents = float view.DocumentCount
+        if frequency = documents then idfFloor else log10 (documents / frequency)
+    | _ -> idf view posting.Rows.Count
 
 let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'value>) =
     match candidateIds with
@@ -1114,14 +1145,13 @@ let rec private evalTerm
             |> Map.map (fun _ frequency -> float frequency * weight * weight)
     | BWord(term, true) ->
         // Prefix wildcards bypass stopword and minimum-length rules.
-        let rows =
-            view.PrefixPostings
-            |> Map.tryFind term.Key
-            |> Option.defaultValue Map.empty
-
-        rows
-        |> restrictScores candidateIds
-        |> scoresFromTfsWithDocumentFrequency view rows.Count
+        match Map.tryFind term.Key view.PrefixPostings with
+        | None -> Map.empty
+        | Some posting ->
+            let weight = prefixWeight view 1 posting
+            posting.Rows
+            |> restrictScores candidateIds
+            |> Map.map (fun _ frequency -> float frequency * weight * weight)
     | BPhrase(words, proximity) ->
         let candidates =
             phraseCandidates view words
@@ -1215,15 +1245,24 @@ let private tryRepeatedWordScores candidateIds (view: ReadView<'id>) nodes =
 let private tryRepeatedNgramScores candidateIds (view: ReadView<'id>) nodes =
     match view.Rules.Tokenizer with
     | Ngrams _ ->
+        let rec unwrap = function
+            | BGroup [ Optional, term ] -> unwrap term
+            | term -> term
+
+        let nodes = nodes |> List.map (fun (operator, term) -> operator, unwrap term)
+
         let keys = function
-            | BWord(word, false) when isExactLookup view.Rules word -> [| word.Key |]
+            | BWord(word, true) -> [| word.Key, true |]
+            | BWord(word, false) when isExactLookup view.Rules word -> [| word.Key, false |]
             | BPhrase(words, None) ->
-                words |> Array.filter (isBooleanSearchable view.Rules) |> Array.map _.Key
+                words
+                |> Array.filter (isBooleanSearchable view.Rules)
+                |> Array.map (fun word -> word.Key, false)
             | _ -> [||]
 
         if nodes
            |> List.exists (function
-               | (Optional | Must | MustNot), (BWord(_, false) | BPhrase(_, None)) -> false
+               | (Optional | Must | MustNot), (BWord _ | BPhrase(_, None)) -> false
                | _ -> true) then
             None
         else
@@ -1249,10 +1288,17 @@ let private tryRepeatedNgramScores candidateIds (view: ReadView<'id>) nodes =
                         |> List.filter (fun (operator, _, matches) -> operator <> MustNot && Map.containsKey id matches)
                         |> List.collect (fun (_, keys, _) -> Array.toList keys)
                         |> Set.ofList
-                        |> Seq.sumBy (fun key ->
-                            let rows = view.Postings.[key]
-                            let weight = queryOccurrenceWeight view rows.Count occurrences.[key]
-                            float rows.[id] * weight * weight)
+                        |> Seq.sumBy (fun (key, prefix) ->
+                            let count = occurrences.[key, prefix]
+                            let frequency, weight =
+                                if prefix then
+                                    let posting = view.PrefixPostings.[key]
+                                    posting.Rows.[id], prefixWeight view count posting
+                                else
+                                    let rows = view.Postings.[key]
+                                    rows.[id], queryOccurrenceWeight view rows.Count count
+
+                            float frequency * weight * weight)
                         |> fun score -> Some(id, score))
                 |> Map.ofSeq
                 |> Some
@@ -1290,15 +1336,17 @@ let internal tryFlatBooleanScoresDictionaryInView
 
     let scoreTerms terms =
         let postingFor (term: Token, prefix) =
-            if prefix then Map.tryFind term.Key view.PrefixPostings
-            elif isExactLookup view.Rules term then booleanPostingRows view term
+            if prefix then
+                Map.tryFind term.Key view.PrefixPostings
+                |> Option.map (fun posting -> posting.Rows, prefixWeight view 1 posting)
+            elif isExactLookup view.Rules term then
+                booleanPostingRows view term |> Option.map (fun rows -> rows, idf view rows.Count)
             else None
 
         let postings =
             terms
             |> List.map (fun (op, term, prefix) ->
-                let rows = postingFor (term, prefix) |> Option.defaultValue Map.empty
-                let weight = idf view rows.Count
+                let rows, weight = postingFor (term, prefix) |> Option.defaultValue (Map.empty, 0.0)
                 { Operator = op
                   Rows = rows
                   Scale = weight * weight })

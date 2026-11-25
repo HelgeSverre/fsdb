@@ -136,3 +136,36 @@ populated MySQL index the counts were 72 before and 70 after. All 70
 remaining cases involved Boolean wildcards. For example, `東京 駅*`
 matched only `東京` rows on the fresh index and included additional
 `駅*` rows after full-text optimization.
+
+## Short Boolean ngram wildcard ranking
+
+MySQL uses the first matching gram's term frequency for each document.
+It adds the document frequency of each matching gram, so one document
+can count several times toward the prefix IDF. A repeated prefix can
+increase this count again while contributing one term to a document's
+score. [MySQL 8.4.11 InnoDB full-text query source](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc).
+
+With a binary bigram index on `東京 東北 東京`, `東海`, `大阪`,
+and `札幌`, the first document's `東*` score was 0.271857 in Fsdb
+and 0.031219 on the optimized MySQL index. Fsdb now produces 0.031219.
+Its prefix postings keep the corpus-wide frequency when another
+predicate limits the candidate rows. Removing and replacing documents
+updates both the row frequencies and the prefix document count.
+
+The wire fixture compared 128 queries across eight UTF-8 collations on
+native MySQL 8.4.11 with session stopwords off and full-text optimization
+enabled. All returned IDs and scores matched within MySQL's float
+rounding. The queries include single and repeated prefixes, a singleton
+required group, compound terms, exclusions, and absent prefixes. A
+separate fixture covers document frequencies larger than the population.
+The maintained multi-column corpus also matched all 1,935 searches at
+token sizes 1, 2, 3, 5, and 10. A durable Fsdb restart after a document
+update preserved the single and repeated prefix scores.
+
+Repeats across compound groups and weighted terms still differ. For
+example, `(東* 東*)` and `>東* 東*` retain a separate score contribution
+for each occurrence in Fsdb. MySQL uses the combined document frequency
+and adds the prefix score once.
+
+In the four-document example, MySQL's fresh-cache score was 0.015610 for
+both matching documents. Cache-dependent wildcard differences remain.
