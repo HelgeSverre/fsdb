@@ -170,3 +170,46 @@ the [peer benchmark script](../scripts/native-feature-peers.fsx).
 ```sh
 dotnet fsi benchmarks/scripts/native-feature-peers.fsx -- MySQL 3391 1 nullable-count-controls
 ```
+
+## Counting expressions and DISTINCT values
+
+Plain correlated `COUNT` subqueries can feed the composite slice into
+the ordinary aggregate evaluator. This covers direct `DISTINCT` columns
+and audited integer expressions, including `CASE`, `NULLIF`, and
+arithmetic on signed 32-bit operands. The evaluator still applies the
+original predicate and handles expression results, SQL NULLs, and
+distinct-value collation. Expressions with possible warnings, errors,
+or side effects use the existing access path.
+
+The native MySQL 8.4.11 comparison matched all 4,680 count values and
+two binding errors. It tested ascending and descending indexes, forced
+and ignored indexes, NULLs, duplicate values and collations, and both
+covered and residual filters. Fsdb retained its previous warning
+and user-variable behavior on the separate fallback controls.
+
+The conditional count allocated 311 MB on the 250-parent, 5,000-child
+regression fixture before the change. The regression bounds allocations
+relative to the indexed `COUNT(*)` control for conditional expressions,
+arithmetic, and direct and conditional `DISTINCT` counts.
+
+The benchmark uses the same 500-parent, 10,000-child fixture and
+durability settings as the nullable-column run. The baseline is
+`a9fc8a01`. Two native passes reverse engine and workload order.
+Each workload verifies its result before timing, then takes 15
+measurements after four warmups. The table averages the two medians.
+
+| Workload, p50 ms | Fsdb before | Fsdb after | MySQL 8.4.11 |
+| --- | ---: | ---: | ---: |
+| `COUNT(*)` control | 6.138 | 5.851 | 1.636 |
+| `COUNT(CASE WHEN c.bucket<>1 THEN c.bucket END)` | 324.187 | 32.970 | 2.396 |
+| `COUNT(DISTINCT c.bucket)` | 323.476 | 29.431 | 2.415 |
+| `COUNT(DISTINCT CASE WHEN c.bucket<>1 THEN c.bucket END)` | 324.605 | 29.722 | 2.426 |
+
+The expression counts improved 9.8–11.0× and took 12–14× MySQL's
+median time. The conditional count varied from 19.2 to 46.7 ms
+between candidate passes, and the indexed control also varied on
+the shared host. [Per-pass p50 and p95 results](2026-11-25-correlated-expression-count.csv).
+
+```sh
+dotnet fsi benchmarks/scripts/native-feature-peers.fsx -- MySQL 3391 1 expression-count-controls
+```

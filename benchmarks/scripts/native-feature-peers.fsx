@@ -10,9 +10,10 @@ let arguments = fsi.CommandLineArgs |> Array.skip 1
 let engine, port, pass, mode =
     match arguments with
     | [| engine; port; pass |] -> engine, int port, int pass, ""
-    | [| engine; port; pass; mode |] when List.contains mode [ "range-controls"; "prefix-controls"; "nullable-count-controls" ] ->
+    | [| engine; port; pass; mode |]
+        when List.contains mode [ "range-controls"; "prefix-controls"; "nullable-count-controls"; "expression-count-controls" ] ->
         engine, int port, int pass, mode
-    | _ -> failwith "Usage: dotnet fsi native-feature-peers.fsx -- ENGINE PORT PASS [range-controls|prefix-controls|nullable-count-controls]"
+    | _ -> failwith "Usage: dotnet fsi native-feature-peers.fsx -- ENGINE PORT PASS [range-controls|prefix-controls|nullable-count-controls|expression-count-controls]"
 
 CultureInfo.CurrentCulture <- CultureInfo.InvariantCulture
 
@@ -129,14 +130,20 @@ let readRangeControls () =
     for lane, hint, predicate, expected in ordered do
         probe lane (fun () -> measure lane 15 (correlatedRange hint predicate expected))
 
-let readNullableCounts () =
+let readCountArguments () =
     write "ALTER TABLE child ADD COLUMN bucket INT NULL"
     write "UPDATE child SET bucket=CASE WHEN MOD(id,5)=0 THEN NULL ELSE MOD(id,3) END"
 
     let queries =
-        [ "count-rows", "*", between, 1500L
-          "count-nullable", "c.bucket", between, 1200L
-          "count-nullable-filtered", "c.bucket", $"c.bucket<>1 AND {between}", 800L ]
+        if mode = "expression-count-controls" then
+            [ "count-rows", "*", between, 1500L
+              "count-case", "CASE WHEN c.bucket<>1 THEN c.bucket END", between, 800L
+              "count-distinct", "DISTINCT c.bucket", between, 1200L
+              "count-distinct-case", "DISTINCT CASE WHEN c.bucket<>1 THEN c.bucket END", between, 800L ]
+        else
+            [ "count-rows", "*", between, 1500L
+              "count-nullable", "c.bucket", between, 1200L
+              "count-nullable-filtered", "c.bucket", $"c.bucket<>1 AND {between}", 800L ]
 
     let ordered = if pass % 2 = 0 then List.rev queries else queries
     for lane, argument, predicate, expected in ordered do
@@ -243,7 +250,7 @@ try
 
         let workloads =
             if mode = "range-controls" then [ readRangeControls ]
-            elif mode = "nullable-count-controls" then [ readNullableCounts ]
+            elif mode = "nullable-count-controls" || mode = "expression-count-controls" then [ readCountArguments ]
             elif mode = "prefix-controls" then
                 write "CREATE VIEW positive_parent AS SELECT id, value FROM parent WHERE value > 0 WITH CASCADED CHECK OPTION"
                 [ viewPrefixUpdates ]

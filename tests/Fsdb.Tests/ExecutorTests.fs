@@ -16121,6 +16121,15 @@ let tests =
                     let bareColumn = readAggregate "bucket" "" between "600"
                     Expect.isLessThan bareColumn (unhinted * 7L) "an unshadowed bare count argument uses the same slice"
 
+                    for argument, expected in
+                        [ "CASE WHEN c.bucket<>1 THEN c.bucket END", "400"
+                          "NULLIF(c.bucket,1)", "400"
+                          "c.bucket+1", "600"
+                          "DISTINCT c.bucket", "600"
+                          "DISTINCT CASE WHEN c.bucket<>1 THEN c.bucket END", "400" ] do
+                        let allocated = readAggregate argument "" between expected
+                        Expect.isLessThan allocated (unhinted * 10L) $"the composite slice feeds COUNT({argument})"
+
                     runDefault store "CREATE TABLE ranked (id INT PRIMARY KEY, parent_id INT, rank_value INT, KEY ix_rank(parent_id, rank_value DESC, id))" |> ignore
                     runDefault store "INSERT INTO ranked VALUES (10,1,NULL),(11,1,1),(12,1,2),(13,1,2),(14,1,3),(15,2,3),(16,2,4),(17,2,5),(18,NULL,3)" |> ignore
 

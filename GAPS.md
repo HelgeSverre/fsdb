@@ -2759,8 +2759,11 @@ implementation effort:
    can read the smallest eligible composite slice before filtering.
    [Counts of nullable physical columns](benchmarks/results/2026-11-25-correlated-integer-range-count.md#counting-nullable-columns)
    also use that slice and count only non-NULL values.
-   Other residual predicates, aggregate expressions, and projected
-   sources still need broader access planning.
+   [Conditional and distinct counts](benchmarks/results/2026-11-25-correlated-integer-range-count.md#counting-expressions-and-distinct-values)
+   pass the same narrow slice to the ordinary aggregate evaluator when
+   their arguments are safe to evaluate in index order.
+   Other residual predicates, broader aggregates, and projected sources
+   still need broader access planning.
 
 2. Transaction scheduling. [Readers behind waiting writers under a global
    read lock](torture/findings/2026-11-06-global-read-waiting-writer-gate.md)

@@ -19014,8 +19014,58 @@ and private prepareCorrelatedRangeSelect select candidate =
         { select with Where = Some(orderCorrelatedRangePredicates candidate predicate) }
     | _ -> select
 
+and private tryCorrelatedExpressionCountAccess registry source (select: SelectStmt) outer =
+    match source, outer, select.Projections with
+    | FromTable tableRef, Some context, [ { Expression = FuncCall(_, [ argument ]) } ]
+        when select.Joins.IsEmpty && isPlainCountSelect registry select (fun _ -> true) ->
+        tryCorrelatedIntegerRangeAccess context source select.Where
+        |> Option.bind (fun (lookup, _) ->
+            let columns = lookup.OrderedColumns
+            let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+            let scope = correlatedProbeSource qualifier columns
+            let innerColumn expression =
+                match expression with
+                | Col name when (tryRoutineVariable name).IsSome -> None
+                | _ -> tryCorrelatedInnerColumn scope expression
+
+            let smallInteger = function
+                | LiteralValue VNull -> true
+                | expression when (correlatedSignedIntegerLiteral expression).IsSome -> true
+                | expression ->
+                    (innerColumn expression).IsSome
+                    && (tryCorrelatedSignedIntegerColumn scope columns expression).IsSome
+
+            // COUNT is order independent when its argument cannot warn, fail,
+            // or change state. Keep other expressions on the ordinary path.
+            let rec silentInteger expression =
+                match expression with
+                | LiteralValue(VInt _) -> true
+                | BinOp((Add | Sub | Mul), left, right) -> smallInteger left && smallInteger right
+                | BinOp((Eq | NullSafeEq | Neq | Lt | Lte | Gt | Gte | And | Or | Xor), left, right) ->
+                    silentInteger left && silentInteger right
+                | IsNull value | IsNotNull value | Not value -> silentInteger value
+                | Case _ -> Expression.children expression |> List.forall silentInteger
+                | FuncCall(name, args) when Functions.isUnmodifiedBuiltinScalar name registry ->
+                    match name.ToUpperInvariant(), args with
+                    | ("NULLIF" | "IFNULL"), [ left; right ] -> silentInteger left && silentInteger right
+                    | "COALESCE", _ :: _ | "IF", [ _; _; _ ] -> List.forall silentInteger args
+                    | _ -> false
+                | _ -> smallInteger expression
+
+            let safeArgument = function
+                | Distinct inner -> (innerColumn inner).IsSome || silentInteger inner
+                | inner -> silentInteger inner
+
+            if safeArgument argument then
+                Some { SourceColumns = columns
+                       SourceRows = Seq.toList lookup.OrderedRows
+                       RangeAccesses = [] }
+            else None)
+    | _ -> None
+
 and private tryCorrelatedSourceLookup store registry dbName source select outer =
-    tryCorrelatedSourceAccess store registry dbName source select.Where outer
+    tryCorrelatedExpressionCountAccess registry source select outer
+    |> Option.orElseWith (fun () -> tryCorrelatedSourceAccess store registry dbName source select.Where outer)
     |> Option.map (fun candidate ->
         candidate.SourceColumns, candidate.SourceRows, prepareCorrelatedRangeSelect select candidate)
 
