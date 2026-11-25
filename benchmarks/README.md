@@ -266,11 +266,11 @@ These tables summarize immutable, linked result artifacts. They are historical
 measurements, not claims about the current branch; use a fresh run for a current
 comparison.
 
-The [native peer comparison at `2da21f23`](results/2da21f23-peer-comparison.md)
+The [latest native peer benchmark](results/eeced6b1-peer-refresh.md)
 records checked point reads, durable updates, and MySQL feature probes,
-including correlated count expressions and exact numeric aggregates.
-The [earlier peer comparison](results/2026-11-25-peer-comparison.md)
-also covers Percona and TiDB.
+including correlated count expressions and exact numeric aggregates. It
+also includes a separate local TiDB run. The [earlier peer comparison](results/2026-11-25-peer-comparison.md)
+covers Percona in matched ARM64 containers.
 
 Each recipe writes one or more tracked `results/<git-sha>[-label].md` files
 with a provenance header (revision, date, OS, .NET, server mode, and dataset).
