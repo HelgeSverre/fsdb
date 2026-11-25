@@ -66,9 +66,9 @@ let correlatedEquality () =
     scalar "SELECT SUM((SELECT COUNT(*) FROM child c WHERE c.parent_id = p.id)) FROM parent p"
     |> require "correlated equality count" 10000L
 
-let correlatedRange hint predicate () =
+let correlatedRange hint predicate expected () =
     scalar $"SELECT SUM((SELECT COUNT(*) FROM child c {hint} WHERE c.parent_id = p.id AND {predicate})) FROM parent p"
-    |> require "correlated range count" 1500L
+    |> require "correlated range count" expected
 
 let between = "c.id BETWEEN p.id AND p.id + 1000"
 
@@ -107,19 +107,24 @@ let probe lane action =
 let readQueries () =
     let queries =
         [ "correlated-equality", correlatedEquality
-          "correlated-range", correlatedRange "" between ]
+          "correlated-range", correlatedRange "" between 1500L ]
 
     let ordered = if pass % 2 = 0 then List.rev queries else queries
     for lane, run in ordered do
         probe lane (fun () -> measure lane 60 run)
 
 let readRangeControls () =
-    for lane, hint, predicate in
-        [ "between", "", between
-          "between-force-child", "FORCE INDEX (ix_child)", between
-          "between-ignore-primary", "IGNORE INDEX (PRIMARY)", between
-          "split-range", "", "c.id >= p.id AND c.id <= p.id + 1000" ] do
-        probe lane (fun () -> measure lane 15 (correlatedRange hint predicate))
+    let queries =
+        [ "between", "", between, 1500L
+          "between-force-child", "FORCE INDEX (ix_child)", between, 1500L
+          "between-ignore-primary", "IGNORE INDEX (PRIMARY)", between, 1500L
+          "split-range", "", "c.id >= p.id AND c.id <= p.id + 1000", 1500L
+          "upper-only", "", "c.id <= p.id + 1000", 1500L
+          "lower-only", "", "p.id <= c.id", 10000L ]
+
+    let ordered = if pass % 2 = 0 then List.rev queries else queries
+    for lane, hint, predicate, expected in ordered do
+        probe lane (fun () -> measure lane 15 (correlatedRange hint predicate expected))
 
 let viewUpdates () =
     probe "joined-view-update" (fun () ->

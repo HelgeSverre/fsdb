@@ -16075,9 +16075,17 @@ let tests =
 
                     Expect.isLessThan unhinted (forced * 3L) "the broad primary-key range does not inflate allocations"
 
+                    let upperOnly = readCount "" "c.id<=p.id+500" "750"
+                    let lowerOnly = readCount "" "p.id<=c.id" "5000"
+
+                    Expect.isLessThan upperOnly (unhinted * 3L) "an upper bound counts the composite index slice"
+                    Expect.isLessThan lowerOnly (unhinted * 3L) "a lower bound counts the composite index slice"
+
                     readCount "" "c.id>p.id AND c.id<=p.id+500" "500" |> ignore
                     readCount "" "c.id BETWEEN p.id+500 AND p.id" "0" |> ignore
                     readCount "IGNORE INDEX (ix_child)" between "750" |> ignore
+                    readCount "FORCE INDEX (ix_child)" "c.id<=p.id+500" "750" |> ignore
+                    readCount "IGNORE INDEX (ix_child)" "c.id<=p.id+500" "750" |> ignore
 
                     runDefault store "CREATE TABLE ranked (id INT PRIMARY KEY, parent_id INT, rank_value INT, KEY ix_rank(parent_id, rank_value DESC, id))" |> ignore
                     runDefault store "INSERT INTO ranked VALUES (10,1,NULL),(11,1,1),(12,1,2),(13,1,2),(14,1,3),(15,2,3),(16,2,4),(17,2,5),(18,NULL,3)" |> ignore
@@ -16095,6 +16103,25 @@ let tests =
                             [ [ Some "1"; Some "3" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]
                             "descending suffixes keep the correct exclusive boundary and ignore null values"
                     | other -> failtestf "expected three correlated counts, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            ("SELECT p.id, "
+                             + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value<p.id+2), "
+                             + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value>=p.id+2), "
+                             + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value<p.id+2 AND c.id<>12), "
+                             + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value<p.id+2 AND c.rank_value<p.id+1) "
+                             + "FROM parents p WHERE p.id<=3 ORDER BY p.id")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "3"; Some "1"; Some "2"; Some "1" ]
+                              [ Some "2"; Some "1"; Some "2"; Some "1"; Some "0" ]
+                              [ Some "3"; Some "0"; Some "0"; Some "0"; Some "0" ] ]
+                            "one-sided descending ranges exclude NULL and preserve extra predicates"
+                    | other -> failtestf "expected one-sided correlated counts, got %A" other
 
                 testCase "correlated plain and functional candidates intersect in conjuncts and OR branches"
                 <| fun _ ->

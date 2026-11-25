@@ -2738,9 +2738,10 @@ implementation effort:
    range took 512 ms versus 3 ms on MySQL. Eligible signed-integer
    correlated counts now use the equality prefix and range of a composite
    index together. The [matched rerun](benchmarks/results/2026-11-25-correlated-integer-range-count.md)
-   measured 399 ms before, 12 ms after, and 1.8 ms on MySQL. Counts with
-   residual predicates and other projected expressions still need broader
-   access planning.
+   measured 399 ms before, 12 ms after, and 1.8 ms on MySQL. The same
+   ordered slice now counts [one-sided bounds](benchmarks/results/2026-11-25-correlated-integer-range-count.md#one-sided-bounds).
+   Counts with residual predicates and other projected expressions still
+   need broader access planning.
 
 2. Transaction scheduling. [Readers behind waiting writers under a global
    read lock](torture/findings/2026-11-06-global-read-waiting-writer-gate.md)

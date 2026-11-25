@@ -19069,7 +19069,7 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
                 |> tryAllSome
                 |> Option.bind (countRows projection))))
 
-/// A whole-key integer prefix and a two-sided integer interval can count
+/// A whole-key integer prefix and an integer interval can count
 /// directly from the ordered index when they cover every WHERE conjunct.
 and private tryCorrelatedIntegerRangeCount (outer: EvalContext) source whereExpr =
     let equalities, ranges =
@@ -19080,14 +19080,15 @@ and private tryCorrelatedIntegerRangeCount (outer: EvalContext) source whereExpr
         | BinOp((Lt | Lte | Gt | Gte), _, _) -> true
         | _ -> false
 
-    let hasTwoSidedRange =
+    let hasRange =
         match ranges with
         | [ Between _ ] -> true
+        | [ comparison ] -> isRangeComparison comparison
         | [ lower; upper ] -> isRangeComparison lower && isRangeComparison upper
         | _ -> false
 
     match source with
-    | FromTable tableRef when hasTwoSidedRange && not equalities.IsEmpty && (tryLockingReadRows tableRef).IsNone ->
+    | FromTable tableRef when hasRange && not equalities.IsEmpty && (tryLockingReadRows tableRef).IsNone ->
         physicalFastPathTable outer.Store outer.DbName tableRef
         |> Option.filter (fun table -> storedRowsMatchReadRows outer.Store table.Columns)
         |> Option.bind (fun table ->
@@ -19105,15 +19106,16 @@ and private tryCorrelatedIntegerRangeCount (outer: EvalContext) source whereExpr
             let pins = equalities |> List.map (tryEqualityPredicate innerColumn bound) |> tryAllSome
 
             match pins, collectRangeBounds innerColumn bound whereExpr with
-            | Some pins, [ { Column = column; Lower = Some _; Upper = Some _ } as range ]
-                when (tryDuplicateIgnoreCase fst pins).IsNone ->
+            | Some pins, [ range ]
+                when (ranges.Length = 1 || (range.Lower.IsSome && range.Upper.IsSome))
+                     && (tryDuplicateIgnoreCase fst pins).IsNone ->
                 let values =
                     pins
                     |> List.map (fun (name: string, value) -> name.ToLowerInvariant(), value)
                     |> Map.ofList
                 let pinned = values |> Map.keys |> Set.ofSeq
                 let allowed = indexHintsFor IndexJoin tableRef |> indexAllowedBy
-                let suffix = [ { Column = column; Transform = None; Direction = Asc } ]
+                let suffix = [ { Column = range.Column; Transform = None; Direction = Asc } ]
 
                 orderedIndexCandidates table
                 |> List.filter (fun candidate -> allowed candidate.Name)
