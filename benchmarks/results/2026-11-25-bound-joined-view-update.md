@@ -12,9 +12,9 @@ key, physical inner or straight join inputs, and simple integer predicates.
 The composite-key regression binds one component through the partner
 alias. It checks a hit, a miss, a rejected `CHECK OPTION` update, and the
 committed rows. The pinned MySQL 8.4.11 oracle used `PRIMARY` with `const`
-access on both inputs and agreed on the checked rows and error. Fsdb's
-traditional `EXPLAIN UPDATE` for the outer view still displays a view
-scan. Separate wire controls for a partial composite key, a disjunctive
+access on both inputs and agreed on the checked rows and error. At the
+benchmarked revision, Fsdb's `EXPLAIN UPDATE` displayed a view scan.
+Separate wire controls for a partial composite key, a disjunctive
 filter, and a left join matched MySQL's affected counts and committed rows.
 The allocation regression verifies the execution path. Four point
 updates allocated 21.1 MB at 500 rows and 181.2 MB at 5,000 rows before the
@@ -70,3 +70,24 @@ transaction moved a row into the initially absent key. Every statement
 affected one row and the final committed values matched. A repeat with
 two matching partner rows and an unbound third partner key column gave
 the same results.
+
+## Explaining bound joined-view updates
+
+Traditional `EXPLAIN UPDATE` now uses the same bound-join proof as
+execution. It displays each physical source, the written source, and
+the complete `PRIMARY` access. It distinguishes an absent const row
+from a row rejected by the view's visibility predicate. Planning leaves
+the rows intact even if the proposed assignment would fail `CHECK OPTION`.
+
+The pinned MySQL 8.4.11 wire comparison matched 20 plans across two- and
+three-table views, including reversed input order, each writable source,
+covering partner reads, absent keys, and a hidden row. The two-table lane
+matched under both definer and invoker security. The committed data was
+identical before and after `EXPLAIN`.
+
+The expanded plan requires `SHOW VIEW` and underlying read privileges,
+including the nested view. A delegated caller without the nested-view
+grant returns 1345, matching the oracle. [MySQL privilege reference](https://dev.mysql.com/doc/refman/8.4/en/privileges-provided.html).
+
+Partial-key and other generic view plans, and exact JSON and TREE
+rendering, remain open.

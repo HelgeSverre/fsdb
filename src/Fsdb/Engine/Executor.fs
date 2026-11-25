@@ -26121,6 +26121,188 @@ let private combineViewPredicate predicate whereClause =
     | Some predicate, None -> Some predicate
     | None, whereClause -> whereClause
 
+let private rewriteStandaloneViewUpdate (view: UpdatableView) (update: UpdateStmt) : Result<UpdateStmt * ViewColumnTarget, EvalError> =
+    if not view.UpdateJoins.IsEmpty && (not view.OrderBy.IsEmpty || not update.OrderBy.IsEmpty) then
+        Error(1221, "Incorrect usage of UPDATE and ORDER BY")
+    elif not view.UpdateJoins.IsEmpty && update.Limit.IsSome then
+        Error(1221, "Incorrect usage of UPDATE and LIMIT")
+    else
+        let rewrite = rewriteViewExpression view
+        let assign (assignment: Assignment) =
+            match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets with
+            | Some target -> Ok(assignment, target)
+            | None when view.OrderedColumns |> List.exists (equalsIgnoreCase assignment.Column) ->
+                let belongsToDerived =
+                    match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Expressions with
+                    | Some(QualifiedCol(qualifier, _)) ->
+                        view.UpdateJoins
+                        |> List.exists (fun join ->
+                            match join.Table with
+                            | FromSubquery(_, name)
+                            | FromJsonTable(_, _, _, name) -> equalsIgnoreCase qualifier name
+                            | _ -> false)
+                    | _ -> false
+
+                if belongsToDerived then Error(nonUpdatableTarget "UPDATE" update.From.Table)
+                else Error(1348, sprintf "Column '%s' is not updatable" assignment.Column)
+            | None -> Error(1054, sprintf "Unknown column '%s' in field list" assignment.Column)
+
+        update.Assignments
+        |> traverse assign
+        |> Result.bind (fun assignments ->
+            let target = assignments |> List.head |> snd
+            if assignments |> List.exists (snd >> sameViewTarget target >> not) then
+                Error(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName)
+            else
+                Ok(
+                    { update with
+                        From = view.UpdateFrom
+                        Joins = view.UpdateJoins
+                        Assignments =
+                            assignments
+                            |> List.map (fun (assignment, target) ->
+                                { assignment with
+                                    Table = if view.UpdateJoins.IsEmpty then None else Some target.Qualifier
+                                    Column = target.Column
+                                    Value = rewrite assignment.Value })
+                        Where = combineViewPredicate view.Predicate (update.Where |> Option.map rewrite)
+                        OrderBy =
+                            if update.OrderBy.IsEmpty then view.OrderBy
+                            else update.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
+                        Limit = update.Limit |> Option.map rewrite },
+                    target))
+
+let private qualifiedLiteralEqualities conditions =
+    conditions
+    |> List.choose (function
+        | BinOp(Eq, QualifiedCol(owner, column), (LiteralValue _ as value))
+        | BinOp(Eq, (LiteralValue _ as value), QualifiedCol(owner, column)) -> Some(owner, column, value)
+        | _ -> None)
+
+let private qualifiedColumnEqualities conditions =
+    conditions
+    |> List.choose (function
+        | BinOp(Eq, QualifiedCol(leftOwner, leftColumn), QualifiedCol(rightOwner, rightColumn)) ->
+            Some((leftOwner, leftColumn), (rightOwner, rightColumn))
+        | _ -> None)
+
+let private mutationColumnKey (owner: string, column: string) = owner.ToLowerInvariant(), column.ToLowerInvariant()
+
+let private isSignedJoinKey = function
+    | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false -> true
+    | _ -> false
+
+let private signedJoinEdge columnTypes (left, right) =
+    let left, right = mutationColumnKey left, mutationColumnKey right
+    match Map.tryFind left columnTypes, Map.tryFind right columnTypes with
+    | Some leftType, Some rightType when leftType = rightType && isSignedJoinKey leftType -> Some(left, right)
+    | _ -> None
+
+let private signedJoinBounds columnTypes equalities conditions =
+    let edges = equalities |> List.choose (signedJoinEdge columnTypes)
+
+    let rec reachable seen pending =
+        match pending with
+        | [] -> seen
+        | column :: rest when Set.contains column seen -> reachable seen rest
+        | column :: rest ->
+            let neighbors =
+                edges
+                |> List.choose (fun (left, right) ->
+                    if column = left then Some right
+                    elif column = right then Some left
+                    else None)
+            reachable (Set.add column seen) (neighbors @ rest)
+
+    qualifiedLiteralEqualities conditions
+    |> List.collect (function
+        | owner, name, LiteralValue(VInt _ as value) ->
+            let column = mutationColumnKey (owner, name)
+            match Map.tryFind column columnTypes with
+            | Some columnType when isSignedJoinKey columnType ->
+                reachable Set.empty [ column ] |> Set.toList |> List.map (fun key -> key, value)
+            | _ -> []
+        | _ -> [])
+    |> Map.ofList
+
+let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list) where =
+    let whereConditions = optionalConjuncts where
+
+    let physicalOperand = function
+        | FromTable source when source.IndexHints.IsEmpty ->
+            physicalFastPathTable store dbName source
+            |> Option.map (fun table ->
+                (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant(), (source, table))
+        | _ -> None
+
+    if (qualifiedLiteralEqualities whereConditions).IsEmpty then None
+    elif joins |> List.exists (fun join -> (join.Kind <> InnerJoin && join.Kind <> StraightJoin) || not join.Using.IsEmpty) then None
+    else
+        FromTable from :: (joins |> List.map _.Table)
+        |> List.map physicalOperand
+        |> tryAllSome
+        |> Option.bind (fun operands ->
+            let columnTypes =
+                operands
+                |> List.collect (fun (owner, (_, table)) ->
+                    table.Columns |> List.map (fun column -> mutationColumnKey (owner, column.Name), column.Type))
+                |> Map.ofList
+
+            let positions = operands |> List.mapi (fun index (owner, _) -> owner, index) |> Map.ofList
+            let safeWhere = function
+                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, column), LiteralValue(VInt _))
+                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue(VInt _), QualifiedCol(owner, column)) ->
+                    Map.tryFind (mutationColumnKey (owner, column)) columnTypes |> Option.exists isSignedJoinKey
+                | _ -> false
+
+            let joinKeys =
+                joins
+                |> List.mapi (fun index join ->
+                    let conditions = conjuncts join.On
+                    let keys = qualifiedColumnEqualities conditions
+                    let inScope ((left, _), (right, _)) =
+                        positions[left] <= index + 1 && positions[right] <= index + 1
+
+                    if keys.Length = conditions.Length
+                       && keys |> List.forall (fun key -> signedJoinEdge columnTypes key |> Option.exists inScope) then Some keys
+                    else None)
+                |> tryAllSome
+                |> Option.map List.concat
+
+            // Keep expressions that can fail or warn in the ordinary path.
+            if positions.Count <> operands.Length || not (List.forall safeWhere whereConditions) then None
+            else
+                joinKeys |> Option.bind (fun equalities ->
+                    let bounds = signedJoinBounds columnTypes equalities whereConditions
+                    let probe (owner, (source, table)) =
+                        let keys = Storage.primaryKeyColumns table
+                        let claims =
+                            keys
+                            |> List.map (fun column -> Map.tryFind (mutationColumnKey (owner, column)) bounds)
+                            |> tryAllSome
+                            |> Option.bind (Storage.tryPrimaryWriteLockTargets store table)
+
+                        owner, (source, table, claims)
+
+                    operands |> List.map probe |> Map.ofList |> Some))
+
+let private sourceOverridesForBoundJoin sources : MutationSourceOverrides option =
+    sources
+    |> Map.toList
+    |> List.map (fun (owner, (_, table: Table, claims: WriteLockTargets option)) ->
+        claims
+        |> Option.map (fun key ->
+            owner,
+            lazy (Ok { Columns = table.Columns
+                       Rows = key.RowIds |> List.choose table.RowsArray.TryFind
+                       IdentityOf = Some
+                       WriteTable = None })))
+    |> tryAllSome
+    |> Option.map Map.ofList
+
+let private boundUpdateJoinSources store dbName from joins where =
+    boundUpdateJoinKeys store dbName from joins where |> Option.bind sourceOverridesForBoundJoin
+
 let private explainKey name length =
     Some({ Names = [ name ]; Length = length }: ExplainRendering.ExplainKey)
 
@@ -26207,6 +26389,112 @@ let private explainKeyLen (col: ColumnDef) : int option =
     // DDL never said so (and this engine's ColumnDef keeps `Nullable = true`
     // for it), so only a genuinely nullable unique column pays the null flag.
     baseLen |> Option.map (fun n -> if col.Nullable && not col.PrimaryKey then n + 1 else n)
+
+let private explainViewExpansion (store: Store) (root: StoredView) =
+    let rec expand seen (view: StoredView) =
+        let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
+        if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then None
+        else
+            match parseStoredViewStatement view with
+            | Ok(Select select as statement) when select.Ctes.IsEmpty ->
+                let next = Set.add key seen
+                let resolve = function
+                    | FromTable reference ->
+                        let database = reference.Database |> Option.defaultValue view.Schema
+                        match tryStoredView store database reference.Table with
+                        | Some nested -> expand next nested
+                        | None -> Some([ { reference with Database = Some database } ], [])
+                    | _ -> None
+
+                (Option.toList select.From @ (select.Joins |> List.map _.Table))
+                |> List.collect FromItem.leaves
+                |> List.map resolve
+                |> tryAllSome
+                |> Option.map (fun parts ->
+                    let own =
+                        ("SHOW VIEW", Auth.OnTable(view.Schema, view.Name))
+                        :: (Auth.requiredPrivilegesInStore store view.Schema statement |> List.filter (fst >> (=) "SELECT"))
+                    parts |> List.collect fst, own @ (parts |> List.collect snd))
+            | _ -> None
+
+    expand Set.empty root
+
+let private tryExplainBoundViewUpdate (store: Store) registry account dbName id (update: UpdateStmt) =
+    let displayName (source: TableRef) = source.Alias |> Option.defaultValue source.Table
+    let sameTable (left: TableRef) (right: TableRef) =
+        equalsIgnoreCase left.Table right.Table
+        && equalsIgnoreCase (left.Database |> Option.defaultValue dbName) (right.Database |> Option.defaultValue dbName)
+
+    let plan =
+        let database = update.From.Database |> Option.defaultValue dbName
+        if not update.Joins.IsEmpty
+           || (update.From.Database.IsNone && Map.containsKey (update.From.Table.ToLowerInvariant()) (currentCteScope ())) then None
+        else
+            tryStoredView store database update.From.Table
+            |> Option.bind (fun stored ->
+                tryUpdatableView store database update.From.Table
+                |> Option.filter (fun view -> not view.UpdateJoins.IsEmpty)
+                |> Option.bind (fun view -> rewriteStandaloneViewUpdate view update |> Result.toOption)
+                |> Option.bind (fun (rewritten, target) ->
+                    boundUpdateJoinKeys store dbName rewritten.From rewritten.Joins rewritten.Where
+                    |> Option.bind (fun keys ->
+                        sourceOverridesForBoundJoin keys
+                        |> Option.bind (fun overrides ->
+                            explainViewExpansion store stored
+                            |> Option.bind (fun (original, requirements) ->
+                                let sources =
+                                    rewritten.From :: (rewritten.Joins |> List.choose (fun join -> match join.Table with FromTable source -> Some source | _ -> None))
+                                if not (sameLength original sources && List.forall2 sameTable original sources) then None
+                                else Some(rewritten, target, keys, overrides, List.zip sources original, requirements))))))
+
+    plan |> Option.map (fun (rewritten, target, keys, overrides, sources, requirements) ->
+        let permitted = Auth.checkForAccount store account (List.distinct requirements) |> Result.isOk
+        if not permitted then
+            Error(Err(1345, "EXPLAIN/SHOW can not be issued; lacking privileges for underlying table"))
+        else
+            let noRows message : ExplainRendering.ExplainRow list =
+                [ { Id = Some id; SelectType = "UPDATE"; Table = None; Type = None; Key = None; Ref = None; Rows = None; Extra = [ message ] } ]
+
+            let lookup (source: TableRef) = Map.find ((displayName source).ToLowerInvariant()) keys
+            if keys |> Map.exists (fun _ (_, _, claims) -> claims |> Option.exists (fun claim -> claim.RowIds.IsEmpty)) then
+                Ok(noRows "no matching row in const table")
+            else
+                // The bound-join proof restricts ON and WHERE to integer comparisons.
+                // Reading its const candidates here never evaluates an assignment.
+                runMutationJoin store registry dbName overrides rewritten.From rewritten.Joins
+                |> Result.bind (fun (joinedSources, rows) ->
+                    let columns = joinedSources |> List.map (fun source -> source.Qualifier, source.Columns)
+                    let context = contextFactory store registry dbName (columnIndexOf (columns |> List.collect snd)) (qualifierRanges columns) None
+                    rows
+                    |> traverse (snd >> whereMatches context rewritten.Where)
+                    |> Result.mapError Err
+                    |> Result.map (fun visible ->
+                        if not (List.contains true visible) then
+                            noRows "Impossible WHERE noticed after reading const tables"
+                        else
+                            sources |> List.map (fun (source, original) ->
+                                let _, table, _ = lookup source
+                                let keyColumns = Storage.primaryKeyColumns table
+                                let length =
+                                    keyColumns
+                                    |> List.map (fun name -> table.Columns |> List.tryFind (fun column -> equalsIgnoreCase name column.Name) |> Option.bind explainKeyLen)
+                                    |> tryAllSome
+                                    |> Option.map List.sum
+                                let writer = equalsIgnoreCase (displayName source) target.Qualifier
+                                let referencesNonKey =
+                                    (Option.toList rewritten.Where @ (rewritten.Joins |> List.map _.On) @ (rewritten.Assignments |> List.map _.Value))
+                                    |> List.exists (Expression.exists (function
+                                        | QualifiedCol(owner, column) when equalsIgnoreCase owner (displayName source) ->
+                                            not (List.exists (equalsIgnoreCase column) keyColumns)
+                                        | _ -> false))
+                                { Id = Some id
+                                  SelectType = if writer then "UPDATE" else "SIMPLE"
+                                  Table = Some(displayName original)
+                                  Type = Some "const"
+                                  Key = explainKey "PRIMARY" length
+                                  Ref = Some(String.concat "," (List.replicate keyColumns.Length "const"))
+                                  Rows = Some 1UL
+                                  Extra = if not writer && not referencesNonKey then [ "Using index" ] else [] }))))
 
 let private explainPrefixKeyLen (column: ColumnDef) (prefixLength: int option) =
     let narrowed =
@@ -27050,7 +27338,7 @@ let private checksumTables (store: Store) (dbName: string) (tables: string list)
 /// engine has a join/subquery structure to describe (`SELECT`, `UNION`,
 /// `UPDATE`, `DELETE`, `INSERT` — plain or `... SELECT`); anything else
 /// (DDL, session statements, ...) is the same 1064 real MySQL gives.
-let rec private explainStatement (format: ExplainFormat) (store: Store) (registry: Registry) (dbName: string) (stmt: Statement) : QueryResult =
+let rec private explainStatement (format: ExplainFormat) (store: Store) (registry: Registry) account (dbName: string) (stmt: Statement) : QueryResult =
     let counter = ref 0
 
     let nextId () =
@@ -27066,6 +27354,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         { registry with
             Scalars = registry.Scalars |> Map.map (fun _ _ _ -> VNull)
             Aggregates = registry.Aggregates |> Map.map (fun _ _ _ -> VNull) }
+        |> registryForDefiner account
 
     let finish (result: Result<unit, QueryResult>) =
         match result with
@@ -27211,23 +27500,27 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             @ (u.OrderBy |> List.map fst)
             @ Option.toList u.Limit
         let ctes = referencedMutationCtes u.Ctes None u.Joins expressions
-        withCteQueryResult store registry dbName ctes (fun () -> explainStatement format store registry dbName (Update { u with Ctes = [] }))
+        withCteQueryResult store registry dbName ctes (fun () -> explainStatement format store registry account dbName (Update { u with Ctes = [] }))
     | Update u ->
         let id = nextId ()
         let extra = [ if u.Where.IsSome then "Using where"
                       if not u.OrderBy.IsEmpty then "Using filesort" ]
         let subqueryExprs = (u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)) @ (u.OrderBy |> List.map fst)
 
-        finish (
-            checkMutationWhere u.From u.Joins ((u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)))
+        let validate () = checkMutationWhere u.From u.Joins ((u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)))
+
+        match tryExplainBoundViewUpdate store registry account dbName id u with
+        | Some(Error error) -> error
+        | Some(Ok rows) -> validate () |> Result.map (fun () -> acc.AddRange rows) |> finish
+        | None ->
+            validate ()
             |> Result.bind (fun () ->
                 let consumption = joinConsumptionFor u.Limit
-
                 explainJoinBlock store registry dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs 0 None consumption)
-        )
+            |> finish
     | Delete d when not d.Ctes.IsEmpty ->
         let ctes = referencedDeleteCtes d
-        withCteQueryResult store registry dbName ctes (fun () -> explainStatement format store registry dbName (Delete { d with Ctes = [] }))
+        withCteQueryResult store registry dbName ctes (fun () -> explainStatement format store registry account dbName (Delete { d with Ctes = [] }))
     | Delete d ->
         let id = nextId ()
         let extra = [ if d.Where.IsSome then "Using where"
@@ -27292,7 +27585,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 let sid = nextId ()
                 explainSelectBlock store registry dbName nextId acc sid "SUBQUERY" select)
         )
-    | Explain(nestedFormat, inner) -> explainStatement nestedFormat store registry dbName inner
+    | Explain(nestedFormat, inner) -> explainStatement nestedFormat store registry account dbName inner
     | _ -> Err(1064, "EXPLAIN is not supported for this statement")
 
 /// A top-level `SELECT`'s resultset plus its per-column MySQL wire types.
@@ -28843,136 +29136,6 @@ let private truncateHashPartitions
                     | Ok value -> Ok(Set.contains (hashPartitionIndex partitioning value) selected)
                     | Error(code, message) -> Error(ExpressionError(code, message)))
                 |> Result.map ignore)
-
-let private qualifiedLiteralEqualities conditions =
-    conditions
-    |> List.choose (function
-        | BinOp(Eq, QualifiedCol(owner, column), (LiteralValue _ as value))
-        | BinOp(Eq, (LiteralValue _ as value), QualifiedCol(owner, column)) -> Some(owner, column, value)
-        | _ -> None)
-
-let private qualifiedColumnEqualities conditions =
-    conditions
-    |> List.choose (function
-        | BinOp(Eq, QualifiedCol(leftOwner, leftColumn), QualifiedCol(rightOwner, rightColumn)) ->
-            Some((leftOwner, leftColumn), (rightOwner, rightColumn))
-        | _ -> None)
-
-let private mutationColumnKey (owner: string, column: string) = owner.ToLowerInvariant(), column.ToLowerInvariant()
-
-let private isSignedJoinKey = function
-    | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false -> true
-    | _ -> false
-
-let private signedJoinEdge columnTypes (left, right) =
-    let left, right = mutationColumnKey left, mutationColumnKey right
-    match Map.tryFind left columnTypes, Map.tryFind right columnTypes with
-    | Some leftType, Some rightType when leftType = rightType && isSignedJoinKey leftType -> Some(left, right)
-    | _ -> None
-
-let private signedJoinBounds columnTypes equalities conditions =
-    let edges = equalities |> List.choose (signedJoinEdge columnTypes)
-
-    let rec reachable seen pending =
-        match pending with
-        | [] -> seen
-        | column :: rest when Set.contains column seen -> reachable seen rest
-        | column :: rest ->
-            let neighbors =
-                edges
-                |> List.choose (fun (left, right) ->
-                    if column = left then Some right
-                    elif column = right then Some left
-                    else None)
-            reachable (Set.add column seen) (neighbors @ rest)
-
-    qualifiedLiteralEqualities conditions
-    |> List.collect (function
-        | owner, name, LiteralValue(VInt _ as value) ->
-            let column = mutationColumnKey (owner, name)
-            match Map.tryFind column columnTypes with
-            | Some columnType when isSignedJoinKey columnType ->
-                reachable Set.empty [ column ] |> Set.toList |> List.map (fun key -> key, value)
-            | _ -> []
-        | _ -> [])
-    |> Map.ofList
-
-let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list) where =
-    let whereConditions = optionalConjuncts where
-
-    let physicalOperand = function
-        | FromTable source when source.IndexHints.IsEmpty ->
-            physicalFastPathTable store dbName source
-            |> Option.map (fun table ->
-                (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant(), (source, table))
-        | _ -> None
-
-    if (qualifiedLiteralEqualities whereConditions).IsEmpty then None
-    elif joins |> List.exists (fun join -> (join.Kind <> InnerJoin && join.Kind <> StraightJoin) || not join.Using.IsEmpty) then None
-    else
-        FromTable from :: (joins |> List.map _.Table)
-        |> List.map physicalOperand
-        |> tryAllSome
-        |> Option.bind (fun operands ->
-            let columnTypes =
-                operands
-                |> List.collect (fun (owner, (_, table)) ->
-                    table.Columns |> List.map (fun column -> mutationColumnKey (owner, column.Name), column.Type))
-                |> Map.ofList
-
-            let positions = operands |> List.mapi (fun index (owner, _) -> owner, index) |> Map.ofList
-            let safeWhere = function
-                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, column), LiteralValue(VInt _))
-                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue(VInt _), QualifiedCol(owner, column)) ->
-                    Map.tryFind (mutationColumnKey (owner, column)) columnTypes |> Option.exists isSignedJoinKey
-                | _ -> false
-
-            let joinKeys =
-                joins
-                |> List.mapi (fun index join ->
-                    let conditions = conjuncts join.On
-                    let keys = qualifiedColumnEqualities conditions
-                    let inScope ((left, _), (right, _)) =
-                        positions[left] <= index + 1 && positions[right] <= index + 1
-
-                    if keys.Length = conditions.Length
-                       && keys |> List.forall (fun key -> signedJoinEdge columnTypes key |> Option.exists inScope) then Some keys
-                    else None)
-                |> tryAllSome
-                |> Option.map List.concat
-
-            // Keep expressions that can fail or warn in the ordinary path.
-            if positions.Count <> operands.Length || not (List.forall safeWhere whereConditions) then None
-            else
-                joinKeys |> Option.bind (fun equalities ->
-                    let bounds = signedJoinBounds columnTypes equalities whereConditions
-                    let probe (owner, (source, table)) =
-                        let keys = Storage.primaryKeyColumns table
-                        let claims =
-                            keys
-                            |> List.map (fun column -> Map.tryFind (mutationColumnKey (owner, column)) bounds)
-                            |> tryAllSome
-                            |> Option.bind (Storage.tryPrimaryWriteLockTargets store table)
-
-                        owner, (source, table, claims)
-
-                    operands |> List.map probe |> Map.ofList |> Some))
-
-let private boundUpdateJoinSources store dbName from joins where : MutationSourceOverrides option =
-    boundUpdateJoinKeys store dbName from joins where
-    |> Option.bind (fun sources ->
-        sources
-        |> Map.toList
-        |> List.map (fun (owner, (_, table, claims)) ->
-            claims
-            |> Option.map (fun key ->
-                owner,
-                lazy (Ok { Columns = table.Columns
-                           Rows = key.RowIds |> List.choose table.RowsArray.TryFind
-                           IdentityOf = Some
-                           WriteTable = None })))
-        |> tryAllSome
-        |> Option.map Map.ofList)
 
 /// Executes a statement under `currentAccount`; `ids` carries the OK-packet
 /// and generated AUTO_INCREMENT identities between statements.
@@ -32583,68 +32746,10 @@ let rec executeAs
         | None, _ -> ids, Err(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
         | Some _, Some column ->
             ids, Err(1052, sprintf "Column '%s' in order clause is ambiguous" column)
-        | Some view, None when not view.UpdateJoins.IsEmpty && (not view.OrderBy.IsEmpty || not updateStmt.OrderBy.IsEmpty) ->
-            ids, Err(1221, "Incorrect usage of UPDATE and ORDER BY")
-        | Some view, None when not view.UpdateJoins.IsEmpty && updateStmt.Limit.IsSome ->
-            ids, Err(1221, "Incorrect usage of UPDATE and LIMIT")
         | Some view, None ->
-            let rewrite = rewriteViewExpression view
-            match
-                updateStmt.Assignments
-                |> traverse (fun assignment ->
-                    match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets with
-                    | Some target -> Ok(assignment, target)
-                    | None when view.OrderedColumns |> List.exists (fun name -> name.Equals(assignment.Column, System.StringComparison.OrdinalIgnoreCase)) ->
-                        let derivedQualifiers =
-                            view.UpdateJoins
-                            |> List.choose (fun join ->
-                                match join.Table with
-                                | FromSubquery(_, qualifier)
-                                | FromJsonTable(_, _, _, qualifier) -> Some qualifier
-                                | _ -> None)
-                        let belongsToDerived =
-                            match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Expressions with
-                            | Some(QualifiedCol(qualifier, _)) ->
-                                derivedQualifiers
-                                |> List.exists (fun derived -> derived.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
-                            | _ -> false
-                        if belongsToDerived then
-                            Error(nonUpdatableTarget "UPDATE" updateStmt.From.Table)
-                        else
-                            Error(1348, sprintf "Column '%s' is not updatable" assignment.Column)
-                    | None -> Error(1054, sprintf "Unknown column '%s' in field list" assignment.Column))
-            with
+            match rewriteStandaloneViewUpdate view updateStmt with
             | Error(code, message) -> ids, Err(code, message)
-            | Ok assignments ->
-                let targets =
-                    assignments
-                    |> List.map (fun (_, target) -> target.Database.ToLowerInvariant(), target.Table.ToLowerInvariant(), target.Qualifier.ToLowerInvariant())
-                    |> List.distinct
-
-                if targets.Length > 1 then
-                    ids, Err(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName)
-                else
-                    let rewritten =
-                        { updateStmt with
-                            From = view.UpdateFrom
-                            Joins = view.UpdateJoins
-                            Assignments =
-                                assignments
-                                |> List.map (fun (assignment, target) ->
-                                    { assignment with
-                                        Table = if view.UpdateJoins.IsEmpty then None else Some target.Qualifier
-                                        Column = target.Column
-                                        Value = rewrite assignment.Value })
-                            Where = combineViewPredicate view.Predicate (updateStmt.Where |> Option.map rewrite)
-                            OrderBy =
-                                if updateStmt.OrderBy.IsEmpty then
-                                    view.OrderBy
-                                else
-                                    updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
-                            Limit = updateStmt.Limit |> Option.map rewrite }
-
-                    let target = assignments |> List.head |> snd
-                    executeViewWrite view view target target (Update rewritten) (Some updateStmt)
+            | Ok(rewritten, target) -> executeViewWrite view view target target (Update rewritten) (Some updateStmt)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -33369,7 +33474,7 @@ let rec executeAs
     | ChecksumTables(tables, quick) ->
         ids, checksumTables store dbName tables quick
     | Explain(format, inner) ->
-        ids, explainStatement format store registry dbName inner
+        ids, explainStatement format store registry currentAccount dbName inner
 
 let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (statement: Statement) =
     let unsafeError =

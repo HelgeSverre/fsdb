@@ -2007,6 +2007,64 @@ let tests =
                         ()
                     | other -> failtestf "expected a const DELETE plan, got %A" other
 
+                testCase "EXPLAIN UPDATE reports both bound keys for a merged checked view"
+                <| fun _ ->
+                    let store = newStore ()
+                    let run = runDefault store
+                    for sql in
+                        [ "CREATE TABLE target (tenant INT,id INT,n INT,PRIMARY KEY(tenant,id))"
+                          "CREATE TABLE partner (tenant INT,id INT,enabled INT,PRIMARY KEY(tenant,id))"
+                          "INSERT INTO target VALUES (1,1,5),(1,2,0),(1,3,7)"
+                          "INSERT INTO partner VALUES (1,1,1),(1,2,1)"
+                          "CREATE VIEW checked_t AS SELECT tenant,id,n FROM target WHERE n>0 WITH CASCADED CHECK OPTION"
+                          "CREATE VIEW active_t AS SELECT t.tenant,t.id,t.n,p.enabled,p.id AS partner_id FROM checked_t t JOIN partner p ON t.id=p.id AND t.tenant=p.tenant WHERE p.enabled=1"
+                          "CREATE VIEW reverse_t AS SELECT t.tenant,t.id,t.n,p.enabled,p.id AS partner_id FROM partner p JOIN checked_t t ON t.id=p.id AND t.tenant=p.tenant WHERE p.enabled=1"
+                          "CREATE SQL SECURITY INVOKER VIEW caller_t AS SELECT tenant,id,n FROM target WHERE n>0 WITH CASCADED CHECK OPTION"
+                          "CREATE SQL SECURITY INVOKER VIEW caller_view AS SELECT t.tenant,t.id,t.n,p.id AS partner_id FROM caller_t t JOIN partner p ON t.id=p.id AND t.tenant=p.tenant WHERE p.enabled=1" ] do
+                        match run sql with
+                        | Affected _ -> ()
+                        | result -> failtestf "setup failed for %s: %A" sql result
+
+                    let check sql expected =
+                        match run sql with
+                        | ResultSet(_, rows) -> Expect.equal rows expected sql
+                        | result -> failtestf "expected an update plan, got %A" result
+
+                    let point role name = [ Some "1"; Some role; Some name; None; Some "const"; Some "PRIMARY"; Some "PRIMARY"; Some "8"; Some "const,const"; Some "1"; Some "100.00"; None ]
+                    let unavailable message = [ Some "1"; Some "UPDATE"; None; None; None; None; None; None; None; None; None; Some message ]
+                    check "EXPLAIN UPDATE active_t SET n=n+1 WHERE tenant=1 AND partner_id=1" [ point "UPDATE" "target"; point "SIMPLE" "p" ]
+                    check "EXPLAIN UPDATE reverse_t SET n=n+1 WHERE tenant=1 AND partner_id=1" [ point "SIMPLE" "p"; point "UPDATE" "target" ]
+                    check "EXPLAIN UPDATE active_t SET enabled=0 WHERE tenant=1 AND partner_id=1" [ point "SIMPLE" "target"; point "UPDATE" "p" ]
+                    check "EXPLAIN UPDATE active_t SET n=n+1 WHERE tenant=1 AND partner_id=3" [ unavailable "no matching row in const table" ]
+                    check "EXPLAIN UPDATE active_t SET n=n+1 WHERE tenant=1 AND partner_id=2" [ unavailable "Impossible WHERE noticed after reading const tables" ]
+                    check "EXPLAIN UPDATE caller_view SET n=n+1 WHERE tenant=1 AND partner_id=1" [ point "UPDATE" "target"; point "SIMPLE" "p" ]
+
+                    let plan = "EXPLAIN UPDATE active_t SET n=n+1 WHERE tenant=1 AND partner_id=1"
+                    let root = Fsdb.Session.create 1 store
+                    let reader = { Fsdb.Session.create 2 store with User = "plan_reader" }
+                    let grant sql =
+                        match Fsdb.QueryHandler.handle root sql |> snd with
+                        | Affected _ -> ()
+                        | result -> failtestf "grant setup failed for %s: %A" sql result
+
+                    grant "CREATE USER plan_reader"
+                    grant "GRANT SELECT, UPDATE, SHOW VIEW ON fsdb.active_t TO plan_reader"
+                    grant "GRANT SHOW VIEW ON fsdb.checked_t TO plan_reader"
+                    grant "GRANT SELECT ON fsdb.target TO plan_reader"
+                    grant "GRANT SELECT ON fsdb.partner TO plan_reader"
+                    match Fsdb.QueryHandler.handle reader plan |> snd with
+                    | Err(1345, _) -> ()
+                    | result -> failtestf "expected underlying-view privilege error, got %A" result
+
+                    grant "GRANT SELECT ON fsdb.checked_t TO plan_reader"
+                    match Fsdb.QueryHandler.handle reader plan |> snd with
+                    | ResultSet(_, rows) -> Expect.equal rows [ point "UPDATE" "target"; point "SIMPLE" "p" ] "authorized view plan"
+                    | result -> failtestf "expected the authorized plan, got %A" result
+
+                    match run "SELECT SUM(n) FROM target" with
+                    | ResultSet(_, [ [ Some "12" ] ]) -> ()
+                    | result -> failtestf "EXPLAIN changed the data: %A" result
+
                 testCase "EXPLAIN by a nullable VARCHAR(50) UNIQUE key reports key_len 203 (50*4+2+1 for the null flag)"
                 <| fun _ ->
                     // Probe values are key-relative even when the key column
