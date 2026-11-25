@@ -4503,6 +4503,21 @@ let internal acquirePreparedInsertWriteTargets
                 | None -> applyLatest ())
     | _ -> ()
 
+let internal waitForTransactionReadKeys timeout (store: Store) dbName tableName keys =
+    match store.TransactionLocks, store.KeyLocks.TryGetValue(lockNamespaceKey dbName tableName) with
+    | Some context, (true, cache) ->
+        let deadline = DateTime.UtcNow + timeout
+        for key in List.sortWith (fun left right -> StringComparer.Ordinal.Compare(left, right)) keys do
+            match cache.Entries.TryGetValue key with
+            | true, weak ->
+                match weak.TryGetTarget() with
+                | true, stripe when not (lock context.HeldStripes (fun () -> context.HeldStripes.Contains stripe)) ->
+                    let _, newlyHeld = acquireStripe deadline store.LockWaits dbName context SharedStripe WaitUntilAvailable stripe
+                    if newlyHeld then releaseLockStripes context [ stripe ]
+                | _ -> ()
+            | _ -> ()
+    | _ -> ()
+
 let acquireTransactionReadTargets
     (timeout: TimeSpan)
     (store: Store)

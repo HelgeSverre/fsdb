@@ -2912,54 +2912,69 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
     | None -> session
     | Some transaction ->
         let dbName = session.Database |> Option.defaultValue defaultDatabase
+        let registry = registryFor session
+        let timeout = lockWaitTimeout session
+        // Functions share the invoking statement's private view and publication boundary.
+        let canRefresh = not (insideFunctionOrTrigger session)
+        let refresh (transaction: Transaction) =
+            let baseCatalog, snapshot =
+                if transaction.Isolation = ReadUncommitted then
+                    rebaseReadUncommittedSnapshot session transaction
+                else
+                    rebaseTransactionSnapshot session transaction
+
+            { transaction with Snapshot = snapshot; BaseCatalog = baseCatalog; Seeded = true }
+
+        let pendingConnection =
+            match transaction.Isolation with
+            | RepeatableRead | Serializable when canRefresh -> Some session.ConnectionId
+            | _ -> None
+
+        let readClaims pending (transaction: Transaction) =
+            Executor.transactionWriteReadClaims pending transaction.Snapshot registry dbName statement
+
+        let readTargets = readClaims pendingConnection transaction
+        let pendingKeys = readTargets |> List.filter (fun (_, _, claims) -> not claims.Keys.IsEmpty)
+        let transaction, readTargets =
+            if pendingKeys.IsEmpty then transaction, readTargets
+            else
+                for database, table, claims in pendingKeys do
+                    Storage.waitForTransactionReadKeys timeout transaction.Snapshot database table claims.Keys
+
+                // A committed insert has a stable row ID only after refresh.
+                let refreshed = refresh transaction
+                refreshed, readClaims None refreshed
+
+        let readTargets = readTargets |> List.filter (fun (_, _, claims) -> not claims.RowIds.IsEmpty)
 
         let targets =
-            Executor.transactionWriteTargets transaction.Snapshot (registryFor session) dbName statement
+            Executor.transactionWriteTargets transaction.Snapshot registry dbName statement
             |> List.filter (fun (_, _, target) -> not target.RowIds.IsEmpty || not target.Keys.IsEmpty)
 
-        let readTargets =
-            Executor.transactionWriteReadTargets transaction.Snapshot (registryFor session) dbName statement
-            |> List.filter (fun (_, _, rows) -> not rows.IsEmpty)
-
         match targets, readTargets with
-        | [], [] -> session
+        | [], [] -> if pendingKeys.IsEmpty then session else { session with Tx = Some transaction }
         | _ ->
             readTargets
-            |> List.iter (fun (database, table, rows) ->
+            |> List.iter (fun (database, table, claims) ->
                 Storage.acquireTransactionReadTargets
-                    (lockWaitTimeout session)
+                    timeout
                     transaction.Snapshot
                     database
                     table
                     ShareLock
                     WaitForLocks
-                    rows
+                    claims.RowIds
                 |> ignore)
             targets
             |> List.iter (fun (database, table, target) ->
                 Storage.acquireTransactionWriteTargets
-                    (lockWaitTimeout session)
+                    timeout
                     transaction.Snapshot
                     database
                     table
                     target.RowIds
                     target.Keys)
-            // Functions share the invoking statement's private view and publication boundary.
-            if insideFunctionOrTrigger session then session
-            else
-                let baseCatalog, snapshot =
-                    if transaction.Isolation = ReadUncommitted then
-                        rebaseReadUncommittedSnapshot session transaction
-                    else
-                        rebaseTransactionSnapshot session transaction
-
-                { session with
-                    Tx =
-                        Some
-                            { transaction with
-                                Snapshot = snapshot
-                                BaseCatalog = baseCatalog
-                                Seeded = true } }
+            if canRefresh then { session with Tx = Some(refresh transaction) } else session
 
 /// Rolls an abandoned connection's transaction back.
 let closeSession (session: Session) : unit =

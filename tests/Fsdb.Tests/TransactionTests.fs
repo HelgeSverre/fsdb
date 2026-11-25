@@ -5684,6 +5684,61 @@ let tests =
               | ResultSet(_, [ [ Some "24" ] ]) -> ()
               | result -> failtestf "expected both committed updates, got %A" result
 
+          testCase "a joined view update waits for a pending insert in its partner range"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for sql, count in
+                  [ "CREATE TABLE parent (id INT PRIMARY KEY,n INT)", 0UL
+                    "CREATE TABLE partner (id INT,seq INT,delta INT,PRIMARY KEY(id,seq))", 0UL
+                    "INSERT INTO parent VALUES (1,10)", 1UL
+                    "CREATE VIEW active AS SELECT p.id,p.n,s.delta,s.seq FROM parent p JOIN partner s ON p.id=s.id", 0UL ] do
+                  run setup sql (Affected count) |> ignore
+
+              for isolation, slot, resolution, blocked, changed in
+                  [ "REPEATABLE READ", 21, "COMMIT", true, 1UL
+                    "REPEATABLE READ", 21, "ROLLBACK", true, 0UL
+                    "REPEATABLE READ", 1000, "COMMIT", false, 0UL
+                    "READ COMMITTED", 21, "COMMIT", false, 0UL
+                    "SERIALIZABLE", 21, "COMMIT", true, 1UL ] do
+                  handle setup "DELETE FROM partner" |> ignore
+                  handle setup "UPDATE parent SET n=10 WHERE id=1" |> ignore
+                  let owner = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let owner = run owner $"INSERT INTO partner VALUES (1,{slot},7)" (Affected 1UL)
+                  let waiter = run (create 3 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let waiter = run waiter "SET innodb_lock_wait_timeout=5" (Affected 0UL)
+                  let waiter = run waiter "BEGIN" (Affected 0UL)
+                  let pending =
+                      Threading.Tasks.Task.Run(fun () ->
+                          handle waiter "UPDATE active SET n=n+delta WHERE id=1 AND seq>=20 AND seq<=22")
+                  let waited = not (pending.Wait(TimeSpan.FromMilliseconds 200.0))
+                  run owner resolution (Affected 0UL) |> ignore
+                  Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 5.0)) "the writer completes when the insert resolves"
+                  let waiter, result = pending.GetAwaiter().GetResult()
+                  Expect.equal waited blocked $"{isolation} waits only for a qualifying pending key"
+                  Expect.equal result (Affected changed) $"{resolution} determines whether the inserted row is visible"
+                  if changed = 1UL then
+                      let contender = run (create 4 store) "SET innodb_lock_wait_timeout=5" (Affected 0UL)
+                      let contender = run contender "BEGIN" (Affected 0UL)
+                      let held = Threading.Tasks.Task.Run(fun () -> handle contender "UPDATE partner SET delta=99 WHERE id=1 AND seq=21")
+                      let readLockHeld = not (held.Wait(TimeSpan.FromMilliseconds 200.0))
+                      run waiter "COMMIT" (Affected 0UL) |> ignore
+                      Expect.isTrue (held.Wait(TimeSpan.FromSeconds 5.0)) "the contender resumes when the view writer commits"
+                      let contender, result = held.GetAwaiter().GetResult()
+                      Expect.isTrue readLockHeld "the view writer holds a read lock on the newly committed partner row"
+                      Expect.equal result (Affected 1UL) "the contender updates the partner once the lock is released"
+                      run contender "ROLLBACK" (Affected 0UL) |> ignore
+                  else
+                      run waiter "COMMIT" (Affected 0UL) |> ignore
+                  match handle setup "SELECT n FROM parent WHERE id=1" |> snd with
+                  | ResultSet(_, [ [ Some value ] ]) -> Expect.equal value (if changed = 1UL then "17" else "10") "committed target value"
+                  | actual -> failtestf "expected the committed parent row, got %A" actual
+
           testCase "joined view update rechecks a changed read source after waiting"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

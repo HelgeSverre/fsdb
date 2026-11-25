@@ -26381,7 +26381,9 @@ let private chooseBoundUpdateAccess store dbName where (sources: Map<string, Bou
                     let useful count = isUsefulEqualityCardinality table.RowsArray.Count count
                     match equality, range with
                     | _, Some range when useful range.CandidateCount
-                                           && (equality |> Option.forall (fun (_, lookup) -> range.CandidateCount < lookup.CandidateCount)) ->
+                                           && (equality |> Option.forall (fun (matched, lookup) ->
+                                               range.CandidateCount < lookup.CandidateCount
+                                               || (not matched.Unique && range.CandidateCount = lookup.CandidateCount))) ->
                         Map.add owner (UpdateRange range) chosen
                     | Some(matched, lookup), _ when useful lookup.CandidateCount ->
                         Map.add owner (UpdateEquality(matched, lookup)) chosen
@@ -34797,35 +34799,54 @@ let transactionWriteTargets
         |> Option.toList
     | _ -> []
 
-let private tryJoinedRangeReadRows store (database: string) (source: BoundUpdateSource) range =
+let private tryJoinedRangeReadTargets store (database: string) (source: BoundUpdateSource) range pendingConnection =
     let databaseKey = database.ToLowerInvariant()
     let tableKey = source.Reference.Table.ToLowerInvariant()
     let tableIn catalog = catalog |> Map.tryFind databaseKey |> Option.bind (Map.tryFind tableKey)
 
-    // A transaction can move a committed row into the range under its row
-    // lock. Probe its published index too, using the stable committed row ID.
+    // A moved row retains its identity across snapshots. A new row has
+    // only its insertion key in common until the transaction publishes it.
     TransactionRegistry.entries store
-    |> List.choose (fun (_, transaction) ->
-        if Set.contains (databaseKey, tableKey) transaction.ChangedTables then
+    |> List.choose (fun (connection, transaction) ->
+        if Some connection <> pendingConnection && Set.contains (databaseKey, tableKey) transaction.ChangedTables then
             match tableIn transaction.BaseCatalog, tableIn transaction.Catalog with
             | Some original, Some table when not (obj.ReferenceEquals(table, source.Table)) -> Some(original, table)
             | _ -> None
         else None)
-    |> List.map (fun (original, table) ->
-        let visible rowId =
-            (original.RowsArray.TryFind rowId).IsSome && (source.Table.RowsArray.TryFind rowId).IsSome
+    |> List.map (fun ((original: Table), (table: Table)) ->
+        let primaryIndices =
+            lazy (
+                Storage.primaryKeyColumns table
+                |> List.map (fun name -> table.Columns |> List.tryFindIndex (fun column -> equalsIgnoreCase name column.Name))
+                |> tryAllSome)
+        let insertedKeys rowId =
+            primaryIndices.Value
+            |> Option.bind (fun indices ->
+                table.RowsArray.TryFind rowId
+                |> Option.bind (fun row -> Storage.tryPrimaryWriteLockTargets store table (indices |> List.map (fun index -> row[index]))))
+            |> Option.map _.Keys
+            |> Option.defaultValue []
+
         Storage.tryOrderedIndexPrefixRangeRowIdsInTableWith
             (equalsIgnoreCase range.IndexName) store table range.Terms range.PrefixValues range.Lower range.Upper
-        |> Option.map (fun (_, _, rowIds) -> Seq.filter visible rowIds))
+        |> Option.map (fun (_, _, rowIds) ->
+            rowIds |> Seq.fold (fun (claims: WriteLockTargets) rowId ->
+                match original.RowsArray.TryFind rowId, pendingConnection with
+                | Some _, _ when (source.Table.RowsArray.TryFind rowId).IsSome -> { claims with RowIds = rowId :: claims.RowIds }
+                | None, Some _ -> { claims with Keys = insertedKeys rowId @ claims.Keys }
+                | _ -> claims) { RowIds = []; Keys = [] }))
     |> tryAllSome
-    |> Option.map (fun pendingRows -> Seq.concat (range.RowIds :: pendingRows) |> List.ofSeq)
+    |> Option.map (fun pending ->
+        { RowIds = (List.ofSeq range.RowIds) @ (pending |> List.collect _.RowIds)
+          Keys = pending |> List.collect _.Keys })
 
-let transactionWriteReadTargets
+let internal transactionWriteReadClaims
+    (pendingConnection: int option)
     (store: Store)
     (registry: Registry)
     (dbName: string)
     (statement: Statement)
-    : (string * string * RowId list) list =
+    : (string * string * WriteLockTargets) list =
     let literalEqualities = optionalConjuncts >> qualifiedLiteralEqualities
     let joinedEqualities (first: TableRef) joins =
         let explicit =
@@ -35000,23 +35021,29 @@ let transactionWriteReadTargets
                                 physicalFastPathTable store dbName source
                                 |> Option.map (fun table ->
                                     let indexedRows () = table.RowsArray.Indexed |> Seq.map fst |> Seq.toList
-                                    let rowIds =
-                                        if materialized then indexedRows ()
+                                    let claims =
+                                        if materialized then { RowIds = indexedRows (); Keys = [] }
                                         else
                                             let qualifier = (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant()
-                                            let rangeRows =
+                                            let rangeClaims =
                                                 accesses.Value |> Option.bind (fun (sources, chosen) ->
                                                     match Map.tryFind qualifier chosen with
-                                                    | Some(UpdateRange range) -> tryJoinedRangeReadRows store sourceDatabase sources[qualifier] range
+                                                    | Some(UpdateRange range) ->
+                                                        let pending =
+                                                            if chosen |> Map.exists (fun _ -> function UpdatePrimary claim -> claim.RowIds.IsEmpty | _ -> false) then None
+                                                            else pendingConnection
+                                                        tryJoinedRangeReadTargets store sourceDatabase sources[qualifier] range pending
                                                     | _ -> None)
 
-                                            rangeRows |> Option.defaultWith (fun () ->
-                                                tryPhysicalCandidates store registry dbName source sourceBound
-                                                |> Option.orElseWith (fun () -> tryPhysicalCandidates store registry dbName source predicate)
-                                                |> Option.map (snd >> List.map fst)
-                                                |> Option.defaultWith indexedRows)
+                                            rangeClaims |> Option.defaultWith (fun () ->
+                                                let rows =
+                                                    tryPhysicalCandidates store registry dbName source sourceBound
+                                                    |> Option.orElseWith (fun () -> tryPhysicalCandidates store registry dbName source predicate)
+                                                    |> Option.map (snd >> List.map fst)
+                                                    |> Option.defaultWith indexedRows
+                                                { RowIds = rows; Keys = [] })
 
-                                    sourceDatabase, source.Table, rowIds))
+                                    sourceDatabase, source.Table, claims))
                 | _ -> []
             | _ -> []
 
@@ -35025,9 +35052,14 @@ let transactionWriteReadTargets
         |> List.groupBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
         |> List.map (fun (_, sources) ->
             let database, table, _ = List.head sources
-            database, table, sources |> List.collect (fun (_, _, rows) -> rows) |> List.distinct)
+            let collect field = sources |> List.collect (fun (_, _, claims) -> field claims) |> List.distinct
+            database, table, { RowIds = collect _.RowIds; Keys = collect _.Keys })
         |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
     | _ -> []
+
+let transactionWriteReadTargets store registry dbName statement =
+    transactionWriteReadClaims None store registry dbName statement
+    |> List.map (fun (database, table, claims) -> database, table, claims.RowIds)
 
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) =
     let root = Auth.account "root" "%"

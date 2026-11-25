@@ -2996,8 +2996,11 @@ implementation effort:
    The two-connection oracle agrees on disjoint progress, same-key waits,
    and visibility after a primary-key move. Standalone joined-view updates
    use the chosen range for partner row claims, including existing rows
-   moved into it by a pending transaction. Pending partner inserts and
-   READ COMMITTED locking differences remain open. An audited
+   moved into it by a pending transaction. Under repeatable read and
+   serializable isolation, the same range detects published partner inserts
+   with primary keys and waits before claiming the committed row.
+   READ COMMITTED locking differences on existing partner rows remain open.
+   An audited
    [nested checked view LEFT JOINed to a window CTE](torture/findings/2026-11-17-nested-window-outer-view.md)
    correctly remains read only, matching MySQL's metadata, rows, CHECK OPTION
    rejection, and mutation rejection. Procedures, functions, and triggers

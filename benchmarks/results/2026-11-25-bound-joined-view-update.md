@@ -171,9 +171,8 @@ In the default repeatable-read wire fixture, Fsdb and MySQL 8.4.11 let
 the update pass held rows outside the range and wait on a matching row
 or a move into or out of the range. A move into the range from another
 prefix also waits. The transaction regression verifies that the writer
-reads the moved row after commit. MySQL also waits for an uncommitted
-insert into the range. Fsdb still has a gap there. The same fixture at
-READ COMMITTED exposes separate differences in which rows cause a wait.
+reads the moved row after commit. READ COMMITTED still has separate
+differences for waits on existing partner rows.
 
 The embedded allocation probe used a single qualifying partner and four
 updates after one warmup, with `id=1 AND seq>=20 AND seq<=21`. The extra
@@ -184,3 +183,22 @@ builds on .NET 10.0.12 produced the same committed value.
 | ---: | ---: | ---: |
 | 500 | 9.61 MB | 6.83 MB |
 | 5,000 | 32.80 MB | 6.74 MB |
+
+## Waiting for pending partner inserts
+
+The transaction planner probes published partner indexes for inserts in
+the selected range under `REPEATABLE READ` and `SERIALIZABLE`. It waits
+on each matching insertion's primary-key stripe, refreshes the snapshot,
+and then claims any committed rows using their stable row identities.
+The temporary key wait uses the existing deadlock and timeout handling.
+
+The pinned MySQL 8.4.11 wire comparison covers primary and descending
+secondary ranges, autocommit and explicit transactions, initially empty
+partners, commit, rollback, and out-of-range inserts across three isolation
+levels. Both engines wait for matching inserts under `REPEATABLE READ`
+and `SERIALIZABLE` and recheck the data after resolution. Both proceed
+immediately in the `READ COMMITTED` insert controls. The transaction
+regression also checks that a later writer waits for the newly committed
+partner's read lock to be released. A separate Fsdb probe returned 1205
+while the insert remained uncommitted. A retry in the same transaction
+succeeded after the inserter committed.
