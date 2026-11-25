@@ -718,10 +718,10 @@ let private geographicSegmentsShareEndpoint (firstStart, firstEnd) (secondStart,
     firstStart = secondStart || firstStart = secondEnd
     || firstEnd = secondStart || firstEnd = secondEnd
 
-let private geographicSegmentsProperlyCross referenceSystem first second =
+let private tryGeographicSegmentCrossing referenceSystem first second =
     let firstStart, firstEnd = first
     let secondStart, secondEnd = second
-    if geographicSegmentsShareEndpoint first second then false
+    if geographicSegmentsShareEndpoint first second then None
     else
         let major = referenceSystem.SemiMajorAxis.Value
         let minor = major * (1.0 - 1.0 / referenceSystem.InverseFlattening.Value)
@@ -740,16 +740,26 @@ let private geographicSegmentsProperlyCross referenceSystem first second =
             if boostGeoEqual delta 0.0 || boostGeoEqual (abs delta) Math.PI then 0
             else Math.Sign delta
         if side firstAzimuth a c * side firstAzimuth a d >= 0
-           || side secondAzimuth c a * side secondAzimuth c b >= 0 then false
+           || side secondAzimuth c a * side secondAzimuth c b >= 0 then None
         else
             GeographicIntersection.intersect flattening a b firstAzimuth c d secondAzimuth
-            |> Option.exists (fun point ->
+            |> Option.filter (fun point ->
                 let inside start endpoint baseline =
                     let distance = geographicPointDistanceRadians normalized start point
                     let length = geographicPointDistanceRadians normalized start endpoint
                     abs (normalizedLongitudeRadians (azimuth start point - baseline)) <= Math.PI / 2.0
                     && distance > 0.0 && distance < length
                 inside a b firstAzimuth && inside c d secondAzimuth)
+
+let private geographicSegmentsProperlyCross referenceSystem first second =
+    tryGeographicSegmentCrossing referenceSystem first second |> Option.isSome
+
+let private geographicSharedSegmentEndpoints referenceSystem ((a, b) as first) ((c, d) as second) =
+    [ a; b; c; d ]
+    |> List.distinct
+    |> List.filter (fun point ->
+        geographicPointOnLineSegment referenceSystem point first
+        && geographicPointOnLineSegment referenceSystem point second)
 
 let private geographicRingWithoutRepeatedNeighbors ring =
     ring
@@ -1000,12 +1010,7 @@ type internal GeographicLineTopology =
 let internal geographicLineLineTopology referenceSystem firstLines secondLines =
     let firstSegments = geographicLineSegments firstLines
     let secondSegments = geographicLineSegments secondLines
-    let sharedEndpoints (firstStart, firstEnd) (secondStart, secondEnd) =
-        [ firstStart; firstEnd; secondStart; secondEnd ]
-        |> List.distinct
-        |> List.filter (fun point ->
-            geographicPointOnLineSegment referenceSystem point (firstStart, firstEnd)
-            && geographicPointOnLineSegment referenceSystem point (secondStart, secondEnd))
+    let sharedEndpoints = geographicSharedSegmentEndpoints referenceSystem
     let pairs =
         [ for first in firstSegments do
             for second in secondSegments do
@@ -1630,6 +1635,104 @@ let private narrowGeographicOverlayShape = function
     | GMultiPoint points -> geographicPointResult points
     | shape -> shape
 
+let private partitionGeographicLineSegment referenceSystem includeContacts otherSegments ((start, endpoint) as segment) =
+    let distance = geographicPointDistance referenceSystem start
+    let contacts, intervals =
+        otherSegments
+        |> List.fold (fun (contacts, intervals) other ->
+            match geographicSharedSegmentEndpoints referenceSystem segment other with
+            | [ point ] -> (if includeContacts then point :: contacts else contacts), intervals
+            | [] when includeContacts ->
+                let crossing =
+                    tryGeographicSegmentCrossing referenceSystem segment other
+                    |> Option.map (fun (latitude, longitude) -> latitude / mysqlRadians 1.0, normalizedLongitudeRadians longitude / mysqlRadians 1.0)
+                Option.toList crossing @ contacts, intervals
+            | [] -> contacts, intervals
+            | points ->
+                let ordered = List.sortBy distance points
+                contacts, (List.head ordered, List.last ordered) :: intervals) ([], [])
+
+    let pieces =
+        if List.isEmpty intervals then [ start, endpoint, false ]
+        else
+            let covered = intervals |> List.map (fun (first, last) -> distance first, distance last)
+            [ yield start
+              yield endpoint
+              for first, last in intervals do
+                  yield first
+                  yield last ]
+            |> List.distinct
+            |> List.map (fun point -> distance point, point)
+            |> List.sortBy fst
+            |> List.pairwise
+            |> List.fold (fun pieces ((from, first), (until, last)) ->
+                let shared = covered |> List.exists (fun (lower, upper) -> lower <= from && until <= upper)
+                // Retain vertices of the source line, but coalesce cuts that
+                // only subdivide an unchanged span from the other line.
+                match pieces with
+                | (previous, _, wasShared) :: rest when wasShared = shared -> (previous, last, shared) :: rest
+                | _ -> (first, last, shared) :: pieces) []
+            |> List.rev
+
+    pieces, List.sortBy distance contacts
+
+let private geographicLineFragments retainShared pieces =
+    let finish current complete =
+        match current with
+        | [] -> complete
+        | _ -> List.rev current :: complete
+
+    let current, complete =
+        pieces
+        |> List.fold (fun (current, complete) (start, endpoint, shared) ->
+            if shared <> retainShared then [], finish current complete
+            else
+                match current with
+                | [] -> [ endpoint; start ], complete
+                | _ -> endpoint :: current, complete) ([], [])
+
+    finish current complete |> List.rev
+
+let private tryGeographicLineOverlay referenceSystem kind srid first second =
+    let usableSegments line =
+        line |> List.pairwise |> List.filter (fun (start, endpoint) -> start <> endpoint)
+
+    let firstSegments, secondSegments = usableSegments first, usableSegments second
+    let ordinary ((startLatitude, startLongitude), (endLatitude, endLongitude)) =
+        abs startLatitude < 90.0 && abs endLatitude < 90.0
+        && not (boostGeoEqual (abs (longitudeDistance startLongitude endLongitude)) 180.0)
+
+    if List.isEmpty firstSegments || List.isEmpty secondSegments
+       || not (List.forall ordinary firstSegments && List.forall ordinary secondSegments) then None
+    else
+        let difference source other =
+            source
+            |> List.collect (partitionGeographicLineSegment referenceSystem false other >> fst)
+            |> geographicLineFragments false
+
+        let lineResult = function
+            | [] -> GEmpty
+            | [ line ] -> GLineString line
+            | lines -> GMultiLineString lines
+
+        match kind with
+        | OverlayKind.Union -> first :: difference secondSegments firstSegments |> lineResult |> Some
+        | OverlayKind.Difference -> difference firstSegments secondSegments |> lineResult |> Some
+        | OverlayKind.SymmetricDifference ->
+            difference firstSegments secondSegments @ difference secondSegments firstSegments |> lineResult |> Some
+        | OverlayKind.Intersection ->
+            let partitioned = firstSegments |> List.map (partitionGeographicLineSegment referenceSystem true secondSegments)
+            let shared = partitioned |> List.collect fst |> geographicLineFragments true
+            let contacts =
+                partitioned
+                |> List.collect snd
+                |> List.filter (fun point -> geographicPointLinePosition referenceSystem point shared = GeographicPointLinePosition.Outside)
+                |> geographicPointResult
+
+            match contacts, lineResult shared with
+            | GEmpty, result | result, GEmpty -> Some result
+            | points, lines -> Some(GGeometryCollection [ { Srid = srid; Shape = points }; { Srid = srid; Shape = lines } ])
+
 let private geographicCoveredPoint referenceSystem =
     let onLinework lines point =
         geographicPointLinePosition referenceSystem point lines <> GeographicPointLinePosition.Outside
@@ -1828,6 +1931,8 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
                 | _ -> Some(normalize other)
         | (GGeometryCollection _ as left), right
         | left, (GGeometryCollection _ as right) -> collectionOverlay left right
+        | GLineString firstLine, GLineString secondLine ->
+            tryGeographicLineOverlay referenceSystem kind first.Srid firstLine secondLine
         | left, right ->
             match geographicPointMembers left, geographicPointMembers right with
             | Some points, Some other -> Some(overlayGeographicPoints kind left points right other)

@@ -24,9 +24,10 @@ EPSG 4326, 4258, and 4267. It used 72 seeded point-set pairs and 48
 point-set pairs with linework, polygons, or an empty geometry.
 Sixteen additional queries checked both argument orders and output shapes.
 The focused regression covers duplicate points, near-equal coordinates,
-the antimeridian, and polygon shell and hole boundaries. Geographic
-overlays between two nonempty higher-dimensional inputs and arbitrary
-nonempty geometry collections remain open.
+the antimeridian, and polygon shell and hole boundaries.
+[Geographic line-string overlays](2026-10-11-geographic-line-topology-oracle.md#geographic-line-string-overlays)
+also cover audited single-line pairs. Overlay combinations with areas and
+arbitrary nonempty geometry collections remain open.
 
 ## Point-set predicates
 

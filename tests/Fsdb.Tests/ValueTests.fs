@@ -645,6 +645,37 @@ let tests =
                         Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "collection overlays retain the SRID"
                         Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{name} of {left} and {right}"
 
+                testCase "geographic line overlays split shared spans and retain input direction"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let first = "LINESTRING(0 0,2 0,4 0)"
+                    let second = "LINESTRING(3 0,2.5 0,1 0)"
+                    let across = "LINESTRING(179 0,-177 0)"
+                    let acrossPart = "LINESTRING(-178 0,180 0)"
+                    let withTouch = "LINESTRING(0 0,4 0,4 4,0 4)"
+                    let sharedAndTouching = "LINESTRING(2 0,4 0,6 2,4 4,5 6)"
+
+                    for name, left, right, expected in
+                        [ "ST_Intersection", first, second, "LINESTRING(1 0,2 0,3 0)"
+                          "ST_Intersection", second, first, second
+                          "ST_Union", first, second, first
+                          "ST_Union", second, first, "MULTILINESTRING((3 0,2.5 0,1 0),(0 0,1 0),(3 0,4 0))"
+                          "ST_Difference", across, acrossPart, "MULTILINESTRING((179 0,180 0),(-178 0,-177 0))"
+                          "ST_SymDifference", second, first, "MULTILINESTRING((0 0,1 0),(3 0,4 0))"
+                          "ST_Intersection", withTouch, sharedAndTouching, "GEOMETRYCOLLECTION(POINT(4 4),LINESTRING(2 0,4 0))"
+                          "ST_Intersection", "LINESTRING(4 0,2 2,0 0)", "LINESTRING(0 0,2 -2,4 0)", "MULTIPOINT((4 0),(0 0))" ] do
+                        let result = call name [ geometry left; geometry right ]
+                        Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "line overlays retain the SRID"
+                        Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{name} of {left} and {right}"
+
+                    let crossing = call "ST_Intersection" [ geometry "LINESTRING(-4 0,2 0)"; geometry "LINESTRING(0 -2,0 2)" ]
+                    match crossing with
+                    | VGeometry { Srid = 4326; Shape = GPoint(latitude, longitude) } ->
+                        Expect.isLessThan (abs latitude) 1e-12 "latitude at the crossing"
+                        Expect.isLessThan (abs longitude) 1e-12 "longitude at the crossing"
+                    | actual -> failtestf "expected a geographic crossing point, got %A" actual
+
                 testCase "planar overlays and buffers cover non-point geometry"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]

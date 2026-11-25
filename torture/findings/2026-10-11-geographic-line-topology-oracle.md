@@ -38,3 +38,43 @@ carrier line's interior as contained but one at its boundary as not
 contained. The implementation checks covered vertices and samples the
 covered geodesic path between them. Near-tangent and unsampled path
 deviations remain precision limits.
+
+## Geographic line-string overlays
+
+MySQL 8.4.11 returns geographic `LINESTRING` overlay results in the
+source traversal order. Intersection retains first-input vertices along
+a shared span and includes isolated contacts separately. Difference
+clips shared spans out of the first input. Union retains the first line
+and appends the uncovered spans of the second. Symmetric difference
+returns uncovered spans from each input in operand order.
+
+Fsdb uses the existing geodesic segment membership and proper-crossing
+calculation for these operations. Point contacts leave line fragments
+intact. The same geodesic rules work across the antimeridian without
+projecting the input onto a plane.
+
+The pinned wire comparison checked all four operations in both operand
+orders on 213 pairs per SRS across EPSG 4326, 4258, and 4267. All 5,112
+results matched geometry type, SRID, component order, and coordinates
+within `2e-13` degrees. Of those, 3,852 also matched exact
+WKT. The audit includes shared and disjoint geodesics, mixed line and
+point results, segmented and reversed paths, endpoint contacts,
+antimeridian crossings, and seeded local and global lines.
+
+Multipart input, zero-length lines, and segments with a polar endpoint
+or a 180-degree longitude change remain outside the implemented path.
+MySQL returns a point for the intersection of a zero-length line with
+its carrier. For two audited half-turns through the north pole, it
+returns longitudes of approximately 61.18 and 64.46 degrees depending
+on the operand order, at latitude 89.9999999999995 degrees.
+
+A separate 48-result precision probe exposed ten intersection mismatches
+on nearly adjacent equatorial segments. For example, MySQL treats the
+gap between longitude `4` and `4.000000000001` as a point contact and
+returns the first line's endpoint. It reports an empty intersection
+when the second start is `4.000000001`. Fsdb returns empty in both cases.
+The follow-up crossed gap and overlap sizes, operand orders, and segment
+lengths along the equator and a meridian. MySQL's result changes with the
+shorter segment and the rounding of the inverse distance. The precision
+gap remains separate from ordinary segment clipping.
+[Boost geographic segment intersection](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
