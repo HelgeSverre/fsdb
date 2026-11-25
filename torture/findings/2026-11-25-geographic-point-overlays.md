@@ -52,3 +52,33 @@ ordered inputs across EPSG 4326, 4258, and 4267. The corpus includes
 duplicates, near-equality chains, points at the poles and antimeridian,
 and multipoints with up to 850 generated members. Three additional
 controls checked longitude identity at the pole and antimeridian.
+
+## Point-only geometry collections
+
+All four geographic overlays accept nested collections of points,
+multipoints, and empty members. Union walks the collection first when
+paired with a primitive and deduplicates after flattening both inputs.
+Intersection between two collections considers the right collection first
+when their normalized point counts are equal. Difference applies the right
+collection's members in sequence. Symmetric difference with an empty
+left collection retains the right collection's nesting while removing
+duplicate members and narrowing a singleton result.
+
+Point collections also combine with ordinary linework and polygonal
+inputs. A symmetric difference with uncovered points groups them into
+one multipoint member alongside the line or area. Repeated line members
+collapse even when a duplicate reverses direction or subdivides the
+same geodesic. Geographic multipoint overlays use the sorted lookup for
+membership, which affects near-equal coordinate chains.
+[MySQL collection utilities](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/gc_utils.cc)
+· [Boost point overlay](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/pointlike_pointlike.hpp).
+
+The pinned wire matrix compared exact WKT and SRIDs in both operand
+orders across WGS 84, GRS 1980, and Clarke 1866. Fsdb matched 3,352
+results, including duplicates, near-equal longitude chains, empty
+members, polar points, and line and area coverage. Sixteen additional
+union calls with a multipolygon containing two polygons remain
+unsupported. In the audited cases MySQL reverses the disjoint polygons,
+dissolves the shared edge of the touching pair, and collapses duplicate
+polygons. Overlays involving collections that contain linework or polygons
+still need their own dimensional dispatch.

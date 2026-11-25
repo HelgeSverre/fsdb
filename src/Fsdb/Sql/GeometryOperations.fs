@@ -7,6 +7,7 @@ open NetTopologySuite.Operation.Buffer
 open NetTopologySuite.Operation.Overlay
 open NetTopologySuite.Operation.OverlayNG
 open NetTopologySuite.Operation.RelateNG
+open Fsdb.Collections
 open Fsdb.SpatialReferenceSystems
 open Fsdb.Value
 
@@ -1462,17 +1463,18 @@ let private geographicPointIndex () =
 
     contains, add
 
-let private geographicPointResult points =
+let private distinctGeographicPoints points =
     let contains, add = geographicPointIndex ()
-    let distinct =
-        points
-        |> List.filter (fun point ->
-            if contains point then false
-            else
-                add point
-                true)
 
-    match distinct with
+    points
+    |> List.filter (fun point ->
+        if contains point then false
+        else
+            add point
+            true)
+
+let private geographicPointResult points =
+    match distinctGeographicPoints points with
     | [] -> GEmpty
     | [ (latitude, longitude) ] -> GPoint(latitude, longitude)
     | points -> GMultiPoint points
@@ -1579,25 +1581,34 @@ let internal geographicOrderedPointMembership points =
 let private overlayGeographicPoints kind firstShape (first: (float * float) list) secondShape (second: (float * float) list) =
     // MySQL dispatches a Point before a MultiPoint for the commutative
     // operations, and walks the smaller MultiPoint in an intersection.
-    let pointFirst =
+    let left, right =
         match firstShape, secondShape with
-        | GMultiPoint _, GPoint _ -> second, first
-        | _ -> first, second
+        | GMultiPoint _, GPoint _ -> (secondShape, second), (firstShape, first)
+        | _ -> (firstShape, first), (secondShape, second)
 
-    let except points other = points |> List.filter (geographicPointMembership other >> not)
+    let membership shape otherShape other =
+        match shape, otherShape with
+        | GMultiPoint _, GMultiPoint _ -> geographicOrderedPointMembership other
+        | _ -> geographicPointMembership other
+
+    let except (shape, points) (otherShape, other) =
+        points |> List.filter (membership shape otherShape other >> not)
+
+    let intersection (shape, points) (otherShape, other) =
+        if List.length points <= List.length other then points |> List.filter (membership shape otherShape other)
+        else other |> List.filter (membership otherShape shape points)
+
+    let union leftOperand rightOperand = snd leftOperand @ except rightOperand leftOperand
+
     let points =
         match kind with
-        | OverlayKind.Intersection ->
-            let left, right = pointFirst
-            if left.Length <= right.Length then left |> List.filter (geographicPointMembership right)
-            else right |> List.filter (geographicPointMembership left)
-        | OverlayKind.Difference -> except first second
-        | OverlayKind.Union ->
-            let left, right = pointFirst
-            left @ right
+        | OverlayKind.Intersection -> intersection left right
+        | OverlayKind.Difference -> except (firstShape, first) (secondShape, second)
+        | OverlayKind.Union -> union left right
         | OverlayKind.SymmetricDifference ->
-            let left, right = pointFirst
-            except left right @ except right left
+            let included = union left right
+            let shared = intersection left right
+            except (GMultiPoint included, included) (GMultiPoint shared, shared)
 
     geographicPointResult points
 
@@ -1635,11 +1646,54 @@ let private geographicCoveredPoint referenceSystem =
     | GMultiPolygon polygons -> Some(inArea polygons)
     | _ -> None
 
+let rec private tryGeographicPointTree = function
+    | GEmpty -> Some []
+    | GGeometryCollection members ->
+        members
+        |> List.map (fun memberGeometry -> tryGeographicPointTree memberGeometry.Shape)
+        |> tryAllSome
+        |> Option.map List.concat
+    | shape -> geographicPointMembers shape
+
+let private cleanGeographicPointTree shape =
+    let rec removeDuplicates = function
+        | GMultiPoint points -> GMultiPoint(distinctGeographicPoints points)
+        | GGeometryCollection members ->
+            let addMember retained (memberGeometry: Geometry) =
+                let cleaned = removeDuplicates memberGeometry.Shape
+                match tryGeographicPointTree cleaned with
+                | Some (_ :: _ as points) ->
+                    let contains = geographicOrderedPointMembership points
+                    let duplicate =
+                        retained
+                        |> List.exists (fun (_, other, containsOther) ->
+                            List.forall contains other && List.forall containsOther points)
+
+                    if duplicate then retained
+                    else ({ memberGeometry with Shape = cleaned }, points, contains) :: retained
+                | _ -> retained
+
+            members
+            |> List.fold addMember []
+            |> List.rev
+            |> List.map (fun (memberGeometry, _, _) -> memberGeometry)
+            |> GGeometryCollection
+        | shape -> shape
+
+    let rec narrow = function
+        | GGeometryCollection [] -> GEmpty
+        | GGeometryCollection [ memberGeometry ] -> narrow memberGeometry.Shape
+        | shape -> narrowGeographicOverlayShape shape
+
+    shape |> removeDuplicates |> narrow
+
 let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second: Geometry) =
     let result shape = { Srid = first.Srid; Shape = shape }
     let orient = orientGeographicPolygons referenceSystem
     let normalize = orient >> narrowGeographicOverlayShape
-    let mixed pointsFirst points other =
+    let isCollection = function GGeometryCollection _ -> true | _ -> false
+
+    let mixed pointShape pointsFirst points other =
         geographicCoveredPoint referenceSystem other
         |> Option.map (fun covered ->
             match kind with
@@ -1651,6 +1705,10 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
                 let outside = points |> List.filter (covered >> not) |> geographicPointResult
                 let areaOrLine = orient other
                 if outside = GEmpty then narrowGeographicOverlayShape areaOrLine
+                elif isCollection pointShape && kind = OverlayKind.SymmetricDifference then
+                    let grouped = geographicPointMembers outside |> Option.map GMultiPoint
+                    let components = narrowGeographicOverlayShape areaOrLine :: Option.toList grouped
+                    GGeometryCollection(List.map result components)
                 else
                     let components =
                         // Union expands multipart members of a mixed result.
@@ -1665,6 +1723,98 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
                         | shape -> [ shape ]
                     GGeometryCollection(List.map result (components @ points)))
 
+    let collectionOverlay left right =
+        let leftCollection = isCollection left
+        let rightCollection = isCollection right
+
+        let distinctComponents equal members =
+            members
+            |> List.fold (fun retained item ->
+                if List.exists (equal item) retained then retained else item :: retained) []
+            |> List.rev
+
+        let removeRepeatedComponents = function
+            | GMultiLineString lines ->
+                let equal first second =
+                    first = second
+                    || (geographicLineCovers referenceSystem [ first ] [ second ]
+                        && geographicLineCovers referenceSystem [ second ] [ first ])
+
+                GMultiLineString(distinctComponents equal lines) |> narrowGeographicOverlayShape
+            | GMultiPolygon polygons ->
+                let equal first second =
+                    if first = second then true
+                    else
+                        let topology = geographicPolygonPolygonTopology referenceSystem [ first ] [ second ]
+                        topology.FirstContainsSecond && topology.SecondContainsFirst
+
+                GMultiPolygon(distinctComponents equal polygons) |> narrowGeographicOverlayShape
+            | shape -> shape
+
+        let withNonpoint pointShape pointsFirst points other =
+            match kind, other, points with
+            // Collection union can dissolve the members of a multipolygon.
+            | OverlayKind.Union, GMultiPolygon (_ :: _ :: _), _ -> None
+            | OverlayKind.Intersection, _, [] -> Some GEmpty
+            | OverlayKind.Difference, _, [] when pointsFirst -> Some GEmpty
+            | _, _, [] -> Some(normalize (removeRepeatedComponents other))
+            | OverlayKind.Intersection, _, _
+            | OverlayKind.Difference, _, _ when kind = OverlayKind.Intersection || pointsFirst ->
+                mixed pointShape pointsFirst (distinctGeographicPoints points) other
+            | _ ->
+                mixed pointShape pointsFirst (distinctGeographicPoints points) (removeRepeatedComponents other)
+
+        let rec subtractPointTree shape other =
+            match shape, other with
+            | GEmpty, _ -> GEmpty
+            | _, GEmpty -> narrowGeographicOverlayShape shape
+            | _, GGeometryCollection members ->
+                let start =
+                    match geographicPointMembers shape with
+                    | Some points -> GMultiPoint points
+                    | None -> shape
+
+                members |> List.fold (fun remaining memberGeometry -> subtractPointTree remaining memberGeometry.Shape) start
+                |> narrowGeographicOverlayShape
+            | _ ->
+                match geographicPointMembers shape, geographicPointMembers other with
+                | Some points, Some otherPoints ->
+                    overlayGeographicPoints OverlayKind.Difference shape points other otherPoints
+                | _ -> shape
+
+        match tryGeographicPointTree left, tryGeographicPointTree right with
+        | Some [], Some _ when kind = OverlayKind.SymmetricDifference && rightCollection ->
+            Some(cleanGeographicPointTree right)
+        | Some [], Some rightPoints ->
+            match kind with
+            | OverlayKind.Intersection | OverlayKind.Difference -> Some GEmpty
+            | _ -> Some(geographicPointResult rightPoints)
+        | Some leftPoints, Some [] ->
+            if kind = OverlayKind.Intersection then Some GEmpty
+            else Some(geographicPointResult leftPoints)
+        | Some leftPoints, Some rightPoints when kind = OverlayKind.Union ->
+            // Flatten both inputs before deduplication so the first
+            // representative is selected across the complete input order.
+            Some(geographicPointResult (if leftCollection then leftPoints @ rightPoints else rightPoints @ leftPoints))
+        | Some leftPoints, Some rightPoints ->
+            let leftPoints = if leftCollection then distinctGeographicPoints leftPoints else leftPoints
+            let rightPoints = if rightCollection then distinctGeographicPoints rightPoints else rightPoints
+            let leftShape = if leftCollection then GMultiPoint leftPoints else left
+            let rightShape = if rightCollection then GMultiPoint rightPoints else right
+            match kind with
+            | OverlayKind.Difference when rightCollection -> Some(subtractPointTree leftShape right)
+            | OverlayKind.Intersection when rightCollection ->
+                Some(overlayGeographicPoints kind rightShape rightPoints leftShape leftPoints)
+            | OverlayKind.SymmetricDifference when leftCollection && not rightCollection ->
+                Some(overlayGeographicPoints kind rightShape rightPoints leftShape leftPoints)
+            | OverlayKind.SymmetricDifference when leftCollection && rightCollection ->
+                // The right result has already been narrowed when the left points are applied.
+                Some(overlayGeographicPoints kind leftShape leftPoints (geographicPointResult rightPoints) rightPoints)
+            | _ -> Some(overlayGeographicPoints kind leftShape leftPoints rightShape rightPoints)
+        | Some points, None when leftCollection && not rightCollection -> withNonpoint left true points right
+        | None, Some points when rightCollection && not leftCollection -> withNonpoint right false points left
+        | _ -> None
+
     let shape =
         match first.Shape, second.Shape with
         | GEmpty, other
@@ -1674,13 +1824,15 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
             | OverlayKind.Difference when first.Shape = GEmpty -> Some GEmpty
             | _ ->
                 match other with
-                | GGeometryCollection _ -> None
+                | GGeometryCollection _ -> collectionOverlay first.Shape second.Shape
                 | _ -> Some(normalize other)
+        | (GGeometryCollection _ as left), right
+        | left, (GGeometryCollection _ as right) -> collectionOverlay left right
         | left, right ->
             match geographicPointMembers left, geographicPointMembers right with
             | Some points, Some other -> Some(overlayGeographicPoints kind left points right other)
-            | Some points, None -> mixed true points right
-            | None, Some points -> mixed false points left
+            | Some points, None -> mixed left true points right
+            | None, Some points -> mixed right false points left
             | _ -> None
 
     shape |> Option.map result

@@ -612,6 +612,39 @@ let tests =
                           "ST_Difference", "POLYGON((0 0,0 4,4 4,4 0,0 0))", "POINT(3 0)", "POLYGON((0 0,4 0,4 4,0 4,0 0))" ] do
                         Expect.equal (overlay name first second) (VString expected) $"{name} of {first} and {second}"
 
+                testCase "geographic point collections preserve overlay order and shape"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let first = "GEOMETRYCOLLECTION(POINT(3 0),POINT(1 0),POINT(2 0),POINT(3 0))"
+                    let second = "GEOMETRYCOLLECTION(POINT(2 0),POINT(1 0),POINT(4 0))"
+                    let nested = "GEOMETRYCOLLECTION(MULTIPOINT((9 0),(9 0)),GEOMETRYCOLLECTION(POINT(3 0),POINT(1 0)),POINT(9 0))"
+                    let empty = "GEOMETRYCOLLECTION EMPTY"
+                    let line = "LINESTRING(0 0,4 0)"
+                    let repeatedLine = "MULTILINESTRING((0 0,4 0),(4 0,0 0),(0 0,2 0,4 0))"
+                    let middle = "GEOMETRYCOLLECTION(POINT(3.00000000000002 0))"
+                    let near = "MULTIPOINT((3.00000000000004 0),(3.00000000000003 0),(3 0))"
+
+                    for name, left, right, expected in
+                        [ "ST_Union", "POINT(9 0)", first, "MULTIPOINT((3 0),(1 0),(2 0),(9 0))"
+                          "ST_Intersection", first, second, "MULTIPOINT((2 0),(1 0))"
+                          "ST_Intersection", second, first, "MULTIPOINT((1 0),(2 0))"
+                          "ST_Difference", first, second, "POINT(3 0)"
+                          "ST_SymDifference", first, "POINT(9 0)", "MULTIPOINT((9 0),(3 0),(1 0),(2 0))"
+                          "ST_SymDifference", first, "GEOMETRYCOLLECTION(POINT(9 0))", "MULTIPOINT((9 0),(3 0),(1 0),(2 0))"
+                          "ST_SymDifference", nested, empty, "MULTIPOINT((9 0),(3 0),(1 0))"
+                          "ST_SymDifference", empty, nested, "GEOMETRYCOLLECTION(MULTIPOINT((9 0)),GEOMETRYCOLLECTION(POINT(3 0),POINT(1 0)))"
+                          "ST_Union", nested, line, "GEOMETRYCOLLECTION(LINESTRING(0 0,4 0),POINT(9 0))"
+                          "ST_SymDifference", nested, line, "GEOMETRYCOLLECTION(LINESTRING(0 0,4 0),MULTIPOINT((9 0)))"
+                          "ST_Union", repeatedLine, nested, "GEOMETRYCOLLECTION(LINESTRING(0 0,4 0),POINT(9 0))"
+                          "ST_Union", middle, "GEOMETRYCOLLECTION(POINT(3.00000000000001 0),POINT(3 0))", "MULTIPOINT((3.00000000000002 0),(3 0))"
+                          "ST_Difference", middle, near, "POINT(3.00000000000002 0)"
+                          "ST_SymDifference", middle, near, "MULTIPOINT((3.00000000000004 0),(3 0),(3.00000000000002 0))"
+                          "ST_Difference", "MULTIPOINT((3 0),(3.00000000000002 0),(3.00000000000004 0))", "GEOMETRYCOLLECTION(POINT(3.00000000000002 0),MULTIPOINT((3.00000000000003 0),(3.00000000000004 0),(3.00000000000001 0)))", empty ] do
+                        let result = call name [ geometry left; geometry right ]
+                        Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "collection overlays retain the SRID"
+                        Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{name} of {left} and {right}"
+
                 testCase "planar overlays and buffers cover non-point geometry"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]

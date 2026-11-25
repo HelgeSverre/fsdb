@@ -3060,6 +3060,10 @@ implementation effort:
    cover point membership on lines and in polygons, including hole boundaries.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
+   [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)
+   also participate in geographic overlays, including nested members and
+   operation-specific result order. Collections with higher-dimensional
+   members and collection unions that dissolve multiple polygons remain open.
    Broader geographic polygon relation and precision rules remain open;
    these samples do not establish general intersection parity.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
