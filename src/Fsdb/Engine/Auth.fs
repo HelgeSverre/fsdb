@@ -2892,8 +2892,10 @@ let internal requiredUpdateJoinReadsInStore store defaultDb (update: UpdateStmt)
 let private deleteColumnRequirements store defaultDb (delete: DeleteStmt) =
     let cteNames = mutationCteNames delete.Ctes
 
+    let initial = sourcesForItem store defaultDb cteNames (FromTable delete.From) |> List.exactlyOne
+
     let scope =
-        mutationJoinScope store defaultDb cteNames (physicalSource store defaultDb delete.From) delete.Joins
+        mutationJoinScope store defaultDb cteNames initial delete.Joins
     let sources, joinRequirements = scope.Sources, scope.Requirements
 
     let expressions =
@@ -3104,17 +3106,26 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
                       | source -> fromItemReadTablesIn boundCtes defaultDb source)))
             |> List.distinct
 
-        let deletedTables =
-            (d.From.Database |> Option.defaultValue defaultDb, d.From.Table)
-            :: (d.Joins
-                |> List.collect (fun join -> FromItem.leaves join.Table)
-                |> List.choose (function
-                    | FromTable table when table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) boundCtes -> None
-                    | FromTable table -> Some(table.Database |> Option.defaultValue defaultDb, table.Table)
-                    | _ -> None))
+        let sources =
+            (FromTable d.From :: (d.Joins |> List.map _.Table))
+            |> List.collect FromItem.leaves
+            |> List.choose (function
+                | FromTable table when table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) boundCtes -> None
+                | FromTable table -> Some table
+                | _ -> None)
 
-        onTables "DELETE" deletedTables
-        @ onTables "SELECT" ((cteTables @ readInExprs) |> List.distinct)
+        let targets, readSources =
+            if d.Joins.IsEmpty then sources, []
+            else
+                sources
+                |> List.partition (fun table ->
+                    let name = table.Alias |> Option.defaultValue table.Table
+                    d.Targets |> List.exists (eqI name))
+
+        let relation (table: TableRef) = table.Database |> Option.defaultValue defaultDb, table.Table
+
+        onTables "DELETE" (targets |> List.map relation)
+        @ onTables "SELECT" (cteTables @ (readSources |> List.map relation) @ readInExprs |> List.distinct)
     | CreateTable table ->
         let target = split table.Name
         onTables "CREATE" [ target ]

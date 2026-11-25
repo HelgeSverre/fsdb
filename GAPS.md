@@ -1291,6 +1291,14 @@ the [`EXCEPT ALL`/`INTERSECT ALL` multiset follow-up](torture/findings/2026-11-0
 also preserves duplicate read rows while updating the physical target once.
 Other set-operation compositions and layered security contexts remain open.
 
+[Multi-table DELETE with a joined view](torture/findings/2026-11-25-joined-delete-view-targets.md)
+now requires SELECT on the view when it serves as a read source. Naming a
+join view as a delete target returns 1395, and naming a read-only view
+returns 1288. A leading CTE now remains bound, including when it shadows
+a stored relation. MySQL also permits a mergeable single-table view as a target
+in this syntax, including a nested view with renamed columns. Mapping that
+target to its physical rows remains open.
+
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
 now has a native MySQL contract and fsdb regression: duplicate derived rows
 update the physical target once, and a cascaded check rejects a value that

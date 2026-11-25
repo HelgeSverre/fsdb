@@ -21,7 +21,58 @@ let private expectStoredPassword password columns row message =
 let tests =
     testList
         "Accounts and privileges"
-        [ testCase "CURRENT_USER()/USER()/SESSION_USER() report the session's user, not a hardcoded name"
+        [ testCase "joined DELETE requires SELECT on a view used only as a source"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root =
+                  [ "CREATE TABLE delete_target(id INT PRIMARY KEY)"
+                    "CREATE TABLE delete_subject(id INT PRIMARY KEY, active INT)"
+                    "CREATE TABLE delete_flags(id INT PRIMARY KEY, active INT)"
+                    "INSERT INTO delete_target VALUES(1),(2),(3)"
+                    "INSERT INTO delete_subject VALUES(1,1),(2,1),(3,0)"
+                    "INSERT INTO delete_flags VALUES(1,1),(2,1),(3,1)"
+                    "CREATE VIEW delete_source AS SELECT s.id FROM delete_subject s JOIN delete_flags f USING(id) WHERE s.active=1 AND f.active=1"
+                    "CREATE USER cleanup_writer"
+                    "GRANT DELETE,SELECT ON fsdb.delete_target TO cleanup_writer"
+                    "GRANT SELECT (id) ON fsdb.delete_source TO cleanup_writer" ]
+                  |> List.fold (fun session sql ->
+                      let session, result = handle session sql
+                      match result with
+                      | Affected _ -> session
+                      | other -> failtestf "%s returned %A" sql other) root
+
+              let writer = { create 2 store with User = "cleanup_writer" }
+              let writer, first = handle writer "DELETE t FROM delete_target t JOIN delete_source v ON v.id=t.id WHERE t.id=1"
+              Expect.equal first (Affected 1UL) "one column grant is enough to read the joined view"
+              let writer, second = handle writer "DELETE FROM t USING delete_source v JOIN delete_target t ON TRUE WHERE t.id=2"
+              Expect.equal second (Affected 1UL) "read access is sufficient even without referencing a view column"
+              let writer, fromCte =
+                  handle writer "WITH active AS (SELECT id FROM delete_source) DELETE t FROM active JOIN delete_target t ON active.id=t.id WHERE t.id=3"
+              Expect.equal fromCte (Affected 0UL) "a leading CTE only requires access to its inputs"
+
+              match handle writer "DELETE v FROM delete_target t JOIN delete_source v ON v.id=t.id" |> snd |> errorInfo with
+              | Some error when error.Code = 1142 ->
+                  Expect.equal error.State "42000" "MySQL SQLSTATE"
+                  Expect.stringContains error.Message "DELETE command denied" "the named target still requires DELETE"
+              | other -> failtestf "expected a DELETE privilege denial, got %A" other
+
+              let root, revoked = handle root "REVOKE SELECT (id) ON fsdb.delete_source FROM cleanup_writer"
+              Expect.equal revoked (Affected 0UL) "revoke the only view grant"
+              for sql in
+                  [ "DELETE t FROM delete_target t JOIN delete_source v ON v.id=t.id WHERE t.id=3"
+                    "DELETE t FROM delete_target t JOIN delete_source v ON TRUE WHERE t.id=3" ] do
+                  match handle writer sql |> snd |> errorInfo with
+                  | Some error when error.Code = 1142 ->
+                      Expect.equal error.State "42000" "MySQL SQLSTATE"
+                      Expect.stringContains error.Message "SELECT command denied" "no view access remains"
+                  | other -> failtestf "expected a SELECT privilege denial, got %A" other
+
+              match handle root "SELECT id FROM delete_target ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected only the unmodified target row, got %A" other
+
+          testCase "CURRENT_USER()/USER()/SESSION_USER() report the session's user, not a hardcoded name"
           <| fun _ ->
               let session = { create 1 (Fsdb.Storage.create ()) with User = "alice" }
 

@@ -56,6 +56,35 @@ let tests =
                   [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ]
                   "rejected mutation preserves the physical target"
 
+          testCase "joined DELETE classifies stored view targets before filtering rows"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE delete_left(id INT PRIMARY KEY)"
+                    "CREATE TABLE delete_right(id INT PRIMARY KEY)"
+                    "INSERT INTO delete_left VALUES(1)"
+                    "INSERT INTO delete_right VALUES(1)"
+                    "CREATE VIEW delete_joined AS SELECT l.id FROM delete_left l JOIN delete_right r ON l.id=r.id"
+                    "CREATE VIEW delete_layered AS SELECT id FROM delete_joined"
+                    "CREATE VIEW delete_outer AS SELECT l.id FROM delete_left l LEFT JOIN delete_right r ON l.id=r.id"
+                    "CREATE ALGORITHM=TEMPTABLE VIEW delete_materialized AS SELECT id FROM delete_left" ] do
+                  expectOk (run store sql) sql
+
+              for sql, expected in
+                  [ "DELETE v FROM delete_joined v JOIN delete_right r ON r.id=v.id", Err(1395, "Can not delete from join view 'fsdb.delete_joined'")
+                    "DELETE v FROM delete_right r JOIN delete_layered v ON r.id=v.id WHERE 1=0", Err(1395, "Can not delete from join view 'fsdb.delete_layered'")
+                    "DELETE v FROM delete_right r JOIN delete_joined v ON r.id=v.id WHERE missing=0", Err(1395, "Can not delete from join view 'fsdb.delete_joined'")
+                    "DELETE v FROM delete_right r JOIN delete_outer v ON r.id=v.id", Err(1288, "The target table v of the DELETE is not updatable")
+                    "DELETE v FROM delete_right r JOIN delete_materialized v ON r.id=v.id", Err(1288, "The target table v of the DELETE is not updatable")
+                    "WITH delete_joined AS (SELECT id FROM delete_left) DELETE v FROM delete_right r JOIN delete_joined v ON r.id=v.id",
+                        Err(1288, "The target table v of the DELETE is not updatable")
+                    "WITH delete_left AS (SELECT id FROM delete_right) DELETE FROM delete_left WHERE id=1",
+                        Err(1288, "The target table delete_left of the DELETE is not updatable") ] do
+                  Expect.equal (run store sql) expected sql
+
+              Expect.equal (rows store "SELECT id FROM delete_left") [ [ Some "1" ] ] "the left base row remains"
+              Expect.equal (rows store "SELECT id FROM delete_right") [ [ Some "1" ] ] "the right base row remains"
+
           testCase "window CTE natural join can update a nested checked view"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

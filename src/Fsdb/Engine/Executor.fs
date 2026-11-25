@@ -2997,6 +2997,9 @@ let private unknownColumn name = unknownColumnIn FieldList name
 let private nonUpdatableTarget operation target : EvalError =
     1288, sprintf "The target table %s of the %s is not updatable" target operation
 
+let private joinViewDeleteError (view: UpdatableView) : EvalError =
+    1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName
+
 let private validateReferencesWith resolve expression =
     Expression.collect (function
         | Col name -> Some(None, name)
@@ -13892,9 +13895,17 @@ and private mutationSourceQuery from joins ctes expressions : SelectStmt =
       Offset = None
       Locking = [] }
 
-and private referencedMutationCtes (ctes: CommonTableExpr list) (joins: Join list) (expressions: Expr list) =
-    let query = mutationSourceQuery None joins [] expressions
+and private referencedMutationCtes (ctes: CommonTableExpr list) from joins expressions =
+    let query = mutationSourceQuery from joins [] expressions
     referencedCtes ctes (selectOrUnionTableNames (PlainSelect query))
+
+and private referencedDeleteCtes (delete: DeleteStmt) =
+    let expressions =
+        Option.toList delete.Where
+        @ (delete.OrderBy |> List.map fst)
+        @ Option.toList delete.Limit
+
+    referencedMutationCtes delete.Ctes (Some(FromTable delete.From)) delete.Joins expressions
 
 and private tryMergeDirectView
     (store: Store)
@@ -27057,7 +27068,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             @ Option.toList u.Where
             @ (u.OrderBy |> List.map fst)
             @ Option.toList u.Limit
-        let ctes = referencedMutationCtes u.Ctes u.Joins expressions
+        let ctes = referencedMutationCtes u.Ctes None u.Joins expressions
         withCteQueryResult store registry dbName ctes (fun () -> explainStatement format store registry dbName (Update { u with Ctes = [] }))
     | Update u ->
         let id = nextId ()
@@ -27073,11 +27084,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 explainJoinBlock store registry dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs 0 None consumption)
         )
     | Delete d when not d.Ctes.IsEmpty ->
-        let expressions =
-            Option.toList d.Where
-            @ (d.OrderBy |> List.map fst)
-            @ Option.toList d.Limit
-        let ctes = referencedMutationCtes d.Ctes d.Joins expressions
+        let ctes = referencedDeleteCtes d
         withCteQueryResult store registry dbName ctes (fun () -> explainStatement format store registry dbName (Delete { d with Ctes = [] }))
     | Delete d ->
         let id = nextId ()
@@ -30403,15 +30410,11 @@ let rec executeAs
             @ Option.toList update.Where
             @ (update.OrderBy |> List.map fst)
             @ Option.toList update.Limit
-        let ctes = referencedMutationCtes update.Ctes update.Joins expressions
+        let ctes = referencedMutationCtes update.Ctes None update.Joins expressions
 
         executeWithMutationCtes ctes (Update { update with Ctes = [] })
     | Delete delete when not delete.Ctes.IsEmpty ->
-        let expressions =
-            Option.toList delete.Where
-            @ (delete.OrderBy |> List.map fst)
-            @ Option.toList delete.Limit
-        let ctes = referencedMutationCtes delete.Ctes delete.Joins expressions
+        let ctes = referencedDeleteCtes delete
 
         executeWithMutationCtes ctes (Delete { delete with Ctes = [] })
     | SetTriggerNew _ -> ids, Err(1064, "SET NEW is only valid in a trigger body")
@@ -31861,7 +31864,7 @@ let rec executeAs
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the REPLACE is not insertable-into" viewName)
         | Some view when not view.UpdateJoins.IsEmpty ->
-            ids, Err(1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName)
+            ids, Err(joinViewDeleteError view)
         | Some view when not view.Insertable -> ids, Err(1471, sprintf "The target table %s of the REPLACE is not insertable-into" viewName)
         | Some view ->
             let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
@@ -31889,7 +31892,7 @@ let rec executeAs
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the REPLACE is not insertable-into" viewName)
         | Some view when not view.UpdateJoins.IsEmpty ->
-            ids, Err(1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName)
+            ids, Err(joinViewDeleteError view)
         | Some view when not view.Insertable -> ids, Err(1471, sprintf "The target table %s of the REPLACE is not insertable-into" viewName)
         | Some view ->
             let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
@@ -31920,7 +31923,7 @@ let rec executeAs
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the REPLACE is not insertable-into" viewName)
         | Some view when not view.UpdateJoins.IsEmpty ->
-            ids, Err(1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName)
+            ids, Err(joinViewDeleteError view)
         | Some view when not view.Insertable -> ids, Err(1471, sprintf "The target table %s of the REPLACE is not insertable-into" viewName)
         | Some view ->
             match resolveViewInsertTarget view (assignments |> List.map fst), rewriteViewAssignments view assignments with
@@ -32782,13 +32785,19 @@ let rec executeAs
                             ids, Affected(uint64 (if foundRows then matched else List.sum counts))
                         | Error e -> ids, storageErr e)
 
+    | Delete deleteStmt when deleteStmt.Joins.IsEmpty
+                             && deleteStmt.From.Database.IsNone
+                             && (currentCteScope () |> Map.containsKey (deleteStmt.From.Table.ToLowerInvariant())) ->
+        let target = deleteStmt.From.Alias |> Option.defaultValue deleteStmt.From.Table
+        ids, Err(nonUpdatableTarget "DELETE" target)
+
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty && tryStoredView store (deleteStmt.From.Database |> Option.defaultValue dbName) deleteStmt.From.Table |> Option.isSome ->
         let viewDb = deleteStmt.From.Database |> Option.defaultValue dbName
 
         match tryUpdatableView store viewDb deleteStmt.From.Table with
         | None -> ids, Err(nonUpdatableTarget "DELETE" deleteStmt.From.Table)
         | Some view when not view.UpdateJoins.IsEmpty ->
-            ids, Err(1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName)
+            ids, Err(joinViewDeleteError view)
         | Some view ->
             let rewrite = rewriteViewExpression view
             let rewritten =
@@ -32940,8 +32949,23 @@ let rec executeAs
                 deleteStmt.Targets
                 |> traverse (fun t ->
                     match Map.tryFind (t.ToLowerInvariant()) sourceIndex with
-                    | Some i when sources.[i].PhysicalTable.IsSome -> Ok i
-                    | Some _ -> Error(nonUpdatableTarget "DELETE" t)
+                    | Some i ->
+                        match sources.[i].PhysicalTable with
+                        | None -> Error(nonUpdatableTarget "DELETE" t)
+                        | Some tableRef when tableRef.Database.IsNone
+                                             && (currentCteScope () |> Map.containsKey (tableRef.Table.ToLowerInvariant())) ->
+                            Error(nonUpdatableTarget "DELETE" t)
+                        | Some tableRef ->
+                            let database = tableRef.Database |> Option.defaultValue dbName
+
+                            match tryStoredView store database tableRef.Table with
+                            | None -> Ok i
+                            | Some _ ->
+                                match tryUpdatableView store database tableRef.Table with
+                                | None -> Error(nonUpdatableTarget "DELETE" t)
+                                | Some view when not view.UpdateJoins.IsEmpty ->
+                                    Error(joinViewDeleteError view)
+                                | Some _ -> Ok i
                     | None -> Error(1109, sprintf "Unknown table '%s' in MULTI DELETE" t))
             with
             | Error(code, message) -> ids, Err(code, message)
