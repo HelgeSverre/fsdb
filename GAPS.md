@@ -1686,6 +1686,7 @@ the SQL `<` predicate, and a forced indexed `body < '亁文'` range omits
 乾文 in fsdb. Chinese collation ordering, range predicates, and exact
 weight bytes remain open even where full-text
 membership and relevance agree.
+The same ordering gap [changes the top full-text result when scores tie](torture/findings/2026-11-06-zh-0900-han-order.md#full-text-top-result-when-scores-tie).
 The 4,096-character Han ordering audit finds 3,721 displaced positions
 and 41,213 pairwise inversions, so this needs broader Chinese tailoring
 rather than a one-character correction.
