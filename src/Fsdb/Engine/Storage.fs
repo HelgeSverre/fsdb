@@ -4503,20 +4503,39 @@ let internal acquirePreparedInsertWriteTargets
                 | None -> applyLatest ())
     | _ -> ()
 
-let internal waitForTransactionReadKeys timeout (store: Store) dbName tableName keys =
-    match store.TransactionLocks, store.KeyLocks.TryGetValue(lockNamespaceKey dbName tableName) with
-    | Some context, (true, cache) ->
+let internal waitForTransactionReadDependencies timeout (store: Store) dbName tableName keys rowIds =
+    match store.TransactionLocks with
+    | Some context ->
         let deadline = DateTime.UtcNow + timeout
-        for key in List.sortWith (fun left right -> StringComparer.Ordinal.Compare(left, right)) keys do
-            match cache.Entries.TryGetValue key with
-            | true, weak ->
-                match weak.TryGetTarget() with
-                | true, stripe when not (lock context.HeldStripes (fun () -> context.HeldStripes.Contains stripe)) ->
-                    let _, newlyHeld = acquireStripe deadline store.LockWaits dbName context SharedStripe WaitUntilAvailable stripe
-                    if newlyHeld then releaseLockStripes context [ stripe ]
+        let tableKey = lockNamespaceKey dbName tableName
+        let waitFor stripe =
+            if not (lock context.HeldStripes (fun () -> context.HeldStripes.Contains stripe)) then
+                let _, newlyHeld = acquireStripe deadline store.LockWaits dbName context SharedStripe WaitUntilAvailable stripe
+                if newlyHeld then releaseLockStripes context [ stripe ]
+
+        match store.KeyLocks.TryGetValue tableKey with
+        | true, cache when not (List.isEmpty keys) ->
+            for key in List.sortWith (fun left right -> StringComparer.Ordinal.Compare(left, right)) keys do
+                match cache.Entries.TryGetValue key with
+                | true, weak ->
+                    match weak.TryGetTarget() with
+                    | true, stripe -> waitFor stripe
+                    | _ -> ()
                 | _ -> ()
-            | _ -> ()
-    | _ -> ()
+        | _ -> ()
+
+        match store.RowLocks.TryGetValue tableKey with
+        | true, cache when not (List.isEmpty rowIds) ->
+            let indices =
+                rowIds |> List.map (fun rowId -> RowId.value rowId % rowLockStripeCount)
+                |> List.distinct |> List.sort
+
+            for index in indices do
+                match cache.TryGetValue index with
+                | true, stripe -> waitFor stripe
+                | _ -> ()
+        | _ -> ()
+    | None -> ()
 
 let acquireTransactionReadTargets
     (timeout: TimeSpan)
@@ -6843,7 +6862,16 @@ let internal tryOrderedIndexPrefixRangeLookupInTableWith allowed store table ter
 let internal tryOrderedIndexPrefixRangeRowIdsInTableWith allowed store table terms prefixValues lower upper =
     tryOrderedIndexPrefixRangeSliceInTableWith allowed store table terms prefixValues lower upper
     |> Option.map (fun (_, slice, traversal) ->
-        slice.ColumnIndices, slice.AfterLast - slice.First, (orderedEntries traversal slice |> Seq.map _.RowId))
+        let following =
+            match traversal with
+            | Forward -> slice.AfterLast
+            | Backward -> slice.First - 1
+
+        let followingRow =
+            if following >= 0 && following < slice.Entries.Count then Some slice.Entries[following].RowId
+            else None
+
+        slice.ColumnIndices, slice.AfterLast - slice.First, (orderedEntries traversal slice |> Seq.map _.RowId), followingRow)
 
 let internal tryOrderedIndexPrefixRangeLookupWith allowed store dbName tableName terms prefixValues lower upper =
     tableAt store dbName tableName

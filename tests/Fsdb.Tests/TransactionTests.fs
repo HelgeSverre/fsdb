@@ -5784,6 +5784,65 @@ let tests =
                   | ResultSet(_, [ [ Some "20" ]; [ Some "30" ] ]) -> ()
                   | result -> failtestf "expected only the selected parent to change, got %A" result
 
+          testCase "a lower-isolation joined update waits for the range boundary without retaining its lock"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for isolation in [ "READ COMMITTED"; "READ UNCOMMITTED" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  for sql, count in
+                      [ "CREATE TABLE parent (id INT PRIMARY KEY,n INT)", 0UL
+                        "CREATE TABLE partner (id INT,seq INT,delta INT,PRIMARY KEY(id,seq))", 0UL
+                        "CREATE TABLE gate (id INT PRIMARY KEY)", 0UL
+                        "INSERT INTO parent VALUES (1,10)", 1UL
+                        "INSERT INTO gate VALUES (1)", 1UL
+                        "INSERT INTO partner VALUES (1,20,3),(1,22,1),(1,100,7),(1,101,9)", 4UL
+                        "CREATE VIEW active AS SELECT p.id,p.n,s.delta,s.seq FROM parent p JOIN partner s ON p.id=s.id", 0UL ] do
+                      run setup sql (Affected count) |> ignore
+
+                  let owner = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let owner = run owner "UPDATE partner SET delta=99 WHERE id=1 AND seq=100" (Affected 1UL)
+                  let writer = run (create 3 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let writer = run writer "BEGIN" (Affected 0UL)
+                  let update = "UPDATE active a JOIN gate g ON g.id=a.id SET a.n=a.n+a.delta WHERE a.id=1 AND a.seq BETWEEN 20 AND 22 AND a.delta>=3"
+                  let pending = Threading.Tasks.Task.Run(fun () -> handle writer update)
+                  let waited = not (pending.Wait(TimeSpan.FromMilliseconds 200.0))
+                  run owner "COMMIT" (Affected 0UL) |> ignore
+                  Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 5.0)) "the view writer resumes at the boundary"
+                  let writer, result = pending.GetAwaiter().GetResult()
+                  Expect.equal result (Affected 1UL) "only the matching row supplies the update"
+                  Expect.isTrue waited "the writer waits on the first record after its range"
+
+                  let contender = create 4 store
+                  run contender "UPDATE partner SET delta=8 WHERE id=1 AND seq=100" (Affected 1UL) |> ignore
+                  run contender "UPDATE partner SET delta=2 WHERE id=1 AND seq=22" (Affected 1UL) |> ignore
+                  let contender = run contender "BEGIN" (Affected 0UL)
+                  let competing = Threading.Tasks.Task.Run(fun () -> handle contender "UPDATE partner SET delta=9 WHERE id=1 AND seq=20")
+                  let stillLocked = not (competing.Wait(TimeSpan.FromMilliseconds 200.0))
+                  run writer "COMMIT" (Affected 0UL) |> ignore
+                  Expect.isTrue (competing.Wait(TimeSpan.FromSeconds 5.0)) "the matching partner unlocks when the writer commits"
+                  Expect.isTrue stillLocked "the matching partner remains locked until the writer commits"
+                  let contender, result = competing.GetAwaiter().GetResult()
+                  Expect.equal result (Affected 1UL) "the competing write resumes"
+                  run contender "COMMIT" (Affected 0UL) |> ignore
+
+                  run setup "DELETE FROM partner WHERE id=1 AND seq=20" (Affected 1UL) |> ignore
+                  let owner = run (create 5 store) "BEGIN" (Affected 0UL)
+                  let owner = run owner "INSERT INTO partner VALUES (1,21,7)" (Affected 1UL)
+                  let waiter = run (create 6 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let pending = Threading.Tasks.Task.Run(fun () -> handle waiter update)
+                  let waited = not (pending.Wait(TimeSpan.FromMilliseconds 200.0))
+                  run owner "COMMIT" (Affected 0UL) |> ignore
+                  Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 5.0)) "the writer resumes after the insert commits"
+                  Expect.isTrue waited "the writer waits on a qualifying pending insert"
+                  Expect.equal (pending.GetAwaiter().GetResult() |> snd) (Affected 1UL) "the committed insert supplies the update"
+                  Expect.equal (handle setup "SELECT n FROM parent" |> snd |> function ResultSet(_, rows) -> rows | _ -> [])
+                      [ [ Some "20" ] ] "both updates use the committed partner values"
+
           testCase "joined view updates read partner versions without locking at lower isolation levels"
           <| fun _ ->
               for isolation, first, second in [ "READ COMMITTED", "13", "112"; "READ UNCOMMITTED", "109", "208" ] do

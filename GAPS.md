@@ -3014,8 +3014,10 @@ implementation effort:
    composite bounds inferred from an outer physical relation or CTE.
    At READ COMMITTED and READ UNCOMMITTED, the audited standalone form
    uses a nonlocking partner read and retains its writable target lock.
-   MySQL acquires shared partner row locks for the audited larger form,
-   which remains open. An audited
+   The [audited larger form](benchmarks/results/2026-11-25-bound-joined-view-update.md#lower-isolation-range-scans-in-larger-joined-updates)
+   waits on its ordered range boundary and holds shared locks on
+   qualifying partner rows. Other outer read operands and join access
+   paths remain open. An audited
    [nested checked view LEFT JOINed to a window CTE](torture/findings/2026-11-17-nested-window-outer-view.md)
    correctly remains read only, matching MySQL's metadata, rows, CHECK OPTION
    rejection, and mutation rejection. Procedures, functions, and triggers

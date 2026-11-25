@@ -249,6 +249,32 @@ shared record lock on it at `READ COMMITTED` and `READ UNCOMMITTED`.
 It also waits if the first existing record beyond the range is held,
 but `performance_schema.data_locks` showed no retained lock on that
 record after the statement. The equivalent standalone view update
-used a nonlocking read of the partner. Fsdb still uses the nonlocking
-path for these larger statements, so 120 of the 168 lower-isolation
-cases differ on waits or resolved data. [InnoDB statement locks](https://dev.mysql.com/doc/refman/8.4/en/innodb-locks-set.html).
+used a nonlocking read of the partner. Before the follow-up, Fsdb used
+that path for the larger statement too. In the initial matrix, 120 of
+the 168 lower-isolation cases differed on waits or resolved data.
+[InnoDB statement locks](https://dev.mysql.com/doc/refman/8.4/en/innodb-locks-set.html).
+
+## Lower-isolation range scans in larger joined updates
+
+At `READ COMMITTED` and `READ UNCOMMITTED`, the larger joined update
+now waits on matching partner rows and on the first record after its
+range in index traversal order. The boundary can fall in the next key
+prefix. The initial scan also checks published partner inserts and key
+moves, then refreshes the committed snapshot after waiting. The
+transaction retains shared locks on rows passing the partner-local
+predicate. It releases temporary claims on the boundary and on rows
+rejected by that predicate.
+
+The pinned wire comparison matched 172 wait, affected-row, and committed
+value cases across ascending primary and descending secondary indexes,
+both isolation levels, explicit transactions and autocommit, direct and
+CTE-bound larger updates, and standalone controls. Two additional cases
+confirmed the wait at the next key prefix. Six `FOR UPDATE NOWAIT`
+controls matched which partner rows remained locked after updates with
+no residual filter, a selective filter, and a filter rejecting every row.
+The transaction regression also verifies an independent write to the
+released boundary and to a row excluded by the partner filter.
+
+Locking unrelated outer read operands, join shapes without a proven
+partner range, and pending inserts into keyless partners remains open.
+The scan audit used one concurrent owner at a time.

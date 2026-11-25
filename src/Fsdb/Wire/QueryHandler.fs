@@ -2916,47 +2916,74 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
         let timeout = lockWaitTimeout session
         // Functions share the invoking statement's private view and publication boundary.
         let canRefresh = not (insideFunctionOrTrigger session)
-        let refresh (transaction: Transaction) =
-            let baseCatalog, snapshot =
-                if transaction.Isolation = ReadUncommitted then
-                    rebaseReadUncommittedSnapshot session transaction
-                else
-                    rebaseTransactionSnapshot session transaction
+        let lowerJoined =
+            match transaction.Isolation, statement with
+            | (ReadUncommitted | ReadCommitted), Update update when canRefresh && not update.Joins.IsEmpty ->
+                FromTable update.From :: (update.Joins |> List.map _.Table)
+                |> List.collect FromItem.leaves
+                |> List.exists (function
+                    | FromTable source -> Executor.viewExists transaction.Snapshot (source.Database |> Option.defaultValue dbName) source.Table
+                    | _ -> false)
+            | _ -> false
 
+        let refreshCommitted (transaction: Transaction) =
+            let baseCatalog, snapshot = rebaseTransactionSnapshot session transaction
             { transaction with Snapshot = snapshot; BaseCatalog = baseCatalog; Seeded = true }
+
+        let readSnapshot (transaction: Transaction) =
+            if lowerJoined && transaction.Isolation = ReadUncommitted then refreshCommitted transaction
+            else transaction
+
+        let refresh (transaction: Transaction) =
+            if transaction.Isolation = ReadUncommitted then
+                let baseCatalog, snapshot = rebaseReadUncommittedSnapshot session transaction
+                { transaction with Snapshot = snapshot; BaseCatalog = baseCatalog; Seeded = true }
+            else refreshCommitted transaction
 
         let pendingConnection =
             match transaction.Isolation with
             | RepeatableRead | Serializable when canRefresh -> Some session.ConnectionId
+            | _ when lowerJoined -> Some session.ConnectionId
             | _ -> None
 
         let readClaims pending (transaction: Transaction) =
             match transaction.Isolation with
-            // Read-only join partners use the statement's read view at these levels.
+            | (ReadUncommitted | ReadCommitted) when lowerJoined ->
+                Executor.transactionWriteReadClaims Executor.WriteReadScope.JoinedRanges pending transaction.Snapshot registry dbName statement
+            // Standalone joined-view updates use a nonlocking partner read.
             | ReadUncommitted | ReadCommitted -> []
             | RepeatableRead | Serializable ->
-                Executor.transactionWriteReadClaims pending transaction.Snapshot registry dbName statement
+                Executor.transactionWriteReadClaims Executor.WriteReadScope.LockingPartners pending transaction.Snapshot registry dbName statement
 
-        let readTargets = readClaims pendingConnection transaction
-        let pendingKeys = readTargets |> List.filter (fun (_, _, claims) -> not claims.Keys.IsEmpty)
+        let initialReadSnapshot = readSnapshot transaction
+        let readTargets = readClaims pendingConnection initialReadSnapshot
+        let pendingReads =
+            readTargets |> List.filter (fun (_, _, claims) -> not (claims.WaitKeys.IsEmpty && claims.WaitRows.IsEmpty))
+
         let transaction, readTargets =
-            if pendingKeys.IsEmpty then transaction, readTargets
+            if pendingReads.IsEmpty then
+                if readTargets.IsEmpty then transaction, readTargets else initialReadSnapshot, readTargets
             else
-                for database, table, claims in pendingKeys do
-                    Storage.waitForTransactionReadKeys timeout transaction.Snapshot database table claims.Keys
+                for database, table, claims in pendingReads do
+                    Storage.waitForTransactionReadDependencies timeout initialReadSnapshot.Snapshot database table claims.WaitKeys claims.WaitRows
 
-                // A committed insert has a stable row ID only after refresh.
-                let refreshed = refresh transaction
+                // An owner can commit a new row or move an existing row
+                // across the boundary while the range scan waits.
+                let refreshed = refreshCommitted initialReadSnapshot
                 refreshed, readClaims None refreshed
 
-        let readTargets = readTargets |> List.filter (fun (_, _, claims) -> not claims.RowIds.IsEmpty)
+        let readTargets = readTargets |> List.filter (fun (_, _, claims) -> not claims.RetainedRows.IsEmpty)
 
         let targets =
             Executor.transactionWriteTargets transaction.Snapshot registry dbName statement
             |> List.filter (fun (_, _, target) -> not target.RowIds.IsEmpty || not target.Keys.IsEmpty)
 
         match targets, readTargets with
-        | [], [] -> if pendingKeys.IsEmpty then session else { session with Tx = Some transaction }
+        | [], [] ->
+            if pendingReads.IsEmpty then session
+            else
+                let snapshot = if transaction.Isolation = ReadUncommitted then refresh transaction else transaction
+                { session with Tx = Some snapshot }
         | _ ->
             readTargets
             |> List.iter (fun (database, table, claims) ->
@@ -2967,7 +2994,7 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
                     table
                     ShareLock
                     WaitForLocks
-                    claims.RowIds
+                    claims.RetainedRows
                 |> ignore)
             targets
             |> List.iter (fun (database, table, target) ->

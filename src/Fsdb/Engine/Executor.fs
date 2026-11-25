@@ -26316,7 +26316,8 @@ type private BoundUpdateRange =
       Lower: (Value * bool) option
       Upper: (Value * bool) option
       CandidateCount: int
-      RowIds: RowId seq }
+      RowIds: RowId seq
+      FollowingRow: RowId option }
 
 type private BoundUpdateAccess =
     | UpdatePrimary of WriteLockTargets
@@ -26347,7 +26348,7 @@ let private tryBoundUpdateRange store where (source: BoundUpdateSource) =
 
                     Storage.tryOrderedIndexPrefixRangeRowIdsInTableWith
                         (equalsIgnoreCase index.Name) store table terms prefixValues range.Lower range.Upper
-                    |> Option.map (fun (indices, count, ids) ->
+                    |> Option.map (fun (indices, count, ids, following) ->
                         { IndexName = index.Name
                           ColumnIndices = indices
                           Terms = terms
@@ -26355,7 +26356,8 @@ let private tryBoundUpdateRange store where (source: BoundUpdateSource) =
                           Lower = range.Lower
                           Upper = range.Upper
                           CandidateCount = count
-                          RowIds = ids }))))
+                          RowIds = ids
+                          FollowingRow = following }))))
         |> List.sortBy _.CandidateCount
         |> List.tryHead
 
@@ -34801,16 +34803,31 @@ let transactionWriteTargets
         |> Option.toList
     | _ -> []
 
-let private tryJoinedRangeReadTargets store (database: string) (source: BoundUpdateSource) range pendingConnection =
+[<RequireQualifiedAccess>]
+type internal WriteReadScope =
+    | LockingPartners
+    | JoinedRanges
+
+type internal WriteReadDependencies =
+    { RetainedRows: RowId list
+      WaitKeys: string list
+      WaitRows: RowId list }
+
+let private tryJoinedRangeReadTargets scope store (database: string) (source: BoundUpdateSource) range retains (pendingConnection: int option) =
     let databaseKey = database.ToLowerInvariant()
     let tableKey = source.Reference.Table.ToLowerInvariant()
     let tableIn catalog = catalog |> Map.tryFind databaseKey |> Option.bind (Map.tryFind tableKey)
+    let transientBoundary = scope = WriteReadScope.JoinedRanges && pendingConnection.IsSome
+    let lockingPartners = scope = WriteReadScope.LockingPartners
+    let empty = { RetainedRows = []; WaitKeys = []; WaitRows = [] }
 
     // A moved row retains its identity across snapshots. A new row has
     // only its insertion key in common until the transaction publishes it.
     TransactionRegistry.entries store
     |> List.choose (fun (connection, transaction) ->
-        if Some connection <> pendingConnection && Set.contains (databaseKey, tableKey) transaction.ChangedTables then
+        if (lockingPartners || transientBoundary)
+           && Some connection <> pendingConnection
+           && Set.contains (databaseKey, tableKey) transaction.ChangedTables then
             match tableIn transaction.BaseCatalog, tableIn transaction.Catalog with
             | Some original, Some table when not (obj.ReferenceEquals(table, source.Table)) -> Some(original, table)
             | _ -> None
@@ -34829,27 +34846,49 @@ let private tryJoinedRangeReadTargets store (database: string) (source: BoundUpd
             |> Option.map _.Keys
             |> Option.defaultValue []
 
+        let addDependency retain claims rowId =
+            match original.RowsArray.TryFind rowId, pendingConnection with
+            | Some _, _ when (source.Table.RowsArray.TryFind rowId).IsSome ->
+                if retain then { claims with RetainedRows = rowId :: claims.RetainedRows }
+                else { claims with WaitRows = rowId :: claims.WaitRows }
+            | None, Some _ -> { claims with WaitKeys = insertedKeys rowId @ claims.WaitKeys }
+            | _ -> claims
+
         Storage.tryOrderedIndexPrefixRangeRowIdsInTableWith
             (equalsIgnoreCase range.IndexName) store table range.Terms range.PrefixValues range.Lower range.Upper
-        |> Option.map (fun (_, _, rowIds) ->
-            rowIds |> Seq.fold (fun (claims: WriteLockTargets) rowId ->
-                match original.RowsArray.TryFind rowId, pendingConnection with
-                | Some _, _ when (source.Table.RowsArray.TryFind rowId).IsSome -> { claims with RowIds = rowId :: claims.RowIds }
-                | None, Some _ -> { claims with Keys = insertedKeys rowId @ claims.Keys }
-                | _ -> claims) { RowIds = []; Keys = [] }))
+        |> Option.map (fun (_, _, rowIds, following) ->
+            let boundary =
+                if transientBoundary then following |> Option.fold (addDependency false) empty
+                else empty
+
+            rowIds |> Seq.fold (addDependency lockingPartners) boundary))
     |> tryAllSome
     |> Option.map (fun pending ->
-        { RowIds = (List.ofSeq range.RowIds) @ (pending |> List.collect _.RowIds)
-          Keys = pending |> List.collect _.Keys })
+        let rows = List.ofSeq range.RowIds
+        { RetainedRows = (List.filter retains rows) @ (pending |> List.collect _.RetainedRows)
+          WaitKeys = pending |> List.collect _.WaitKeys
+          WaitRows =
+            (if transientBoundary then rows @ Option.toList range.FollowingRow else [])
+            @ (pending |> List.collect _.WaitRows) })
 
 let internal transactionWriteReadClaims
+    (scope: WriteReadScope)
     (pendingConnection: int option)
     (store: Store)
     (registry: Registry)
     (dbName: string)
     (statement: Statement)
-    : (string * string * WriteLockTargets) list =
+    : (string * string * WriteReadDependencies) list =
     let literalEqualities = optionalConjuncts >> qualifiedLiteralEqualities
+    let localConjuncts qualifier where =
+        where
+        |> optionalConjuncts
+        |> List.filter (fun expression ->
+            not (Expression.exists (function
+                | QualifiedCol(owner, _) -> not (equalsIgnoreCase owner qualifier)
+                | Col _ -> true
+                | _ -> false) expression))
+
     let joinedEqualities (first: TableRef) joins =
         let explicit =
             joins
@@ -34925,7 +34964,7 @@ let internal transactionWriteReadClaims
                 reachable Set.empty [ owner, column ]
                 |> Option.map (fun targetColumn -> BinOp(Eq, QualifiedCol(qualifier, targetColumn), value)))
     match statement with
-    | Update original ->
+    | Update original when scope = WriteReadScope.LockingPartners || not original.Joins.IsEmpty ->
         let update = writableViewFirst store dbName original
         let viewSources =
             FromTable update.From :: (update.Joins |> List.map _.Table)
@@ -34997,13 +35036,7 @@ let internal transactionWriteReadClaims
                         if update.Joins.IsEmpty then
                             update.Where |> Option.map (rewriteViewExpression view)
                         else
-                            update.Where
-                            |> optionalConjuncts
-                            |> List.filter (fun expression ->
-                                not (Expression.exists (function
-                                    | QualifiedCol(owner, _) -> not (equalsIgnoreCase owner viewQualifier)
-                                    | Col _ -> true
-                                    | _ -> false) expression))
+                            localConjuncts viewQualifier update.Where
                             |> List.map (rewriteViewExpression view)
                             |> List.fold (fun predicate expression -> combineViewPredicate predicate (Some expression)) None
 
@@ -35042,7 +35075,7 @@ let internal transactionWriteReadClaims
                             boundUpdateJoinKeys store dbName view.UpdateFrom view.UpdateJoins rangePredicate
                             |> Option.bind (fun sources ->
                                 chooseBoundUpdateAccess store dbName rangePredicate sources
-                                |> Option.map (fun accesses -> sources, accesses)))
+                                |> Option.map (fun accesses -> sources, accesses, rangePredicate)))
 
                     let sourcePredicate (source: TableRef) =
                         let qualifier = source.Alias |> Option.defaultValue source.Table
@@ -35082,31 +35115,59 @@ let internal transactionWriteReadClaims
                             if sourceKey = targetKey then None
                             else
                                 physicalFastPathTable store dbName source
-                                |> Option.map (fun table ->
+                                |> Option.bind (fun table ->
                                     let indexedRows () = table.RowsArray.Indexed |> Seq.map fst |> Seq.toList
+                                    let fallback rows =
+                                        if scope = WriteReadScope.LockingPartners then
+                                            Some { RetainedRows = rows (); WaitKeys = []; WaitRows = [] }
+                                        else None
+
                                     let claims =
-                                        if materialized then { RowIds = indexedRows (); Keys = [] }
+                                        if materialized then fallback indexedRows
                                         else
                                             let qualifier = (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant()
                                             let rangeClaims =
-                                                accesses.Value |> Option.bind (fun (sources, chosen) ->
+                                                accesses.Value |> Option.bind (fun (sources, chosen, rangePredicate) ->
                                                     match Map.tryFind qualifier chosen with
                                                     | Some(UpdateRange range) ->
-                                                        let pending =
-                                                            if chosen |> Map.exists (fun _ -> function UpdatePrimary claim -> claim.RowIds.IsEmpty | _ -> false) then None
-                                                            else pendingConnection
-                                                        tryJoinedRangeReadTargets store sourceDatabase sources[qualifier] range pending
+                                                        let absent =
+                                                            chosen |> Map.exists (fun _ -> function UpdatePrimary claim -> claim.RowIds.IsEmpty | _ -> false)
+                                                        let pending = if absent then None else pendingConnection
+                                                        let inverted =
+                                                            match range.Lower, range.Upper with
+                                                            | Some(lower, includesLower), Some(upper, includesUpper) ->
+                                                                let comparison = Value.compare lower upper
+                                                                comparison > 0 || (comparison = 0 && not (includesLower && includesUpper))
+                                                            | _ -> false
+                                                        if scope = WriteReadScope.JoinedRanges && (absent || inverted) then None
+                                                        else
+                                                            let source = sources[qualifier]
+                                                            let retains =
+                                                                if scope = WriteReadScope.LockingPartners then fun _ -> true
+                                                                else
+                                                                    let local =
+                                                                        localConjuncts qualifier rangePredicate
+                                                                        |> List.fold (fun combined expression ->
+                                                                            combineViewPredicate combined (Some expression)) None
+
+                                                                    let columns = source.Table.Columns
+                                                                    let context = contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None
+                                                                    let matches = prepareWhereMatches context local
+                                                                    fun rowId ->
+                                                                        source.Table.RowsArray.TryFind rowId
+                                                                        |> Option.exists (matches >> Result.defaultValue true)
+
+                                                            tryJoinedRangeReadTargets scope store sourceDatabase source range retains pending
                                                     | _ -> None)
 
-                                            rangeClaims |> Option.defaultWith (fun () ->
-                                                let rows =
+                                            rangeClaims |> Option.orElseWith (fun () ->
+                                                fallback (fun () ->
                                                     tryPhysicalCandidates store registry dbName source sourceBound
                                                     |> Option.orElseWith (fun () -> tryPhysicalCandidates store registry dbName source predicate)
                                                     |> Option.map (snd >> List.map fst)
-                                                    |> Option.defaultWith indexedRows
-                                                { RowIds = rows; Keys = [] })
+                                                    |> Option.defaultWith indexedRows))
 
-                                    sourceDatabase, source.Table, claims))
+                                    claims |> Option.map (fun claims -> sourceDatabase, source.Table, claims)))
                 | _ -> []
             | _ -> []
 
@@ -35116,13 +35177,14 @@ let internal transactionWriteReadClaims
         |> List.map (fun (_, sources) ->
             let database, table, _ = List.head sources
             let collect field = sources |> List.collect (fun (_, _, claims) -> field claims) |> List.distinct
-            database, table, { RowIds = collect _.RowIds; Keys = collect _.Keys })
+            database, table,
+            { RetainedRows = collect _.RetainedRows; WaitKeys = collect _.WaitKeys; WaitRows = collect _.WaitRows })
         |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
     | _ -> []
 
 let transactionWriteReadTargets store registry dbName statement =
-    transactionWriteReadClaims None store registry dbName statement
-    |> List.map (fun (database, table, claims) -> database, table, claims.RowIds)
+    transactionWriteReadClaims WriteReadScope.LockingPartners None store registry dbName statement
+    |> List.map (fun (database, table, claims) -> database, table, claims.RetainedRows)
 
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) =
     let root = Auth.account "root" "%"
