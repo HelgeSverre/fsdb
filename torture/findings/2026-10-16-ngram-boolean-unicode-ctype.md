@@ -122,9 +122,17 @@ collations and token sizes 1–10. The oracle refreshes table statistics
 before scoring. The maintained
 multi-column corpus matched all 1,935 queries at sizes 1, 2, 3, 5, and 10.
 
-In the 790-query binary punctuation corpus, mismatches against MySQL's
-optimized full-text index fell from 98 to 90. Eleven queries gained
-parity, while three ASCII uppercase Boolean terms exposed an existing
-phrase-verification difference. A separate wildcard control showed that
-`東京 駅*` matched only `東京` rows on a freshly populated MySQL index
-and included the additional `駅*` rows after full-text optimization.
+The 790-query binary punctuation corpus sets `SESSION
+innodb_ft_enable_stopword=OFF` in both connections before creating the
+index. A `GLOBAL` assignment changes the default for subsequent sessions.
+The earlier corpus used different session settings, which skewed its
+mismatch counts and led to the reported uppercase phrase differences.
+With aligned settings, the three uppercase apostrophe queries agree,
+and the binary phrase oracle now includes them.
+
+Against MySQL's optimized full-text index the corrected corpus found 12
+mismatches before the apostrophe fix and zero after it. Against a freshly
+populated MySQL index the counts were 72 before and 70 after. All 70
+remaining cases involved Boolean wildcards. For example, `東京 駅*`
+matched only `東京` rows on the fresh index and included additional
+`駅*` rows after full-text optimization.

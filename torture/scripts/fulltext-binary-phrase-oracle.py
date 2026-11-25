@@ -49,6 +49,16 @@ def verify(client, _other):
                     expect(f"{collation}{parser} {term} {mode}", matches(client, term, mode), ids)
 
         client.query("DROP TABLE probe.docs;"
+                     f"CREATE TABLE probe.docs(id INT PRIMARY KEY,body TEXT COLLATE {collation},"
+                     "FULLTEXT ft(body) WITH PARSER ngram);"
+                     "INSERT INTO probe.docs VALUES(1,'ABC'),(2,'DEF'),(3,'ABC''DEF'),"
+                     "(4,'東京ABC''DEF'),(5,'abc def'),(6,'北京');"
+                     "ANALYZE TABLE probe.docs")
+        for term, ids in [("ABC''DEF", "NULL"), ("+ABC''DEF", "NULL"), ("ABC''DEF*", "NULL"),
+                          ('"AB"', "1,3,4"), ("abc''def", "5")]:
+            expect(f"{collation} apostrophe {term}", matches(client, term, "IN BOOLEAN MODE"), ids)
+
+        client.query("DROP TABLE probe.docs;"
                      f"CREATE TABLE probe.docs(id INT PRIMARY KEY,body TEXT COLLATE {collation},FULLTEXT ft(body));"
                      "INSERT INTO probe.docs VALUES(1,'orchard Cobalt'),(2,'orchard XX cobalt'),"
                      "(3,'orchard café'),(4,'orchard CAFÉ café'),(5,'zzzz')")

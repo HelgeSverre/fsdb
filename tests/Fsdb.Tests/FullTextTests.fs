@@ -294,6 +294,17 @@ let tests =
                         "\"北京'飯店\"", [ 8; 9 ]; "\"하늘'나라\"", [ 10; 11 ] ] do
                       Expect.equal (booleanScores index query |> Map.keys |> Seq.toList) expected $"{name} {query}"
 
+              let mixedCase =
+                  [ 1, [ "ABC" ]; 2, [ "DEF" ]; 3, [ "ABC'DEF" ]; 4, [ "東京ABC'DEF" ]
+                    5, [ "abc def" ]; 6, [ "北京" ] ]
+              for name in [ "utf8mb4_bin"; "utf8mb4_0900_bin" ] do
+                  let index = buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) (tryFind name |> Option.get) mixedCase
+                  let ids query = booleanScores index query |> Map.keys |> Seq.toList
+                  for query in [ "ABC'DEF"; "+ABC'DEF"; "ABC'DEF*" ] do
+                      Expect.isEmpty (ids query) $"{name} verifies each uppercase word as a multi-gram phrase"
+                  Expect.equal (ids "\"AB\"") [ 1; 3; 4 ] $"{name} retains the uppercase gram in the index"
+                  Expect.equal (ids "abc'def") [ 5 ] $"{name} matches the lowercase phrases"
+
           testCase "general Unicode ngrams retain halfwidth voicing marks in relevance"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 6; Stopwords = StopwordPolicy.BuiltIn }
