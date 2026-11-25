@@ -162,10 +162,26 @@ The maintained multi-column corpus also matched all 1,935 searches at
 token sizes 1, 2, 3, 5, and 10. A durable Fsdb restart after a document
 update preserved the single and repeated prefix scores.
 
-Repeats across compound groups and weighted terms still differ. For
-example, `(東* 東*)` and `>東* 東*` retain a separate score contribution
-for each occurrence in Fsdb. MySQL uses the combined document frequency
-and adds the prefix score once.
+For repeats across groups, Fsdb collects document frequencies from the
+terms visited while evaluating the query. Each returned document uses the
+distinct terms from its matched groups. In the binary fixture, `(東* 東*)`
+therefore scores the same as `東* 東*`. A wildcard exclusion only visits
+postings if its group already has matches, while an exact ngram follows
+the phrase visitor even in an empty group. An exclusion in a subgroup can
+change the relevance of rows that survive outside that subgroup.
+
+Weights adjust the result by up to one point before term relevance is
+added. A soft term only adjusts an existing match. Opposing operators can
+adjust the same row differently if one prefix matches multiple grams.
+For `>東* <東*`, the fixture's first two documents score −0.937984
+and 0.031008. [MySQL 8.4.11 ngram parser](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/plugin/fulltext/ngram_parser/plugin_ngram.cc).
+
+The optimized-index comparison checked membership and relevance on 2,253
+queries across eight UTF-8 collations, including grouped exclusions,
+optional and required groups, opposing weight operators, and phrases.
+All 1,211 differences from the previous Fsdb revision were resolved in
+that corpus at a relative tolerance of 0.00001 and an absolute tolerance
+of 0.0000001 for MySQL's single-precision scores.
 
 In the four-document example, MySQL's fresh-cache score was 0.015610 for
 both matching documents. Cache-dependent wildcard differences remain.

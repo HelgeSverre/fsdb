@@ -1242,67 +1242,147 @@ let private tryRepeatedWordScores candidateIds (view: ReadView<'id>) nodes =
         |> scoreNaturalWordMatches view
         |> Some
 
-let private tryRepeatedNgramScores candidateIds (view: ReadView<'id>) nodes =
+type private NgramScoringKey =
+    | ExactNgram of string
+    | NgramPrefix of string
+
+type private NgramMatch =
+    { Terms: Set<NgramScoringKey>
+      Adjustment: int }
+
+let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
     match view.Rules.Tokenizer with
+    | Words _ -> None
     | Ngrams _ ->
-        let rec unwrap = function
-            | BGroup [ Optional, term ] -> unwrap term
-            | term -> term
-
-        let nodes = nodes |> List.map (fun (operator, term) -> operator, unwrap term)
-
         let keys = function
-            | BWord(word, true) -> [| word.Key, true |]
-            | BWord(word, false) when isExactLookup view.Rules word -> [| word.Key, false |]
-            | BPhrase(words, None) ->
+            | BWord(word, true) -> [| NgramPrefix word.Key |]
+            | BWord(word, false) when isExactLookup view.Rules word -> [| ExactNgram word.Key |]
+            | BPhrase(words, _) ->
                 words
                 |> Array.filter (isBooleanSearchable view.Rules)
-                |> Array.map (fun word -> word.Key, false)
+                |> Array.map (fun word -> ExactNgram word.Key)
             | _ -> [||]
 
-        if nodes
-           |> List.exists (function
-               | (Optional | Must | MustNot), (BWord _ | BPhrase(_, None)) -> false
-               | _ -> true) then
+        let rec leaves nodes =
+            nodes
+            |> Seq.collect (function
+                | _, BGroup children -> leaves children
+                | leaf -> Seq.singleton leaf)
+
+        let rec hasRankAdjustments nodes =
+            nodes |> List.exists (function
+                | (Raise | Lower | Soft), _ -> true
+                | _, BGroup children -> hasRankAdjustments children
+                | _ -> false)
+
+        let frequencies = leaves nodes |> Seq.collect (snd >> keys) |> Seq.countBy id |> Map.ofSeq
+
+        if frequencies |> Map.forall (fun _ count -> count = 1) && not (hasRankAdjustments nodes) then
             None
         else
-            let occurrences =
-                nodes
-                |> List.collect (snd >> keys >> Array.toList)
-                |> List.countBy id
-                |> Map.ofList
+            // A wildcard exclusion visits postings only if its group has matches.
+            // When its key recurs, that decision uses the full index result.
+            let fullScope =
+                leaves nodes
+                |> Seq.exists (function
+                    | MustNot, BWord(word, true) -> frequencies.[NgramPrefix word.Key] > 1
+                    | _ -> false)
 
-            if occurrences |> Map.forall (fun _ count -> count = 1) then
-                None
-            else
-                let results = nodes |> List.map (fun (operator, term) -> operator, keys term, evalTerm candidateIds view term)
+            let scope = if fullScope then None else candidateIds
+            let visits = Collections.Generic.Dictionary<NgramScoringKey, int>()
 
-                results
-                |> List.map (fun (operator, _, matches) -> operator, matches)
-                |> booleanCandidates
-                |> Seq.choose (fun id ->
-                    if results |> List.exists (fun (operator, _, matches) -> operator = MustNot && Map.containsKey id matches) then
-                        None
-                    else
-                        results
-                        |> List.filter (fun (operator, _, matches) -> operator <> MustNot && Map.containsKey id matches)
-                        |> List.collect (fun (_, keys, _) -> Array.toList keys)
-                        |> Set.ofList
-                        |> Seq.sumBy (fun (key, prefix) ->
-                            let count = occurrences.[key, prefix]
-                            let frequency, weight =
-                                if prefix then
-                                    let posting = view.PrefixPostings.[key]
-                                    posting.Rows.[id], prefixWeight view count posting
-                                else
-                                    let rows = view.Postings.[key]
-                                    rows.[id], queryOccurrenceWeight view rows.Count count
+            let adjustmentSteps term id =
+                match term with
+                | BWord(word, true) ->
+                    indexedTokens view.Documents.[id]
+                    |> Seq.filter (prefixKeys view.Collation >> Array.contains word.Key)
+                    |> Seq.distinctBy _.Key
+                    |> Seq.truncate 2
+                    |> Seq.length
+                | _ -> 1
 
-                            float frequency * weight * weight)
-                        |> fun score -> Some(id, score))
-                |> Map.ofSeq
-                |> Some
-    | _ -> None
+            let adjust term id delta current =
+                // The second gram can move a rank from the opposite bound past zero.
+                let steps = if current = -delta then adjustmentSteps term id else 1
+                Math.Clamp(current + steps * delta, -1, 1)
+
+            let rec matchTerm = function
+                | BGroup children -> matchNodes children
+                | term ->
+                    let found = keys term
+                    for key in found do
+                        match visits.TryGetValue key with
+                        | true, count -> visits.[key] <- count + 1
+                        | false, _ -> visits.Add(key, 1)
+
+                    let terms = Set.ofArray found
+                    evalTerm scope view term
+                    |> Map.map (fun _ _ -> { Terms = terms; Adjustment = 0 })
+
+            and matchNodes nodes =
+                // Ordinary terms seed the group before required terms and exclusions.
+                let optional, filters = nodes |> List.partition (fun (op, _) -> op <> Must && op <> MustNot)
+                let required, excluded = filters |> List.partition (fun (op, _) -> op = Must)
+
+                let union matches (operator, term) =
+                    matchTerm term
+                    |> Map.fold (fun matches id incoming ->
+                        matches
+                        |> Map.change id (fun existing ->
+                            match operator, existing with
+                            | Soft, None -> None
+                            | _ ->
+                                let current = existing |> Option.defaultValue incoming
+                                let adjustment =
+                                    match operator with
+                                    | Raise -> adjust term id 1 current.Adjustment
+                                    | Lower | Soft -> adjust term id -1 current.Adjustment
+                                    | _ -> current.Adjustment
+
+                                Some { Terms = Set.union current.Terms incoming.Terms
+                                       Adjustment = adjustment })) matches
+
+                let intersect first matches (_, term) =
+                    matchTerm term
+                    |> Map.fold (fun narrowed id incoming ->
+                        match Map.tryFind id matches with
+                        | Some current ->
+                            let combined =
+                                { Terms = Set.union current.Terms incoming.Terms
+                                  Adjustment = Math.Clamp(current.Adjustment + incoming.Adjustment, -1, 1) }
+                            Map.add id combined narrowed
+                        | None when first -> Map.add id incoming narrowed
+                        | None -> narrowed) Map.empty
+
+                let included = List.fold union Map.empty optional
+                let filtered =
+                    match required with
+                    | first :: rest -> List.fold (intersect false) (intersect true included first) rest
+                    | [] -> included
+
+                (filtered, excluded)
+                ||> List.fold (fun matches (_, term) ->
+                    match term with
+                    | BWord(_, true) when matches.IsEmpty -> matches
+                    | _ -> matchTerm term |> Map.fold (fun matches id _ -> Map.remove id matches) matches)
+
+            let scoreTerm id term =
+                let count = visits.[term]
+                let rows, weight =
+                    match term with
+                    | NgramPrefix key ->
+                        let posting = view.PrefixPostings.[key]
+                        posting.Rows, prefixWeight view count posting
+                    | ExactNgram key ->
+                        let rows = view.Postings.[key]
+                        rows, queryOccurrenceWeight view rows.Count count
+
+                float rows.[id] * weight * weight
+
+            matchNodes nodes
+            |> (if fullScope then restrictScores candidateIds else id)
+            |> Map.map (fun id matched -> float matched.Adjustment + (matched.Terms |> Seq.sumBy (scoreTerm id)))
+            |> Some
 
 let internal booleanScoresInView candidateIds (view: ReadView<'id>) (query: string) =
     let candidateIds = candidatesInView candidateIds view
@@ -1311,7 +1391,7 @@ let internal booleanScoresInView candidateIds (view: ReadView<'id>) (query: stri
        || (candidateIds |> Option.exists Set.isEmpty) then
         Map.empty
     else
-        tryRepeatedNgramScores candidateIds view nodes
+        tryNgramRanking candidateIds view nodes
         |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes)
         |> Option.defaultWith (fun () -> evalNodes candidateIds view nodes)
         |> Map.map (fun _ score -> visibleBooleanScore score)
@@ -1467,7 +1547,7 @@ let internal tryFlatBooleanScoresDictionaryInView
     if onlyExclusions || (candidateIds |> Option.exists Set.isEmpty) then
         flat |> Option.map (fun _ -> Collections.Generic.Dictionary<'id, float>())
     else
-        match tryRepeatedNgramScores candidateIds view nodes
+        match tryNgramRanking candidateIds view nodes
               |> Option.orElseWith (fun () -> tryRepeatedWordScores candidateIds view nodes) with
         | Some scores ->
             let result = Collections.Generic.Dictionary<'id, float>()

@@ -645,7 +645,17 @@ let tests =
                   [ "東*", 0.031219376251101494, 0.015609688125550747
                     "+(東*)", 0.031219376251101494, 0.015609688125550747
                     "東* 東*", 0.062016263604164124, 0.031008131802082062
-                    "+(東*) 東*", 0.062016263604164124, 0.031008131802082062 ] do
+                    "+(東*) 東*", 0.062016263604164124, 0.031008131802082062
+                    "(東* 東*)", 0.062016263604164124, 0.031008131802082062
+                    "(東* 北*) 東*", 0.062016263604164124, 0.031008131802082062
+                    "東* (-東*)", 0.031219376251101494, 0.015609688125550747
+                    "東* (-東* 東海)", 0.062016263604164124, 0.031008131802082062
+                    ">東* 東*", 1.062016248703, 1.031008124352
+                    ">東* >東*", 1.062016248703, 1.031008124352
+                    ">東* <東*", -0.937983751297, 0.031008131802
+                    ">東* (<東*)", 1.062016248703, 1.031008124352
+                    "東* ~東*", -0.937983751297, -0.968991875648
+                    "~東* 東*", 0.062016263604164124, 0.031008131802082062 ] do
                   let scores = booleanScores index query
                   Expect.equal (scores |> Map.keys |> Seq.toList) [ 1; 2 ] query
                   closeTo first scores.[1] $"first matched document for {query}"
@@ -654,6 +664,11 @@ let tests =
               let bounded = tryFlatBooleanScoresDictionaryWithin (Some(set [ 2 ])) index "東*" |> Option.get
               Expect.equal (bounded.Keys |> Seq.toList) [ 2 ] "bounded prefix results"
               closeTo 0.015609688125550747 bounded.[2] "the bounded query keeps corpus-wide document frequency"
+
+              let boundedGroup = booleanScoresWithin (set [ 1 ]) index "東* (-東* 東海)"
+              closeTo 0.062016263604164124 boundedGroup.[1] "an excluded visit can depend on a row outside the candidate set"
+              closeTo 0.090619057417 (booleanScores index "札幌 (-札幌)").[4] "an exact ngram visits its posting inside an empty exclusion group"
+              Expect.isEmpty (booleanScores index "~東*") "a soft term cannot seed an ngram result"
 
               let frequent = build [ 1, "東京 東北 東京 東海 東西"; 2, "東南 東口"; 3, "大阪" ]
               let scores = booleanScores frequent "東*"

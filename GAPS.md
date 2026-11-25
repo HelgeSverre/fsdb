@@ -1728,7 +1728,9 @@ shows cache-dependent wildcard differences on a fresh MySQL index.
 [Short Boolean ngram wildcard ranking](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#short-boolean-ngram-wildcard-ranking)
 now uses the first matching gram's term frequency and counts each
 matching gram's postings toward document frequency on the audited
-optimized MySQL indexes.
+optimized MySQL indexes. Repeated terms share relevance across groups,
+and audited ngram weighting operators adjust the result before each
+matched term contributes its relevance.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.
