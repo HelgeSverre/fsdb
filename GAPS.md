@@ -1717,9 +1717,10 @@ audited exact `WEIGHT_STRING` bytes still differ. Broader Japanese collation
 and parser behavior remains open.
 
 The [Boolean query Unicode character-table gap](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md)
-is closed for audited cases: Boolean word and phrase boundaries now use
-MySQL 8.4's historical Unicode 5.0-draft character set, while natural and
-query-expansion indexing continue to find later-assigned characters.
+is closed for audited cases. Boolean ngram word and phrase boundaries use
+MySQL 8.4's historical Unicode 5.0-draft character set with the boundary
+changes from the collation's lowercase table. Natural and query-expansion
+indexing continue to find later-assigned characters.
 
 The [legacy vertical-punctuation follow-up](torture/findings/2026-10-15-legacy-ngram-punctuation.md#vertical-punctuation-block-follow-up)
 also distinguishes all U+FE10–U+FE19 forms under `utf8mb4_unicode_ci` and

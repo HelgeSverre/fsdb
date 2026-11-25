@@ -186,6 +186,32 @@ let tests =
               Expect.equal (booleanScores index "\"文ſ\"" |> ids) [ 1; 2 ] "the quoted query shares the tailored posting"
               Expect.equal (expansionScores index "文ſ" |> ids) [ 1; 2 ] "expansion stays within the matched equivalence class"
 
+          testCase "Boolean ngram boundaries follow the collation's lowercase table"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let documents =
+                  [ "中Ɥ"; "中ɥ"; "中ẞ"; "中ß"; "中Ꞅ"; "中ꞅ"; "中Ɑ"; "中ɑ"; "中h" ]
+                  |> List.mapi (fun i body -> i + 1, rules, [ body ])
+
+              let ids index query = booleanScores index query |> Map.keys |> Seq.toList
+              for name, turnedH, sharpS, alpha in
+                  [ "utf8mb4_zh_0900_as_cs", [ 1; 2 ], [ 3; 4 ], [ 7; 8 ]
+                    "utf8mb4_ja_0900_as_cs_ks", [ 1; 2 ], [ 3; 4 ], [ 7; 8 ]
+                    "utf8mb4_unicode_520_ci", [], [ 3; 4 ], [ 7; 8 ]
+                    "utf8mb4_unicode_ci", [], [], []
+                    "utf8mb4_0900_bin", [], [], [] ] do
+                  let index = buildIndexWithDocumentSettings rules (tryFind name |> Option.get) documents
+                  for term, expected in [ "中Ɥ", turnedH; "中ẞ", sharpS; "中Ɑ", alpha; "中Ꞅ", [] ] do
+                      let phrase = "\"" + term + "\""
+                      Expect.equal (ids index term) expected (name + " bare " + term)
+                      Expect.equal (ids index phrase) expected (name + " quoted " + term)
+
+              let chinese = tryFind "utf8mb4_zh_0900_as_cs" |> Option.get
+              let cherokee =
+                  buildIndexWithDocumentSettings rules chinese
+                      [ 1, rules, [ "中文Ꭰ" ]; 2, rules, [ "中文ꭰ" ]; 3, rules, [ "中文Ɥ" ]; 4, rules, [ "中文ɥ" ] ]
+              Expect.equal (ids cherokee "\"中文Ꭰ\"") [ 1; 2; 3; 4 ] "the folded Cherokee capital ends the word"
+
           testCase "Unicode 5.2 ngrams share padded space keys but retain Mongolian separator weight"
           <| fun _ ->
               let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get

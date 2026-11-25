@@ -823,8 +823,28 @@ let internal booleanSyntaxErrorInView (view: ReadView<'id>) query =
     | Words _ -> booleanGroupSyntaxError query
     | Ngrams _ -> None
 
+// These are the BMP word-boundary changes after MySQL's collation-specific
+// lowercase conversion. The query keeps its spelling for token lookup.
+let private isUnicode520BooleanNgramChar c =
+    match int c with
+    | 0x03CF | 0x1E9E | 0x2C6D | 0x2C6E | 0x2C6F | 0x2C70 | 0x2C7E | 0x2C7F | 0xA77D -> true
+    | _ -> BooleanWordChars.contains c
+
+let private isUnicode900BooleanNgramChar c =
+    match int c with
+    | code when code >= 0x13A0 && code <= 0x13F4 -> false // Cherokee lowercase letters are outside the historical word table.
+    | 0x037F | 0xA78D | 0xA7AA | 0xA7AB | 0xA7AC | 0xA7AD | 0xA7AE | 0xA7B0 | 0xA7B1 | 0xA7B2 -> true
+    | _ -> isUnicode520BooleanNgramChar c
+
 let private parseBooleanQuery rules (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
     let policy, tokenizer = rules.Stopwords, rules.Tokenizer
+    let isWord =
+        match tokenizer with
+        | Ngrams _ when not (isBinaryCollation collation) ->
+            if collation.Name.Contains("_0900_", StringComparison.Ordinal) then isUnicode900BooleanNgramChar
+            elif collation.Name.EndsWith("_unicode_520_ci", StringComparison.Ordinal) then isUnicode520BooleanNgramChar
+            else BooleanWordChars.contains
+        | _ -> BooleanWordChars.contains
     let mutable i = 0
     let len = query.Length
 
@@ -835,7 +855,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
 
     let readWord () =
         let start = i
-        while i < len && (BooleanWordChars.contains query.[i] || (query.[i] = '\'' && i > start)) do
+        while i < len && (isWord query.[i] || (query.[i] = '\'' && i > start)) do
             i <- i + 1
         let text = query.Substring(start, i - start).Trim('\'')
         tokenWith collation text, text
@@ -843,9 +863,9 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
     let phraseWords phrase =
         let words =
             match tokenizer with
-            | Words _ -> rawTokensBy BooleanWordChars.contains phrase |> Array.map (tokenWith collation)
+            | Words _ -> rawTokensBy isWord phrase |> Array.map (tokenWith collation)
             | Ngrams size ->
-                rawTokensBy BooleanWordChars.contains phrase
+                rawTokensBy isWord phrase
                 |> Array.collect (fun word ->
                     if runeLength word < size then [| tokenWith collation word |]
                     else tokensWith tokenizer collation word)
@@ -919,7 +939,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                         | Ngrams _ -> None
 
                     acc.Add(op, BPhrase(words, proximity))
-                elif BooleanWordChars.contains query.[i] then
+                elif isWord query.[i] then
                     let w, sourceWord = readWord ()
                     let prefix = i < len && query.[i] = '*'
                     if prefix then i <- i + 1

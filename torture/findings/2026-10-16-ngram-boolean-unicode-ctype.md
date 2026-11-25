@@ -46,3 +46,33 @@ including Boolean membership and relevance.
 
 This does not claim that every Boolean operator/phrase edge or collation is
 covered by the sampled corpus. MeCab remains separate.
+
+## Lowercase boundaries in Boolean ngrams
+
+MySQL 8.4.11 applies the collation's lowercase mapping before classifying
+Boolean ngram words. For example, Unicode 9 collations fold `Ɥ` to `ɥ`
+and accept it inside `中Ɥ`. Unicode 5.2 collations accept `中ẞ` through
+its fold to `中ß`. Binary ngram queries use the original classification.
+Folding can also create a boundary. In Chinese 0900, uppercase Cherokee
+`Ꭰ` folds to `ꭰ`, which lies outside the historical classifier.
+
+Comparing `LOWER` for every BMP scalar on the pinned server gives nine
+additional word characters for Unicode 5.2. Unicode 9 adds ten beyond
+those nine and excludes 85 Cherokee capitals that fold to later letters.
+Fsdb applies these boundary changes to the ngram lexer and keeps token
+lookup on the existing posting path.
+
+The wire fixture matched MySQL on all 452 bare and quoted Boolean
+membership checks built from the affected uppercase and lowercase forms.
+A separate Chinese fixture verifies that a folded Cherokee capital ends
+the word. The maintained Chinese 0900 and Unicode 5.2 corpora also match
+all 7,740 searches across token sizes 1–10. The word parser and legacy
+posting case folding have separate differences in the focused fixtures.
+
+The Chinese Latin-extended lane matches all 384 searches at sizes 1 and 2.
+Run it with a Release CLI and native MySQL 8.4.11.
+
+```sh
+uv run --with pymysql torture/scripts/ngram-multicol-oracle.py \
+  --collation utf8mb4_zh_0900_as_cs --legacy-range A780:A7A0 1 2
+```
