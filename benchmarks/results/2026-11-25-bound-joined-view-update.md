@@ -219,3 +219,36 @@ holds changes. `READ UNCOMMITTED` sees the owner's published changes.
 Both wait if the owner holds the target. The transaction regression
 also checks that the next statement sees the newly committed partner
 value and retains the transaction's earlier target write.
+
+## Partner ranges inside a larger joined update
+
+A writable view inside `UPDATE ... JOIN` now uses its internal range to
+prepare partner claims. The range planner considers the view-local
+filter and any same-type signed-integer equality inferred through the
+outer inner joins. Both parts of a composite prefix can come from the
+outer relation, including a pass-through CTE with explicitly renamed
+columns.
+
+At `REPEATABLE READ` and `SERIALIZABLE`, an out-of-range existing row
+remains free to progress. Held or deleted matching rows, key moves, and
+pending inserts inside the range still wait and read the owner's resolved
+state. The regression also checks that a second tenant's data remains
+unchanged.
+
+The pinned MySQL 8.4.11 wire probes matched all 216 cases at these two
+isolation levels. They used single- and two-part target keys, both outer
+source positions, view-local and inferred bounds, CTE operands,
+autocommit and explicit transactions, and owner commit or rollback.
+The baseline had eight differences in the initial 25-case fixture
+because the larger updates waited for unrelated existing rows and
+missed qualifying pending inserts.
+
+The lower-isolation matrix exposed a separate gap. For the audited
+`UPDATE ... JOIN`, MySQL waits on the matching partner and retains a
+shared record lock on it at `READ COMMITTED` and `READ UNCOMMITTED`.
+It also waits if the first existing record beyond the range is held,
+but `performance_schema.data_locks` showed no retained lock on that
+record after the statement. The equivalent standalone view update
+used a nonlocking read of the partner. Fsdb still uses the nonlocking
+path for these larger statements, so 120 of the 168 lower-isolation
+cases differ on waits or resolved data. [InnoDB statement locks](https://dev.mysql.com/doc/refman/8.4/en/innodb-locks-set.html).

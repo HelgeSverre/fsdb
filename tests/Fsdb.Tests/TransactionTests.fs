@@ -5739,6 +5739,51 @@ let tests =
                   | ResultSet(_, [ [ Some value ] ]) -> Expect.equal value (if changed = 1UL then "17" else "10") "committed target value"
                   | actual -> failtestf "expected the committed parent row, got %A" actual
 
+          testCase "a larger joined update reuses its writable view's partner range"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for update in
+                  [ "UPDATE active a JOIN gate g ON g.id=a.id AND g.tenant=a.tenant SET a.n=a.n+a.delta WHERE a.id=1 AND a.tenant=1 AND a.seq BETWEEN 20 AND 22"
+                    "WITH gate_rows AS (SELECT tenant,id FROM gate) UPDATE gate_rows g JOIN active a ON g.id=a.id AND g.tenant=a.tenant SET a.n=a.n+a.delta WHERE g.id=1 AND g.tenant=1 AND a.seq BETWEEN 20 AND 22" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  for sql, count in
+                      [ "CREATE TABLE parent (tenant INT,id INT,n INT,PRIMARY KEY(tenant,id))", 0UL
+                        "CREATE TABLE partner (tenant INT,id INT,seq INT,delta INT,PRIMARY KEY(tenant,id,seq))", 0UL
+                        "CREATE TABLE gate (tenant INT,id INT,PRIMARY KEY(tenant,id))", 0UL
+                        "INSERT INTO parent VALUES (1,1,10),(2,1,30)", 2UL
+                        "INSERT INTO partner VALUES (1,1,20,3),(1,1,100,7),(1,1,1000,9),(2,1,20,12)", 4UL
+                        "INSERT INTO gate VALUES (1,1),(2,1)", 2UL
+                        "CREATE VIEW positive AS SELECT tenant,id,n FROM parent WHERE n>0 WITH CASCADED CHECK OPTION", 0UL
+                        "CREATE VIEW active AS SELECT p.tenant,p.id,p.n,s.delta,s.seq FROM positive p JOIN partner s ON p.id=s.id AND p.tenant=s.tenant", 0UL ] do
+                      run setup sql (Affected count) |> ignore
+
+                  let owner = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let owner = run owner "UPDATE partner SET delta=99 WHERE tenant=1 AND id=1 AND seq=100" (Affected 1UL)
+                  let waiter = run (create 3 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+                  let _, disjoint = handle waiter update
+                  run owner "ROLLBACK" (Affected 0UL) |> ignore
+                  Expect.equal disjoint (Affected 1UL) "the partner row outside the view range remains free to progress"
+
+                  run setup "DELETE FROM partner WHERE tenant=1 AND id=1 AND seq=20" (Affected 1UL) |> ignore
+                  let owner = run (create 4 store) "BEGIN" (Affected 0UL)
+                  let owner = run owner "INSERT INTO partner VALUES (1,1,21,7)" (Affected 1UL)
+                  let waiter = run (create 5 store) "SET innodb_lock_wait_timeout=5" (Affected 0UL)
+                  let pending = Threading.Tasks.Task.Run(fun () -> handle waiter update)
+                  let waited = not (pending.Wait(TimeSpan.FromMilliseconds 200.0))
+                  run owner "COMMIT" (Affected 0UL) |> ignore
+                  Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 5.0)) "the joined update resumes after the insert commits"
+                  Expect.isTrue waited "the joined update waits for the pending partner key"
+                  Expect.equal (pending.GetAwaiter().GetResult() |> snd) (Affected 1UL) "the joined update reads the inserted partner"
+
+                  match handle setup "SELECT n FROM parent ORDER BY tenant,id" |> snd with
+                  | ResultSet(_, [ [ Some "20" ]; [ Some "30" ] ]) -> ()
+                  | result -> failtestf "expected only the selected parent to change, got %A" result
+
           testCase "joined view updates read partner versions without locking at lower isolation levels"
           <| fun _ ->
               for isolation, first, second in [ "READ COMMITTED", "13", "112"; "READ UNCOMMITTED", "109", "208" ] do

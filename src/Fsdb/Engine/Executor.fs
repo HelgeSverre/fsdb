@@ -34934,11 +34934,53 @@ let internal transactionWriteReadClaims
         let outerLiterals = literalEqualities update.Where
         let outerJoins = joinedEqualities update.From update.Joins
 
+        let cteFor (source: TableRef) =
+            if source.Database.IsNone then
+                update.Ctes |> List.tryFind (fun cte -> equalsIgnoreCase cte.CteName source.Table)
+            else None
+
+        let outerSignedBounds =
+            lazy (
+                if update.Joins |> List.forall (fun join -> join.Kind = InnerJoin || join.Kind = StraightJoin) then
+                    let columnTypes =
+                        viewSources
+                        |> List.collect (fun source ->
+                            let qualifier = source.Alias |> Option.defaultValue source.Table
+                            let database = source.Database |> Option.defaultValue dbName
+                            let columns =
+                                match cteFor source with
+                                | Some ({ Body = PlainSelect { From = Some(FromTable input) } } as cte)
+                                    when (cteFor input).IsNone ->
+                                    tryPhysicalProjection store registry dbName (FromSubquery(cte.Body, qualifier))
+                                    |> Option.map (fun projection ->
+                                        let inferred = projection.OutputColumns
+                                        if cte.CteColumns.IsEmpty then inferred
+                                        elif sameLength cte.CteColumns inferred then
+                                            List.map2 (fun name (column: ColumnDef) -> { column with Name = name }) cte.CteColumns inferred
+                                        else [])
+                                    |> Option.defaultValue []
+                                | Some _ -> []
+                                | None ->
+                                    physicalFastPathTable store dbName source
+                                    |> Option.map _.Columns
+                                    |> Option.orElseWith (fun () -> viewColumns store registry database source.Table)
+                                    |> Option.defaultValue []
+
+                            columns |> List.map (fun column -> mutationColumnKey (qualifier, column.Name), column.Type))
+                        |> Map.ofList
+
+                    signedJoinBounds columnTypes outerJoins (optionalConjuncts update.Where)
+                else Map.empty)
+
         let targetsForView (viewRef: TableRef) =
             let database = viewRef.Database |> Option.defaultValue dbName
             let viewQualifier = viewRef.Alias |> Option.defaultValue viewRef.Table
 
-            match tryUpdatableView store database viewRef.Table with
+            let resolvedView =
+                if (cteFor viewRef).IsSome then None
+                else tryUpdatableView store database viewRef.Table
+
+            match resolvedView with
             | Some view when not view.UpdateJoins.IsEmpty ->
                 let written =
                     update.Assignments
@@ -34951,37 +34993,56 @@ let internal transactionWriteReadClaims
 
                 match written with
                 | [ target ] ->
-                    let viewWhere =
+                    let localViewWhere =
                         if update.Joins.IsEmpty then
                             update.Where |> Option.map (rewriteViewExpression view)
                         else
-                            let local =
-                                update.Where
-                                |> optionalConjuncts
-                                |> List.filter (fun expression ->
-                                    not (Expression.exists (function
-                                        | QualifiedCol(owner, _) -> not (equalsIgnoreCase owner viewQualifier)
-                                        | Col _ -> true
-                                        | _ -> false) expression))
-                                |> List.map (rewriteViewExpression view)
-                                |> List.fold (fun predicate expression -> combineViewPredicate predicate (Some expression)) None
-                            let inferred =
-                                boundFor viewQualifier outerJoins outerLiterals
-                                |> Option.map (rewriteViewExpression view)
-                            combineViewPredicate local inferred
+                            update.Where
+                            |> optionalConjuncts
+                            |> List.filter (fun expression ->
+                                not (Expression.exists (function
+                                    | QualifiedCol(owner, _) -> not (equalsIgnoreCase owner viewQualifier)
+                                    | Col _ -> true
+                                    | _ -> false) expression))
+                            |> List.map (rewriteViewExpression view)
+                            |> List.fold (fun predicate expression -> combineViewPredicate predicate (Some expression)) None
 
-                    let predicate = combineViewPredicate viewWhere view.Predicate
+                    let inferred =
+                        boundFor viewQualifier outerJoins outerLiterals
+                        |> Option.map (rewriteViewExpression view)
+                    let predicate = combineViewPredicate (combineViewPredicate localViewWhere inferred) view.Predicate
                     let sourceLiterals = literalEqualities predicate
                     let sourceJoins = joinedEqualities view.UpdateFrom view.UpdateJoins
 
                     let accesses =
                         lazy (
-                            if not (update.Joins.IsEmpty && update.Ctes.IsEmpty) then None
-                            else
-                                boundUpdateJoinKeys store dbName view.UpdateFrom view.UpdateJoins predicate
-                                |> Option.bind (fun sources ->
-                                    chooseBoundUpdateAccess store dbName predicate sources
-                                    |> Option.map (fun accesses -> sources, accesses)))
+                            // The range proof belongs to the view's physical
+                            // sources. Outer equalities need their own type proof
+                            // before they can contribute additional key parts.
+                            let rangeWhere =
+                                if outerLiterals |> List.exists (fun (owner, _, _) -> not (equalsIgnoreCase owner viewQualifier)) then
+                                    let explicitColumns =
+                                        outerLiterals
+                                        |> List.choose (fun (owner, column, _) ->
+                                            if equalsIgnoreCase owner viewQualifier then Some(column.ToLowerInvariant())
+                                            else None)
+                                        |> Set.ofList
+
+                                    outerSignedBounds.Value
+                                    |> Map.fold (fun predicate (owner, column) value ->
+                                        if equalsIgnoreCase owner viewQualifier && not (Set.contains column explicitColumns) then
+                                            BinOp(Eq, QualifiedCol(viewQualifier, column), Lit value)
+                                            |> rewriteViewExpression view
+                                            |> Some
+                                            |> combineViewPredicate predicate
+                                        else predicate) localViewWhere
+                                else localViewWhere
+
+                            let rangePredicate = combineViewPredicate rangeWhere view.Predicate
+                            boundUpdateJoinKeys store dbName view.UpdateFrom view.UpdateJoins rangePredicate
+                            |> Option.bind (fun sources ->
+                                chooseBoundUpdateAccess store dbName rangePredicate sources
+                                |> Option.map (fun accesses -> sources, accesses)))
 
                     let sourcePredicate (source: TableRef) =
                         let qualifier = source.Alias |> Option.defaultValue source.Table

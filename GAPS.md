@@ -3004,13 +3004,18 @@ implementation effort:
    The follow-up carries a complete target key into
    write-lock selection when the filter names the join partner's key.
    The two-connection oracle agrees on disjoint progress, same-key waits,
-   and visibility after a primary-key move. Standalone joined-view updates
+   and visibility after a primary-key move. Joined-view updates
    use the chosen range for partner row claims, including existing rows
    moved into it by a pending transaction. Under repeatable read and
    serializable isolation, the same range detects published partner inserts
    with primary keys and waits before claiming the committed row.
-   Under READ COMMITTED and READ UNCOMMITTED, the partner uses the statement
-   read view and the writable target retains its write lock. An audited
+   A [larger joined statement](benchmarks/results/2026-11-25-bound-joined-view-update.md#partner-ranges-inside-a-larger-joined-update)
+   can also reuse the view range at these isolation levels, including
+   composite bounds inferred from an outer physical relation or CTE.
+   At READ COMMITTED and READ UNCOMMITTED, the audited standalone form
+   uses a nonlocking partner read and retains its writable target lock.
+   MySQL acquires shared partner row locks for the audited larger form,
+   which remains open. An audited
    [nested checked view LEFT JOINed to a window CTE](torture/findings/2026-11-17-nested-window-outer-view.md)
    correctly remains read only, matching MySQL's metadata, rows, CHECK OPTION
    rejection, and mutation rejection. Procedures, functions, and triggers
