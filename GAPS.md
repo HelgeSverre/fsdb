@@ -1298,8 +1298,10 @@ returns 1288. A leading CTE now remains bound, including when it shadows
 a stored relation. [Mergeable single-table view targets](torture/findings/2026-11-25-joined-delete-view-targets.md#writable-target-follow-up)
 now carry physical row identity through nested projections, computed
 columns, and multiple targets. The audited delete waits for a competing
-base-row writer and rechecks view visibility after the wait. More selective
-row locking and indexed predicates inside the view still need coverage.
+base-row writer and rechecks view visibility after the wait. A view layer
+now retains its [physical ngram index scores](torture/findings/2026-11-25-joined-delete-view-targets.md#indexed-match-follow-up)
+through joined DELETE, including when an outer view filters a projected
+score. More selective row locking and temporary-table shadowing remain open.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
 now has a native MySQL contract and fsdb regression: duplicate derived rows

@@ -25374,7 +25374,7 @@ let private prepareDeleteViewSource store registry (stored: StoredView) (view: U
     let marker = "_fsdb_delete_" + System.Guid.NewGuid().ToString("N")
     let invalid () = Err(invalidViewError stored.Schema stored.Name)
 
-    let project registry (layer: StoredView) (input: TableRef) (select: SelectStmt) (columns: ColumnDef list, rows) =
+    let project registry (layer: StoredView) (input: TableRef) (select: SelectStmt) (visibleColumns: ColumnDef list) (columns, rows, rewrite) =
         let qualifier = input.Alias |> Option.defaultValue input.Table
         let identities = rows |> List.map fst |> List.toArray
         let binding =
@@ -25393,9 +25393,12 @@ let private prepareDeleteViewSource store registry (stored: StoredView) (view: U
             |> List.collect (fun projection ->
                 match projection.Expression with
                 | Star owner when owner |> Option.forall (equalsIgnoreCase qualifier) ->
-                    columns
+                    visibleColumns
                     |> List.map (fun column -> Projection.create (QualifiedCol(qualifier, column.Name)) (Some column.Name))
-                | _ -> [ projection ])
+                | expression ->
+                    let rewritten = rewrite expression
+                    if rewritten = expression then [ projection ]
+                    else [ { projection with Expression = rewritten; Alias = Some(projectionLabel projection) } ])
         let source =
             { input with
                 Database = None
@@ -25406,7 +25409,9 @@ let private prepareDeleteViewSource store registry (stored: StoredView) (view: U
         let rewritten =
             { select with
                 From = Some(FromTable source)
-                Projections = projections @ [ Projection.create (QualifiedCol(qualifier, marker)) (Some marker) ] }
+                Projections = projections @ [ Projection.create (QualifiedCol(qualifier, marker)) (Some marker) ]
+                Where = select.Where |> Option.map rewrite
+                OrderBy = select.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction) }
         let names = if layer.Columns.IsEmpty then [] else layer.Columns @ [ marker ]
 
         DynamicScope.withValue cteScope (Map.ofList [ marker, binding ]) (fun () ->
@@ -25420,6 +25425,35 @@ let private prepareDeleteViewSource store registry (stored: StoredView) (view: U
                     Ok(identities.[int index], row.[.. row.Length - 2])
                 | _ -> Error(invalid ()))
             |> Result.map (fun rows -> List.take (output.Length - 1) output, rows))
+
+    let prepareScores schema (input: TableRef) (select: SelectStmt) (columns, rows) =
+        let matchNodes =
+            ((select.Projections |> List.map _.Expression)
+             @ Option.toList select.Where
+             @ (select.OrderBy |> List.map fst))
+            |> List.collect collectMatchAgainst
+            |> List.distinct
+
+        if matchNodes.IsEmpty then
+            Ok(columns, rows, id)
+        else
+            // Score against the original indexed corpus before the view
+            // input becomes a CTE. Keep the physical identity of each row.
+            withoutCteScope (fun () -> fullTextMutationSources viewStore schema input [] matchNodes)
+            |> Result.bind (fun (sources, rewrite) ->
+                let qualifier = input.Alias |> Option.defaultValue input.Table
+
+                match Map.tryFind (qualifier.ToLowerInvariant()) sources with
+                | None -> Error(invalid ())
+                | Some pending ->
+                    pending.Value
+                    |> Result.bind (fun source ->
+                        source.Rows
+                        |> traverse (fun row ->
+                            match source.IdentityOf row with
+                            | Some identity -> Ok(identity, row)
+                            | None -> Error(invalid ()))
+                        |> Result.map (fun scoredRows -> source.Columns, scoredRows, rewrite)))
 
     let rec read registry (layer: StoredView) =
         match parseStoredViewStatement layer with
@@ -25435,7 +25469,10 @@ let private prepareDeleteViewSource store registry (stored: StoredView) (view: U
                         withoutCteScope (fun () -> resolveTableRef viewStore authorized layer.Schema input)
                         |> Result.map (fun (columns, rows) -> columns, rows |> List.map (fun row -> row, row))
 
-                inputRows |> Result.bind (project authorized layer input select))
+                inputRows
+                |> Result.bind (fun ((columns, _) as inputRows) ->
+                    prepareScores layer.Schema input select inputRows
+                    |> Result.bind (project authorized layer input select columns)))
         | _ -> Error(invalid ())
 
     read registry stored

@@ -60,7 +60,18 @@ path. The transaction scheduler conservatively claims the base table's
 rows, then the delete rechecks visibility on the rebased snapshot.
 The focused regressions cover the row counts, trigger rollback, grants,
 and concurrent visibility change. Temporary tables that shadow a view's
-base table still need coverage. A separate probe with a `MATCH` predicate
-inside the target view deleted one row on MySQL and returned 1191 on
-Fsdb. Materializing the view input drops the physical index information
-needed by that predicate.
+base table still need coverage.
+
+## Indexed MATCH follow-up
+
+MySQL 8.4.11 with its default ngram size of two returned IDs 1 and 4 for
+the quoted phrase `東京駅`. A nested view also read a projected score for
+`鉄道`. The joined DELETE removed ID 1, preserved a near match, an
+unrelated document and ID 4, and left only ID 4 in the ngram view.
+The Fsdb baseline at `570bc6f3` returned 1191 during the DELETE.
+
+Fsdb now computes each MATCH score over the physical index before
+materializing the view input. The ordinary projection and filter consume
+those scores alongside the physical identities. Star expansion uses
+the original visible columns, and the join restricts the delete targets
+while the complete indexed corpus determines relevance.

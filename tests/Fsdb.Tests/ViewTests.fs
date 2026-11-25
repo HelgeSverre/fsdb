@@ -123,6 +123,35 @@ let tests =
                   [ [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ]
                   "both targets roll back when a base trigger rejects the delete"
 
+          testCase "joined DELETE uses ngram scores in a nested view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE delete_articles(id INT PRIMARY KEY, body VARCHAR(100), FULLTEXT KEY ix_body(body) WITH PARSER ngram) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
+                    "CREATE TABLE delete_active_ids(id INT PRIMARY KEY)"
+                    "INSERT INTO delete_articles VALUES(1,'東京駅鉄道'),(2,'東京の鉄道駅'),(3,'北京地铁'),(4,'東京駅鉄道')"
+                    "INSERT INTO delete_active_ids VALUES(1),(2),(3)"
+                    "CREATE VIEW delete_scored AS SELECT a.*,MATCH(body) AGAINST ('鉄道' IN BOOLEAN MODE) AS score FROM delete_articles a WHERE MATCH(a.body) AGAINST ('\"東京駅\"' IN BOOLEAN MODE)"
+                    "CREATE VIEW delete_selected AS SELECT * FROM delete_scored WHERE score>0" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT id,body,score>0 FROM delete_selected ORDER BY id")
+                  [ [ Some "1"; Some "東京駅鉄道"; Some "1" ]; [ Some "4"; Some "東京駅鉄道"; Some "1" ] ]
+                  "only the contiguous phrase matches"
+              Expect.equal
+                  (run store "DELETE v FROM delete_active_ids x JOIN delete_selected v ON x.id=v.id WHERE v.score>0")
+                  (Affected 1UL)
+                  "only the matching document present in the join is deleted"
+              Expect.equal
+                  (rows store "SELECT id FROM delete_articles ORDER BY id")
+                  [ [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ]
+                  "the near match, unrelated document and unmatched exact phrase remain"
+              Expect.equal
+                  (rows store "SELECT id FROM delete_selected ORDER BY id")
+                  [ [ Some "4" ] ]
+                  "the ngram view no longer returns the deleted document"
+
           testCase "window CTE natural join can update a nested checked view"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
