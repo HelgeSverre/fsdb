@@ -45,10 +45,8 @@ counts only the matching interval inside the equality prefix.
 ## One-sided bounds
 
 An upper or lower bound can also count the corresponding suffix slice.
-A pair of comparisons still requires one bound in each direction on the
-same suffix. Repeated same-direction predicates and other residual filters
-retain row evaluation. The same null exclusion applies to ascending and
-descending keys, including an upper bound with no lower endpoint.
+The same null exclusion applies to ascending and descending keys,
+including an upper bound with no lower endpoint.
 
 The pinned MySQL 8.4.11 wire check agreed on all 900 result rows across
 ascending and descending nullable SMALLINT suffixes, composite equality
@@ -80,3 +78,25 @@ baseline varied enough across processes that the exact two-sided
 performance effect remains uncertain.
 
 [Per-pass p50 and p95 results](2026-11-25-correlated-one-sided-range-count.csv).
+
+## Intersecting bounds
+
+A correlated `COUNT(*)` can count a single ordered slice when several
+comparisons or `BETWEEN` predicates constrain the same signed-integer
+suffix after the equality prefix. The intersection uses the highest
+lower bound and lowest upper bound. A strict bound wins when endpoints
+tie. Predicates the slice cannot represent keep the ordinary row
+evaluation path.
+
+The pinned MySQL 8.4.11 wire comparison matched 640 counts across the
+unhinted, forced ascending, forced descending, and ignored-index cases.
+The fixture includes equal and contradictory endpoints, nullable columns
+and outer bounds, out-of-domain values, mixed operand directions,
+overlapping `BETWEEN` predicates, and residual filters.
+
+The allocation regression uses 250 parents and 5,000 children. Before
+the change the repeated-upper-bound count allocated 365 MB on the calling
+thread, against 7.2 MB for the existing `BETWEEN` control. A warmed Debug
+probe of the updated executor measured 7.5 MB for repeated upper bounds,
+7.2 MB for repeated lower bounds, and 8.6 MB for a narrowed `BETWEEN`
+interval. The updated `BETWEEN` control used 7.1 MB.

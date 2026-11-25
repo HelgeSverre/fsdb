@@ -19076,16 +19076,11 @@ and private tryCorrelatedIntegerRangeCount (outer: EvalContext) source whereExpr
         optionalConjuncts whereExpr
         |> List.partition (function BinOp(Eq, _, _) -> true | _ -> false)
 
-    let isRangeComparison = function
-        | BinOp((Lt | Lte | Gt | Gte), _, _) -> true
+    let isRangePredicate = function
+        | Between _ | BinOp((Lt | Lte | Gt | Gte), _, _) -> true
         | _ -> false
 
-    let hasRange =
-        match ranges with
-        | [ Between _ ] -> true
-        | [ comparison ] -> isRangeComparison comparison
-        | [ lower; upper ] -> isRangeComparison lower && isRangeComparison upper
-        | _ -> false
+    let hasRange = not ranges.IsEmpty && List.forall isRangePredicate ranges
 
     match source with
     | FromTable tableRef when hasRange && not equalities.IsEmpty && (tryLockingReadRows tableRef).IsNone ->
@@ -19105,10 +19100,35 @@ and private tryCorrelatedIntegerRangeCount (outer: EvalContext) source whereExpr
 
             let pins = equalities |> List.map (tryEqualityPredicate innerColumn bound) |> tryAllSome
 
-            match pins, collectRangeBounds innerColumn bound whereExpr with
-            | Some pins, [ range ]
-                when (ranges.Length = 1 || (range.Lower.IsSome && range.Upper.IsSome))
-                     && (tryDuplicateIgnoreCase fst pins).IsNone ->
+            let tighter isTighter oldBound newBound =
+                match oldBound, newBound with
+                | Some(oldValue, oldInclusive), Some(newValue, newInclusive) ->
+                    let order = Value.compare newValue oldValue
+                    if order = 0 then Some(oldValue, oldInclusive && newInclusive)
+                    elif isTighter order then newBound
+                    else oldBound
+                | _ -> Option.orElse oldBound newBound
+
+            let intersection =
+                ranges
+                |> List.map (fun predicate ->
+                    match rangePredicatesFor innerColumn bound predicate with
+                    | [] -> None
+                    | bounds -> Some bounds)
+                |> tryAllSome
+                |> Option.bind (fun bounds ->
+                    match List.concat bounds with
+                    | first :: rest when rest |> List.forall (fun next -> equalsIgnoreCase first.Column next.Column) ->
+                        rest
+                        |> List.fold (fun current next ->
+                            { current with
+                                Lower = tighter (fun order -> order > 0) current.Lower next.Lower
+                                Upper = tighter (fun order -> order < 0) current.Upper next.Upper }) first
+                        |> Some
+                    | _ -> None)
+
+            match pins, intersection with
+            | Some pins, Some range when (tryDuplicateIgnoreCase fst pins).IsNone ->
                 let values =
                     pins
                     |> List.map (fun (name: string, value) -> name.ToLowerInvariant(), value)

@@ -16081,6 +16081,13 @@ let tests =
                     Expect.isLessThan upperOnly (unhinted * 3L) "an upper bound counts the composite index slice"
                     Expect.isLessThan lowerOnly (unhinted * 3L) "a lower bound counts the composite index slice"
 
+                    for bounds, expected in
+                        [ "c.id<=p.id+500 AND c.id<p.id+500", "500"
+                          "p.id<=c.id AND c.id>=p.id+500", "4500"
+                          "c.id BETWEEN p.id AND p.id+500 AND c.id>=p.id+250 AND c.id<p.id+500", "250" ] do
+                        let allocated = readCount "" bounds expected
+                        Expect.isLessThan allocated (unhinted * 3L) $"the intersection uses one composite index slice for {bounds}"
+
                     readCount "" "c.id>p.id AND c.id<=p.id+500" "500" |> ignore
                     readCount "" "c.id BETWEEN p.id+500 AND p.id" "0" |> ignore
                     readCount "IGNORE INDEX (ix_child)" between "750" |> ignore
@@ -16111,16 +16118,21 @@ let tests =
                              + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value<p.id+2), "
                              + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value>=p.id+2), "
                              + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value<p.id+2 AND c.id<>12), "
-                             + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value<p.id+2 AND c.rank_value<p.id+1) "
+                             + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value<=p.id+1 AND c.rank_value<p.id+1), "
+                             + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND p.id<=c.rank_value AND c.rank_value>p.id), "
+                             + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value BETWEEN p.id AND p.id+2 AND p.id+1<c.rank_value AND c.rank_value<=p.id+1), "
+                             + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value BETWEEN p.id AND p.id+2 AND c.rank_value<NULL), "
+                             + "(SELECT COUNT(*) FROM ranked c WHERE c.parent_id=p.id AND c.rank_value<=p.id+2 AND c.id<13) "
                              + "FROM parents p WHERE p.id<=3 ORDER BY p.id")
                     with
                     | ResultSet(_, rows) ->
                         Expect.equal
                             rows
-                            [ [ Some "1"; Some "3"; Some "1"; Some "2"; Some "1" ]
-                              [ Some "2"; Some "1"; Some "2"; Some "1"; Some "0" ]
-                              [ Some "3"; Some "0"; Some "0"; Some "0"; Some "0" ] ]
-                            "one-sided descending ranges exclude NULL and preserve extra predicates"
+                            ([ [ "1"; "3"; "1"; "2"; "1"; "3"; "0"; "0"; "2" ]
+                               [ "2"; "1"; "2"; "1"; "0"; "3"; "0"; "0"; "0" ]
+                               [ "3"; "0"; "0"; "0"; "0"; "0"; "0"; "0"; "0" ] ]
+                             |> List.map (List.map Some))
+                            "descending ranges intersect strictly and preserve unsupported conjuncts"
                     | other -> failtestf "expected one-sided correlated counts, got %A" other
 
                 testCase "correlated plain and functional candidates intersect in conjuncts and OR branches"
