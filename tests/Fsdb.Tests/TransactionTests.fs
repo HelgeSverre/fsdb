@@ -5739,6 +5739,52 @@ let tests =
                   | ResultSet(_, [ [ Some value ] ]) -> Expect.equal value (if changed = 1UL then "17" else "10") "committed target value"
                   | actual -> failtestf "expected the committed parent row, got %A" actual
 
+          testCase "joined view updates read partner versions without locking at lower isolation levels"
+          <| fun _ ->
+              for isolation, first, second in [ "READ COMMITTED", "13", "112"; "READ UNCOMMITTED", "109", "208" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let checkValue session value =
+                      match handle session "SELECT n FROM parent WHERE id=1" |> snd with
+                      | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal actual value isolation
+                      | actual -> failtestf "expected the target value, got %A" actual
+
+                  for sql, count in
+                      [ "CREATE TABLE parent (id INT PRIMARY KEY,n INT)", 0UL
+                        "CREATE TABLE partner (id INT,seq INT,delta INT,PRIMARY KEY(id,seq))", 0UL
+                        "INSERT INTO parent VALUES (1,10)", 1UL
+                        "INSERT INTO partner VALUES (1,20,3),(1,100,7)", 2UL
+                        "CREATE VIEW active AS SELECT p.id,p.n,s.delta,s.seq FROM parent p JOIN partner s ON p.id=s.id", 0UL ] do
+                      run setup sql (Affected count) |> ignore
+
+                  let owner = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let owner = run owner "UPDATE partner SET delta=99 WHERE id=1 AND seq=20" (Affected 1UL)
+                  let waiter = run (create 3 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let waiter = run waiter "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+                  let waiter = run waiter "BEGIN" (Affected 0UL)
+                  let update = "UPDATE active SET n=n+delta WHERE id=1 AND seq>=20 AND seq<=21"
+                  let waiter, result = handle waiter update
+                  if result = Affected 1UL then checkValue waiter first
+                  run owner "COMMIT" (Affected 0UL) |> ignore
+                  Expect.equal result (Affected 1UL) "a held partner row does not block the view update"
+                  let waiter = run waiter update (Affected 1UL)
+                  checkValue waiter second
+
+                  let targetWriter = run (create 4 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let targetWriter = run targetWriter "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+                  let targetWriter = run targetWriter "BEGIN" (Affected 0UL)
+                  let targetWriter, result = handle targetWriter update
+                  run targetWriter "ROLLBACK" (Affected 0UL) |> ignore
+                  run waiter "COMMIT" (Affected 0UL) |> ignore
+                  match result with
+                  | Err(1205, _) -> ()
+                  | other -> failtestf "the write target must still block a competing update, got %A" other
+                  checkValue setup second
+
           testCase "joined view update rechecks a changed read source after waiting"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

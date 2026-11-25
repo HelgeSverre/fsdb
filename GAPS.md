@@ -2999,8 +2999,8 @@ implementation effort:
    moved into it by a pending transaction. Under repeatable read and
    serializable isolation, the same range detects published partner inserts
    with primary keys and waits before claiming the committed row.
-   READ COMMITTED locking differences on existing partner rows remain open.
-   An audited
+   Under READ COMMITTED and READ UNCOMMITTED, the partner uses the statement
+   read view and the writable target retains its write lock. An audited
    [nested checked view LEFT JOINed to a window CTE](torture/findings/2026-11-17-nested-window-outer-view.md)
    correctly remains read only, matching MySQL's metadata, rows, CHECK OPTION
    rejection, and mutation rejection. Procedures, functions, and triggers

@@ -2931,7 +2931,11 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
             | _ -> None
 
         let readClaims pending (transaction: Transaction) =
-            Executor.transactionWriteReadClaims pending transaction.Snapshot registry dbName statement
+            match transaction.Isolation with
+            // Read-only join partners use the statement's read view at these levels.
+            | ReadUncommitted | ReadCommitted -> []
+            | RepeatableRead | Serializable ->
+                Executor.transactionWriteReadClaims pending transaction.Snapshot registry dbName statement
 
         let readTargets = readClaims pendingConnection transaction
         let pendingKeys = readTargets |> List.filter (fun (_, _, claims) -> not claims.Keys.IsEmpty)

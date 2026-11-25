@@ -171,8 +171,7 @@ In the default repeatable-read wire fixture, Fsdb and MySQL 8.4.11 let
 the update pass held rows outside the range and wait on a matching row
 or a move into or out of the range. A move into the range from another
 prefix also waits. The transaction regression verifies that the writer
-reads the moved row after commit. READ COMMITTED still has separate
-differences for waits on existing partner rows.
+reads the moved row after commit.
 
 The embedded allocation probe used a single qualifying partner and four
 updates after one warmup, with `id=1 AND seq>=20 AND seq<=21`. The extra
@@ -202,3 +201,21 @@ regression also checks that a later writer waits for the newly committed
 partner's read lock to be released. A separate Fsdb probe returned 1205
 while the insert remained uncommitted. A retry in the same transaction
 succeeded after the inserter committed.
+
+## Partner reads at lower isolation levels
+
+Joined-view UPDATE now uses the statement read view for read-only
+partners at `READ COMMITTED` and `READ UNCOMMITTED`. It continues to
+claim and wait for the writable target. The higher isolation levels
+continue to claim partner rows and wait for qualifying pending inserts.
+
+The pinned MySQL 8.4.11 wire comparison covers payload changes, key
+moves in both directions, inserts, deletes, exact keys, derived partners,
+and a held writable target at all four isolation levels. All 64 cases
+matched on affected rows, target values, and lock timeouts across
+autocommit and explicit transactions.
+`READ COMMITTED` reads the last committed partner values while an owner
+holds changes. `READ UNCOMMITTED` sees the owner's published changes.
+Both wait if the owner holds the target. The transaction regression
+also checks that the next statement sees the newly committed partner
+value and retains the transaction's earlier target write.

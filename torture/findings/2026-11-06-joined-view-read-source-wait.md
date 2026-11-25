@@ -1,7 +1,8 @@
 # Joined-view UPDATE waits for its read source
 
-Native MySQL 8.4.11 waits when an UPDATE through a joined view reads a row held
-by another transaction, even if the owner does not hold the writable target.
+At the default `REPEATABLE READ` isolation level, native MySQL 8.4.11 waits
+when an UPDATE through a joined view reads a row held by another transaction,
+even if the owner does not hold the writable target.
 After the owner commits a change that makes the view predicate false, the
 waiting UPDATE affects zero rows. Before this fix, fsdb completed immediately
 and reported one affected row from its older source snapshot.
