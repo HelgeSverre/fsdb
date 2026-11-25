@@ -515,3 +515,47 @@ the 90 seeded intersections went from 16 differences to 14, with
 near-edge intersections went from 51 differences to 39, with 16 of the
 remaining differences due solely to point order. Both fixtures still
 contain cases with different geometry content or coordinates.
+
+### Contact order within monotonic sections
+
+MySQL's point overlay emits turns in the order Boost visits section
+pairs. The direct traversal walks line sections first and polygon
+sections second. A line section can contain several consecutive edges
+with the same latitude and longitude directions. In that case an
+exterior crossing on a later line edge can precede a hole crossing
+on an earlier edge. Fsdb groups contacts by those sections before
+subtracting the final linework. [Boost turn traversal](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/get_turns.hpp)
+· [Boost section boundaries](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/sections/sectionalize.hpp).
+
+When a line segment strictly contains a polygon edge, the collinear
+turn belongs to the destination of the polygon edge. Its start is
+reported by the incoming edge. This preserves the two isolated
+vertices' order even when the source line is reversed.
+[Boost linear–areal turns](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/get_turn_info_la.hpp).
+
+Native MySQL 8.4.11 results compare geometry type, member order,
+and coordinates within 10⁻⁸ degrees. The 240 additional seeded inputs
+include multipart lines, multiple polygons, holes, reversed rings,
+and both operand orders over WGS 84, GRS 1980, and Clarke 1866. The
+hole-meridian cases vary line direction and how intermediate source
+vertices divide the span along the hole.
+
+| Intersection fixture | Cases | Differences before | Differences after | Order-only before | Order-only after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Seeded rectangles | 90 | 14 | 3 | 11 | 0 |
+| Near-edge and near-hole contacts | 448 | 39 | 23 | 16 | 0 |
+| Seeded multipart and holed rectangles | 240 | 131 | 7 | 124 | 0 |
+| Aligned hole meridians | 216 | 108 | 0 | 108 | 0 |
+
+The cases with geometry content or coordinate differences are the
+same before and after. A separate 24-case probe used alternating line
+segments and stepped polygon boundaries that exceed Boost's direct
+traversal threshold. All 24 differed before and after, with nine
+order-only differences in each run. The spatially partitioned traversal
+and residual coordinate differences remain open.
+[Boost spatial partition traversal](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/partition.hpp).
+
+`ST_Difference`, `ST_Union`, and `ST_SymDifference` each matched
+all 90 seeded rectangles on the final build. The
+[edge predicate oracle](../scripts/geographic-edge-oracle.py)
+still reports the same 11 `Crosses` versus `Touches` differences.

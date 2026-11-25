@@ -1960,6 +1960,26 @@ type private GeographicAreaLinePiece =
       Covered: bool
       StartsSegment: bool }
 
+let private geographicOverlaySections segments =
+    let direction ((firstLatitude, firstLongitude), (secondLatitude, secondLongitude)) =
+        let longitudeDelta = longitudeDistanceRadians (mysqlRadians firstLongitude) (mysqlRadians secondLongitude)
+        sign longitudeDelta, sign (secondLatitude - firstLatitude)
+
+    // Boost splits a turn-search section at a direction change or after
+    // eleven edges. Longitude follows the short arc at the antimeridian.
+    let rec collect previous slots current sections = function
+        | [] -> List.rev (List.rev current :: sections)
+        | segment :: rest ->
+            let next = direction segment
+            if next = previous && slots > 0 then
+                collect previous (slots - 1) (segment :: current) sections rest
+            else
+                collect next 10 [ segment ] (List.rev current :: sections) rest
+
+    match segments with
+    | [] -> []
+    | first :: rest -> collect (direction first) 10 [ first ] [] rest
+
 let private geographicAreaLinePieces referenceSystem includePoints polygons boundarySegments ((start, endpoint) as segment) =
     let covered point =
         match geographicPointPolygonPosition referenceSystem point polygons with
@@ -1972,7 +1992,12 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
         let distance = geographicPointDistance referenceSystem start
         let cuts, contacts, spans =
             boundarySegments
-            |> List.fold (fun (cuts, contacts, spans) ((a, b) as boundary) ->
+            |> List.fold (fun (cuts, contacts, spans) (section, ((a, b) as boundary)) ->
+                let addContacts = function
+                    | [] -> contacts
+                    | points when includePoints -> (section, points) :: contacts
+                    | _ -> contacts
+
                 match geographicSharedSegmentEndpoints referenceSystem segment boundary with
                 | [] ->
                     // The linear overlay traverses the polygon in the
@@ -1983,13 +2008,18 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                         if not includePoints then []
                         elif fst a <> fst b then Option.toList cut
                         else tryGeographicCrossingPoint referenceSystem segment boundary |> Option.toList
-                    Option.toList cut @ cuts, point @ contacts, spans
-                | [ point ] -> point :: cuts, point :: contacts, spans
+                    Option.toList cut @ cuts, addContacts point, spans
+                | [ point ] -> point :: cuts, addContacts [ point ], spans
                 | points ->
                     let positions = List.map distance points
-                    points @ cuts, points @ contacts, (List.min positions, List.max positions) :: spans) ([], [], [])
+                    let turnPoints =
+                        if points = [ a; b ] && (points |> List.forall (fun point -> point <> start && point <> endpoint)) then
+                            // The collinear turn belongs to the destination of
+                            // the polygon edge. Its start belongs to the incoming edge.
+                            [ b ]
+                        else points
+                    points @ cuts, addContacts turnPoints, (List.min positions, List.max positions) :: spans) ([], [], [])
 
-        let orderedContacts = contacts |> distinctGeographicPoints |> List.sortBy distance
         let cuts = distinctGeographicPoints (start :: endpoint :: cuts) |> List.sortBy distance
         let pieces =
             cuts
@@ -2001,7 +2031,7 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                     alongBoundary
                     || covered (geographicPointAlong referenceSystem start endpoint ((lower + upper) / 2.0))
                 { Start = first; End = second; Covered = isCovered; StartsSegment = index = 0 })
-        pieces, orderedContacts
+        pieces, List.rev contacts
 
 let private geographicAreaLineFragments retainCovered pieces =
     let finish current finished =
@@ -2050,24 +2080,44 @@ let private geographicOverlayLineCoverage lines =
 let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygons area =
     let sources = List.map List.pairwise lines
     let polygons = List.map (orientGeographicPolygonRings referenceSystem) polygons
-    let boundary = polygons |> List.collect id |> List.collect List.pairwise
+    let rings = polygons |> List.collect id |> List.map List.pairwise
+    let boundary = List.concat rings
     let nondegenerate = List.filter (fun (first, second) -> first <> second)
     if List.exists List.isEmpty sources
        || not (List.forall supportedGeographicOverlaySegment (nondegenerate (List.concat sources))
                && List.forall supportedGeographicOverlaySegment (nondegenerate boundary)) then None
     else
-        let boundary = nondegenerate boundary
         let compose = function
             | [] -> GEmpty
             | [ shape ] -> shape
             | shapes -> GGeometryCollection(shapes |> List.map (fun shape -> { Srid = srid; Shape = shape }))
 
         let includePoints = kind = OverlayKind.Intersection
-        let partitioned =
-            sources |> List.map (List.map (geographicAreaLinePieces referenceSystem includePoints polygons boundary))
+        let boundarySections = if includePoints then List.collect geographicOverlaySections rings else [ boundary ]
+        let boundary =
+            boundarySections
+            |> List.mapi (fun section edges -> nondegenerate edges |> List.map (fun edge -> section, edge))
+            |> List.concat
+        let partitionSegment = geographicAreaLinePieces referenceSystem includePoints polygons boundary
+        let partitionLine segments =
+            let sections = if includePoints then geographicOverlaySections segments else [ segments ]
+            let partitioned = sections |> List.map (List.map partitionSegment)
+            let pieces = partitioned |> List.collect (List.collect fst)
+            let contacts =
+                // Within each line section, Boost visits polygon sections
+                // before advancing to the next pair of sections.
+                partitioned |> List.collect (fun section ->
+                    section
+                    |> List.collect snd
+                    |> List.groupBy fst
+                    |> List.sortBy fst
+                    |> List.collect (snd >> List.collect snd))
+            pieces, contacts
+
+        let partitioned = sources |> List.map partitionLine
         let fragments retainCovered =
             partitioned
-            |> List.collect (List.collect fst >> geographicAreaLineFragments retainCovered)
+            |> List.collect (fst >> geographicAreaLineFragments retainCovered)
             |> distinctGeographicLines referenceSystem
 
         match kind with
@@ -2076,7 +2126,7 @@ let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygon
             let covered = geographicOverlayLineCoverage inside
             let points =
                 partitioned
-                |> List.collect (List.collect snd)
+                |> List.collect snd
                 |> distinctGeographicPoints
                 |> List.choose (fun (latitude, longitude) ->
                     if covered (latitude, longitude) then None

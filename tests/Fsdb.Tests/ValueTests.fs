@@ -760,10 +760,32 @@ let tests =
 
                     let alongHole = call "ST_Intersection" [ geometry "LINESTRING(2 1,5 1)"; area ]
                     match alongHole with
-                    | VGeometry { Shape = GGeometryCollection({ Shape = GLineString _ } :: contacts) } ->
-                        Expect.hasLength contacts 2 "both points lie off the final line"
-                        Expect.isTrue (contacts |> List.exists (fun point -> point.Shape = GPoint(3.0, 1.0))) "the hole vertex survives an intermediate cut"
+                    | VGeometry { Shape = GGeometryCollection [ { Shape = GLineString _ }; { Shape = GPoint(outerLatitude, _) }; { Shape = GPoint(3.0, 1.0) } ] } ->
+                        Expect.isLessThan (abs (outerLatitude - 4.0018348968833735)) 1e-10 "the exterior crossing precedes the retained hole vertex"
                     | actual -> failtestf "expected a line and two isolated points, got %A" actual
+
+                    for line in [ "LINESTRING(-1 1,5 1)"; "LINESTRING(5 1,-1 1)" ] do
+                        match call "ST_Intersection" [ geometry line; area ] with
+                        | VGeometry { Shape = GGeometryCollection [ { Shape = GLineString _ }; { Shape = GPoint(outerLatitude, _) }; { Shape = GPoint(3.0, 1.0) }; { Shape = GPoint(1.0, 1.0) } ] } ->
+                            Expect.isLessThan (abs (outerLatitude - 4.0018348968833735)) 1e-10 "the contained boundary edge emits its destination first"
+                        | actual -> failtestf "expected the line and its three ordered contacts, got %A" actual
+
+                testCase "geographic area contacts follow boundary sections across a monotonic line run"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4267L; axis ]
+                    let line = geometry "LINESTRING(76.17191167001 35.52790542575,76.63981897530 36.73181869110,77.84802584710 37.33982420059)"
+                    let area = geometry "POLYGON((76.18314487538 35.64892657818,77.35333230283 35.64892657818,77.35333230283 36.83473258261,76.18314487538 36.83473258261,76.18314487538 35.64892657818),(76.47569173224 35.94537807929,76.47569173224 36.53828108150,77.06078544596 36.53828108150,77.06078544596 35.94537807929,76.47569173224 35.94537807929))"
+                    for operands in [ [ line; area ]; [ area; line ] ] do
+                        match call "ST_Intersection" operands with
+                        | VGeometry { Shape = GGeometryCollection({ Shape = GLineString _ } :: { Shape = GLineString _ } :: contacts) } ->
+                            let latitudes =
+                                contacts |> List.map (fun contact ->
+                                    match contact.Shape with
+                                    | GPoint(latitude, _) -> Math.Round(latitude, 8)
+                                    | shape -> failtestf "expected an isolated point, got %A" shape)
+                            Expect.equal latitudes [ 35.64909240; 36.83614816; 36.53846440 ] "both exterior contacts precede the hole contact"
+                        | actual -> failtestf "expected two lines and three isolated points, got %A" actual
 
                 testCase "geographic multiline overlays preserve component order and split shared spans"
                 <| fun _ ->
