@@ -266,8 +266,10 @@ These tables summarize immutable, linked result artifacts. They are historical
 measurements, not claims about the current branch; use a fresh run for a current
 comparison.
 
-The [2026-11-25 peer comparison](results/2026-11-25-peer-comparison.md)
+The [native peer comparison at `3de535d8`](results/3de535d8-peer-comparison.md)
 records checked point reads, durable updates, and MySQL feature probes.
+The [earlier peer comparison](results/2026-11-25-peer-comparison.md)
+also covers Percona and TiDB.
 
 Each recipe writes one or more tracked `results/<git-sha>[-label].md` files
 with a provenance header (revision, date, OS, .NET, server mode, and dataset).
