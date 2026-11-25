@@ -4642,6 +4642,59 @@ let tests =
                       "SELECT (SELECT AVG(c.n) FROM child c WHERE c.pid=p.id) AS pos,(SELECT AVG(-c.n) FROM child c WHERE c.pid=p.id) AS neg FROM parent p WHERE p.id=4"
               Expect.equal midpoint (ResultSet([ "pos"; "neg" ], [ [ Some "0.0313"; Some "-0.0313" ] ])) "exact half-way values round away from zero"
 
+          testCase "correlated MEDIUMINT extrema retain the INT24 wire type"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE p(id INT PRIMARY KEY)"
+              let session, _ = handle session "CREATE TABLE c(id INT PRIMARY KEY,pid INT,n MEDIUMINT,u MEDIUMINT UNSIGNED,KEY ix(pid,id))"
+              let session, _ = handle session "INSERT INTO p VALUES(1),(2)"
+              let session, _ = handle session "INSERT INTO c VALUES(1,1,-8388608,16777215),(2,1,8388607,0)"
+              let sql =
+                  "SELECT (SELECT MIN(c.n) FROM c WHERE c.pid=p.id AND c.id BETWEEN 1 AND 5) AS low,"
+                  + "(SELECT MAX(DISTINCT c.u) FROM c WHERE c.pid=p.id AND c.id BETWEEN 1 AND 5) AS high FROM p ORDER BY id"
+              let resultSession, result = handle session sql
+              Expect.equal result (ResultSet([ "low"; "high" ], [ [ Some "-8388608"; Some "16777215" ]; [ None; None ] ]))
+                  "signed and unsigned extrema at the domain bounds"
+              let descriptors (columns: ColumnMetadata list) =
+                  columns |> List.map (fun column -> column.TypeId, column.ColumnLength, column.Flags)
+              let expected = [ TypeInt24, 9u, BinaryFlag; TypeInt24, 8u, BinaryFlag ||| UnsignedFlag ]
+              Expect.equal (descriptors resultSession.LastResultColumnMetadata) expected "text result metadata"
+              match prepareStatementForSession session sql with
+              | Ok(statement, parameterCount) ->
+                  let _, columns = preparedMetadata session statement parameterCount
+                  Expect.equal (columns |> List.map _.Metadata |> descriptors) expected "prepared result metadata"
+              | Error error -> failtestf "expected the extrema statement to prepare, got %A" error
+
+              let window = "SELECT MIN(n) OVER () AS low,MAX(u) OVER () AS high FROM c ORDER BY id"
+              let execution, _ = handle session window
+              Expect.equal
+                  (execution.LastResultColumnMetadata |> List.map (fun column -> column.TypeId, column.ColumnLength))
+                  [ TypeLong, 9u; TypeLong, 8u ] "window materialization uses four-byte INT metadata"
+              match prepareStatementForSession session window with
+              | Ok(statement, parameterCount) ->
+                  let _, columns = preparedMetadata session statement parameterCount
+                  Expect.equal (columns |> List.map _.Metadata |> descriptors) expected "the prepared window advertises the declared type"
+              | Error error -> failtestf "expected the window statement to prepare, got %A" error
+
+              for statement, typeId, width, flags in
+                  [ "SELECT n FROM c WHERE id=1 UNION ALL SELECT n FROM c WHERE id=2", TypeInt24, 9u, BinaryFlag
+                    "SELECT n FROM c WHERE id=1 UNION ALL SELECT u FROM c WHERE id=1", TypeLong, 9u, BinaryFlag
+                    "SELECT NULL UNION ALL SELECT u FROM c WHERE id=1", TypeInt24, 8u, BinaryFlag ||| UnsignedFlag ] do
+                  let combined, _ = handle session statement
+                  Expect.equal (combined.LastResultColumnMetadata |> List.map _.TypeId) [ typeId ] statement
+                  match prepareStatementForSession session statement with
+                  | Ok(prepared, parameterCount) ->
+                      let _, columns = preparedMetadata session prepared parameterCount
+                      Expect.equal (columns |> List.map _.Metadata |> descriptors) [ typeId, width, flags ] statement
+                  | Error error -> failtestf "expected the union to prepare, got %A" error
+
+              let session, _ = handle session "CREATE TABLE widest(u BIGINT UNSIGNED)"
+              let session, _ = handle session "INSERT INTO widest VALUES(18446744073709551615)"
+              let mixed, value = handle session "SELECT n FROM c WHERE id=1 UNION ALL SELECT u FROM widest"
+              Expect.equal value (ResultSet([ "n" ], [ [ Some "-8388608" ]; [ Some "18446744073709551615" ] ]))
+                  "signed MEDIUMINT and unsigned BIGINT reconcile without losing digits"
+              Expect.equal (mixed.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal ] "the mixed domains need DECIMAL"
+
           testCase "fixed-scale approximate aggregates retain their result scales"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

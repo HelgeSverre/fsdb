@@ -746,7 +746,7 @@ let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) 
     elif typeId = TypeTime then
         writeBinaryTime w s
     // The narrower integer widths, which a resultset only advertises when
-    // the output column resolved back to a declared TINYINT/SMALLINT/INT/
+    // the output column resolved back to a declared TINYINT/SMALLINT/MEDIUMINT/INT/
     // YEAR/BOOLEAN (see `Executor.outputColumnWireOverrides`). Each must
     // write exactly the width its advertised type implies: a length-encoded
     // string here instead desyncs every column after it, which is what this
@@ -757,7 +757,7 @@ let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) 
         w.WriteByte(byte (sbyte (parseIntOr 0L s)))
     elif typeId = TypeYear || typeId = TypeShort then
         w.WriteInt16LE(int (int16 (parseIntOr 0L s)))
-    elif typeId = TypeLong then
+    elif typeId = TypeLong || typeId = TypeInt24 then
         w.WriteInt32LE(int (int32 (parseIntOr 0L s)))
     elif carriesRawBytes metadata then
         w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
@@ -825,6 +825,7 @@ let TypeDouble = 0x05uy
 let TypeNull = 0x06uy
 let TypeTimestamp = 0x07uy
 let TypeLongLong = 0x08uy
+let TypeInt24 = Value.TypeInt24
 let TypeDate = 0x0auy
 let TypeTime = 0x0buy
 let TypeDateTime = 0x0cuy
@@ -926,7 +927,7 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
     elif typeId = TypeShort then
         let v = r.ReadInt16LE()
         VInt(if unsigned then int64 (uint16 v) else int64 (int16 v))
-    elif typeId = TypeLong then
+    elif typeId = TypeLong || typeId = TypeInt24 then
         let v = r.ReadInt32LE()
         VInt(if unsigned then int64 (uint32 v) else int64 v)
     elif typeId = TypeLongLong then

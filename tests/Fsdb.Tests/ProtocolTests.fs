@@ -660,11 +660,23 @@ let tests =
               reader.ReadByte() |> ignore
               Expect.equal (readBinaryValue reader TypeBit false) (VBytes [| 0uy; 1uy |]) "bit bytes"
 
+          testCase "binary MEDIUMINT values occupy a four-byte integer slot"
+          <| fun _ ->
+              let metadata = [ metadataOfType (TMediumInt false); metadataOfType (TMediumInt true); columnMetadata TypeVarString ]
+              let payload = binaryRowPayload metadata [ Some "-8388608"; Some "16777215"; Some "x" ]
+              Expect.equal payload (Convert.FromHexString "0000000080FFFFFFFF000178") "INT24 keeps the following field aligned"
+              let reader = Reader payload
+              reader.ReadByte() |> ignore
+              reader.ReadByte() |> ignore
+              Expect.equal (readBinaryValue reader TypeInt24 false) (VInt -8388608L) "signed INT24 uses sign extension"
+              Expect.equal (readBinaryValue reader TypeInt24 true) (VInt 16777215L) "unsigned INT24 uses the full domain"
+              Expect.equal (readBinaryValue reader TypeVarString false) (VString "x") "the following field survives decoding"
+
           testCase "wireTypeOfColumnType maps every declared-type family to its wire id"
           <| fun _ ->
               Expect.equal (wireTypeOfColumnType (TTinyInt false)) TypeTiny "tinyint"
               Expect.equal (wireTypeOfColumnType (TSmallInt false)) TypeShort "smallint"
-              Expect.equal (wireTypeOfColumnType (TMediumInt false)) TypeLong "mediumint"
+              Expect.equal (wireTypeOfColumnType (TMediumInt false)) TypeInt24 "mediumint"
               Expect.equal (wireTypeOfColumnType (TInt false)) TypeLong "int"
               Expect.equal (wireTypeOfColumnType (TBigInt false)) TypeLongLong "bigint"
               Expect.equal (wireTypeOfColumnType (TBit 9)) TypeBit "bit"

@@ -278,9 +278,6 @@ column descriptors and rows at each of three division precision settings.
 The fixtures include signed and unsigned columns, nullable and empty
 matches, conditional expressions, and DISTINCT.
 
-In a separate declared-type probe, `MIN(MEDIUMINT)` still reported
-`INT` where MySQL reported `MEDIUMINT`.
-
 ### Fixed-scale floating-point aggregates
 
 `SUM` retains the input's floating-point scale. `AVG` adds
@@ -303,3 +300,22 @@ aggregates. The binary prepared comparison matched 96 scalar and
 window column descriptors and 288 returned values across precision
 increments 0, 4, 12, and 30. A separate exact `DECIMAL` control still differs at
 30 fractional digits because Fsdb uses `System.Decimal`.
+
+### MEDIUMINT result metadata
+
+Direct projections and correlated extrema now advertise `INT24` with
+display width 9 for signed columns and 8 for unsigned columns. Prepared
+parameters and result values use four bytes. The audited window value
+functions advertise `INT24` during preparation and report `INT` with the
+original display width after execution. [MySQL binary result protocol](https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html).
+
+UNION results that combine `MEDIUMINT` with other integer types use the
+smallest common type implied by MySQL's signed and unsigned promotion
+rules. Mixing signed `MEDIUMINT` with unsigned `BIGINT` promotes to
+`DECIMAL` and preserves the full 64-bit unsigned range.
+
+Native MySQL 8.4.11 comparisons covered both signed boundaries, the
+unsigned maximum, NULL and empty scalar results, 36 pairs of integer
+UNION operands, and prepared reads with explicit `Int24` and `UInt24`
+parameters. Raw window execution descriptors still differ in the
+generic numeric flag even where type, width, scale, and values agree.

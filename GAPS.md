@@ -2768,6 +2768,9 @@ implementation effort:
    preserves the audited numeric type and display scale on text and
    prepared results. [Fixed-scale floating-point aggregates](benchmarks/results/2026-11-25-correlated-integer-range-count.md#fixed-scale-floating-point-aggregates)
    also preserve the audited scale through the window path.
+   [MEDIUMINT result metadata](benchmarks/results/2026-11-25-correlated-integer-range-count.md#mediumint-result-metadata)
+   preserves the native type on correlated extrema and reconciles it with
+   other integer types in UNION results.
    Other residual predicates, broader aggregates, and projected sources
    still need broader access planning.
 

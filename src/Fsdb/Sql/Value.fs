@@ -1139,6 +1139,7 @@ let TypeDouble = 0x05uy
 let TypeNull = 0x06uy
 let TypeTimestamp = 0x07uy
 let TypeLongLong = 0x08uy
+let TypeInt24 = 0x09uy
 let TypeDate = 0x0auy
 let TypeTime = 0x0buy
 let TypeDateTime = 0x0cuy

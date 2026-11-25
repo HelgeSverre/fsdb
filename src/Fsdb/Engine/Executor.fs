@@ -4377,9 +4377,50 @@ let private scalarSubqueryMaterializes registry (select: SelectStmt) =
         containsAggregate registry expression || not (collectWindowFuncs expression).IsEmpty))
 
 let private isIntegerType typeId =
-    typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
+    typeId = TypeTiny || typeId = TypeShort || typeId = TypeInt24
+    || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
 
 let private isIntegerMetadata (metadata: ColumnMetadata) = isIntegerType metadata.TypeId
+
+let private isBareNullProjection index (select: SelectStmt) =
+    let hasStar =
+        select.Projections |> List.exists (fun projection ->
+            match projection.Expression with Star _ -> true | _ -> false)
+    not hasStar
+    && (select.Projections
+        |> List.tryItem index
+        |> Option.exists (fun projection -> match projection.Expression with Lit VNull -> true | _ -> false))
+
+let private tryMediumIntegerUnionMetadata (columns: ColumnMetadata list) =
+    if columns |> List.exists (fun column -> column.TypeId = TypeInt24) then
+        let types = [| TypeTiny; TypeShort; TypeInt24; TypeLong; TypeLongLong |]
+        let signedWidths = [| 4u; 6u; 9u; 11u; 20u |]
+        let present = columns |> List.filter (fun column -> column.TypeId <> TypeNull)
+        present
+        |> List.map (fun column ->
+            types |> Array.tryFindIndex ((=) column.TypeId) |> Option.map (fun index -> index, column))
+        |> tryAllSome
+        |> Option.map (fun integers ->
+            let widest columns = columns |> List.fold (fun width (index, _) -> max width index) -1
+            let unsignedColumns, signedColumns = integers |> List.partition (snd >> hasMetadataFlag UnsignedFlag)
+            let unsignedWidth, signedWidth = widest unsignedColumns, widest signedColumns
+            let resultWidth =
+                if signedWidth >= 0 && unsignedWidth >= signedWidth then unsignedWidth + 1
+                else max signedWidth unsignedWidth
+            let columnLength =
+                integers
+                |> List.map (fun (index, column) ->
+                    if index < types.Length - 1 && hasMetadataFlag UnsignedFlag column
+                       && column.ColumnLength = signedWidths.[index] then column.ColumnLength - 1u
+                    else column.ColumnLength)
+                |> List.max
+            if resultWidth = types.Length then
+                { Value.columnMetadata TypeNewDecimal with ColumnLength = columnLength + 1u }
+            else
+                { Value.columnMetadata types.[resultWidth] with
+                    ColumnLength = columnLength
+                    Flags = if signedColumns.IsEmpty then UnsignedFlag else 0us })
+    else None
 
 let private approximateResultMetadata typeId (operands: ColumnMetadata list) =
     let scale = operands |> List.fold (fun scale item -> max scale item.Decimals) 0uy
@@ -8811,17 +8852,23 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | _ -> None
     | MatchAgainst _ -> simple TypeDouble
     | WindowOver(fn, _) ->
-        match fn with
-        | WinRowNumber
-        | WinRank _
-        | WinNTile _ -> simple TypeLongLong
-        | WinPercentRank
-        | WinCumeDist -> simple TypeDouble
-        | WinLagLead(_, arg, _, _)
-        | WinFirstValue arg
-        | WinLastValue arg
-        | WinNthValue(arg, _) -> metadataOfExpr ctx arg
-        | WinAggregate(name, args) -> metadataOfExpr ctx (FuncCall(name, args))
+        let metadata =
+            match fn with
+            | WinRowNumber
+            | WinRank _
+            | WinNTile _ -> simple TypeLongLong
+            | WinPercentRank
+            | WinCumeDist -> simple TypeDouble
+            | WinLagLead(_, arg, _, _)
+            | WinFirstValue arg
+            | WinLastValue arg
+            | WinNthValue(arg, _) -> metadataOfExpr ctx arg
+            | WinAggregate(name, args) -> metadataOfExpr ctx (FuncCall(name, args))
+        metadata
+        |> Option.map (fun column ->
+            if column.TypeId = TypeInt24 then
+                { column with Flags = BinaryFlag ||| (column.Flags &&& UnsignedFlag) }
+            else column)
     | Case(_, whens, elseBranch) ->
         (whens |> List.map snd) @ [ elseBranch |> Option.defaultValue (Lit VNull) ] |> choose
     | Subquery select ->
@@ -11189,6 +11236,7 @@ and private deriveColumns
         if column.TypeId = TypeTiny && column.ColumnLength = 1u then TBool
         elif column.TypeId = TypeTiny then TTinyInt unsigned
         elif column.TypeId = TypeShort then TSmallInt unsigned
+        elif column.TypeId = TypeInt24 then TMediumInt unsigned
         elif column.TypeId = TypeLong then TInt unsigned
         elif column.TypeId = TypeLongLong then TBigInt unsigned
         elif column.TypeId = TypeFloat then TFloat false
@@ -20248,9 +20296,11 @@ and private tryCumeDistDenseRanks
 /// to text.
 and private unionAggregateType (columns: ColumnMetadata list) : ColumnMetadata =
     let types = columns |> List.map _.TypeId
+    let mediumInteger = tryMediumIntegerUnionMetadata columns
     let isInt t =
         t = Value.TypeTiny
         || t = Value.TypeShort
+        || t = Value.TypeInt24
         || t = Value.TypeLong
         || t = Value.TypeLongLong
     let isDate t = t = Value.TypeDate
@@ -20268,6 +20318,7 @@ and private unionAggregateType (columns: ColumnMetadata list) : ColumnMetadata =
         approximateResultMetadata typeId columns
     elif types |> List.exists (fun t -> t = Value.TypeNewDecimal) then
         Value.columnMetadata Value.TypeNewDecimal
+    elif mediumInteger.IsSome then mediumInteger.Value
     elif types |> List.forall isInt then
         { Value.columnMetadata Value.TypeLongLong with
             Flags =
@@ -20291,11 +20342,18 @@ and private coerceUnionValue (metadata: ColumnMetadata) (v: Value) : Value =
     | VNull -> VNull
     | _ ->
         match ty with
-        | t when t = Value.TypeTiny || t = Value.TypeShort || t = Value.TypeLong || t = Value.TypeLongLong ->
+        | t when t = Value.TypeTiny || t = Value.TypeShort || t = Value.TypeInt24 || t = Value.TypeLong || t = Value.TypeLongLong ->
             match v with
+            | VInt _ -> v
             | VUInt _ when hasMetadataFlag Value.UnsignedFlag metadata -> v
+            | VUInt value when value <= uint64 System.Int64.MaxValue -> VInt(int64 value)
             | _ -> VInt(int64 (Value.toDouble v))
-        | t when t = Value.TypeNewDecimal -> VDecimal(decimal (Value.toDouble v))
+        | t when t = Value.TypeNewDecimal ->
+            match v with
+            | VDecimal _ -> v
+            | VInt value -> VDecimal(decimal value)
+            | VUInt value -> VDecimal(decimal value)
+            | _ -> VDecimal(decimal (Value.toDouble v))
         | t when t = Value.TypeDouble || t = Value.TypeFloat ->
             let number = Value.toDouble v
             // UNION materializes finite-scale values before ordering and deduplication.
@@ -20406,22 +20464,7 @@ and private runUnionStmtWithOuter
             // mixed-typed union then sorts exactly as MySQL does.
             // A bare NULL projection has no runtime value to infer from, so
             // its branch metadata falls back to VAR_STRING. Preserve that
-            // syntactic NULL identity when reconciling it with JSON.
-            let isBareNullProjection index (select: SelectStmt) =
-                let hasStar =
-                    select.Projections
-                    |> List.exists (fun projection ->
-                        match projection.Expression with
-                        | Star _ -> true
-                        | _ -> false)
-                not hasStar
-                && (select.Projections
-                    |> List.tryItem index
-                    |> Option.exists (fun projection ->
-                        match projection.Expression with
-                        | Lit VNull -> true
-                        | _ -> false))
-
+            // syntactic NULL identity when reconciling branch types.
             let branchTypes = List.rev typesSoFar
             let branches = first :: (rest |> List.map snd)
             let reconciled =
@@ -23559,8 +23602,13 @@ and private runWindowedSelect
                     |> Option.map (fun metadata ->
                         let collation = keyCollation (ctxFor [||]) wf
                         let column =
-                            deriveColumns [ name ] [ collation ] [ metadata ]
-                            |> List.head
+                            if metadata.TypeId = TypeInt24 then
+                                // Window temporaries use INT for a MEDIUMINT result.
+                                { syntheticColumn name (TInt(hasMetadataFlag UnsignedFlag metadata)) nullable with
+                                    NumericDisplay = Some { Width = Some(int metadata.ColumnLength); Decimals = None; ZeroFill = false } }
+                            else
+                                deriveColumns [ name ] [ collation ] [ metadata ]
+                                |> List.head
                         let display =
                             match wf with
                             | WindowOver(WinAggregate(aggregate, _), _)
@@ -28146,22 +28194,45 @@ let private statementSources store schema (select: SelectStmt) =
 /// Expression descriptors can exceed stored-column precision, so PREPARE must
 /// retain their wire shape independently of its ColumnDef fallback.
 let statementNumericMetadata store registry schema statement =
+    let describeSelect (select: SelectStmt) =
+        if SelectStmt.hasDestination select || not select.Ctes.IsEmpty then None
+        else
+            let sources = statementSources store schema select
+            let rewritten =
+                if select.Joins |> List.exists joinCoalescesColumns then rewriteNaturalSelect select sources
+                else Ok select
+            rewritten |> Result.toOption |> Option.bind (fun select ->
+                if sources |> List.exists (snd >> List.isEmpty) then None
+                else
+                    let columns = sources |> List.collect snd
+                    let context = contextFactory store registry schema (columnIndexOf columns) (qualifierRanges sources) None (probeRow columns)
+                    Some(outputColumnWireOverrides context columns select))
+
     match statement with
-    | Select select when not (SelectStmt.hasDestination select) && select.Ctes.IsEmpty ->
-        let sources = statementSources store schema select
-        let rewritten =
-            if select.Joins |> List.exists joinCoalescesColumns then rewriteNaturalSelect select sources
-            else Ok select
-        rewritten |> Result.toOption |> Option.bind (fun select ->
-            if sources |> List.exists (snd >> List.isEmpty) then None
-            else
-                let columns = sources |> List.collect snd
-                let context = contextFactory store registry schema (columnIndexOf columns) (qualifierRanges sources) None (probeRow columns)
-                outputColumnWireOverrides context columns select
-                |> List.map (Option.filter (fun metadata ->
-                    metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat || metadata.TypeId = TypeLongLong
-                    || (isIntegerMetadata metadata && hasMetadataFlag BinaryFlag metadata)))
-                |> Some)
+    | Select select ->
+        describeSelect select
+        |> Option.map (List.map (Option.filter (fun metadata ->
+            metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat || metadata.TypeId = TypeLongLong
+            || (isIntegerMetadata metadata && hasMetadataFlag BinaryFlag metadata))))
+    | Union(first, rest, _, _, _) ->
+        first :: (rest |> List.map snd)
+        |> List.map (fun select ->
+            describeSelect select
+            |> Option.map (List.mapi (fun index metadata ->
+                if isBareNullProjection index select then Some(Value.columnMetadata TypeNull)
+                else metadata)))
+        |> tryAllSome
+        |> Option.bind (function
+            | initial :: others as branches when others |> List.forall (sameLength initial) ->
+                branches
+                |> List.transpose
+                |> List.map (fun candidates ->
+                    candidates
+                    |> tryAllSome
+                    |> Option.bind tryMediumIntegerUnionMetadata
+                    |> Option.map (fun metadata -> { metadata with Flags = metadata.Flags ||| BinaryFlag }))
+                |> Some
+            | _ -> None)
     | _ -> None
 
 /// PREPARE must expose the same physical source fields as later execution

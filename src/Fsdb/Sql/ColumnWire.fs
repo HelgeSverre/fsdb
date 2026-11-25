@@ -39,7 +39,10 @@ let metadataOfType (ty: ColumnType) : ColumnMetadata =
     | TTinyInt unsigned -> { columnMetadata TypeTiny with ColumnLength = 4u } |> withUnsigned unsigned |> numeric
     | TBool -> { columnMetadata TypeTiny with ColumnLength = 1u } |> numeric
     | TSmallInt unsigned -> { columnMetadata TypeShort with ColumnLength = 6u } |> withUnsigned unsigned |> numeric
-    | TMediumInt unsigned -> { columnMetadata TypeLong with ColumnLength = 9u } |> withUnsigned unsigned |> numeric
+    | TMediumInt unsigned ->
+        { columnMetadata TypeInt24 with ColumnLength = if unsigned then 8u else 9u }
+        |> withUnsigned unsigned
+        |> numeric
     | TInt unsigned -> { columnMetadata TypeLong with ColumnLength = 11u } |> withUnsigned unsigned |> numeric
     | TBigInt unsigned -> { columnMetadata TypeLongLong with ColumnLength = 20u } |> withUnsigned unsigned |> numeric
     | TBit width -> { columnMetadata TypeBit with ColumnLength = uint32 width; Flags = UnsignedFlag }

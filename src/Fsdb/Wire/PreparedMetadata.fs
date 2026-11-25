@@ -560,6 +560,7 @@ let private numericParameterType (metadata: ColumnMetadata) =
     match metadata.TypeId with
     | typeId when typeId = TypeTiny -> Some(TTinyInt unsigned)
     | typeId when typeId = TypeShort -> Some(TSmallInt unsigned)
+    | typeId when typeId = TypeInt24 -> Some(TMediumInt unsigned)
     | typeId when typeId = TypeLong -> Some(TInt unsigned)
     | typeId when typeId = TypeLongLong -> Some(TBigInt unsigned)
     | typeId when typeId = TypeFloat -> Some(TFloat unsigned)
