@@ -54,4 +54,19 @@ MySQL completed the second update while ID 2 remained locked. Fsdb's
 second update remained pending through the two-second observation and
 completed after the holder rolled back. Both engines committed the same
 value for ID 1. The bound used to execute the join has yet to reach the
-write-lock selection for this partner-qualified filter.
+write-lock selection for this partner-qualified filter in the benchmarked
+revision.
+
+The follow-up shares the same bound keys between execution and write-lock
+selection for eligible joined updates. A complete key can narrow the
+write claim even when a read-only join partner has a partial key. A
+missing target key retains the conservative row claims so a concurrent
+primary-key move is visible when the waiting statement resumes.
+
+The MySQL 8.4.11 and Fsdb wire probes used a two-column primary key.
+Both joined-view and physical updates completed while a different row
+was held. Both waited on the matching row, and both waited when another
+transaction moved a row into the initially absent key. Every statement
+affected one row and the final committed values matched. A repeat with
+two matching partner rows and an unbound third partner key column gave
+the same results.

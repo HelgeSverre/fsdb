@@ -5431,6 +5431,59 @@ let tests =
                   | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ]) -> ()
                   | result -> failtestf "expected both disjoint writes, got %A" result
 
+          testCase "a joined view update bound through its partner locks the target key"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql in
+                  [ "CREATE TABLE tx_bound_target (tenant INT, id INT, n INT, PRIMARY KEY (tenant,id))"
+                    "CREATE TABLE tx_bound_partner (tenant INT, id INT, enabled INT, PRIMARY KEY (tenant,id))"
+                    "INSERT INTO tx_bound_target VALUES (1,1,10),(1,2,20),(2,1,30)"
+                    "INSERT INTO tx_bound_partner VALUES (1,1,1),(1,2,1),(2,1,1)"
+                    "CREATE VIEW tx_bound_positive AS SELECT tenant,id,n FROM tx_bound_target WHERE n>0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW tx_bound_view AS SELECT t.tenant,t.id,t.n,p.id AS partner_id FROM tx_bound_positive t JOIN tx_bound_partner p ON t.id=p.id AND t.tenant=p.tenant WHERE p.enabled=1" ] do
+                  match handle setup sql |> snd with
+                  | Affected _ -> ()
+                  | result -> failtestf "setup failed for %s: %A" sql result
+
+              let runWithHeldRow ownerId writerId holderSql writerSql expectEarly =
+                  let owner, _ = handle (create ownerId store) "BEGIN"
+                  let owner, changed = handle owner holderSql
+                  Expect.equal changed (Affected 1UL) "the owner holds its target row"
+                  let writer, _ = handle (create writerId store) "BEGIN"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let pending =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle writer writerSql)
+                  let writerStarted = started.Wait(TimeSpan.FromSeconds 5.0)
+                  let completedWhileHeld = writerStarted && pending.Wait(TimeSpan.FromMilliseconds 500.0)
+                  Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner commits"
+                  Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 5.0)) "the writer finishes after the owner commits"
+                  let writer, result = pending.GetAwaiter().GetResult()
+                  Expect.equal result (Affected 1UL) "the view updates its bound target"
+                  Expect.equal (handle writer "COMMIT" |> snd) (Affected 0UL) "the writer commits"
+                  Expect.isTrue writerStarted "the view writer started"
+                  Expect.equal completedWhileHeld expectEarly "only a conflicting physical row should block the writer"
+
+              let viewUpdate = "UPDATE tx_bound_view SET n=n+1 WHERE tenant=1 AND partner_id=1"
+              let physicalUpdate =
+                  "UPDATE tx_bound_target t JOIN tx_bound_partner p ON t.id=p.id AND t.tenant=p.tenant SET t.n=t.n+1 WHERE p.tenant=1 AND p.id=1"
+
+              runWithHeldRow 2 3 "UPDATE tx_bound_target SET n=n+1 WHERE tenant=1 AND id=2" viewUpdate true
+              runWithHeldRow 4 5 "UPDATE tx_bound_target SET n=n+1 WHERE tenant=1 AND id=1" viewUpdate false
+              runWithHeldRow 6 7 "UPDATE tx_bound_target SET n=n+1 WHERE tenant=1 AND id=2" physicalUpdate true
+
+              match handle setup "SELECT tenant,id,n FROM tx_bound_target ORDER BY tenant,id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "1"; Some "14" ]; [ Some "1"; Some "2"; Some "22" ]; [ Some "2"; Some "1"; Some "30" ] ]) -> ()
+              | result -> failtestf "expected all increments on the original rows, got %A" result
+
+              Expect.equal (handle setup "DELETE FROM tx_bound_target WHERE tenant=1 AND id=1" |> snd) (Affected 1UL) "the bound key is absent"
+              runWithHeldRow 8 9 "UPDATE tx_bound_target SET id=1 WHERE tenant=1 AND id=2" viewUpdate false
+              match handle setup "SELECT tenant,id,n FROM tx_bound_target ORDER BY tenant,id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "1"; Some "23" ]; [ Some "2"; Some "1"; Some "30" ] ]) -> ()
+              | result -> failtestf "expected the writer to update the row moved into the bound key, got %A" result
+
           testCase "disjoint physical joined updates lock only their matched row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -28897,14 +28897,14 @@ let private signedJoinBounds columnTypes equalities conditions =
         | _ -> [])
     |> Map.ofList
 
-let private boundUpdateJoinSources store dbName (from: TableRef) (joins: Join list) where : MutationSourceOverrides option =
+let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list) where =
     let whereConditions = optionalConjuncts where
 
     let physicalOperand = function
         | FromTable source when source.IndexHints.IsEmpty ->
             physicalFastPathTable store dbName source
             |> Option.map (fun table ->
-                (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant(), table)
+                (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant(), (source, table))
         | _ -> None
 
     if (qualifiedLiteralEqualities whereConditions).IsEmpty then None
@@ -28916,7 +28916,7 @@ let private boundUpdateJoinSources store dbName (from: TableRef) (joins: Join li
         |> Option.bind (fun operands ->
             let columnTypes =
                 operands
-                |> List.collect (fun (owner, table) ->
+                |> List.collect (fun (owner, (_, table)) ->
                     table.Columns |> List.map (fun column -> mutationColumnKey (owner, column.Name), column.Type))
                 |> Map.ofList
 
@@ -28946,22 +28946,33 @@ let private boundUpdateJoinSources store dbName (from: TableRef) (joins: Join li
             else
                 joinKeys |> Option.bind (fun equalities ->
                     let bounds = signedJoinBounds columnTypes equalities whereConditions
-                    let probe (owner, table: Table) =
+                    let probe (owner, (source, table)) =
                         let keys = Storage.primaryKeyColumns table
+                        let claims =
+                            keys
+                            |> List.map (fun column -> Map.tryFind (mutationColumnKey (owner, column)) bounds)
+                            |> tryAllSome
+                            |> Option.bind (Storage.tryPrimaryWriteLockTargets store table)
 
-                        keys
-                        |> List.map (fun column -> Map.tryFind (mutationColumnKey (owner, column)) bounds |> Option.map (fun value -> column, value))
-                        |> tryAllSome
-                        |> Option.bind (tryStoredEqualityMatchLookupWhere (equalsIgnoreCase "PRIMARY") store table)
-                        |> Option.filter (fun (matched, _) -> matched.UsesFullKey)
-                        |> Option.map (fun (_, lookup) ->
-                            owner,
-                            lazy (Ok { Columns = table.Columns
-                                       Rows = lookup.CandidateRows |> Seq.map snd |> List.ofSeq
-                                       IdentityOf = Some
-                                       WriteTable = None }))
+                        owner, (source, table, claims)
 
-                    operands |> List.map probe |> tryAllSome |> Option.map Map.ofList))
+                    operands |> List.map probe |> Map.ofList |> Some))
+
+let private boundUpdateJoinSources store dbName from joins where : MutationSourceOverrides option =
+    boundUpdateJoinKeys store dbName from joins where
+    |> Option.bind (fun sources ->
+        sources
+        |> Map.toList
+        |> List.map (fun (owner, (_, table, claims)) ->
+            claims
+            |> Option.map (fun key ->
+                owner,
+                lazy (Ok { Columns = table.Columns
+                           Rows = key.RowIds |> List.choose table.RowsArray.TryFind
+                           IdentityOf = Some
+                           WriteTable = None })))
+        |> tryAllSome
+        |> Option.map Map.ofList)
 
 /// Executes a statement under `currentAccount`; `ids` carries the OK-packet
 /// and generated AUTO_INCREMENT identities between statements.
@@ -34124,6 +34135,27 @@ let transactionWriteTargets
         |> Option.defaultValue []
         |> combineTargets
 
+    let protectKeyMove (table: Table) (claims: WriteLockTargets) =
+        // INSERT claims the destination key. An UPDATE can move an existing
+        // row there under a row lock when the bound key is currently absent.
+        if claims.RowIds.IsEmpty then
+            { claims with RowIds = table.RowsArray.Indexed |> Seq.map fst |> Seq.toList }
+        else claims
+
+    let joinedUpdateTargets from joins names predicate =
+        let bound = lazy (if cteNames.IsEmpty then boundUpdateJoinKeys store dbName from joins predicate else None)
+        let resolve (source: TableRef) where =
+            let owner = source.Alias |> Option.defaultValue source.Table
+            bound.Value
+            |> Option.bind (Map.tryFind (owner.ToLowerInvariant()))
+            |> Option.bind (function
+                | reference, table, Some claims when reference = source ->
+                    Some(source.Database |> Option.defaultValue dbName, source.Table, protectKeyMove table claims)
+                | _ -> None)
+            |> Option.orElseWith (fun () -> targets source where)
+
+        joinedTargets resolve from joins names predicate
+
     match statement with
     | Update update when update.Joins.IsEmpty ->
         let viewDatabase = update.From.Database |> Option.defaultValue dbName
@@ -34148,7 +34180,7 @@ let transactionWriteTargets
                 if view.UpdateJoins.IsEmpty then
                     targets view.UpdateFrom predicate |> Option.toList
                 else
-                    joinedTargets targets view.UpdateFrom view.UpdateJoins [ target.Qualifier ] predicate
+                    joinedUpdateTargets view.UpdateFrom view.UpdateJoins [ target.Qualifier ] predicate
             | _ -> []
         | None ->
             let keys = pendingOrderedInsertKeys update.From update.Where update.OrderBy update.Limit
@@ -34373,7 +34405,7 @@ let transactionWriteTargets
                             | _ -> None)
                     |> function Some name -> Ok name | None -> Error())
             |> Result.toOption
-            |> Option.map (fun names -> joinedTargets targets update.From update.Joins names update.Where)
+            |> Option.map (fun names -> joinedUpdateTargets update.From update.Joins names update.Where)
             |> Option.defaultValue []
     | Delete delete when delete.Joins.IsEmpty ->
         let viewDatabase = delete.From.Database |> Option.defaultValue dbName
@@ -34458,14 +34490,7 @@ let transactionWriteTargets
                                     None))
                         |> tryAllSome
                         |> Option.bind (Storage.tryPrimaryWriteLockTargets store table)
-                        |> Option.map (fun claims ->
-                            // INSERT claims the destination key. An UPDATE
-                            // can move an existing row there under a row lock.
-                            let rows =
-                                if claims.RowIds.IsEmpty then table.RowsArray.Indexed |> Seq.map fst |> Seq.toList
-                                else claims.RowIds
-
-                            view.Database, view.Table, { claims with RowIds = rows }))
+                        |> Option.map (fun claims -> view.Database, view.Table, protectKeyMove table claims))
                     |> Option.orElseWith (fun () -> targets reference None)
                 | _ -> targets source predicate
 
