@@ -8977,6 +8977,30 @@ let tests =
                   | ProcedureResult(_, rows) -> Expect.equal rows expected "the parameter supplies every derived k value"
                   | other -> failtestf "unexpected correlated derived result: %A" other
 
+          testCase "correlated nullable counts respect shadowed arguments and range predicates"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              for sql in
+                  [ "CREATE TABLE ids (id INT PRIMARY KEY)"
+                    "CREATE TABLE counts (id INT PRIMARY KEY,pid INT,r INT,bucket INT, KEY ix(pid,r))"
+                    "INSERT INTO ids VALUES (1),(2)"
+                    "INSERT INTO counts VALUES (1,1,1,NULL),(2,1,9,7),(3,2,1,5),(4,2,9,NULL)"
+                    "CREATE PROCEDURE count_shadow(IN bucket INT) BEGIN SELECT p.id,(SELECT COUNT(bucket) FROM counts c WHERE c.pid=p.id AND c.r<=p.id+2) AS n FROM ids p ORDER BY p.id; END"
+                    "CREATE PROCEDURE range_shadow(IN r INT) BEGIN SELECT p.id,(SELECT COUNT(c.bucket) FROM counts c WHERE c.pid=p.id AND r<=p.id+2) AS n FROM ids p ORDER BY p.id; END" ] do
+                  match handle session sql |> snd with
+                  | Affected _ -> ()
+                  | result -> failtestf "expected fixture statement to succeed, got %A" result
+
+              for sql, count in
+                  [ "CALL count_shadow(NULL)", "0"
+                    "CALL count_shadow(8)", "1"
+                    "CALL range_shadow(1)", "1"
+                    "CALL range_shadow(9)", "0" ] do
+                  match handle session sql |> snd with
+                  | ProcedureResult(_, rows) -> Expect.equal rows [ [ Some "1"; Some count ]; [ Some "2"; Some count ] ] sql
+                  | result -> failtestf "expected correlated counts, got %A" result
+
           testCase "PARAMETERS describes procedure arguments and function returns"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

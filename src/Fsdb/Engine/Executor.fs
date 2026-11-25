@@ -9420,11 +9420,9 @@ and private tryMissingCorrelatedAggregateArgument (outer: EvalContext) (select: 
     | _ -> None
 
 and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
-    let countRows = isPlainCountRowsSelect outer.Store outer.DbName outer.Registry select
-
     match select.From with
-    | Some(FromItem.Qualified qualifier as source) when countRows && select.Joins.IsEmpty ->
-        let countCandidates candidates =
+    | Some(FromItem.Qualified qualifier as source) when select.Joins.IsEmpty ->
+        let countCandidates countsRow candidates =
             candidates |> Option.map (fun candidate ->
                 let columns, rows = candidate.SourceColumns, candidate.SourceRows
                 let context =
@@ -9448,23 +9446,57 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
                             countResult
                             |> Result.bind (fun count ->
                                 matches row
-                                |> Result.map (fun matches -> if matches then count + 1L else count)))
+                                |> Result.map (fun matches -> if matches && countsRow row then count + 1L else count)))
                         (Ok 0L)
                     |> Result.map VInt))
 
-        match tryCorrelatedEqualityCount outer source select.Where with
-        | Some count -> Some(Ok(VInt(int64 count)))
-        | None ->
-            match tryCorrelatedIntegerRangeAccess outer source select.Where with
-            | Some(lookup, true) -> Some(Ok(VInt(int64 lookup.OrderedRowCount)))
-            | Some(lookup, false) ->
-                Some { SourceColumns = lookup.OrderedColumns
-                       SourceRows = Seq.toList lookup.OrderedRows
-                       RangeAccesses = [] }
-                |> countCandidates
+        let rangeAccess () = tryCorrelatedIntegerRangeAccess outer source select.Where
+
+        let countRangeCandidates countsRow (lookup: Storage.OrderedLookup) =
+            Some { SourceColumns = lookup.OrderedColumns
+                   SourceRows = Seq.toList lookup.OrderedRows
+                   RangeAccesses = [] }
+            |> countCandidates countsRow
+
+        if isPlainCountRowsSelect outer.Store outer.DbName outer.Registry select then
+            match tryCorrelatedEqualityCount outer source select.Where with
+            | Some count -> Some(Ok(VInt(int64 count)))
             | None ->
-                tryCorrelatedSourceAccess outer.Store outer.Registry outer.DbName source select.Where (Some outer)
-                |> countCandidates
+                match rangeAccess () with
+                | Some(lookup, true) -> Some(Ok(VInt(int64 lookup.OrderedRowCount)))
+                | Some(lookup, false) -> countRangeCandidates (fun _ -> true) lookup
+                | None ->
+                    tryCorrelatedSourceAccess outer.Store outer.Registry outer.DbName source select.Where (Some outer)
+                    |> countCandidates (fun _ -> true)
+        else
+            match select.Projections with
+            | [ { Expression = FuncCall(_, [ argument ]) } ] when isPlainCountSelect outer.Registry select (fun _ -> true) ->
+                let localColumn =
+                    match argument with
+                    | Col name when (tryRoutineVariable name).IsNone -> Some name
+                    | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier -> Some name
+                    | _ -> None
+
+                localColumn |> Option.bind (fun column ->
+                    rangeAccess ()
+                    |> Option.bind (fun (lookup, covered) ->
+                        resolveColumn lookup.OrderedColumns column
+                        |> Result.toOption
+                        |> Option.map (fun index -> lookup, covered, index))
+                    |> Option.bind (fun (lookup, covered, index) ->
+                        let countsRow (row: Value[]) = row[index] <> VNull
+
+                        if covered then
+                            let mutable count = 0L
+                            let mutable processed = 0
+                            for row in lookup.OrderedRows do
+                                Limits.checkQueryCancellation processed
+                                processed <- processed + 1
+                                if countsRow row then count <- count + 1L
+                            Some(Ok(VInt count))
+                        else
+                            countRangeCandidates countsRow lookup))
+            | _ -> None
     | _ -> None
 
 and private plainExistsProjection (projection: Projection) =
@@ -19088,9 +19120,14 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
         | _ -> false
 
     let hasRange = List.exists isRangePredicate ranges
+    let hasRoutineVariable =
+        routineVariables.Value.IsSome
+        && (whereExpr |> Option.exists (Expression.exists (function
+            | Col name -> (tryRoutineVariable name).IsSome
+            | _ -> false)))
 
     match source with
-    | FromTable tableRef when hasRange && not equalities.IsEmpty && (tryLockingReadRows tableRef).IsNone ->
+    | FromTable tableRef when hasRange && not equalities.IsEmpty && not hasRoutineVariable && (tryLockingReadRows tableRef).IsNone ->
         physicalFastPathTable outer.Store outer.DbName tableRef
         |> Option.filter (fun table -> storedRowsMatchReadRows outer.Store table.Columns)
         |> Option.bind (fun table ->

@@ -16057,9 +16057,9 @@ let tests =
                     runDefault store "INSERT INTO parents VALUES (9999)" |> ignore
                     runDefault store "INSERT INTO children VALUES (9999,NULL,NULL)" |> ignore
 
-                    let readCount hint bounds expected =
+                    let readAggregate argument hint bounds expected =
                         let sql =
-                            $"SELECT SUM((SELECT COUNT(*) FROM children c {hint} WHERE c.parent_id=p.id AND {bounds})) FROM parents p"
+                            $"SELECT SUM((SELECT COUNT({argument}) FROM children c {hint} WHERE c.parent_id=p.id AND {bounds})) FROM parents p"
 
                         let before = System.GC.GetAllocatedBytesForCurrentThread()
                         let result = runDefault store sql
@@ -16071,6 +16071,7 @@ let tests =
 
                         allocated
 
+                    let readCount = readAggregate "*"
                     let between = "c.id BETWEEN p.id AND p.id+500"
                     let forced = readCount "FORCE INDEX (ix_child)" between "750"
                     let unhinted = readCount "" between "750"
@@ -16106,6 +16107,19 @@ let tests =
                         Expect.isLessThan allocated (unhinted * 7L) $"the index slice narrows candidates before filtering {bounds}"
 
                     readCount "IGNORE INDEX (ix_child)" $"c.bucket=1 AND {between}" "200" |> ignore
+
+                    for predicate, expected in
+                        [ between, "600"
+                          "c.id<=p.id+500 AND c.id<p.id+500", "400"
+                          $"c.bucket<>1 AND {between}", "400"
+                          $"c.bucket IS NULL AND {between}", "0" ] do
+                        let allocated = readAggregate "c.bucket" "" predicate expected
+                        Expect.isLessThan allocated (unhinted * 7L) $"the nullable count reads the composite slice for {predicate}"
+
+                    readAggregate "c.bucket" "IGNORE INDEX (ix_child)" between "600" |> ignore
+
+                    let bareColumn = readAggregate "bucket" "" between "600"
+                    Expect.isLessThan bareColumn (unhinted * 7L) "an unshadowed bare count argument uses the same slice"
 
                     runDefault store "CREATE TABLE ranked (id INT PRIMARY KEY, parent_id INT, rank_value INT, KEY ix_rank(parent_id, rank_value DESC, id))" |> ignore
                     runDefault store "INSERT INTO ranked VALUES (10,1,NULL),(11,1,1),(12,1,2),(13,1,2),(14,1,3),(15,2,3),(16,2,4),(17,2,5),(18,NULL,3)" |> ignore

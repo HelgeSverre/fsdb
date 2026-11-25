@@ -2751,8 +2751,10 @@ implementation effort:
    and [intersections of several signed-integer bounds on the same index suffix](benchmarks/results/2026-11-25-correlated-integer-range-count.md#intersecting-bounds).
    Correlated counts with [simple signed-integer residual filters](benchmarks/results/2026-11-25-correlated-integer-range-count.md#filtering-narrowed-candidates)
    can read the smallest eligible composite slice before filtering.
-   Other residual predicates and projected expressions still need
-   broader access planning.
+   [Counts of nullable physical columns](benchmarks/results/2026-11-25-correlated-integer-range-count.md#counting-nullable-columns)
+   also use that slice and count only non-NULL values.
+   Other residual predicates, aggregate expressions, and projected
+   sources still need broader access planning.
 
 2. Transaction scheduling. [Readers behind waiting writers under a global
    read lock](torture/findings/2026-11-06-global-read-waiting-writer-gate.md)

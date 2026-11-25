@@ -122,3 +122,51 @@ On the 250-parent, 5,000-child fixture, a `bucket=1` residual allocated
 executor probe measured 14.1 MB. Residual inequality, null, and
 column-to-column comparison cases used 13.3–16.8 MB. The fully covered
 control used 7.3 MB.
+
+## Counting nullable columns
+
+`COUNT(column)` now uses the same equality-prefix and integer-range
+slice when the argument is a direct column on the physical inner table.
+The executor reads the argument from each qualifying row and skips
+SQL NULLs. Residual filters still run before counting, and bare names
+bound to routine variables use ordinary evaluation.
+
+The native MySQL 8.4.11 check compared 1,800 result values and two
+binding errors. It covered forced and ignored indexes, ascending and
+descending nullable suffixes, NULL and out-of-domain bounds, duplicate
+suffix values, several counted column types, and JSON null versus SQL
+NULL. Separate procedure controls covered shadowed count arguments and
+range predicates.
+
+On the existing 250-parent, 5,000-child fixture, the baseline allocated
+307 MB on the calling thread for one `COUNT(c.bucket)` range query.
+The regression bounds allocation for qualified and bare arguments,
+one- and two-sided ranges, and residual filters relative to the
+indexed `COUNT(*)` control.
+
+The native benchmark uses 500 parents and 10,000 children. The child
+index is `(parent_id, id)`. A nullable `bucket` is NULL for every
+fifth row and otherwise holds `MOD(id,3)`. Each lane verifies its
+result on every execution, with four warmups and 15 timed samples
+after preflight. The two passes reverse the engine and workload order
+on the Apple M2 Max. Both Fsdb builds use Release .NET 10.0.12 with WAL
+and Server GC. MySQL 8.4.11 uses a 256 MiB InnoDB buffer pool, flush at
+commit, and binary logging disabled. The Fsdb baseline is `78ec82a6`.
+
+| Workload, p50 ms | Fsdb before | Fsdb after | MySQL |
+| --- | ---: | ---: | ---: |
+| `COUNT(*)` control | 7.187 | 7.770 | 1.643 |
+| `COUNT(c.bucket)` | 331.003 | 7.797 | 2.394 |
+| `COUNT(c.bucket)` with `c.bucket<>1` | 336.963 | 14.653 | 2.420 |
+
+The nullable count improved 42× and the filtered count improved 23×.
+Fsdb took 3.3× and 6.1× MySQL's median time on those lanes. The
+`COUNT(*)` baseline varied between 3.8 and 10.6 ms across passes, so
+this run gives no firm estimate of change on that control. [Per-pass p50 and p95 results](2026-11-25-correlated-nullable-count.csv).
+
+Run the checked fixture against a disposable loopback server using
+the [peer benchmark script](../scripts/native-feature-peers.fsx).
+
+```sh
+dotnet fsi benchmarks/scripts/native-feature-peers.fsx -- MySQL 3391 1 nullable-count-controls
+```
