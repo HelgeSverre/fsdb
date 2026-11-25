@@ -1683,8 +1683,9 @@ Unicode singleton weights, 6,850 mixed strings, and the 4,096-character Han
 ordering and full-text reproduction. It also fixes the `LIMIT 1` title
 tie-break when ngram scores match. The historical 4,096-character run had
 3,721 displaced positions and 41,213 pairwise inversions. Full-text token
-keys retain their existing encoding, and linguistic prefix and substring
-matching retain the host locale path.
+keys also use the pinned weights, fixing mixed-script postings for `文ſ`
+and `文ꞅ`. Linguistic prefix and substring matching retain the host locale
+path.
 The independent CLDR 30 pinyin sequence exactly reproduces MySQL's
 ranked Han order in three audited blocks (1,020, 4,092, and 4,088
 characters); a fourth 4,087-character block differs by one moved

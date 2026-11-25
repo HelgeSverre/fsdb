@@ -1934,6 +1934,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         fun s ->
             if spec.ByteOrder then
                 "B" + Convert.ToHexString(binaryBytes s)
+            elif chinese0900 then
+                Convert.ToHexString(Zh0900Weights.weightOf s)
             else
                 Convert.ToHexString(ci.GetSortKey(fullTextKeyText s, spec.Fold).KeyData)
       WeightOf =

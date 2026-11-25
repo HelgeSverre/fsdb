@@ -170,6 +170,22 @@ let tests =
                   Expect.equal (booleanScores changed "ORCH*" |> Map.keys |> Seq.toList) [ 1 ] "mutation removes normalized prefixes"
                   Expect.equal (naturalScores changed "Orchard" |> Map.keys |> Seq.toList) [ 1 ] "mutation removes normalized exact postings"
 
+          testCase "Chinese 0900 ngram postings preserve tailored equivalence in mixed-script text"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_zh_0900_as_cs" |> Option.get
+              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let index =
+                  [ "文ſ"; "文ꞅ"; "文s"; "文國"; "文国"; "文乾"; "文亁" ]
+                  |> List.mapi (fun i body -> i + 1, rules, [ body ])
+                  |> buildIndexWithDocumentSettings rules collation
+
+              let ids scores = scores |> Map.keys |> Seq.toList
+              for query, expected in [ "文ſ", [ 1; 2 ]; "文ꞅ", [ 1; 2 ]; "文s", [ 3 ]; "文国", [ 5 ]; "文乾", [ 6 ] ] do
+                  Expect.equal (naturalScores index query |> ids) expected query
+
+              Expect.equal (booleanScores index "\"文ſ\"" |> ids) [ 1; 2 ] "the quoted query shares the tailored posting"
+              Expect.equal (expansionScores index "文ſ" |> ids) [ 1; 2 ] "expansion stays within the matched equivalence class"
+
           testCase "Unicode 5.2 ngrams share padded space keys but retain Mongolian separator weight"
           <| fun _ ->
               let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get
