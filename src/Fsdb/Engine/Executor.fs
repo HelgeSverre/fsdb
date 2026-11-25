@@ -9424,15 +9424,8 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
 
     match select.From with
     | Some(FromItem.Qualified qualifier as source) when countRows && select.Joins.IsEmpty ->
-        let count =
-            tryCorrelatedEqualityCount outer source select.Where
-            |> Option.orElseWith (fun () -> tryCorrelatedIntegerRangeCount outer source select.Where)
-
-        match count with
-        | Some count -> Some(Ok(VInt(int64 count)))
-        | None ->
-            tryCorrelatedSourceAccess outer.Store outer.Registry outer.DbName source select.Where (Some outer)
-            |> Option.map (fun candidate ->
+        let countCandidates candidates =
+            candidates |> Option.map (fun candidate ->
                 let columns, rows = candidate.SourceColumns, candidate.SourceRows
                 let context =
                     contextFactory
@@ -9458,6 +9451,20 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
                                 |> Result.map (fun matches -> if matches then count + 1L else count)))
                         (Ok 0L)
                     |> Result.map VInt))
+
+        match tryCorrelatedEqualityCount outer source select.Where with
+        | Some count -> Some(Ok(VInt(int64 count)))
+        | None ->
+            match tryCorrelatedIntegerRangeAccess outer source select.Where with
+            | Some(lookup, true) -> Some(Ok(VInt(int64 lookup.OrderedRowCount)))
+            | Some(lookup, false) ->
+                Some { SourceColumns = lookup.OrderedColumns
+                       SourceRows = Seq.toList lookup.OrderedRows
+                       RangeAccesses = [] }
+                |> countCandidates
+            | None ->
+                tryCorrelatedSourceAccess outer.Store outer.Registry outer.DbName source select.Where (Some outer)
+                |> countCandidates
     | _ -> None
 
 and private plainExistsProjection (projection: Projection) =
@@ -19069,9 +19076,9 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
                 |> tryAllSome
                 |> Option.bind (countRows projection))))
 
-/// A whole-key integer prefix and an integer interval can count
-/// directly from the ordered index when they cover every WHERE conjunct.
-and private tryCorrelatedIntegerRangeCount (outer: EvalContext) source whereExpr =
+/// Narrow a count to an integer index interval. Report whether the slice
+/// covers the entire predicate or its rows still need to be filtered.
+and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExpr =
     let equalities, ranges =
         optionalConjuncts whereExpr
         |> List.partition (function BinOp(Eq, _, _) -> true | _ -> false)
@@ -19080,7 +19087,7 @@ and private tryCorrelatedIntegerRangeCount (outer: EvalContext) source whereExpr
         | Between _ | BinOp((Lt | Lte | Gt | Gte), _, _) -> true
         | _ -> false
 
-    let hasRange = not ranges.IsEmpty && List.forall isRangePredicate ranges
+    let hasRange = List.exists isRangePredicate ranges
 
     match source with
     | FromTable tableRef when hasRange && not equalities.IsEmpty && (tryLockingReadRows tableRef).IsNone ->
@@ -19100,6 +19107,16 @@ and private tryCorrelatedIntegerRangeCount (outer: EvalContext) source whereExpr
 
             let pins = equalities |> List.map (tryEqualityPredicate innerColumn bound) |> tryAllSome
 
+            // A narrower slice can skip evaluating these residuals on excluded
+            // rows because exact signed comparisons and null tests are silent.
+            let isInner expression = (innerColumn expression).IsSome
+            let isSafeResidual = function
+                | IsNull expression | IsNotNull expression -> isInner expression
+                | BinOp((Lt | Lte | Gt | Gte | Neq), left, right) ->
+                    (isInner left && (isInner right || (bound right).IsSome))
+                    || (isInner right && (bound left).IsSome)
+                | _ -> false
+
             let tighter isTighter oldBound newBound =
                 match oldBound, newBound with
                 | Some(oldValue, oldInclusive), Some(newValue, newInclusive) ->
@@ -19109,55 +19126,60 @@ and private tryCorrelatedIntegerRangeCount (outer: EvalContext) source whereExpr
                     else oldBound
                 | _ -> Option.orElse oldBound newBound
 
-            let intersection =
+            let classified =
                 ranges
                 |> List.map (fun predicate ->
                     match rangePredicatesFor innerColumn bound predicate with
-                    | [] -> None
+                    | [] when not (isSafeResidual predicate) -> None
                     | bounds -> Some bounds)
                 |> tryAllSome
-                |> Option.bind (fun bounds ->
-                    match List.concat bounds with
-                    | first :: rest when rest |> List.forall (fun next -> equalsIgnoreCase first.Column next.Column) ->
-                        rest
-                        |> List.fold (fun current next ->
-                            { current with
-                                Lower = tighter (fun order -> order > 0) current.Lower next.Lower
-                                Upper = tighter (fun order -> order < 0) current.Upper next.Upper }) first
-                        |> Some
-                    | _ -> None)
 
-            match pins, intersection with
-            | Some pins, Some range when (tryDuplicateIgnoreCase fst pins).IsNone ->
+            match pins, classified with
+            | Some pins, Some classified when (tryDuplicateIgnoreCase fst pins).IsNone ->
                 let values =
                     pins
                     |> List.map (fun (name: string, value) -> name.ToLowerInvariant(), value)
                     |> Map.ofList
                 let pinned = values |> Map.keys |> Set.ofSeq
                 let allowed = indexHintsFor IndexJoin tableRef |> indexAllowedBy
-                let suffix = [ { Column = range.Column; Transform = None; Direction = Asc } ]
+                let indexes = orderedIndexCandidates table |> List.filter (fun candidate -> allowed candidate.Name)
 
-                orderedIndexCandidates table
-                |> List.filter (fun candidate -> allowed candidate.Name)
-                |> List.tryPick (fun candidate ->
-                    tryIndexPrefix table pinned suffix candidate.Terms
-                    |> Option.filter (fun matched -> matched.PinnedCount = pins.Length)
-                    |> Option.bind (fun matched ->
-                        let terms = storageOrderTerms matched.Terms
-                        let prefixValues =
-                            matched.Terms
-                            |> List.take matched.PinnedCount
-                            |> List.map (fun term -> values.[term.Column.ToLowerInvariant()])
+                let intervals =
+                    classified
+                    |> List.concat
+                    |> List.groupBy _.Column
+                    |> List.map (fun (_, bounds) ->
+                        bounds |> List.reduce (fun current next ->
+                            { current with
+                                Lower = tighter (fun order -> order > 0) current.Lower next.Lower
+                                Upper = tighter (fun order -> order < 0) current.Upper next.Upper }))
 
-                        Storage.tryOrderedIndexPrefixRangeLookupInTableWith
-                            (equalsIgnoreCase candidate.Name)
-                            outer.Store
-                            table
-                            terms
-                            prefixValues
-                            range.Lower
-                            range.Upper
-                        |> Option.map _.OrderedRowCount))
+                let allRangesCovered = intervals.Length = 1 && List.forall (not << List.isEmpty) classified
+
+                intervals
+                |> List.collect (fun range ->
+                    let suffix = [ { Column = range.Column; Transform = None; Direction = Asc } ]
+                    indexes |> List.choose (fun candidate ->
+                        tryIndexPrefix table pinned suffix candidate.Terms
+                        |> Option.filter (fun matched -> matched.PinnedCount > 0)
+                        |> Option.bind (fun matched ->
+                            let terms = storageOrderTerms matched.Terms
+                            let prefixValues =
+                                matched.Terms
+                                |> List.take matched.PinnedCount
+                                |> List.map (fun term -> values.[term.Column.ToLowerInvariant()])
+
+                            Storage.tryOrderedIndexPrefixRangeLookupInTableWith
+                                (equalsIgnoreCase candidate.Name)
+                                outer.Store
+                                table
+                                terms
+                                prefixValues
+                                range.Lower
+                                range.Upper
+                            |> Option.map (fun lookup -> lookup, allRangesCovered && matched.PinnedCount = pins.Length))))
+                |> List.sortBy (fun (lookup, covered) -> lookup.OrderedRowCount, not covered)
+                |> List.tryHead
             | _ -> None)
     | _ -> None
 

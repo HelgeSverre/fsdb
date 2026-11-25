@@ -100,3 +100,25 @@ thread, against 7.2 MB for the existing `BETWEEN` control. A warmed Debug
 probe of the updated executor measured 7.5 MB for repeated upper bounds,
 7.2 MB for repeated lower bounds, and 8.6 MB for a narrowed `BETWEEN`
 interval. The updated `BETWEEN` control used 7.1 MB.
+
+## Filtering narrowed candidates
+
+In a correlated `COUNT(*)` with more predicates than one index covers,
+the executor can use a signed-integer equality prefix and a range suffix
+to narrow the candidates. It picks the eligible slice with the fewest
+entries and evaluates the original filter against those rows. An exact
+slice count still applies when the chosen index covers every conjunct.
+The narrower access requires signed-integer comparisons or null tests
+whose skipped evaluations cannot produce conversion warnings or side
+effects. Other predicate shapes retain the existing planning path.
+
+The pinned MySQL 8.4.11 wire comparison matched 600 counts. It covered
+ascending and descending suffixes, a competing index with a longer
+equality prefix, forced and ignored indexes, nullable operands, empty
+intervals, and fallback filters with text or fractional operands.
+
+On the 250-parent, 5,000-child fixture, a `bucket=1` residual allocated
+293 MB per query in the original Debug regression. The updated warmed
+executor probe measured 14.1 MB. Residual inequality, null, and
+column-to-column comparison cases used 13.3–16.8 MB. The fully covered
+control used 7.3 MB.

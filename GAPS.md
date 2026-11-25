@@ -2745,8 +2745,10 @@ implementation effort:
    measured 399 ms before, 12 ms after, and 1.8 ms on MySQL. The same
    ordered slice now counts [one-sided bounds](benchmarks/results/2026-11-25-correlated-integer-range-count.md#one-sided-bounds)
    and [intersections of several signed-integer bounds on the same index suffix](benchmarks/results/2026-11-25-correlated-integer-range-count.md#intersecting-bounds).
-   Counts with residual predicates and other projected expressions still
-   need broader access planning.
+   Correlated counts with [simple signed-integer residual filters](benchmarks/results/2026-11-25-correlated-integer-range-count.md#filtering-narrowed-candidates)
+   can read the smallest eligible composite slice before filtering.
+   Other residual predicates and projected expressions still need
+   broader access planning.
 
 2. Transaction scheduling. [Readers behind waiting writers under a global
    read lock](torture/findings/2026-11-06-global-read-waiting-writer-gate.md)

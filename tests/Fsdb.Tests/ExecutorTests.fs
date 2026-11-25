@@ -16041,7 +16041,7 @@ let tests =
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE parents (id INT PRIMARY KEY)" |> ignore
-                    runDefault store "CREATE TABLE children (id INT PRIMARY KEY, parent_id INT, KEY ix_child(parent_id, id))" |> ignore
+                    runDefault store "CREATE TABLE children (id INT PRIMARY KEY, parent_id INT, bucket INT, KEY ix_child(parent_id, id))" |> ignore
 
                     let insertRows table count row =
                         [ 1..count ]
@@ -16051,9 +16051,11 @@ let tests =
                         |> ignore
 
                     insertRows "parents" 250 (fun id -> sprintf "(%d)" id)
-                    insertRows "children" 5000 (fun id -> sprintf "(%d,%d)" id ((id - 1) % 250 + 1))
+                    insertRows "children" 5000 (fun id ->
+                        let bucket = if id % 5 = 0 then "NULL" else string (id % 3)
+                        sprintf "(%d,%d,%s)" id ((id - 1) % 250 + 1) bucket)
                     runDefault store "INSERT INTO parents VALUES (9999)" |> ignore
-                    runDefault store "INSERT INTO children VALUES (9999,NULL)" |> ignore
+                    runDefault store "INSERT INTO children VALUES (9999,NULL,NULL)" |> ignore
 
                     let readCount hint bounds expected =
                         let sql =
@@ -16093,6 +16095,17 @@ let tests =
                     readCount "IGNORE INDEX (ix_child)" between "750" |> ignore
                     readCount "FORCE INDEX (ix_child)" "c.id<=p.id+500" "750" |> ignore
                     readCount "IGNORE INDEX (ix_child)" "c.id<=p.id+500" "750" |> ignore
+
+                    for bounds, expected in
+                        [ $"c.bucket=1 AND {between}", "200"
+                          $"c.bucket<>1 AND {between} AND c.id<p.id+500", "266"
+                          $"c.bucket IS NULL AND {between}", "150"
+                          $"c.bucket<2 AND {between}", "400"
+                          $"c.bucket<c.parent_id AND {between}", "597" ] do
+                        let allocated = readCount "" bounds expected
+                        Expect.isLessThan allocated (unhinted * 7L) $"the index slice narrows candidates before filtering {bounds}"
+
+                    readCount "IGNORE INDEX (ix_child)" $"c.bucket=1 AND {between}" "200" |> ignore
 
                     runDefault store "CREATE TABLE ranked (id INT PRIMARY KEY, parent_id INT, rank_value INT, KEY ix_rank(parent_id, rank_value DESC, id))" |> ignore
                     runDefault store "INSERT INTO ranked VALUES (10,1,NULL),(11,1,1),(12,1,2),(13,1,2),(14,1,3),(15,2,3),(16,2,4),(17,2,5),(18,NULL,3)" |> ignore
