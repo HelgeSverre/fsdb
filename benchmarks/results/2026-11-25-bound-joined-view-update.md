@@ -275,9 +275,9 @@ no residual filter, a selective filter, and a filter rejecting every row.
 The transaction regression also verifies an independent write to the
 released boundary and to a row excluded by the partner filter.
 
-Locking outer read operands, join shapes without a proven partner range,
-and pending inserts into keyless partners remain open. The scan audit
-used one concurrent owner at a time.
+The scan audit used one concurrent owner at a time. Join shapes without
+a proven partner range and pending inserts into keyless partners remain
+open.
 
 ## Outer join operand locks
 
@@ -295,8 +295,8 @@ holds a change to the outer row's delta from 7 to 19. Native MySQL
 8.4.11 waits and commits `n=32` when the owner commits, or `n=20`
 when the owner rolls back. A committed delete affects no rows. A
 pending insert for the initially absent key also causes a wait and,
-on commit, supplies the outer value. Fsdb completes the statement
-before the owner resolves in each of these cases.
+on commit, supplies the outer value. Before the fix, Fsdb completed the
+statement before the owner resolved in each of these cases.
 
 All 24 matching-key wait controls diverged over four isolation levels
 and both owner outcomes. Eight unrelated-key controls matched. A
@@ -305,3 +305,29 @@ statement and before commit. MySQL returned error 3572 on the outer
 key in all twelve cases, including when `g.delta>=10` or
 `a.delta>=10` eliminated the update. Fsdb allowed the contender to
 lock that key. The unrelated key remained free in both engines.
+
+The read planner now propagates signed-integer bounds through the audited
+inner joins and single left join, then probes fully bound primary keys on
+the outer physical tables. Fsdb waits for a pending insert by key and
+keeps a shared lock on each visible row through transaction end. The
+statement rechecks the row identity after refreshing its snapshot so a
+concurrent delete and insert at the same key cannot leave the replacement
+row unlocked.
+
+The native MySQL 8.4.11 wire comparison matched all 128 wait and result
+checks across the original join order, the reversed join order, an
+outer composite primary key, and autocommit. Each variant covered
+matching-key updates, inserts, and deletes plus unrelated-key controls
+across four isolation levels and both owner outcomes. The unrelated
+controls let the joined writer commit before releasing the owner so
+the check measures row scheduling. Four more replacement checks
+verified that the writer used the new delta and held a shared lock on
+the replacement row. For visible keys, a second shared reader succeeded
+and `FOR UPDATE NOWAIT` returned 3572 until the writer ended. That also
+held when a predicate rejected every candidate.
+
+The missing-key case at REPEATABLE READ and SERIALIZABLE still differs.
+With no outer row and no pending writer, MySQL prevents another
+transaction from inserting that key. Fsdb allows the insert. Fsdb can
+also reject a SERIALIZABLE commit after an unrelated writer commits
+first, matching its pre-existing whole-catalog validation rule.

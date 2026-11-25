@@ -2972,8 +2972,59 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
                 let refreshed = refreshCommitted initialReadSnapshot
                 refreshed, readClaims None refreshed
 
-        let readTargets = readTargets |> List.filter (fun (_, _, claims) -> not claims.RetainedRows.IsEmpty)
+        let primaryProbes =
+            readTargets
+            |> List.choose (fun (database, table, claims) ->
+                if claims.PrimaryProbes.IsEmpty then None
+                else Some(database, table, claims.PrimaryProbes, Set.ofList claims.RetainedRows))
 
+        let acquireReadRows remaining (transaction: Transaction) database table rows =
+            Storage.acquireTransactionReadTargets remaining transaction.Snapshot database table ShareLock WaitForLocks rows |> ignore
+
+        let refreshReadRows (transaction: Transaction) =
+            let refreshed = refresh transaction
+            if primaryProbes.IsEmpty then refreshed
+            else
+                let deadline = DateTime.UtcNow + timeout
+                let remaining database =
+                    let timeLeft = deadline - DateTime.UtcNow
+                    if timeLeft <= TimeSpan.Zero then raise (Storage.LockWaitTimeout database)
+                    timeLeft
+
+                let tableAt (database: string) table (tx: Transaction) =
+                    match tx.Snapshot.Databases.TryGetValue (database.ToLowerInvariant()) with
+                    | true, tables -> Map.tryFind (normalizeTableName table) tables.Value
+                    | false, _ -> None
+
+                // A delete and insert can leave the same key on a different
+                // row. Hold a shared lock on the identity in the statement's
+                // refreshed snapshot before using that row in the update.
+                let rec stabilize previous snapshot probes =
+                    let next =
+                        probes
+                        |> List.map (fun (database, table, values, held) ->
+                            match tableAt database table previous, tableAt database table snapshot with
+                            | before, Some current when not (before |> Option.exists (fun table -> obj.ReferenceEquals(table, current))) ->
+                                let claims =
+                                    values
+                                    |> List.choose (Storage.tryPrimaryWriteLockTargets snapshot.Snapshot current)
+                                    |> List.filter (fun claim -> claim.RowIds |> List.exists (fun row -> not (Set.contains row held)))
+                                let rows = claims |> List.collect _.RowIds |> List.distinct
+
+                                if not rows.IsEmpty then
+                                    let keys = claims |> List.collect _.Keys |> List.distinct
+                                    Storage.waitForTransactionReadDependencies (remaining database) snapshot.Snapshot database table keys []
+                                    acquireReadRows (remaining database) snapshot database table rows
+
+                                (database, table, values, Set.union held (Set.ofList rows)), not rows.IsEmpty
+                            | _ -> (database, table, values, held), false)
+
+                    if next |> List.exists snd then stabilize snapshot (refresh snapshot) (List.map fst next)
+                    else snapshot
+
+                stabilize transaction refreshed primaryProbes
+
+        let readTargets = readTargets |> List.filter (fun (_, _, claims) -> not claims.RetainedRows.IsEmpty)
         let targets =
             Executor.transactionWriteTargets transaction.Snapshot registry dbName statement
             |> List.filter (fun (_, _, target) -> not target.RowIds.IsEmpty || not target.Keys.IsEmpty)
@@ -2982,20 +3033,14 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
         | [], [] ->
             if pendingReads.IsEmpty then session
             else
-                let snapshot = if transaction.Isolation = ReadUncommitted then refresh transaction else transaction
+                let snapshot =
+                    if transaction.Isolation = ReadUncommitted || not primaryProbes.IsEmpty then refreshReadRows transaction
+                    else transaction
                 { session with Tx = Some snapshot }
         | _ ->
             readTargets
             |> List.iter (fun (database, table, claims) ->
-                Storage.acquireTransactionReadTargets
-                    timeout
-                    transaction.Snapshot
-                    database
-                    table
-                    ShareLock
-                    WaitForLocks
-                    claims.RetainedRows
-                |> ignore)
+                acquireReadRows timeout transaction database table claims.RetainedRows)
             targets
             |> List.iter (fun (database, table, target) ->
                 Storage.acquireTransactionWriteTargets
@@ -3005,7 +3050,7 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
                     table
                     target.RowIds
                     target.Keys)
-            if canRefresh then { session with Tx = Some(refresh transaction) } else session
+            if canRefresh then { session with Tx = Some(refreshReadRows transaction) } else session
 
 /// Rolls an abandoned connection's transaction back.
 let closeSession (session: Session) : unit =

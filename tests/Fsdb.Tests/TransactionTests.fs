@@ -5784,6 +5784,86 @@ let tests =
                   | ResultSet(_, [ [ Some "20" ]; [ Some "30" ] ]) -> ()
                   | result -> failtestf "expected only the selected parent to change, got %A" result
 
+          testCase "a joined view update retains the outer primary-key read lock"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql, count in
+                  [ "CREATE TABLE parent (id INT PRIMARY KEY,n INT)", 0UL
+                    "CREATE TABLE partner (id INT,seq INT,delta INT,PRIMARY KEY(id,seq))", 0UL
+                    "CREATE TABLE gate (id INT PRIMARY KEY,delta INT)", 0UL
+                    "INSERT INTO parent VALUES (1,10)", 1UL
+                    "INSERT INTO partner VALUES (1,20,3)", 1UL
+                    "INSERT INTO gate VALUES (1,7),(2,13)", 2UL
+                    "CREATE VIEW active AS SELECT p.id,p.n,s.seq,s.delta FROM parent p JOIN partner s ON p.id=s.id", 0UL ] do
+                  run setup sql (Affected count) |> ignore
+
+              let innerUpdate =
+                  "UPDATE active a JOIN gate g ON g.id=a.id SET a.n=a.n+a.delta+g.delta WHERE a.id=1 AND a.seq BETWEEN 20 AND 22"
+
+              let outerUpdate =
+                  "UPDATE active a LEFT JOIN gate g ON g.id=a.id SET n=a.n+a.delta+g.delta WHERE a.id=1 AND a.seq BETWEEN 20 AND 22"
+
+              for index, isolation in [ "READ UNCOMMITTED"; "READ COMMITTED"; "REPEATABLE READ"; "SERIALIZABLE" ] |> List.indexed do
+                  let writer = run (create (2 + index * 3) store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let contender = create (3 + index * 3) store
+
+                  for update, count, retains in
+                      [ innerUpdate, 1UL, true
+                        innerUpdate + " AND g.delta>=10", 0UL, true
+                        innerUpdate + " AND a.delta>=10", 0UL, true
+                        innerUpdate + " AND g.id=2", 0UL, false
+                        outerUpdate, 1UL, true ] do
+                      let writing = run writer "BEGIN" (Affected 0UL)
+                      let writing = run writing update (Affected count)
+
+                      let reading = run contender "BEGIN" (Affected 0UL)
+                      let reading, shared = handle reading "SELECT id FROM gate WHERE id=1 FOR SHARE NOWAIT"
+                      let reading = run reading "ROLLBACK" (Affected 0UL)
+                      let reading = run reading "BEGIN" (Affected 0UL)
+                      let reading, exclusive = handle reading "SELECT id FROM gate WHERE id=1 FOR UPDATE NOWAIT"
+                      let reading, disjoint = handle reading "SELECT id FROM gate WHERE id=2 FOR UPDATE NOWAIT"
+                      run reading "ROLLBACK" (Affected 0UL) |> ignore
+                      run writing "ROLLBACK" (Affected 0UL) |> ignore
+
+                      match shared, exclusive, disjoint, retains with
+                      | ResultSet(_, [ [ Some "1" ] ]), Err(3572, _), ResultSet(_, [ [ Some "2" ] ]), true
+                      | ResultSet(_, [ [ Some "1" ] ]), ResultSet(_, [ [ Some "1" ] ]), ResultSet(_, [ [ Some "2" ] ]), false -> ()
+                      | _ -> failtestf "%s: unexpected locks for %s, got %A, %A and %A" isolation update shared exclusive disjoint
+
+                  for replacesExisting in [ false; true ] do
+                      if not replacesExisting then run setup "DELETE FROM gate WHERE id=1" (Affected 1UL) |> ignore
+                      let owner = run (create (4 + index * 3) store) "BEGIN" (Affected 0UL)
+                      let owner =
+                          if replacesExisting then run owner "DELETE FROM gate WHERE id=1" (Affected 1UL)
+                          else owner
+                      let owner = run owner "INSERT INTO gate VALUES (1,19)" (Affected 1UL)
+                      let writing = run writer "BEGIN" (Affected 0UL)
+                      let pending = Threading.Tasks.Task.Run(fun () -> handle writing innerUpdate)
+                      let waited = not (pending.Wait(TimeSpan.FromMilliseconds 100.0))
+                      run owner "COMMIT" (Affected 0UL) |> ignore
+                      Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 5.0)) "the outer read resumes after the insert commits"
+                      Expect.isTrue waited "the outer read waits for the competing insert"
+                      let writing, result = pending.GetAwaiter().GetResult()
+                      Expect.equal result (Affected 1UL) "the outer read uses the published row"
+                      match handle writing "SELECT n FROM parent WHERE id=1" |> snd with
+                      | ResultSet(_, [ [ Some "32" ] ]) -> ()
+                      | actual -> failtestf "expected the published delta to give n=32 at %s, got %A" isolation actual
+
+                      let reading = run contender "BEGIN" (Affected 0UL)
+                      let reading, exclusive = handle reading "SELECT id FROM gate WHERE id=1 FOR UPDATE NOWAIT"
+                      run reading "ROLLBACK" (Affected 0UL) |> ignore
+                      run writing "ROLLBACK" (Affected 0UL) |> ignore
+                      match exclusive with
+                      | Err(3572, _) -> ()
+                      | actual -> failtestf "%s should retain the published row lock (replacing=%b), got %A" isolation replacesExisting actual
+                      run setup "UPDATE gate SET delta=7 WHERE id=1" (Affected 1UL) |> ignore
+
           testCase "a lower-isolation joined update waits for the range boundary without retaining its lock"
           <| fun _ ->
               let run session sql expected =

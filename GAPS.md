@@ -3023,8 +3023,11 @@ implementation effort:
    uses a nonlocking partner read and retains its writable target lock.
    The [audited larger form](benchmarks/results/2026-11-25-bound-joined-view-update.md#lower-isolation-range-scans-in-larger-joined-updates)
    waits on its ordered range boundary and holds shared locks on
-   qualifying partner rows. Other outer read operands and join access
-   paths remain open. An audited
+   qualifying partner rows. Fully bound signed-integer primary keys on
+   [outer physical read operands](benchmarks/results/2026-11-25-bound-joined-view-update.md#outer-join-operand-locks)
+   now wait for an owning transaction and retain a shared lock on the
+   published row, including after a delete and reinsert. Missing-key gap
+   locks and other outer join access paths remain open. An audited
    [nested checked view LEFT JOINed to a window CTE](torture/findings/2026-11-17-nested-window-outer-view.md)
    correctly remains read only, matching MySQL's metadata, rows, CHECK OPTION
    rejection, and mutation rejection. Procedures, functions, and triggers

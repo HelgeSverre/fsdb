@@ -26242,6 +26242,13 @@ let private signedJoinEdge columnTypes (left, right) =
     | Some leftType, Some rightType when leftType = rightType && isSignedJoinKey leftType -> Some(left, right)
     | _ -> None
 
+let private isSignedJoinPredicate columnTypes = function
+    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, column), LiteralValue(VInt _))
+    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue(VInt _), QualifiedCol(owner, column))
+    | Between(QualifiedCol(owner, column), LiteralValue(VInt _), LiteralValue(VInt _)) ->
+        Map.tryFind (mutationColumnKey (owner, column)) columnTypes |> Option.exists isSignedJoinKey
+    | _ -> false
+
 let private signedJoinBounds columnTypes equalities conditions =
     let edges = equalities |> List.choose (signedJoinEdge columnTypes)
 
@@ -26304,15 +26311,6 @@ let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list)
                 |> Map.ofList
 
             let positions = operands |> List.mapi (fun index (owner, _) -> owner, index) |> Map.ofList
-            let signedColumn owner column =
-                Map.tryFind (mutationColumnKey (owner, column)) columnTypes |> Option.exists isSignedJoinKey
-
-            let safeWhere = function
-                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, column), LiteralValue(VInt _))
-                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue(VInt _), QualifiedCol(owner, column))
-                | Between(QualifiedCol(owner, column), LiteralValue(VInt _), LiteralValue(VInt _)) -> signedColumn owner column
-                | _ -> false
-
             let joinKeys =
                 joins
                 |> List.mapi (fun index join ->
@@ -26328,7 +26326,7 @@ let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list)
                 |> Option.map List.concat
 
             // Keep expressions that can fail or warn in the ordinary path.
-            if positions.Count <> operands.Length || not (List.forall safeWhere whereConditions) then None
+            if positions.Count <> operands.Length || not (List.forall (isSignedJoinPredicate columnTypes) whereConditions) then None
             else
                 joinKeys |> Option.bind (fun equalities ->
                     let bounds = signedJoinBounds columnTypes equalities whereConditions
@@ -34853,7 +34851,8 @@ type internal WriteReadScope =
 type internal WriteReadDependencies =
     { RetainedRows: RowId list
       WaitKeys: string list
-      WaitRows: RowId list }
+      WaitRows: RowId list
+      PrimaryProbes: Value list list }
 
 let private tryJoinedRangeReadTargets scope store (database: string) (source: BoundUpdateSource) range retains (pendingConnection: int option) =
     let databaseKey = database.ToLowerInvariant()
@@ -34861,7 +34860,7 @@ let private tryJoinedRangeReadTargets scope store (database: string) (source: Bo
     let tableIn catalog = catalog |> Map.tryFind databaseKey |> Option.bind (Map.tryFind tableKey)
     let transientBoundary = scope = WriteReadScope.JoinedRanges && pendingConnection.IsSome
     let lockingPartners = scope = WriteReadScope.LockingPartners
-    let empty = { RetainedRows = []; WaitKeys = []; WaitRows = [] }
+    let empty = { RetainedRows = []; WaitKeys = []; WaitRows = []; PrimaryProbes = [] }
 
     // A moved row retains its identity across snapshots. A new row has
     // only its insertion key in common until the transaction publishes it.
@@ -34911,7 +34910,8 @@ let private tryJoinedRangeReadTargets scope store (database: string) (source: Bo
           WaitKeys = pending |> List.collect _.WaitKeys
           WaitRows =
             (if transientBoundary then rows @ Option.toList range.FollowingRow else [])
-            @ (pending |> List.collect _.WaitRows) })
+            @ (pending |> List.collect _.WaitRows)
+          PrimaryProbes = [] })
 
 let internal transactionWriteReadClaims
     (scope: WriteReadScope)
@@ -35020,38 +35020,119 @@ let internal transactionWriteReadClaims
                 update.Ctes |> List.tryFind (fun cte -> equalsIgnoreCase cte.CteName source.Table)
             else None
 
+        let outerColumnTypes =
+            lazy (
+                viewSources
+                |> List.collect (fun source ->
+                    let qualifier = source.Alias |> Option.defaultValue source.Table
+                    let database = source.Database |> Option.defaultValue dbName
+                    let columns =
+                        match cteFor source with
+                        | Some ({ Body = PlainSelect { From = Some(FromTable input) } } as cte)
+                            when (cteFor input).IsNone ->
+                            tryPhysicalProjection store registry dbName (FromSubquery(cte.Body, qualifier))
+                            |> Option.map (fun projection ->
+                                let inferred = projection.OutputColumns
+                                if cte.CteColumns.IsEmpty then inferred
+                                elif sameLength cte.CteColumns inferred then
+                                    List.map2 (fun name (column: ColumnDef) -> { column with Name = name }) cte.CteColumns inferred
+                                else [])
+                            |> Option.defaultValue []
+                        | Some _ -> []
+                        | None ->
+                            physicalFastPathTable store dbName source
+                            |> Option.map _.Columns
+                            |> Option.orElseWith (fun () -> viewColumns store registry database source.Table)
+                            |> Option.defaultValue []
+
+                    columns |> List.map (fun column -> mutationColumnKey (qualifier, column.Name), column.Type))
+                |> Map.ofList)
+
+        let innerJoin = function InnerJoin | StraightJoin -> true | _ -> false
         let outerSignedBounds =
             lazy (
-                if update.Joins |> List.forall (fun join -> join.Kind = InnerJoin || join.Kind = StraightJoin) then
-                    let columnTypes =
-                        viewSources
-                        |> List.collect (fun source ->
-                            let qualifier = source.Alias |> Option.defaultValue source.Table
-                            let database = source.Database |> Option.defaultValue dbName
-                            let columns =
-                                match cteFor source with
-                                | Some ({ Body = PlainSelect { From = Some(FromTable input) } } as cte)
-                                    when (cteFor input).IsNone ->
-                                    tryPhysicalProjection store registry dbName (FromSubquery(cte.Body, qualifier))
-                                    |> Option.map (fun projection ->
-                                        let inferred = projection.OutputColumns
-                                        if cte.CteColumns.IsEmpty then inferred
-                                        elif sameLength cte.CteColumns inferred then
-                                            List.map2 (fun name (column: ColumnDef) -> { column with Name = name }) cte.CteColumns inferred
-                                        else [])
-                                    |> Option.defaultValue []
-                                | Some _ -> []
-                                | None ->
-                                    physicalFastPathTable store dbName source
-                                    |> Option.map _.Columns
-                                    |> Option.orElseWith (fun () -> viewColumns store registry database source.Table)
-                                    |> Option.defaultValue []
-
-                            columns |> List.map (fun column -> mutationColumnKey (qualifier, column.Name), column.Type))
-                        |> Map.ofList
-
-                    signedJoinBounds columnTypes outerJoins (optionalConjuncts update.Where)
+                if update.Joins |> List.forall (fun join -> innerJoin join.Kind) then
+                    signedJoinBounds outerColumnTypes.Value outerJoins (optionalConjuncts update.Where)
                 else Map.empty)
+
+        let exactOuterReads () =
+            let qualifier (source: TableRef) = source.Alias |> Option.defaultValue source.Table
+            let database (source: TableRef) = source.Database |> Option.defaultValue dbName
+            let viewRef = update.From
+            let resolvedView =
+                if update.Joins.IsEmpty || (cteFor viewRef).IsSome then None
+                else tryUpdatableView store (database viewRef) viewRef.Table
+
+            match resolvedView with
+            | Some view when not view.UpdateJoins.IsEmpty ->
+                let allInner = update.Joins |> List.forall (fun join -> innerJoin join.Kind)
+                let singleLeft = match update.Joins with [ { Kind = LeftJoin } ] -> true | _ -> false
+                let sources =
+                    update.Joins
+                    |> List.map (function
+                        | { Table = FromTable source; Using = [] } when (cteFor source).IsNone ->
+                            physicalFastPathTable store dbName source |> Option.map (fun table -> source, table)
+                        | _ -> None)
+                    |> tryAllSome
+
+                let readBounds () =
+                    let columnTypes = outerColumnTypes.Value
+                    let conditions = update.Joins |> List.collect (_.On >> conjuncts)
+                    let edges = qualifiedColumnEqualities conditions
+                    let where = optionalConjuncts update.Where
+
+                    if edges.Length <> conditions.Length
+                       || not (edges |> List.forall (signedJoinEdge columnTypes >> Option.isSome))
+                       || not (where |> List.forall (isSignedJoinPredicate columnTypes)) then Map.empty
+                    elif allInner then outerSignedBounds.Value
+                    else signedJoinBounds columnTypes edges where
+
+                let planReads (sources: (TableRef * Table) list) =
+                    let written =
+                        update.Assignments
+                        |> List.map (fun assignment ->
+                            let writesView =
+                                match assignment.Table with
+                                | Some owner -> equalsIgnoreCase owner (qualifier viewRef)
+                                | None ->
+                                    sources |> List.forall (fun (_, table) ->
+                                        table.Columns |> List.forall (fun column -> not (equalsIgnoreCase column.Name assignment.Column)))
+                            if writesView then Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
+                            else None)
+                        |> tryAllSome
+
+                    let bounds = readBounds ()
+                    let conflicts =
+                        outerLiterals |> List.exists (fun (owner, column, literal) ->
+                            match literal, Map.tryFind (mutationColumnKey (owner, column)) bounds with
+                            | LiteralValue(VInt _ as value), Some bound -> value <> bound
+                            | _ -> false)
+
+                    match written with
+                    | Some targets when not targets.IsEmpty && not bounds.IsEmpty && not conflicts ->
+                        sources
+                        |> List.choose (fun (source, table) ->
+                            let sourceDb = database source
+                            let isWritten = targets |> List.exists (fun target ->
+                                equalsIgnoreCase target.Database sourceDb && equalsIgnoreCase target.Table source.Table)
+
+                            if isWritten || not source.IndexHints.IsEmpty || not source.Partitions.IsEmpty then None
+                            else
+                                Storage.primaryKeyColumns table
+                                |> List.map (fun column -> Map.tryFind (mutationColumnKey (qualifier source, column)) bounds)
+                                |> tryAllSome
+                                |> Option.bind (fun values ->
+                                    Storage.tryPrimaryWriteLockTargets store table values
+                                    |> Option.map (fun target ->
+                                        // An insert may own the key before its row is visible.
+                                        let waitKeys = if pendingConnection.IsSome && target.RowIds.IsEmpty then target.Keys else []
+                                        sourceDb, source.Table,
+                                        { RetainedRows = target.RowIds; WaitKeys = waitKeys; WaitRows = []; PrimaryProbes = [ values ] })))
+                    | _ -> []
+
+                if allInner || singleLeft then sources |> Option.map planReads |> Option.defaultValue []
+                else []
+            | _ -> []
 
         let targetsForView (viewRef: TableRef) =
             let database = viewRef.Database |> Option.defaultValue dbName
@@ -35161,7 +35242,7 @@ let internal transactionWriteReadClaims
                                     let indexedRows () = table.RowsArray.Indexed |> Seq.map fst |> Seq.toList
                                     let fallback rows =
                                         if scope = WriteReadScope.LockingPartners then
-                                            Some { RetainedRows = rows (); WaitKeys = []; WaitRows = [] }
+                                            Some { RetainedRows = rows (); WaitKeys = []; WaitRows = []; PrimaryProbes = [] }
                                         else None
 
                                     let claims =
@@ -35213,14 +35294,16 @@ let internal transactionWriteReadClaims
                 | _ -> []
             | _ -> []
 
-        viewSources
-        |> List.collect targetsForView
+        (List.collect targetsForView viewSources @ exactOuterReads ())
         |> List.groupBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
         |> List.map (fun (_, sources) ->
             let database, table, _ = List.head sources
             let collect field = sources |> List.collect (fun (_, _, claims) -> field claims) |> List.distinct
             database, table,
-            { RetainedRows = collect _.RetainedRows; WaitKeys = collect _.WaitKeys; WaitRows = collect _.WaitRows })
+            { RetainedRows = collect _.RetainedRows
+              WaitKeys = collect _.WaitKeys
+              WaitRows = collect _.WaitRows
+              PrimaryProbes = collect _.PrimaryProbes })
         |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
     | _ -> []
 
