@@ -1702,25 +1702,49 @@ let private tryGeographicLineOverlay referenceSystem kind srid first second =
         abs startLatitude < 90.0 && abs endLatitude < 90.0
         && not (boostGeoEqual (abs (longitudeDistance startLongitude endLongitude)) 180.0)
 
-    if List.isEmpty firstSegments || List.isEmpty secondSegments
+    if List.isEmpty first || List.isEmpty second
        || not (List.forall ordinary firstSegments && List.forall ordinary secondSegments) then None
     else
-        let difference source other =
-            source
-            |> List.collect (partitionGeographicLineSegment referenceSystem false other >> fst)
-            |> geographicLineFragments false
+        let coversPoint line segments point =
+            if List.isEmpty segments then geographicPointMembership [ List.head line ] point
+            else geographicPointLinePosition referenceSystem point [ line ] <> GeographicPointLinePosition.Outside
+
+        let difference line source otherLine other =
+            if List.isEmpty source then
+                if coversPoint otherLine other (List.head line) then [] else [ line ]
+            else
+                source
+                |> List.collect (partitionGeographicLineSegment referenceSystem false other >> fst)
+                |> geographicLineFragments false
 
         let lineResult = function
             | [] -> GEmpty
             | [ line ] -> GLineString line
             | lines -> GMultiLineString lines
 
-        match kind with
-        | OverlayKind.Union -> first :: difference secondSegments firstSegments |> lineResult |> Some
-        | OverlayKind.Difference -> difference firstSegments secondSegments |> lineResult |> Some
-        | OverlayKind.SymmetricDifference ->
-            difference firstSegments secondSegments @ difference secondSegments firstSegments |> lineResult |> Some
-        | OverlayKind.Intersection ->
+        let subtractFirst () = difference first firstSegments second secondSegments
+        let subtractSecond () = difference second secondSegments first firstSegments
+
+        let pointIntersection point line segments =
+            (if coversPoint line segments point then geographicPointResult [ point ] else GEmpty) |> Some
+
+        let hasInteriorOccurrence point segments =
+            (segments |> List.pairwise |> List.exists (fun ((_, vertex), _) -> vertex = point))
+            || (segments |> List.exists (fun ((start, endpoint) as segment) ->
+                point <> start && point <> endpoint && geographicPointOnLineSegment referenceSystem point segment))
+
+        match kind, firstSegments, secondSegments with
+        | OverlayKind.Union, [], _ :: _
+            when first.Length > 2 && hasInteriorOccurrence first.Head secondSegments ->
+            // MySQL retains a repeated interior vertex as the entire union
+            // when the first operand has multiple zero-length segments.
+            Some(GLineString first)
+        | OverlayKind.Union, _, _ -> first :: subtractSecond () |> lineResult |> Some
+        | OverlayKind.Difference, _, _ -> subtractFirst () |> lineResult |> Some
+        | OverlayKind.SymmetricDifference, _, _ -> subtractFirst () @ subtractSecond () |> lineResult |> Some
+        | OverlayKind.Intersection, [], _ -> pointIntersection first.Head second secondSegments
+        | OverlayKind.Intersection, _, [] -> pointIntersection second.Head first firstSegments
+        | OverlayKind.Intersection, _, _ ->
             let partitioned = firstSegments |> List.map (partitionGeographicLineSegment referenceSystem true secondSegments)
             let shared = partitioned |> List.collect fst |> geographicLineFragments true
             let contacts =

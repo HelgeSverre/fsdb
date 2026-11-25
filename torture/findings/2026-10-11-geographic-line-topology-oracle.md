@@ -61,10 +61,9 @@ WKT. The audit includes shared and disjoint geodesics, mixed line and
 point results, segmented and reversed paths, endpoint contacts,
 antimeridian crossings, and seeded local and global lines.
 
-Multipart input, zero-length lines, and segments with a polar endpoint
-or a 180-degree longitude change remain outside the implemented path.
-MySQL returns a point for the intersection of a zero-length line with
-its carrier. For two audited half-turns through the north pole, it
+Multipart input and nonzero segments with a polar endpoint or a
+180-degree longitude change remain outside the implemented path.
+For two audited half-turns through the north pole, MySQL
 returns longitudes of approximately 61.18 and 64.46 degrees depending
 on the operand order, at latitude 89.9999999999995 degrees.
 
@@ -78,3 +77,26 @@ lengths along the equator and a meridian. MySQL's result changes with the
 shorter segment and the rounding of the inverse distance. The precision
 gap remains separate from ordinary segment clipping.
 [Boost geographic segment intersection](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
+
+Native MySQL 8.4.11 also matched an equatorial gap of `1e-11` degrees at
+longitude 4 and separated a gap of `2e-11`. At longitude 100 the same
+transition fell between `2e-11` and `2.5e-11`. The measured brackets
+are consistent with one scaled section-envelope margin, so a fixed
+longitude tolerance would miss cases. [Boost section envelope expansion](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/sections/sectionalize.hpp).
+
+## Zero-length line strings
+
+For a line whose vertices repeat one coordinate, intersection returns a
+point when the other line covers it. Difference and symmetric difference
+can remove the zero-length line, while union retains the first operand's
+line representation. If the first operand has several zero-length
+segments, MySQL can also discard the carrier in a union when that point
+occurs inside the carrier's traversal. A point occurring only at the
+carrier's endpoint follows the ordinary union rule.
+
+The native MySQL 8.4.11 wire comparison matched 1,104 results across
+EPSG 4326, 4258, and 4267. The checks cover both operand orders and all
+four overlay operations, including interior and endpoint visits,
+repeated vertices, closed lines, and identical and distinct polar
+coordinates. The 5,112 ordinary-line wire results were byte-identical
+to the previous Fsdb run.

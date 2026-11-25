@@ -676,6 +676,41 @@ let tests =
                         Expect.isLessThan (abs longitude) 1e-12 "longitude at the crossing"
                     | actual -> failtestf "expected a geographic crossing point, got %A" actual
 
+                testCase "geographic overlays keep zero-length line operands and point contacts"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let repeated = "LINESTRING(0 0,0 0,0 0)"
+                    let segment = "LINESTRING(0 0,0 0)"
+                    let carrier = "LINESTRING(-2 0,-2 0,2 0)"
+                    let simplified = "LINESTRING(-2 0,2 0)"
+                    let outside = "LINESTRING(3 0,3 0)"
+                    let near = "LINESTRING(3.00000000000001 0,3.00000000000001 0)"
+                    let empty = "GEOMETRYCOLLECTION EMPTY"
+
+                    for name, left, right, expected in
+                        [ "ST_Intersection", segment, carrier, "POINT(0 0)"
+                          "ST_Intersection", carrier, repeated, "POINT(0 0)"
+                          "ST_Intersection", "LINESTRING(2 0,2 0)", carrier, "POINT(2 0)"
+                          "ST_Intersection", carrier, "LINESTRING(2.000000000001 0,2.000000000001 0)", empty
+                          "ST_Intersection", near, outside, "POINT(3.00000000000001 0)"
+                          "ST_Intersection", "LINESTRING(7 90,7 90)", "LINESTRING(8 90,8 90)", empty
+                          "ST_Intersection", "LINESTRING(180 0,180 0)", "LINESTRING(179 0,-178 0)", "POINT(180 0)"
+                          "ST_Union", segment, carrier, "MULTILINESTRING((0 0,0 0),(-2 0,2 0))"
+                          "ST_Union", repeated, carrier, repeated
+                          "ST_Union", repeated, "LINESTRING(-2 0,0 0,1 2,0 0)", repeated
+                          "ST_Union", repeated, "LINESTRING(0 0,2 0,2 2,0 0)", "MULTILINESTRING((0 0,0 0,0 0),(0 0,2 0,2 2,0 0))"
+                          "ST_Union", carrier, segment, carrier
+                          "ST_Union", carrier, outside, "MULTILINESTRING((-2 0,-2 0,2 0),(3 0,3 0))"
+                          "ST_Difference", repeated, carrier, empty
+                          "ST_Difference", outside, carrier, outside
+                          "ST_Difference", carrier, segment, simplified
+                          "ST_SymDifference", segment, carrier, simplified
+                          "ST_SymDifference", carrier, outside, "MULTILINESTRING((-2 0,2 0),(3 0,3 0))" ] do
+                        let result = call name [ geometry left; geometry right ]
+                        Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "zero-length line overlays retain the SRID"
+                        Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{name} of {left} and {right}"
+
                 testCase "planar overlays and buffers cover non-point geometry"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]
