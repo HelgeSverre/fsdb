@@ -559,3 +559,34 @@ and residual coordinate differences remain open.
 all 90 seeded rectangles on the final build. The
 [edge predicate oracle](../scripts/geographic-edge-oracle.py)
 still reports the same 11 `Crosses` versus `Touches` differences.
+
+### Contact order in spatial partitions
+
+When both inputs have more than 16 sections, MySQL partitions their
+geographic envelopes. The point overlay visits sections spanning the
+split before the two halves and alternates longitude and latitude on
+recursive splits. Fsdb uses that traversal for the point contacts.
+The envelopes include geodesic latitude extrema and wrap longitude
+across the antimeridian. [Boost section partitioning](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/partition.hpp)
+· [Boost geodesic segment envelopes](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategy/spherical/envelope_segment.hpp).
+
+The native MySQL 8.4.11 comparison used the same 10⁻⁸ degree tolerance.
+The dense fixtures increase the number of sections enough to exercise
+recursive partitions. The antimeridian fixtures use stepped polygons
+whose horizontal edges and line crossings span the longitude seam.
+
+| Intersection fixture | Cases | Differences before | Differences after | Order-only before | Order-only after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Stepped polygons | 24 | 24 | 15 | 9 | 0 |
+| Dense stepped polygons | 15 | 15 | 8 | 7 | 0 |
+| Stepped polygons across the antimeridian | 15 | 15 | 10 | 5 | 0 |
+
+The same 33 cases still differ in geometry content or coordinates.
+Nine include a clipped longitude that differs by exactly 360° within
+tolerance. MySQL serializes the unwrapped longitude in those cases.
+After normalizing longitudes, all linework agrees and 28 cases still
+differ in isolated points. The four earlier intersection fixtures
+retained their match counts.
+A compact two-fragment regression checks that the contact spanning
+the split precedes contacts in the left half, including when an
+input crosses the antimeridian.

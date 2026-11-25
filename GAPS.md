@@ -3119,8 +3119,10 @@ implementation effort:
    operations. [Isolated-contact coverage](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#isolated-contacts-beside-clipped-linework)
    uses the finished clipped segments. [Contact order](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#contact-order-within-monotonic-sections)
    follows monotonic sections and preserves the audited collinear turn
-   order. Spatially partitioned section order and residual point
-   retention still differ. Near-hole relation differences remain.
+   order. [Spatially partitioned contacts](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#contact-order-in-spatial-partitions)
+   follow the audited section order across ordinary and antimeridian
+   splits. Residual geometry content, point coordinates, and near-hole
+   relation differences remain.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
    [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)

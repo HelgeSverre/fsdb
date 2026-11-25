@@ -1980,6 +1980,178 @@ let private geographicOverlaySections segments =
     | [] -> []
     | first :: rest -> collect (direction first) 10 [ first ] [] rest
 
+[<Struct>]
+type private GeographicSectionBounds =
+    { West: float
+      East: float
+      South: float
+      North: float }
+
+let private mergeGeographicSectionBounds first second =
+    let half = Math.PI
+    let period = 2.0 * half
+    let intervals box =
+        let width = box.East - box.West
+        let west =
+            if box.West < -half || box.West > half then normalizedLongitudeRadians box.West
+            else box.West
+        let east = if west = box.West then box.East else west + width
+        if width >= period then [ -half, half ]
+        elif east > half then [ west, half; -half, east - period ]
+        else [ west, east ]
+
+    // The enclosing arc excludes the largest uncovered longitude gap.
+    let west, east =
+        let west = min first.West second.West
+        let east = max first.East second.East
+        if -half <= west && east <= half && east - west <= half then west, east
+        else
+            match List.sortBy fst (intervals first @ intervals second) with
+            | [] -> west, east
+            | (west, firstEast) :: rest ->
+                let east, gap, left, right =
+                    rest |> List.fold (fun (east, gap, left, right) (start, finish) ->
+                        if start - east > gap then max east finish, start - east, east, start
+                        else max east finish, gap, left, right) (firstEast, 0.0, west, west)
+                let wrapGap = period + west - east
+                if gap > wrapGap && not (boostGeoEqual gap wrapGap) then right, left + period
+                else west, east
+    { West = west
+      East = east
+      South = min first.South second.South
+      North = max first.North second.North }
+
+let private geographicSectionBounds flattening edges =
+    let half = Math.PI
+    let quarter = half / 2.0
+    let period = 2.0 * half
+    let edgeBounds (first, second) =
+        let first = geographicPointRadians first
+        let second = geographicPointRadians second
+        let (latitude1, west), (latitude2, east) =
+            if snd first <= snd second then first, second else second, first
+        let (latitude1, west), (latitude2, east) =
+            if east - west > half then (latitude2, east), (latitude1, west + period)
+            else (latitude1, west), (latitude2, east)
+
+        let south, north = min latitude1 latitude2, max latitude1 latitude2
+        let south, north =
+            if west = east then south, north
+            else
+                let firstAzimuth, lastAzimuth =
+                    geographicSegmentAzimuthsRadians flattening (latitude1, west) (latitude2, east)
+                if min firstAzimuth lastAzimuth < quarter && quarter < max firstAzimuth lastAzimuth then
+                    // Clairaut's relation gives the latitude of the geodesic vertex.
+                    let azimuth = if latitude1 <= latitude2 then firstAzimuth else lastAzimuth
+                    let axisRatio = 1.0 - flattening
+                    let reducedLatitude = atan (axisRatio * tan south)
+                    let reducedVertex = acos (min 1.0 (abs (cos reducedLatitude * sin azimuth)))
+                    let vertex = atan (tan reducedVertex / axisRatio)
+                    if south + north < 0.0 then min south (-vertex), north
+                    else south, max north vertex
+                else south, north
+        { West = west; East = east; South = south; North = north }
+
+    let bounds = edges |> List.map edgeBounds |> List.reduce mergeGeographicSectionBounds
+    let margin value = 1000.0 * (Math.BitIncrement 1.0 - 1.0) * max 1.0 (abs value)
+    { West = bounds.West - margin bounds.West
+      East = bounds.East + margin bounds.East
+      South = bounds.South - margin bounds.South
+      North = bounds.North + margin bounds.North }
+
+let private geographicPartitionThreshold = 16
+
+let private visitGeographicSectionPairs visit first second =
+    let overlaps a b =
+        let period = 2.0 * Math.PI
+        let width = a.East - a.West
+        let otherWidth = b.East - b.West
+        let delta = longitudeDistanceRadians a.West b.West
+        let shifted = a.West + (if delta < 0.0 then delta + period else delta)
+        let wrappedEnd = shifted - period + otherWidth
+        let westEnd = if abs (wrappedEnd - b.East) < Math.PI then b.East else wrappedEnd
+        b.South <= a.North && a.South <= b.North
+        && (width >= period || otherWidth >= period || shifted <= a.East || a.West <= westEnd)
+
+    let bounds sections = sections |> List.map snd |> List.reduce mergeGeographicSectionBounds
+    let divide lower upper sections =
+        let lowerHits, remaining = List.partition (snd >> overlaps lower) sections
+        let spanning, lowerOnly = List.partition (snd >> overlaps upper) lowerHits
+        lowerOnly, List.filter (snd >> overlaps upper) remaining, spanning
+    let visitPairs a b =
+        for firstIndex, _ in a do
+            for secondIndex, _ in b do
+                visit firstIndex secondIndex
+    let many sections = List.length sections >= geographicPartitionThreshold
+
+    let rec descend depth byLongitude box a b =
+        let lower, upper =
+            if byLongitude then
+                let middle = (box.West + box.East) / 2.0
+                { box with East = middle }, { box with West = middle }
+            else
+                let middle = (box.South + box.North) / 2.0
+                { box with North = middle }, { box with South = middle }
+        let leftA, rightA, spanningA = divide lower upper a
+        let leftB, rightB, spanningB = divide lower upper b
+        let deeper box = descend (depth + 1) (not byLongitude) box
+        let canDescend x y = depth < 100 && many x && many y
+
+        // Within a partition, sections that straddle the midpoint are
+        // visited before pairs confined to either half.
+        if canDescend spanningA spanningB then deeper (bounds (spanningA @ spanningB)) spanningA spanningB
+        else visitPairs spanningA spanningB
+
+        if canDescend leftB rightB && many spanningA then
+            let spanning = bounds spanningA
+            deeper spanning spanningA leftB
+            deeper spanning spanningA rightB
+        else
+            visitPairs spanningA leftB
+            visitPairs spanningA rightB
+
+        if canDescend leftA rightA && many spanningB then
+            let spanning = bounds spanningB
+            deeper spanning leftA spanningB
+            deeper spanning rightA spanningB
+        else
+            visitPairs leftA spanningB
+            visitPairs rightA spanningB
+
+        if canDescend leftA leftB then deeper lower leftA leftB
+        else visitPairs leftA leftB
+        if canDescend rightA rightB then deeper upper rightA rightB
+        else visitPairs rightA rightB
+
+    descend 0 true (bounds (first @ second)) first second
+
+let private geographicPartitionContacts referenceSystem lineSections boundarySections contacts =
+    if List.length lineSections <= geographicPartitionThreshold
+       || List.length boundarySections <= geographicPartitionThreshold
+       || List.forall List.isEmpty contacts then
+        contacts |> List.collect (List.collect snd)
+    else
+        let pairs =
+            contacts
+            |> List.mapi (fun line -> List.map (fun (boundary, points) -> struct (line, boundary), points))
+            |> List.concat
+        let remaining = Collections.Generic.Dictionary<struct (int * int), (float * float) list>()
+        for key, points in pairs do remaining.Add(key, points)
+        let ordered = ResizeArray()
+        let visit first second =
+            let key = struct (first, second)
+            match remaining.TryGetValue key with
+            | true, points ->
+                ordered.AddRange points
+                remaining.Remove key |> ignore
+            | _ -> ()
+        let flattening = referenceSystem.InverseFlattening |> Option.map (fun value -> 1.0 / value) |> Option.defaultValue 0.0
+        let index sections = List.mapi (fun index section -> index, geographicSectionBounds flattening section) sections
+        visitGeographicSectionPairs visit (index lineSections) (index boundarySections)
+        // Keep any borderline contact the clipping pass found outside the section boxes.
+        for struct (line, boundary), _ in pairs do visit line boundary
+        List.ofSeq ordered
+
 let private geographicAreaLinePieces referenceSystem includePoints polygons boundarySegments ((start, endpoint) as segment) =
     let covered point =
         match geographicPointPolygonPosition referenceSystem point polygons with
@@ -2099,22 +2271,23 @@ let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygon
             |> List.mapi (fun section edges -> nondegenerate edges |> List.map (fun edge -> section, edge))
             |> List.concat
         let partitionSegment = geographicAreaLinePieces referenceSystem includePoints polygons boundary
-        let partitionLine segments =
-            let sections = if includePoints then geographicOverlaySections segments else [ segments ]
+        let sourceSections =
+            sources |> List.map (fun segments -> if includePoints then geographicOverlaySections segments else [ segments ])
+        let partitionLine sections =
             let partitioned = sections |> List.map (List.map partitionSegment)
             let pieces = partitioned |> List.collect (List.collect fst)
             let contacts =
                 // Within each line section, Boost visits polygon sections
                 // before advancing to the next pair of sections.
-                partitioned |> List.collect (fun section ->
+                partitioned |> List.map (fun section ->
                     section
                     |> List.collect snd
                     |> List.groupBy fst
                     |> List.sortBy fst
-                    |> List.collect (snd >> List.collect snd))
+                    |> List.map (fun (boundary, groups) -> boundary, List.collect snd groups))
             pieces, contacts
 
-        let partitioned = sources |> List.map partitionLine
+        let partitioned = sourceSections |> List.map partitionLine
         let fragments retainCovered =
             partitioned
             |> List.collect (fst >> geographicAreaLineFragments retainCovered)
@@ -2127,6 +2300,7 @@ let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygon
             let points =
                 partitioned
                 |> List.collect snd
+                |> geographicPartitionContacts referenceSystem (List.concat sourceSections) boundarySections
                 |> distinctGeographicPoints
                 |> List.choose (fun (latitude, longitude) ->
                     if covered (latitude, longitude) then None

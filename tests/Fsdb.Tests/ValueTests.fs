@@ -787,6 +787,43 @@ let tests =
                             Expect.equal latitudes [ 35.64909240; 36.83614816; 36.53846440 ] "both exterior contacts precede the hole contact"
                         | actual -> failtestf "expected two lines and three isolated points, got %A" actual
 
+                testCase "geographic area contacts visit sections spanning the partition before either side"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    for origin, expected in
+                        [ 10.0, [ 12.236578; 10.665219; 10.403067 ]
+                          177.03, [ 179.266578; -179.901814; 177.695219; 177.433067 ] ] do
+                        let position (offset, latitude) =
+                            let longitude = origin + offset
+                            sprintf "%.2f %.2f" (if longitude > 180.0 then longitude - 360.0 else longitude) latitude
+                        let path points = "(" + (points |> List.map position |> String.concat ",") + ")"
+                        let rectangle west south east north =
+                            "(" + path [ west, south; east, south; east, north; west, north; west, south ] + ")"
+
+                        // The additional components keep both inputs above the turn-search partition threshold.
+                        let lines =
+                            [ yield path [ 0.73, 9.0; 0.37, 14.5 ]
+                              yield path [ 2.03, 9.0; 3.17, 14.5 ]
+                              for index in 1..16 do
+                                  let start = 0.3 * float index
+                                  yield path [ start, 15.1; start + 0.05, 15.2 ] ]
+                        let areas =
+                            [ yield rectangle 0.0 10.0 6.0 14.0
+                              for index in 1..5 do
+                                  let west = 0.5 * float index
+                                  yield rectangle west 17.0 (west + 0.2) 17.2 ]
+                        let line = geometry ("MULTILINESTRING(" + String.concat "," lines + ")")
+                        let area = geometry ("MULTIPOLYGON(" + String.concat "," areas + ")")
+                        match call "ST_Intersection" [ line; area ] with
+                        | VGeometry { Shape = GGeometryCollection({ Shape = GLineString _ } :: { Shape = GLineString _ } :: contacts) } ->
+                            let longitudes = contacts |> List.map (fun contact ->
+                                match contact.Shape with
+                                | GPoint(_, longitude) -> Math.Round(longitude, 6)
+                                | shape -> failtestf "expected an isolated point, got %A" shape)
+                            Expect.equal longitudes expected "the middle contacts are visited before the left partition's contacts"
+                        | actual -> failtestf "expected two fragments followed by isolated points, got %A" actual
+
                 testCase "geographic multiline overlays preserve component order and split shared spans"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"
