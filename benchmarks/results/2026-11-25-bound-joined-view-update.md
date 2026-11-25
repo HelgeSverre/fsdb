@@ -91,3 +91,19 @@ grant returns 1345, matching the oracle. [MySQL privilege reference](https://dev
 
 Partial-key and other generic view plans, and exact JSON and TREE
 rendering, remain open.
+
+## Executing partial-key joins
+
+Two-table inner updates can also narrow an individual source by an exact
+index prefix. A complete target key can be probed while the read partner
+returns several rows from a composite key. The executor keeps those rows
+in row-store scan order because the first matching partner can supply the
+assignment. The ordinary join and view checks still run on the candidates.
+
+The allocation regression holds the two matching partner rows constant
+while increasing the partner table from roughly 500 to 5,000 rows. Four updates
+allocated 3.49 MB and 13.71 MB before the change. The same measurements
+with the candidate allocated 2.40 MB at both sizes and preserved the
+original partner choice when index order differs from insertion order.
+MySQL and Fsdb agree on affected rows, committed values, and `CHECK OPTION` for the
+composite-prefix wire fixture with equal-valued matching partners.

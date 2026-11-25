@@ -12940,6 +12940,38 @@ let tests =
                     let large = measure 5_000
                     Expect.isLessThan large (3L * small) $"allocations at 500 and 5000 rows were {small} and {large} bytes"
 
+                testCase "a joined view update probes a composite key prefix in source order"
+                <| fun _ ->
+                    let measure unrelatedRows =
+                        let store = newStore ()
+                        let run = runDefault store
+                        let affected sql count = Expect.equal (run sql) (Affected count) sql
+                        affected "CREATE TABLE parents (id INT PRIMARY KEY,n INT)" 0UL
+                        affected "CREATE TABLE partners (id INT,seq INT,delta INT,PRIMARY KEY(id,seq))" 0UL
+                        affected "INSERT INTO parents VALUES (1,10),(2,20)" 2UL
+                        affected "INSERT INTO partners VALUES (1,20,3),(1,10,7),(2,10,9)" 3UL
+
+                        for start in 3..250..unrelatedRows do
+                            let ids = [ start .. min unrelatedRows (start + 249) ]
+                            let values = ids |> List.map (fun id -> $"({id},10,100)") |> String.concat ","
+                            affected $"INSERT INTO partners VALUES {values}" (uint64 ids.Length)
+
+                        affected "CREATE VIEW active AS SELECT p.id,p.n,s.delta FROM parents p JOIN partners s ON p.id=s.id" 0UL
+                        let update = "UPDATE active SET n=n+delta WHERE id=1"
+                        affected update 1UL
+                        let before = System.GC.GetAllocatedBytesForCurrentThread()
+                        for _ in 1..4 do affected update 1UL
+                        let allocated = System.GC.GetAllocatedBytesForCurrentThread() - before
+
+                        match run "SELECT id,n FROM parents ORDER BY id" with
+                        | ResultSet(_, rows) ->
+                            Expect.equal rows [ [ Some "1"; Some "25" ]; [ Some "2"; Some "20" ] ] "the first matching partner in source order supplies the assignment"
+                        | other -> failtestf "expected committed rows, got %A" other
+                        allocated
+
+                    let small, large = measure 500, measure 5_000
+                    Expect.isLessThan large (3L * small) $"allocations at 500 and 5000 rows were {small} and {large} bytes"
+
                 testCase "a broad composite left-prefix join prefers one hash build"
                 <| fun _ ->
                     let store = newStore ()

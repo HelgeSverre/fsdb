@@ -26225,6 +26225,12 @@ let private signedJoinBounds columnTypes equalities conditions =
         | _ -> [])
     |> Map.ofList
 
+type private BoundUpdateSource =
+    { Reference: TableRef
+      Table: Table
+      Equalities: (string * Value) list
+      PrimaryClaim: WriteLockTargets option }
+
 let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list) where =
     let whereConditions = optionalConjuncts where
 
@@ -26282,26 +26288,61 @@ let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list)
                             |> tryAllSome
                             |> Option.bind (Storage.tryPrimaryWriteLockTargets store table)
 
-                        owner, (source, table, claims)
+                        let equalities =
+                            table.Columns
+                            |> List.choose (fun column ->
+                                Map.tryFind (mutationColumnKey (owner, column.Name)) bounds
+                                |> Option.map (fun value -> column.Name, value))
+
+                        owner, { Reference = source; Table = table; Equalities = equalities; PrimaryClaim = claims }
 
                     operands |> List.map probe |> Map.ofList |> Some))
+
+let private overrideMutationSource (table: Table) rows =
+    lazy (Ok { Columns = table.Columns; Rows = rows (); IdentityOf = Some; WriteTable = None })
+
+let private primaryMutationSource source =
+    source.PrimaryClaim
+    |> Option.map (fun key -> overrideMutationSource source.Table (fun () -> key.RowIds |> List.choose source.Table.RowsArray.TryFind))
 
 let private sourceOverridesForBoundJoin sources : MutationSourceOverrides option =
     sources
     |> Map.toList
-    |> List.map (fun (owner, (_, table: Table, claims: WriteLockTargets option)) ->
-        claims
-        |> Option.map (fun key ->
-            owner,
-            lazy (Ok { Columns = table.Columns
-                       Rows = key.RowIds |> List.choose table.RowsArray.TryFind
-                       IdentityOf = Some
-                       WriteTable = None })))
+    |> List.map (fun (owner, source) -> primaryMutationSource source |> Option.map (fun prepared -> owner, prepared))
     |> tryAllSome
     |> Option.map Map.ofList
 
 let private boundUpdateJoinSources store dbName from joins where =
-    boundUpdateJoinKeys store dbName from joins where |> Option.bind sourceOverridesForBoundJoin
+    boundUpdateJoinKeys store dbName from joins where
+    |> Option.bind (fun sources ->
+        sourceOverridesForBoundJoin sources
+        |> Option.orElseWith (fun () ->
+            let physicalIdentity (_, source: BoundUpdateSource) =
+                (source.Reference.Database |> Option.defaultValue dbName).ToLowerInvariant(), source.Reference.Table.ToLowerInvariant()
+
+            match Map.toList sources with
+            // In a two-table join each target keeps the first matching partner
+            // independently of the hash build side. A longer chain can reorder
+            // combinations when an earlier join changes its build side.
+            | [ first; second ] as inputs when physicalIdentity first <> physicalIdentity second ->
+                inputs
+                |> List.choose (fun (owner, source) ->
+                    let table = source.Table
+                    let prepared =
+                        primaryMutationSource source
+                        |> Option.orElseWith (fun () ->
+                            tryStoredEqualityMatchLookup store table source.Equalities
+                            |> Option.filter (fun (_, lookup) -> isUsefulEqualityCardinality table.RowsArray.Count lookup.CandidateCount)
+                            |> Option.map (fun (_, lookup) ->
+                                overrideMutationSource table (fun () ->
+                                    lookup.CandidateRows
+                                    |> Seq.sortBy (fst >> table.RowsArray.ScanPosition)
+                                    |> Seq.map snd
+                                    |> List.ofSeq)))
+                    prepared |> Option.map (fun rows -> owner, rows))
+                |> Map.ofList
+                |> Some
+            | _ -> None))
 
 let private explainKey name length =
     Some({ Names = [ name ]; Length = length }: ExplainRendering.ExplainKey)
@@ -26456,7 +26497,7 @@ let private tryExplainBoundViewUpdate (store: Store) registry account dbName id 
                 [ { Id = Some id; SelectType = "UPDATE"; Table = None; Type = None; Key = None; Ref = None; Rows = None; Extra = [ message ] } ]
 
             let lookup (source: TableRef) = Map.find ((displayName source).ToLowerInvariant()) keys
-            if keys |> Map.exists (fun _ (_, _, claims) -> claims |> Option.exists (fun claim -> claim.RowIds.IsEmpty)) then
+            if keys |> Map.exists (fun _ source -> source.PrimaryClaim |> Option.exists (fun claim -> claim.RowIds.IsEmpty)) then
                 Ok(noRows "no matching row in const table")
             else
                 // The bound-join proof restricts ON and WHERE to integer comparisons.
@@ -26473,7 +26514,7 @@ let private tryExplainBoundViewUpdate (store: Store) registry account dbName id 
                             noRows "Impossible WHERE noticed after reading const tables"
                         else
                             sources |> List.map (fun (source, original) ->
-                                let _, table, _ = lookup source
+                                let table = (lookup source).Table
                                 let keyColumns = Storage.primaryKeyColumns table
                                 let length =
                                     keyColumns
@@ -34253,10 +34294,10 @@ let transactionWriteTargets
             let owner = source.Alias |> Option.defaultValue source.Table
             bound.Value
             |> Option.bind (Map.tryFind (owner.ToLowerInvariant()))
-            |> Option.bind (function
-                | reference, table, Some claims when reference = source ->
-                    Some(source.Database |> Option.defaultValue dbName, source.Table, protectKeyMove table claims)
-                | _ -> None)
+            |> Option.filter (fun bound -> bound.Reference = source)
+            |> Option.bind (fun bound ->
+                bound.PrimaryClaim
+                |> Option.map (fun claims -> source.Database |> Option.defaultValue dbName, source.Table, protectKeyMove bound.Table claims))
             |> Option.orElseWith (fun () -> targets source where)
 
         joinedTargets resolve from joins names predicate
