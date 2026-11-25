@@ -2984,11 +2984,11 @@ implementation effort:
 3. Complex join-derived updatable views. [Bound joined-view updates](benchmarks/results/2026-11-25-bound-joined-view-update.md)
    probe fully bound physical primary keys for audited inner joins with
    signed-integer predicates. The native point-update median fell from
-   5.01 ms to 3.29 ms. Traditional `EXPLAIN UPDATE` reports both primary-key
-   probes for the fully bound joined-view plan. Two-table inner updates also
-   use selective exact index prefixes while preserving source scan order.
-   Partial-key EXPLAIN, broader join shapes, exact JSON and TREE formatting,
-   and the remaining wire latency are open.
+   5.01 ms to 3.29 ms. Two-table inner updates also use selective exact index
+   prefixes while preserving source scan order. Traditional `EXPLAIN UPDATE`
+   reports selected complete keys and prefixes with their key lengths.
+   Range bounds on later key parts, `filtered` estimates, broader join shapes,
+   exact JSON and TREE formatting, and the remaining wire latency are open.
    The follow-up carries a complete target key into
    write-lock selection when the filter names the join partner's key.
    The two-connection oracle agrees on disjoint progress, same-key waits,

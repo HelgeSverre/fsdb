@@ -26298,51 +26298,51 @@ let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list)
 
                     operands |> List.map probe |> Map.ofList |> Some))
 
-let private overrideMutationSource (table: Table) rows =
-    lazy (Ok { Columns = table.Columns; Rows = rows (); IdentityOf = Some; WriteTable = None })
+type private BoundUpdateAccess =
+    | UpdatePrimary of WriteLockTargets
+    | UpdateEquality of Storage.EqualityIndexMatch * Storage.EqualityIndexMatchLookup
 
-let private primaryMutationSource source =
-    source.PrimaryClaim
-    |> Option.map (fun key -> overrideMutationSource source.Table (fun () -> key.RowIds |> List.choose source.Table.RowsArray.TryFind))
+let private chooseBoundUpdateAccess store dbName (sources: Map<string, BoundUpdateSource>) =
+    let primaries =
+        sources |> Map.toList |> List.choose (fun (owner, source) -> source.PrimaryClaim |> Option.map (fun claim -> owner, UpdatePrimary claim))
+        |> Map.ofList
+    if primaries.Count = sources.Count then Some primaries
+    else
+        let physicalIdentity (source: BoundUpdateSource) =
+            (source.Reference.Database |> Option.defaultValue dbName).ToLowerInvariant(), source.Reference.Table.ToLowerInvariant()
 
-let private sourceOverridesForBoundJoin sources : MutationSourceOverrides option =
-    sources
-    |> Map.toList
-    |> List.map (fun (owner, source) -> primaryMutationSource source |> Option.map (fun prepared -> owner, prepared))
-    |> tryAllSome
-    |> Option.map Map.ofList
+        match sources |> Map.toList with
+        // In a two-table join each target keeps the first matching partner
+        // independently of the hash build side. Longer chains can reorder
+        // combinations if an earlier join changes its build side.
+        | [ (_, first); (_, second) ] when physicalIdentity first <> physicalIdentity second ->
+            sources
+            |> Map.fold (fun chosen owner source ->
+                if Map.containsKey owner chosen then chosen
+                else
+                    let table = source.Table
+                    match tryStoredEqualityMatchLookup store table source.Equalities with
+                    | Some(matched, lookup) when isUsefulEqualityCardinality table.RowsArray.Count lookup.CandidateCount ->
+                        Map.add owner (UpdateEquality(matched, lookup)) chosen
+                    | _ -> chosen) primaries
+            |> fun chosen -> if chosen.IsEmpty then None else Some chosen
+        | _ -> None
 
-let private boundUpdateJoinSources store dbName from joins where =
+let private boundUpdateRows (table: Table) = function
+    | UpdatePrimary claim -> claim.RowIds |> List.choose table.RowsArray.TryFind
+    | UpdateEquality(_, lookup) ->
+        lookup.CandidateRows
+        |> Seq.sortBy (fst >> table.RowsArray.ScanPosition)
+        |> Seq.map snd
+        |> List.ofSeq
+
+let private boundUpdateJoinSources store dbName from joins where : MutationSourceOverrides option =
     boundUpdateJoinKeys store dbName from joins where
     |> Option.bind (fun sources ->
-        sourceOverridesForBoundJoin sources
-        |> Option.orElseWith (fun () ->
-            let physicalIdentity (_, source: BoundUpdateSource) =
-                (source.Reference.Database |> Option.defaultValue dbName).ToLowerInvariant(), source.Reference.Table.ToLowerInvariant()
-
-            match Map.toList sources with
-            // In a two-table join each target keeps the first matching partner
-            // independently of the hash build side. A longer chain can reorder
-            // combinations when an earlier join changes its build side.
-            | [ first; second ] as inputs when physicalIdentity first <> physicalIdentity second ->
-                inputs
-                |> List.choose (fun (owner, source) ->
-                    let table = source.Table
-                    let prepared =
-                        primaryMutationSource source
-                        |> Option.orElseWith (fun () ->
-                            tryStoredEqualityMatchLookup store table source.Equalities
-                            |> Option.filter (fun (_, lookup) -> isUsefulEqualityCardinality table.RowsArray.Count lookup.CandidateCount)
-                            |> Option.map (fun (_, lookup) ->
-                                overrideMutationSource table (fun () ->
-                                    lookup.CandidateRows
-                                    |> Seq.sortBy (fst >> table.RowsArray.ScanPosition)
-                                    |> Seq.map snd
-                                    |> List.ofSeq)))
-                    prepared |> Option.map (fun rows -> owner, rows))
-                |> Map.ofList
-                |> Some
-            | _ -> None))
+        chooseBoundUpdateAccess store dbName sources
+        |> Option.map (Map.map (fun owner access ->
+            let table = sources[owner].Table
+            lazy (Ok { Columns = table.Columns; Rows = boundUpdateRows table access; IdentityOf = Some; WriteTable = None }))))
 
 let private explainKey name length =
     Some({ Names = [ name ]; Length = length }: ExplainRendering.ExplainKey)
@@ -26460,83 +26460,6 @@ let private explainViewExpansion (store: Store) (root: StoredView) =
 
     expand Set.empty root
 
-let private tryExplainBoundViewUpdate (store: Store) registry account dbName id (update: UpdateStmt) =
-    let displayName (source: TableRef) = source.Alias |> Option.defaultValue source.Table
-    let sameTable (left: TableRef) (right: TableRef) =
-        equalsIgnoreCase left.Table right.Table
-        && equalsIgnoreCase (left.Database |> Option.defaultValue dbName) (right.Database |> Option.defaultValue dbName)
-
-    let plan =
-        let database = update.From.Database |> Option.defaultValue dbName
-        if not update.Joins.IsEmpty
-           || (update.From.Database.IsNone && Map.containsKey (update.From.Table.ToLowerInvariant()) (currentCteScope ())) then None
-        else
-            tryStoredView store database update.From.Table
-            |> Option.bind (fun stored ->
-                tryUpdatableView store database update.From.Table
-                |> Option.filter (fun view -> not view.UpdateJoins.IsEmpty)
-                |> Option.bind (fun view -> rewriteStandaloneViewUpdate view update |> Result.toOption)
-                |> Option.bind (fun (rewritten, target) ->
-                    boundUpdateJoinKeys store dbName rewritten.From rewritten.Joins rewritten.Where
-                    |> Option.bind (fun keys ->
-                        sourceOverridesForBoundJoin keys
-                        |> Option.bind (fun overrides ->
-                            explainViewExpansion store stored
-                            |> Option.bind (fun (original, requirements) ->
-                                let sources =
-                                    rewritten.From :: (rewritten.Joins |> List.choose (fun join -> match join.Table with FromTable source -> Some source | _ -> None))
-                                if not (sameLength original sources && List.forall2 sameTable original sources) then None
-                                else Some(rewritten, target, keys, overrides, List.zip sources original, requirements))))))
-
-    plan |> Option.map (fun (rewritten, target, keys, overrides, sources, requirements) ->
-        let permitted = Auth.checkForAccount store account (List.distinct requirements) |> Result.isOk
-        if not permitted then
-            Error(Err(1345, "EXPLAIN/SHOW can not be issued; lacking privileges for underlying table"))
-        else
-            let noRows message : ExplainRendering.ExplainRow list =
-                [ { Id = Some id; SelectType = "UPDATE"; Table = None; Type = None; Key = None; Ref = None; Rows = None; Extra = [ message ] } ]
-
-            let lookup (source: TableRef) = Map.find ((displayName source).ToLowerInvariant()) keys
-            if keys |> Map.exists (fun _ source -> source.PrimaryClaim |> Option.exists (fun claim -> claim.RowIds.IsEmpty)) then
-                Ok(noRows "no matching row in const table")
-            else
-                // The bound-join proof restricts ON and WHERE to integer comparisons.
-                // Reading its const candidates here never evaluates an assignment.
-                runMutationJoin store registry dbName overrides rewritten.From rewritten.Joins
-                |> Result.bind (fun (joinedSources, rows) ->
-                    let columns = joinedSources |> List.map (fun source -> source.Qualifier, source.Columns)
-                    let context = contextFactory store registry dbName (columnIndexOf (columns |> List.collect snd)) (qualifierRanges columns) None
-                    rows
-                    |> traverse (snd >> whereMatches context rewritten.Where)
-                    |> Result.mapError Err
-                    |> Result.map (fun visible ->
-                        if not (List.contains true visible) then
-                            noRows "Impossible WHERE noticed after reading const tables"
-                        else
-                            sources |> List.map (fun (source, original) ->
-                                let table = (lookup source).Table
-                                let keyColumns = Storage.primaryKeyColumns table
-                                let length =
-                                    keyColumns
-                                    |> List.map (fun name -> table.Columns |> List.tryFind (fun column -> equalsIgnoreCase name column.Name) |> Option.bind explainKeyLen)
-                                    |> tryAllSome
-                                    |> Option.map List.sum
-                                let writer = equalsIgnoreCase (displayName source) target.Qualifier
-                                let referencesNonKey =
-                                    (Option.toList rewritten.Where @ (rewritten.Joins |> List.map _.On) @ (rewritten.Assignments |> List.map _.Value))
-                                    |> List.exists (Expression.exists (function
-                                        | QualifiedCol(owner, column) when equalsIgnoreCase owner (displayName source) ->
-                                            not (List.exists (equalsIgnoreCase column) keyColumns)
-                                        | _ -> false))
-                                { Id = Some id
-                                  SelectType = if writer then "UPDATE" else "SIMPLE"
-                                  Table = Some(displayName original)
-                                  Type = Some "const"
-                                  Key = explainKey "PRIMARY" length
-                                  Ref = Some(String.concat "," (List.replicate keyColumns.Length "const"))
-                                  Rows = Some 1UL
-                                  Extra = if not writer && not referencesNonKey then [ "Using index" ] else [] }))))
-
 let private explainPrefixKeyLen (column: ColumnDef) (prefixLength: int option) =
     let narrowed =
         match prefixLength, column.Type with
@@ -26592,6 +26515,143 @@ let private explainIndexKeyLen
         | None -> Error())
     |> Result.toOption
     |> Option.map List.sum
+
+let private tryExplainBoundViewUpdate (store: Store) registry account dbName id (update: UpdateStmt) =
+    let displayName (source: TableRef) = source.Alias |> Option.defaultValue source.Table
+    let ownerOf source = (displayName source).ToLowerInvariant()
+    let sameTable (left: TableRef) (right: TableRef) =
+        equalsIgnoreCase left.Table right.Table
+        && equalsIgnoreCase (left.Database |> Option.defaultValue dbName) (right.Database |> Option.defaultValue dbName)
+
+    let plan =
+        let database = update.From.Database |> Option.defaultValue dbName
+        if not update.Joins.IsEmpty
+           || (update.From.Database.IsNone && Map.containsKey (update.From.Table.ToLowerInvariant()) (currentCteScope ())) then None
+        else
+            tryStoredView store database update.From.Table
+            |> Option.bind (fun stored ->
+                tryUpdatableView store database update.From.Table
+                |> Option.filter (fun view -> not view.UpdateJoins.IsEmpty)
+                |> Option.bind (fun view -> rewriteStandaloneViewUpdate view update |> Result.toOption)
+                |> Option.filter (fun (rewritten, _) ->
+                    rewritten.Assignments |> List.forall (fun assignment -> (collectMatchAgainst assignment.Value).IsEmpty))
+                |> Option.bind (fun (rewritten, target) ->
+                    boundUpdateJoinKeys store dbName rewritten.From rewritten.Joins rewritten.Where
+                    |> Option.bind (fun keys ->
+                        explainViewExpansion store stored
+                        |> Option.bind (fun (original, requirements) ->
+                            let sources =
+                                rewritten.From :: (rewritten.Joins |> List.choose (fun join -> match join.Table with FromTable source -> Some source | _ -> None))
+                            if not (sameLength original sources && List.forall2 sameTable original sources) then None
+                            else Some(rewritten, target, keys, List.zip sources original, requirements)))))
+
+    plan |> Option.bind (fun (rewritten, target, keys, sources, requirements) ->
+        match Auth.checkForAccount store account (List.distinct requirements) with
+        | Error _ -> Some(Error(Err(1345, "EXPLAIN/SHOW can not be issued; lacking privileges for underlying table")))
+        | Ok () ->
+            chooseBoundUpdateAccess store dbName keys
+            |> Option.map (fun accesses ->
+                let noRows message : ExplainRendering.ExplainRow list =
+                    [ { Id = Some id; SelectType = "UPDATE"; Table = None; Type = None; Key = None; Ref = None; Rows = None; Extra = [ message ] } ]
+
+                let constants =
+                    accesses |> Map.filter (fun _ -> function UpdatePrimary _ -> true | UpdateEquality(matched, _) -> matched.Unique)
+                let constantRows =
+                    constants |> Map.map (fun owner access -> boundUpdateRows keys[owner].Table access |> List.tryHead)
+                let predicates = optionalConjuncts rewritten.Where @ (rewritten.Joins |> List.collect (_.On >> conjuncts))
+
+                if constantRows |> Map.exists (fun _ row -> row.IsNone) then
+                    Ok(noRows "no matching row in const table")
+                else
+                    let constantPredicates =
+                        predicates
+                        |> List.filter (Expression.exists (function
+                            | QualifiedCol(owner, _) -> not (Map.containsKey (owner.ToLowerInvariant()) constants)
+                            | _ -> false) >> not)
+                    let columns = constants |> Map.toList |> List.map (fun (owner, _) -> owner, keys[owner].Table.Columns)
+                    let row = constantRows |> Map.toList |> List.choose snd |> Array.concat
+                    let context = contextFactory store registry dbName (columnIndexOf (columns |> List.collect snd)) (qualifierRanges columns) None
+                    constantPredicates
+                    |> traverse (fun predicate -> whereMatches context (Some predicate) row)
+                    |> Result.mapError Err
+                    |> Result.map (fun visible ->
+                        if List.contains false visible then
+                            noRows "Impossible WHERE noticed after reading const tables"
+                        else
+                            let keyColumns owner =
+                                let table = keys[owner].Table
+                                match Map.tryFind owner accesses with
+                                | Some(UpdatePrimary _) -> Storage.primaryKeyColumns table
+                                | Some(UpdateEquality(matched, _)) -> matched.ColumnIndices |> List.map (fun index -> table.Columns[index].Name)
+                                | None -> []
+
+                            let pin (owner: string) column =
+                                let owner = owner.ToLowerInvariant()
+                                if keyColumns owner |> List.exists (equalsIgnoreCase column) then
+                                    keys[owner].Equalities |> List.tryFind (fst >> equalsIgnoreCase column) |> Option.map snd
+                                else None
+
+                            let needsCheck = function
+                                | BinOp(Eq, QualifiedCol(owner, column), LiteralValue value)
+                                | BinOp(Eq, LiteralValue value, QualifiedCol(owner, column)) -> pin owner column <> Some value
+                                | BinOp(Eq, QualifiedCol(left, leftColumn), QualifiedCol(right, rightColumn)) ->
+                                    match pin left leftColumn, pin right rightColumn with
+                                    | Some leftValue, Some rightValue -> leftValue <> rightValue
+                                    | _ -> true
+                                | _ -> true
+
+                            sources |> List.map (fun (source, original) ->
+                                let owner = ownerOf source
+                                let table = keys[owner].Table
+                                let writer = equalsIgnoreCase owner target.Qualifier
+                                let columns = keyColumns owner
+                                let keyName, length, candidateCount =
+                                    match Map.tryFind owner accesses with
+                                    | Some(UpdatePrimary _) ->
+                                        let bytes =
+                                            columns
+                                            |> List.map (fun name -> table.Columns |> List.tryFind (fun column -> equalsIgnoreCase name column.Name) |> Option.bind explainKeyLen)
+                                            |> tryAllSome
+                                            |> Option.map List.sum
+                                        Some "PRIMARY", bytes, 1
+                                    | Some(UpdateEquality(matched, lookup)) ->
+                                        Some matched.Name, explainIndexKeyLen (Some table) matched.Name table.Columns matched.ColumnIndices matched.PrefixLengths, max 1 lookup.CandidateCount
+                                    | None -> None, None, table.RowsArray.Count
+
+                                let key: ExplainRendering.ExplainKey option =
+                                    keyName |> Option.map (fun name -> { Names = [ name ]; Length = length })
+                                let constant = Map.containsKey owner constants
+                                let referenceOnSource predicate =
+                                    Expression.exists (function QualifiedCol(alias, _) -> equalsIgnoreCase alias owner | _ -> false) predicate
+                                let residual =
+                                    not constant && (predicates |> List.exists (fun predicate -> referenceOnSource predicate && needsCheck predicate))
+
+                                let coveredColumns =
+                                    if keyName |> Option.exists (equalsIgnoreCase "PRIMARY") then Storage.primaryKeyColumns table
+                                    else
+                                        match Map.tryFind owner accesses with
+                                        | Some(UpdateEquality(matched, _)) when matched.UsesWholeStoredValues -> columns
+                                        | _ -> []
+
+                                let covering =
+                                    not writer && not coveredColumns.IsEmpty
+                                    && not (
+                                        (predicates @ (rewritten.Assignments |> List.map _.Value))
+                                        |> List.exists (Expression.exists (function
+                                            | QualifiedCol(alias, column) when equalsIgnoreCase alias owner ->
+                                                not (List.exists (equalsIgnoreCase column) coveredColumns)
+                                            | _ -> false)))
+
+                                { Id = Some id
+                                  SelectType = if writer then "UPDATE" else "SIMPLE"
+                                  Table = Some(displayName original)
+                                  Type = Some(if constant then "const" elif key.IsSome then "ref" else "ALL")
+                                  Key = key
+                                  Ref = key |> Option.map (fun _ -> String.concat "," (List.replicate columns.Length "const"))
+                                  Rows = Some(uint64 candidateCount)
+                                  Extra =
+                                      [ if residual then "Using where"
+                                        if covering then "Using index" ] }))))
 
 let private tryExplainPhysicalSource (store: Store) (dbName: string) (item: FromItem) : Result<(string * ColumnDef list * Table) option, QueryResult> =
     match item with

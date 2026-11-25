@@ -2065,6 +2065,57 @@ let tests =
                     | ResultSet(_, [ [ Some "12" ] ]) -> ()
                     | result -> failtestf "EXPLAIN changed the data: %A" result
 
+                testCase "EXPLAIN UPDATE reports the chosen prefix of a joined view partner"
+                <| fun _ ->
+                    let store = newStore ()
+                    let run = runDefault store
+                    for sql in
+                        [ "CREATE TABLE parents (id INT PRIMARY KEY,n INT)"
+                          "CREATE TABLE partners (id INT,seq INT,delta INT,PRIMARY KEY(id,seq))"
+                          "INSERT INTO parents VALUES (1,10),(2,20),(3,0),(4,40)"
+                          "INSERT INTO partners VALUES (1,20,7),(1,10,7),(2,10,9),(3,10,11)"
+                          "CREATE VIEW checked_parent AS SELECT id,n FROM parents WHERE n>0 WITH CASCADED CHECK OPTION"
+                          "CREATE VIEW active AS SELECT p.id,p.n,s.delta FROM checked_parent p JOIN partners s ON p.id=s.id WHERE s.delta>0"
+                          "CREATE VIEW covering AS SELECT p.id,p.n FROM parents p JOIN partners s ON p.id=s.id" ] do
+                        match run sql with
+                        | Affected _ -> ()
+                        | result -> failtestf "setup failed for %s: %A" sql result
+
+                    let indexed selectType table access rows extra =
+                        [ Some "1"; Some selectType; Some table; None; Some access; Some "PRIMARY"; Some "PRIMARY"; Some "4"; Some "const"; Some rows; extra ]
+
+                    let noRows message =
+                        [ [ Some "1"; Some "UPDATE"; None; None; None; None; None; None; None; None; Some message ] ]
+
+                    for statement, expected in
+                        [ "UPDATE active SET n=n+delta WHERE id=1", [ indexed "UPDATE" "parents" "const" "1" None; indexed "SIMPLE" "s" "ref" "2" (Some "Using where") ]
+                          "UPDATE active SET n=n+delta WHERE id=99", noRows "no matching row in const table"
+                          "UPDATE active SET n=n+delta WHERE id=4", [ indexed "UPDATE" "parents" "const" "1" None; indexed "SIMPLE" "s" "ref" "1" (Some "Using where") ]
+                          "UPDATE active SET n=n+delta WHERE id=3", noRows "Impossible WHERE noticed after reading const tables"
+                          "UPDATE covering SET n=n+1 WHERE id=1", [ indexed "UPDATE" "p" "const" "1" None; indexed "SIMPLE" "s" "ref" "2" (Some "Using index") ] ] do
+                        match run ("EXPLAIN " + statement) with
+                        | ResultSet(_, rows) -> Expect.equal (rows |> List.map (List.removeAt 10)) expected statement
+                        | result -> failtestf "expected a plan for %s, got %A" statement result
+
+                    let root = Fsdb.Session.create 1 store
+                    let reader = { Fsdb.Session.create 2 store with User = "prefix_reader" }
+                    for sql in
+                        [ "CREATE USER prefix_reader"
+                          "GRANT SELECT, UPDATE, SHOW VIEW ON fsdb.active TO prefix_reader" ] do
+                        match Fsdb.QueryHandler.handle root sql |> snd with
+                        | Affected _ -> ()
+                        | result -> failtestf "grant setup failed for %s: %A" sql result
+
+                    for key in [ 1; 99 ] do
+                        let plan = $"EXPLAIN UPDATE active SET n=n+delta WHERE id={key}"
+                        match Fsdb.QueryHandler.handle reader plan |> snd with
+                        | Err(1345, _) -> ()
+                        | result -> failtestf "expected an underlying-view privilege error for %s, got %A" plan result
+
+                    match run "SELECT SUM(n) FROM parents" with
+                    | ResultSet(_, [ [ Some "70" ] ]) -> ()
+                    | result -> failtestf "EXPLAIN changed the data: %A" result
+
                 testCase "EXPLAIN by a nullable VARCHAR(50) UNIQUE key reports key_len 203 (50*4+2+1 for the null flag)"
                 <| fun _ ->
                     // Probe values are key-relative even when the key column

@@ -89,8 +89,7 @@ The expanded plan requires `SHOW VIEW` and underlying read privileges,
 including the nested view. A delegated caller without the nested-view
 grant returns 1345, matching the oracle. [MySQL privilege reference](https://dev.mysql.com/doc/refman/8.4/en/privileges-provided.html).
 
-Partial-key and other generic view plans, and exact JSON and TREE
-rendering, remain open.
+Broader view plans and exact JSON and TREE rendering remain open.
 
 ## Executing partial-key joins
 
@@ -107,3 +106,22 @@ with the candidate allocated 2.40 MB at both sizes and preserved the
 original partner choice when index order differs from insertion order.
 MySQL and Fsdb agree on affected rows, committed values, and `CHECK OPTION` for the
 composite-prefix wire fixture with equal-valued matching partners.
+
+## Explaining partial-key joins
+
+Traditional `EXPLAIN UPDATE` shares index selection with execution. With
+a complete target primary key and two partner matches on the first part
+of a composite key, it reports `const` for the target and `ref` with a
+four-byte key and two candidate rows for the partner. The plan reports a
+residual predicate or a covering lookup where applicable.
+
+The pinned MySQL 8.4.11 comparison also covers an absent target, an empty
+partner prefix, a target hidden by the view predicate, and a covering prefix.
+Both engines return error 1345 without the required underlying grants for
+either an existing or an absent target. Fsdb checks those grants before
+selecting an index prefix. Both engines leave the rows intact.
+MySQL estimates `filtered` at 33.33%
+for the residual partner predicate. Fsdb currently renders 100.00%.
+With `s.seq > 10` on the second partner key column, MySQL
+uses `range` with an eight-byte key. Fsdb's lookup still uses the equality
+prefix and applies the range predicate to its candidates.
