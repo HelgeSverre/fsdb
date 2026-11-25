@@ -7,11 +7,11 @@ open MySqlConnector
 
 let arguments = fsi.CommandLineArgs |> Array.skip 1
 
-let engine, port, pass, rangeControls =
+let engine, port, pass, mode =
     match arguments with
-    | [| engine; port; pass |] -> engine, int port, int pass, false
-    | [| engine; port; pass; "range-controls" |] -> engine, int port, int pass, true
-    | _ -> failwith "Usage: dotnet fsi native-feature-peers.fsx -- ENGINE PORT PASS [range-controls]"
+    | [| engine; port; pass |] -> engine, int port, int pass, ""
+    | [| engine; port; pass; mode |] when List.contains mode [ "range-controls"; "prefix-controls" ] -> engine, int port, int pass, mode
+    | _ -> failwith "Usage: dotnet fsi native-feature-peers.fsx -- ENGINE PORT PASS [range-controls|prefix-controls]"
 
 CultureInfo.CurrentCulture <- CultureInfo.InvariantCulture
 
@@ -139,6 +139,28 @@ let viewUpdates () =
             scalar "SELECT value FROM parent WHERE id = 251"
             |> require "joined view committed value" 66L))
 
+let viewPrefixUpdates () =
+    let sizes = if pass % 2 = 0 then [ 5000; 500 ] else [ 500; 5000 ]
+    for size in sizes do
+        let lane = $"joined-view-prefix-{size}"
+        probe lane (fun () ->
+            let table = $"partner_{size}"
+            let view = $"active_parent_{size}"
+            write "UPDATE parent SET value = 1 WHERE id = 251"
+            write $"CREATE TABLE {table} (id INT NOT NULL, sequence_no INT NOT NULL, delta INT NOT NULL, PRIMARY KEY(id, sequence_no))"
+            seed table size (fun n -> $"({n},10,2)")
+            write $"INSERT INTO {table} VALUES (251,20,2)"
+            write $"CREATE VIEW {view} AS SELECT p.id,p.value,s.delta FROM positive_parent p JOIN {table} s ON p.id=s.id WHERE s.delta>0"
+            scalar $"SELECT COUNT(*) FROM {view} WHERE id = 251" |> require "prefix matches" 2L
+
+            let update () =
+                execute $"UPDATE {view} SET value = value + delta WHERE id = 251"
+                |> require "joined prefix affected rows" 1
+
+            time lane 60 update (fun () ->
+                scalar "SELECT value FROM parent WHERE id = 251"
+                |> require "joined prefix committed value" 131L))
+
 let spatial () =
     probe "spatial-mbr" (fun () ->
         // MySQL requires an explicit SRID to consider the spatial index.
@@ -199,7 +221,10 @@ try
         seedAccounts ()
 
         let workloads =
-            if rangeControls then [ readRangeControls ]
+            if mode = "range-controls" then [ readRangeControls ]
+            elif mode = "prefix-controls" then
+                write "CREATE VIEW positive_parent AS SELECT id, value FROM parent WHERE value > 0 WITH CASCADED CHECK OPTION"
+                [ viewPrefixUpdates ]
             else [ readQueries; viewUpdates; spatial; fullText ]
 
         let ordered = if pass % 2 = 0 then List.rev workloads else workloads
