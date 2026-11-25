@@ -770,6 +770,55 @@ let tests =
                             | _ -> failtestf "%s expected one unwrapped cut, got %A" name cuts
                         | actual -> failtestf "%s expected a geometry, got %A" name actual
 
+                testCase "geographic computations reject out-of-range coordinates in generated geometry"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let line = geometry "LINESTRING(-179 9,179.5 13)"
+                    let area = geometry "POLYGON((178 10,-178 10,-178 12,178 12,178 10))"
+                    let unwrapped = call "ST_GeometryN" [ call "ST_Intersection" [ line; area ]; VInt 1L ]
+                    let longitude = call "ST_EndPoint" [ unwrapped ]
+                    let latitude = call "ST_SwapXY" [ geometry "POINT(110 32)" ]
+                    let expectError code state coordinate operation arguments =
+                        try
+                            call operation arguments |> ignore
+                            failtestf "%s should reject the geometry's %s" operation coordinate
+                        with
+                        | Fsdb.Functions.SqlError(actual, message) ->
+                            Expect.equal actual code operation
+                            Expect.equal (Fsdb.SqlState.forCode actual) state operation
+                            Expect.stringContains message coordinate operation
+
+                    for operation, arguments in
+                        [ "ST_Length", [ unwrapped ]
+                          "ST_SRID", [ unwrapped ]
+                          "ST_IsValid", [ unwrapped ]
+                          "ST_Transform", [ unwrapped; VInt 4326L ]
+                          "ST_Transform", [ unwrapped; VInt 3857L ]
+                          "ST_LineInterpolatePoint", [ unwrapped; VDouble 0.5 ]
+                          "ST_LineInterpolatePoints", [ unwrapped; VDouble 0.5 ]
+                          "ST_PointAtDistance", [ unwrapped; VInt 10L ]
+                          "ST_Buffer", [ unwrapped; VInt 10L ]
+                          "ST_X", [ longitude ]
+                          "ST_Y", [ longitude ] ] do
+                        expectError 3731 "22S02" "longitude -180.123435" operation arguments
+
+                    let planar = call "ST_GeomFromText" [ VString "POINT(1 1)" ]
+                    for operation in
+                        [ "ST_Distance"; "ST_Distance_Sphere"; "ST_Intersects"; "ST_Touches"
+                          "ST_Difference"; "ST_Intersection"; "ST_Union"; "ST_SymDifference"
+                          "MBRContains"; "MBRWithin"; "MBRIntersects" ] do
+                        expectError 3731 "22S02" "longitude -180.123435" operation [ planar; unwrapped ]
+
+                    for operation in [ "ST_SRID"; "ST_IsValid"; "ST_X"; "ST_Y" ] do
+                        expectError 3732 "22S03" "latitude 110.000000" operation [ latitude ]
+
+                    Expect.equal (call "ST_NumPoints" [ unwrapped ]) (VInt 2L) "line inspection still accepts the result"
+                    Expect.equal (call "ST_AsText" [ latitude; axis ]) (VString "POINT(32 110)") "text export retains the invalid latitude"
+                    match call "ST_AsWKB" [ unwrapped; axis ] with
+                    | VBytes bytes -> Expect.equal bytes.Length 41 "binary export keeps both vertices"
+                    | actual -> failtestf "expected WKB, got %A" actual
+
                 testCase "geographic area intersections remove contacts covered by the final line"
                 <| fun _ ->
                     let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]

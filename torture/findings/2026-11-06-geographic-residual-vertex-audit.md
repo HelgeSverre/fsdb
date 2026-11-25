@@ -611,8 +611,24 @@ overlay path. [Boost geographic segment intersections](https://github.com/boosto
 
 The five remaining `ST_Intersection` cases disagree on isolated
 points. The seeded, near-edge, multipart, and other stepped intersection
-fixtures retained their existing match counts. MySQL also reports
-error 3731 if `ST_Length` consumes the resulting line. The same
-error occurs for `ST_Distance`, `ST_IsValid`, `ST_SRID`, and
-`ST_X` on the unwrapped endpoint. All succeeded on the normalized
-control. Fsdb still accepts the unwrapped line in those calls.
+fixtures retained their existing match counts.
+
+### Coordinate ranges in spatial function arguments
+
+MySQL validates geographic operation arguments in radians and checks
+longitude before latitude at each vertex. Fsdb now reports
+`3731 / 22S02` for an out-of-range longitude and `3732 / 22S03`
+for an out-of-range latitude. The checks run before a binary operation
+compares the two SRIDs and before a same-SRID transform returns its
+input. Exporters, geometry component extraction, and shape metadata
+such as `ST_NumPoints` still accept the generated geometry.
+[MySQL geometry argument parser](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/wkb.cc)
+· [MySQL coordinate range visitor](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/coordinate_range_visitor.h).
+
+The MySQL 8.4.11 wire comparison matched the code, SQLSTATE, and
+message in all 37 range-error cases. The fixtures use an unwrapped
+overlay cut and an invalid latitude created by `ST_SwapXY`.
+Normalized controls and all 1,048 prior intersection outputs were
+unchanged. Some geographic operations still differ in availability or
+unsupported-SRS error codes, including MBR operations on valid geographic
+inputs and `ST_IsClosed`.

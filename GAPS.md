@@ -3122,9 +3122,10 @@ implementation effort:
    order. [Spatially partitioned contacts](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#contact-order-in-spatial-partitions)
    follow the audited section order across ordinary and antimeridian
    splits. [Unwrapped clipping longitudes](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#unwrapped-clipping-longitudes)
-   match MySQL's overlay output. Domain errors in functions consuming
-   those results, residual isolated points, and near-hole relation
-   differences remain.
+   match MySQL's overlay output. [Geographic argument validation](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#coordinate-ranges-in-spatial-function-arguments)
+   matches the audited longitude and latitude errors, including after
+   composition with extractors. Geographic function coverage, residual
+   isolated points, and near-hole relation differences remain.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
    [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)

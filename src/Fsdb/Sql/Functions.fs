@@ -5763,6 +5763,27 @@ let private geometryArgument functionName = function
     | VGeometry geometry -> geometry
     | _ -> geometryError functionName "a geometry argument is required"
 
+let private validateGeometryParameter (functionName: string) geometry =
+    match SpatialReferenceSystems.tryGeometryParameterDomainError geometry with
+    | None -> geometry
+    | Some error ->
+        let code, coordinate, value, range =
+            match error with
+            | LongitudeOutOfRange longitude -> 3731, "longitude", longitude, "(-180.000000, 180.000000]"
+            | LatitudeOutOfRange latitude -> 3732, "latitude", latitude, "[-90.000000, 90.000000]"
+
+        raise (
+            SqlError(
+                code,
+                sprintf
+                    "A parameter of function %s contains a geometry with %s %f, which is out of range. It must be within %s."
+                    (functionName.ToLowerInvariant()) coordinate value range
+            )
+        )
+
+let private spatialOperationArgument functionName value =
+    geometryArgument functionName value |> validateGeometryParameter functionName
+
 let private geometrySrid functionName = function
     | VInt srid when srid >= 0L && srid <= int64 Int32.MaxValue -> int srid
     | VUInt srid when srid <= uint64 Int32.MaxValue -> int srid
@@ -5876,7 +5897,7 @@ let private binaryGeometryWithSameSridFn functionName operation: Scalar =
     | [ _; VNull ] -> VNull
     | [ first; second ] ->
         let first, second =
-            requireSameSrid functionName (geometryArgument functionName first) (geometryArgument functionName second)
+            requireSameSrid functionName (spatialOperationArgument functionName first) (spatialOperationArgument functionName second)
 
         operation first second
     | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
@@ -6001,7 +6022,7 @@ let private geometryIsValidFn: Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] ->
-        let geometry = geometryArgument "ST_ISVALID" value
+        let geometry = spatialOperationArgument "ST_ISVALID" value
         let referenceSystem = spatialReferenceSystem "ST_ISVALID" geometry.Srid
 
         let valid =
@@ -6016,7 +6037,7 @@ let private pointCoordinateFn functionName select: Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] ->
-        match (geometryArgument functionName value).Shape with
+        match (spatialOperationArgument functionName value).Shape with
         | GPoint(x, y) -> VDouble(select x y)
         | _ -> geometryError functionName "a Point argument is required"
     | _ -> nativeParameterCountError functionName
@@ -6028,7 +6049,7 @@ let private geometrySridFn: Scalar =
         let geometry = geometryArgument "ST_SRID" value
         if SpatialReferenceSystems.hasNonFiniteCoordinates geometry then
             raise (SqlError(3037, "Invalid GIS data provided to function st_srid."))
-        VInt(int64 geometry.Srid)
+        VInt(int64 (validateGeometryParameter "ST_SRID" geometry).Srid)
     | [ _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_SRID geometry mutation'"))
     | _ -> nativeParameterCountError "st_srid"
 
@@ -6037,8 +6058,9 @@ let private geometryTransformFn: Scalar =
     | [ VNull; _ ]
     | [ _; VNull ] -> VNull
     | [ value; targetValue ] ->
-        let geometry = geometryArgument "ST_Transform" value
+        let source = geometryArgument "ST_Transform" value
         let targetSrid = geometrySrid "ST_Transform" targetValue
+        let geometry = validateGeometryParameter "ST_Transform" source
         let sourceSrid = geometry.Srid
         if sourceSrid = targetSrid then
             VGeometry geometry
@@ -6213,8 +6235,8 @@ let private geometryDistanceFn: Scalar =
             | distances -> Some(List.min distances)
 
     let distance firstValue secondValue unit =
-        let first = geometryArgument "ST_DISTANCE" firstValue
-        let second = geometryArgument "ST_DISTANCE" secondValue
+        let first = spatialOperationArgument "ST_DISTANCE" firstValue
+        let second = spatialOperationArgument "ST_DISTANCE" secondValue
 
         if first.Srid <> second.Srid then
             raise (SqlError(3033, sprintf "Binary geometry function st_distance given two geometries of different SRIDs: %d and %d, which should have been identical." first.Srid second.Srid))
@@ -6313,8 +6335,8 @@ let private geometryDistanceSphereFn: Scalar =
 
     let distance firstValue secondValue radiusValue =
         let functionName = "ST_DISTANCE_SPHERE"
-        let first = geometryArgument functionName firstValue
-        let second = geometryArgument functionName secondValue
+        let first = spatialOperationArgument functionName firstValue
+        let second = spatialOperationArgument functionName secondValue
 
         if first.Srid <> second.Srid then
             raise (SqlError(3033, sprintf "Binary geometry function st_distance_sphere given two geometries of different SRIDs: %d and %d, which should have been identical." first.Srid second.Srid))
@@ -6346,7 +6368,7 @@ let private geometryDistanceSphereFn: Scalar =
             if first.Srid = 0 then
                 fun degrees -> degrees * Math.PI / 180.0
             else
-                fun degrees -> degrees * 0.017453292519943278
+                fun degrees -> degrees * SpatialReferenceSystems.geographicRadiansPerDegree
 
         sphericalPointSetDistance radius toRadians (coordinates functionName first) (coordinates functionName second)
         |> Option.map (fun distance ->
@@ -6371,7 +6393,7 @@ let private geometryLengthFn: Scalar =
 
     let length value unit =
         let functionName = "ST_LENGTH"
-        let geometry = geometryArgument functionName value
+        let geometry = spatialOperationArgument functionName value
 
         let measured =
             if geometry.Srid = 0 then
@@ -6413,7 +6435,7 @@ type private LineInterpolationMode =
 
 let private geometryLineInterpolateFn functionName mode: Scalar =
     let evaluate geometryValue distanceValue =
-        let geometry = geometryArgument functionName geometryValue
+        let geometry = spatialOperationArgument functionName geometryValue
         let points =
             match geometry.Shape with
             | GLineString points -> points
@@ -6548,7 +6570,7 @@ let private geometryBufferFn: Scalar =
         | VNull, _
         | _, VNull -> VNull
         | _ ->
-            let geometry = geometryArgument "ST_BUFFER" value |> requirePlanar "ST_BUFFER"
+            let geometry = spatialOperationArgument "ST_BUFFER" value |> requirePlanar "ST_BUFFER"
             let distance = toDouble distanceValue
             let kind = geometryKind geometry.Shape
 
@@ -6740,7 +6762,7 @@ let private geometryPredicateFn functionName predicate =
     | [ _; VNull ] -> VNull
     | [ firstValue; secondValue ] ->
         let first, second =
-            requireSameSrid functionName (geometryArgument functionName firstValue) (geometryArgument functionName secondValue)
+            requireSameSrid functionName (spatialOperationArgument functionName firstValue) (spatialOperationArgument functionName secondValue)
 
         let referenceSystem = spatialReferenceSystem functionName first.Srid
         let result =

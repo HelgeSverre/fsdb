@@ -253,6 +253,13 @@ let internal all =
 
 let internal tryFind srid = all |> List.tryFind (fun referenceSystem -> referenceSystem.Srid = srid)
 
+let private geographicSrids =
+    all
+    |> List.choose (fun referenceSystem -> referenceSystem.SemiMajorAxis |> Option.map (fun _ -> referenceSystem.Srid))
+    |> Set.ofList
+
+let internal geographicRadiansPerDegree = 0.017453292519943278
+
 let internal lacksTowgs84 srid = srid = 4030
 
 let private earthRadius = 6378137.0
@@ -559,19 +566,20 @@ let internal withAxisOrder axisOrder (geometry: Geometry) =
     | LatitudeLongitude -> geometry
     | LongitudeLatitude -> mapGeometry (fun (longitude, latitude) -> latitude, longitude) geometry
 
-let rec internal coordinates = function
-    | GEmpty -> []
-    | GPoint(x, y) -> [ x, y ]
+let rec private tryPickCoordinate check = function
+    | GEmpty -> None
+    | GPoint(x, y) -> check (x, y)
     | GLineString points
-    | GMultiPoint points -> points
+    | GMultiPoint points -> List.tryPick check points
     | GPolygon rings
-    | GMultiLineString rings -> List.concat rings
-    | GMultiPolygon polygons -> polygons |> List.collect List.concat
-    | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> coordinates geometry.Shape)
+    | GMultiLineString rings -> List.tryPick (List.tryPick check) rings
+    | GMultiPolygon polygons -> List.tryPick (List.tryPick (List.tryPick check)) polygons
+    | GGeometryCollection geometries -> List.tryPick (fun geometry -> tryPickCoordinate check geometry.Shape) geometries
 
 let internal hasNonFiniteCoordinates (geometry: Geometry) =
-    coordinates geometry.Shape
-    |> List.exists (fun (x, y) -> not (Double.IsFinite x && Double.IsFinite y))
+    geometry.Shape
+    |> tryPickCoordinate (fun (x, y) -> if Double.IsFinite x && Double.IsFinite y then None else Some())
+    |> Option.isSome
 
 let internal tryPointDomainError (latitude, longitude) =
     if latitude < -90.0 || latitude > 90.0 then
@@ -582,12 +590,27 @@ let internal tryPointDomainError (latitude, longitude) =
         None
 
 let internal tryCoordinateDomainError (geometry: Geometry) =
-    coordinates geometry.Shape |> List.tryPick tryPointDomainError
+    tryPickCoordinate tryPointDomainError geometry.Shape
+
+let internal tryGeometryParameterDomainError (geometry: Geometry) =
+    if not (Set.contains geometry.Srid geographicSrids) then None
+    else
+        // MySQL checks incoming geographic operation parameters in radians.
+        let check (latitude, longitude) =
+            let lon = longitude * geographicRadiansPerDegree
+            let lat = latitude * geographicRadiansPerDegree
+            let pole = Math.PI / 2.0
+            if lon <= -Math.PI || lon > Math.PI then
+                Some(LongitudeOutOfRange(lon / geographicRadiansPerDegree))
+            elif lat < -pole || lat > pole then
+                Some(LatitudeOutOfRange(lat / geographicRadiansPerDegree))
+            else None
+        tryPickCoordinate check geometry.Shape
 
 let internal tryTransformedCoordinateDomainError (geometry: Geometry) =
     // MySQL retains tiny projection roundoff beyond either antimeridian.
-    coordinates geometry.Shape
-    |> List.tryPick (fun point ->
+    geometry.Shape
+    |> tryPickCoordinate (fun point ->
         match tryPointDomainError point with
         | Some(LongitudeOutOfRange longitude) when abs (abs longitude - 180.0) < antimeridianRoundoff -> None
         | error -> error)

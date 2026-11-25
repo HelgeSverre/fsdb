@@ -37,7 +37,7 @@ let private strategyCodeLength = sizeof<int32>
 let private encodedStrategyLength = strategyCodeLength + sizeof<double>
 
 let private radians degrees = degrees * Math.PI / 180.0
-let private mysqlRadians degrees = degrees * 0.017453292519943278
+let private mysqlRadians degrees = degrees * geographicRadiansPerDegree
 
 let internal planarPointDistance (firstX: float, firstY: float) (secondX: float, secondY: float) =
     let deltaX, deltaY = secondX - firstX, secondY - firstY
