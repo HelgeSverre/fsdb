@@ -747,6 +747,24 @@ let tests =
                         Expect.isLessThan (abs (contactLatitude - 41.00000008675716)) 1e-10 "the separate point lies beside the short fragment"
                     | actual -> failtestf "expected the tiny clipped line and point, got %A" actual
 
+                testCase "geographic area intersections remove contacts covered by the final line"
+                <| fun _ ->
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]
+                    let area = geometry "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,3 1,3 3,1 3,1 1))"
+                    let shortClip = call "ST_Intersection" [ geometry "LINESTRING(1 2.999,3 2.999)"; area ]
+                    match shortClip with
+                    | VGeometry { Shape = GLineString [ (startLatitude, _); (cutLatitude, _) ] } ->
+                        Expect.equal startLatitude 1.0 "the clipped line starts at the source endpoint"
+                        Expect.isLessThan (abs (cutLatitude - 1.000000309934808)) 1e-10 "the clipped line absorbs the nearby crossing point"
+                    | actual -> failtestf "expected the clipped line by itself, got %A" actual
+
+                    let alongHole = call "ST_Intersection" [ geometry "LINESTRING(2 1,5 1)"; area ]
+                    match alongHole with
+                    | VGeometry { Shape = GGeometryCollection({ Shape = GLineString _ } :: contacts) } ->
+                        Expect.hasLength contacts 2 "both points lie off the final line"
+                        Expect.isTrue (contacts |> List.exists (fun point -> point.Shape = GPoint(3.0, 1.0))) "the hole vertex survives an intermediate cut"
+                    | actual -> failtestf "expected a line and two isolated points, got %A" actual
+
                 testCase "geographic multiline overlays preserve component order and split shared spans"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

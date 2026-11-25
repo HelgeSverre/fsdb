@@ -2021,6 +2021,32 @@ let private geographicAreaLineFragments retainCovered pieces =
 
     finish current finished |> List.rev
 
+let private geographicOverlayLineCoverage lines =
+    // MySQL subtracts the clipped linework from the point result using
+    // Boost's default spheroid, independent of the overlay's ellipsoid.
+    let flattening = 1.0 - 6356752.3142451793 / 6378137.0
+    let segments =
+        lines
+        |> List.collect (List.map geographicPointRadians >> List.pairwise)
+
+    fun point ->
+        let (latitude, longitude) as query = geographicPointRadians point
+        segments
+        |> List.exists (fun (((latitude1, longitude1) as start), ((latitude2, longitude2) as endpoint)) ->
+            let length = longitudeDistanceRadians longitude1 longitude2
+            let offset = longitudeDistanceRadians longitude1 longitude
+            let sameStart = boostGeoEqual offset 0.0
+            let sameEnd = boostGeoEqual (longitudeDistanceRadians longitude2 longitude) 0.0
+            match sameStart, sameEnd with
+            | true, true -> min latitude1 latitude2 <= latitude && latitude <= max latitude1 latitude2
+            | true, false -> boostGeoEqual latitude latitude1
+            | false, true -> boostGeoEqual latitude latitude2
+            | false, false when offset * length > 0.0 && abs offset < abs length ->
+                let azimuth point = geographicSegmentAzimuthsRadians flattening start point |> fst
+                let delta = normalizedLongitudeRadians (azimuth query - azimuth endpoint)
+                boostGeoEqual delta 0.0 || boostGeoEqual (abs delta) Math.PI
+            | _ -> false)
+
 let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygons area =
     let sources = List.map List.pairwise lines
     let polygons = List.map (orientGeographicPolygonRings referenceSystem) polygons
@@ -2047,18 +2073,13 @@ let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygon
         match kind with
         | OverlayKind.Intersection ->
             let inside = fragments true
-            let coveredCut =
-                partitioned
-                |> List.collect (List.collect fst)
-                |> List.collect (fun piece -> if piece.Covered then [ piece.Start; piece.End ] else [])
-                |> geographicPointMembership
+            let covered = geographicOverlayLineCoverage inside
             let points =
                 partitioned
                 |> List.collect (List.collect snd)
                 |> distinctGeographicPoints
                 |> List.choose (fun (latitude, longitude) ->
-                    if coveredCut (latitude, longitude)
-                       || geographicPointLinePosition referenceSystem (latitude, longitude) inside <> GeographicPointLinePosition.Outside then None
+                    if covered (latitude, longitude) then None
                     else Some(GPoint(latitude, longitude)))
             Some(compose (List.map GLineString inside @ points))
         | OverlayKind.Difference ->

@@ -498,3 +498,20 @@ relation predicates still differ. Near-edge contact retention and
 ordering remain open, along with the 11 `Crosses` versus `Touches`
 differences and overlays with nondegenerate polar or half-turn
 segments.
+
+### Isolated contacts beside clipped linework
+
+MySQL subtracts the finished line fragments from the point result
+using Boost's default geographic spheroid. Matching that operation
+lets a point survive when it coincides with an intermediate cut that
+is absent from the final line. It also removes nearby crossings that
+Boost treats as covered by the finished line.
+[MySQL intersection dispatcher](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/intersection_functor.cc)
+· [Boost geographic winding strategy](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/spherical/point_in_poly_winding.hpp).
+
+Compared against native MySQL 8.4.11 at the same 10⁻⁸ degree tolerance,
+the 90 seeded intersections went from 16 differences to 14, with
+11 of the remaining differences due solely to point order. The 448
+near-edge intersections went from 51 differences to 39, with 16 of the
+remaining differences due solely to point order. Both fixtures still
+contain cases with different geometry content or coordinates.
