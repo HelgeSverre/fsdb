@@ -99,14 +99,28 @@ about `7.1e-15` degrees. The 5,112 ordinary-line results were byte-identical
 to the previous Fsdb run. Near-adjacent geodesics off the audited axes
 remain open.
 
-A separate 108-result axis check varies nearly contained spans, where
-the endpoints at one end almost coincide. Twenty results differ in
-the selected endpoint or in whether the result is a point or a span.
+### Nearly contained spans
+
+The 108-result near-containment check originally had twenty differences.
 For example, intersecting the equatorial `LINESTRING(4 0,0 0)` with
-`LINESTRING(-0.0000005 0,6 0)` gives the first line in MySQL and
-`POINT(4 0)` in Fsdb.
-Fsdb returned byte-identical results on both sides of the multipart
-change for this check.
+`LINESTRING(-0.0000005 0,6 0)` returned only `POINT(4 0)` in Fsdb.
+It now returns the full first line, as in MySQL.
+
+When two nearby endpoints face the same direction along an equator or
+meridian, the overlay now measures both spans from the shorter segment's
+origin. A rounded endpoint tie keeps the first operand's coordinate.
+A short meridional union fragment also survives duplicate removal when
+its latitude extent differs from the longer line sharing its endpoint.
+[Boost collinear segment strategy](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
+
+All 108 original results and 27,648 expanded results matched native
+MySQL 8.4.11. The expanded matrices cover all four operations, both
+operand orders and traversal directions, almost equal or nearly contained
+lines, adjacency controls, and antimeridian wrap. They include
+3,456 mixed single-line and multiline results across EPSG 4326, 4258,
+and 4267. The largest coordinate difference was about `7.1e-15`
+degrees. The previous 5,112 ordinary single-line results were
+byte-identical.
 
 ## Zero-length line strings
 

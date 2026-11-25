@@ -672,11 +672,19 @@ let tests =
                           "ST_Intersection", "LINESTRING(0 0,4 0)", "LINESTRING(3.9999999 0,6 0)", "POINT(4 0)"
                           "ST_Intersection", "LINESTRING(0 0,4 0)", "LINESTRING(3.999999 0,6 0)", "LINESTRING(3.999999 0,4 0)"
                           "ST_Difference", "LINESTRING(0 0,1 0)", "LINESTRING(0.9999999 0,5 0)", "LINESTRING(0 0,0.9999999 0)"
+                          "ST_Intersection", "LINESTRING(4 0,0 0)", "LINESTRING(-0.0000005 0,6 0)", "LINESTRING(4 0,0 0)"
+                          "ST_Intersection", "LINESTRING(3 4,3 0)", "LINESTRING(3 -0.0000005,3 6)", "LINESTRING(3 4,3 0)"
                           "ST_Intersection", "LINESTRING(7 0,7 4)", "LINESTRING(7 3.9999999,7 6)", "POINT(7 4)"
                           "ST_Intersection", "LINESTRING(7 0,7 4)", "LINESTRING(7 4.000000000001,7 6)", "GEOMETRYCOLLECTION EMPTY" ] do
                         let result = call name [ geometry left; geometry right ]
                         Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "line overlays retain the SRID"
                         Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{name} of {left} and {right}"
+
+                    let meridianUnion =
+                        call "ST_Union"
+                            [ geometry "LINESTRING(7 -67,7 -63)"
+                              geometry "LINESTRING(7 -67.000000001,7 -61)" ]
+                    Expect.equal (call "ST_NumGeometries" [ meridianUnion ]) (VInt 3L) "a short outside meridional fragment survives union"
 
                     let crossing = call "ST_Intersection" [ geometry "LINESTRING(-4 0,2 0)"; geometry "LINESTRING(0 -2,0 2)" ]
                     match crossing with

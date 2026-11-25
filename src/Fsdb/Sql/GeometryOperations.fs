@@ -1644,7 +1644,44 @@ let private geographicAxisOffset equatorial (firstLatitude, firstLongitude) (sec
     if equatorial then longitudeDistanceRadians (mysqlRadians firstLongitude) (mysqlRadians secondLongitude)
     else mysqlRadians secondLatitude - mysqlRadians firstLatitude
 
-let private tryAdjacentGeographicAxisContact referenceSystem ((a, b) as first) ((c, d) as second) =
+let private nearGeographicAxisSpan referenceSystem equatorial ((a, b) as first) ((c, d) as second) =
+    let offset = geographicAxisOffset equatorial
+    let unitEllipsoid = { referenceSystem with SemiMajorAxis = Some 1.0 }
+    let distance left right =
+        geographicInverseDistanceRadians false unitEllipsoid (geographicPointRadians left) (geographicPointRadians right)
+
+    // Measure both segments from the shorter segment's origin. Switching to
+    // the longer segment can round a nearby endpoint against a different cut.
+    let start, endpoint =
+        let segment = if distance a b <= distance c d then first else second
+        if not equatorial && fst (fst segment) > fst (snd segment) then snd segment, fst segment
+        else segment
+
+    let length = distance start endpoint
+    let project point =
+        let magnitude = distance start point
+        let signed = if offset start point * offset start endpoint < 0.0 then -magnitude else magnitude
+        if boostGeoEqual signed 0.0 || boostGeoEqual (offset start point) 0.0 then 0.0
+        elif boostGeoEqual signed length || boostGeoEqual (offset endpoint point) 0.0 then length
+        else signed
+
+    let position value start endpoint =
+        if boostGeoEqual value start || boostGeoEqual value endpoint then GeographicPointLinePosition.Boundary
+        elif min start endpoint < value && value < max start endpoint then GeographicPointLinePosition.Interior
+        else GeographicPointLinePosition.Outside
+
+    let a1, a2, b1, b2 = project a, project b, project c, project d
+    let covered value low high = position value low high <> GeographicPointLinePosition.Outside
+    let interior value low high = position value low high = GeographicPointLinePosition.Interior
+
+    // A rounded endpoint tie belongs to the first operand.
+    [ if covered a1 b1 b2 then yield a
+      if interior b1 a1 a2 then yield c
+      if covered a2 b1 b2 then yield b
+      if interior b2 a1 a2 then yield d ]
+    |> List.truncate 2
+
+let private tryNearGeographicAxisIntersection referenceSystem ((a, b) as first) ((c, d) as second) =
     let equatorial = equatorialSegment first && equatorialSegment second
     let sharedMeridian = snd a = snd b && snd a = snd c && snd a = snd d
     if not (equatorial || sharedMeridian) then None
@@ -1657,9 +1694,10 @@ let private tryAdjacentGeographicAxisContact referenceSystem ((a, b) as first) (
         let length segment = abs (offset (fst segment) (snd segment))
         let touches firstPoint firstAway secondPoint secondAway =
             let gap = offset firstPoint secondPoint
-            if gap <> 0.0 && abs gap <= near
-               && offset firstPoint firstAway * offset secondPoint secondAway < 0.0
-               && abs gap < min (length first) (length second) then
+            if gap = 0.0 || abs gap > near || abs gap >= min (length first) (length second) then None
+            elif offset firstPoint firstAway * offset secondPoint secondAway > 0.0 then
+                Some(nearGeographicAxisSpan referenceSystem equatorial first second)
+            else
                 let separated = gap * offset secondPoint secondAway > 0.0
                 // Boost tests the expanded longitude envelope before finding
                 // a common endpoint. Meridians keep their latitude ordering.
@@ -1684,7 +1722,6 @@ let private tryAdjacentGeographicAxisContact referenceSystem ((a, b) as first) (
                     if boostGeoEqual projected boundary then Some [ firstPoint ]
                     elif (if joiningStart then projected > boundary else projected < boundary) then Some [ firstPoint; secondPoint ]
                     else Some []
-            else None
 
         [ a, b, c, d; a, b, d, c; b, a, c, d; b, a, d, c ]
         |> List.tryPick (fun (firstPoint, firstAway, secondPoint, secondAway) -> touches firstPoint firstAway secondPoint secondAway)
@@ -1712,7 +1749,7 @@ let private partitionGeographicLineSegment referenceSystem pointContacts otherSe
         otherSegments
         |> List.fold (fun (contacts, intervals) (componentIndex, other) ->
             let points =
-                tryAdjacentGeographicAxisContact referenceSystem segment other
+                tryNearGeographicAxisIntersection referenceSystem segment other
                 |> Option.defaultWith (fun () -> geographicSharedSegmentEndpoints referenceSystem segment other)
             match points with
             | [ point ] -> (if includeContacts then point :: contacts else contacts), intervals
@@ -1787,11 +1824,30 @@ let private distinctComponents equal members =
     |> List.rev
 
 let private distinctGeographicLines referenceSystem lines =
-    distinctComponents (fun first second ->
+    let meridianExtent = function
+        | (latitude, longitude) :: rest when rest |> List.forall (fun (_, lon) -> lon = longitude) ->
+            let lower, upper =
+                rest |> List.fold (fun (lower, upper) (lat, _) -> min lower lat, max upper lat) (latitude, latitude)
+            Some(longitude, mysqlRadians lower, mysqlRadians upper)
+        | _ -> None
+
+    let sameExtent first second =
+        match first, second with
+        | Some(lon, lower, upper), Some(otherLon, otherLower, otherUpper) when lon = otherLon ->
+            // An azimuth comparison can mistake a very short meridional
+            // fragment for the longer line sharing one of its endpoints.
+            boostGeoEqual lower otherLower && boostGeoEqual upper otherUpper
+        | _ -> true
+
+    lines
+    |> List.map (fun line -> line, meridianExtent line)
+    |> distinctComponents (fun (first, firstExtent) (second, secondExtent) ->
         first = second
         || first = List.rev second
-        || (geographicLineCovers referenceSystem [ first ] [ second ]
-            && geographicLineCovers referenceSystem [ second ] [ first ])) lines
+        || (sameExtent firstExtent secondExtent
+            && geographicLineCovers referenceSystem [ first ] [ second ]
+            && geographicLineCovers referenceSystem [ second ] [ first ]))
+    |> List.map fst
 
 let private tryGeographicLineOverlay referenceSystem kind srid first second =
     let usableSegments line =
