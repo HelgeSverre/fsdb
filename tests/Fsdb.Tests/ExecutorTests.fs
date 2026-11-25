@@ -15758,6 +15758,65 @@ let tests =
 
                     Expect.isLessThan calls 20 "the direct lookup intersects two individually broad range candidates"
 
+                testCase "correlated integer count uses the equality prefix and range together"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parents (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE children (id INT PRIMARY KEY, parent_id INT, KEY ix_child(parent_id, id))" |> ignore
+
+                    let insertRows table count row =
+                        [ 1..count ]
+                        |> List.map row
+                        |> String.concat ","
+                        |> fun rows -> runDefault store ("INSERT INTO " + table + " VALUES " + rows)
+                        |> ignore
+
+                    insertRows "parents" 250 (fun id -> sprintf "(%d)" id)
+                    insertRows "children" 5000 (fun id -> sprintf "(%d,%d)" id ((id - 1) % 250 + 1))
+                    runDefault store "INSERT INTO parents VALUES (9999)" |> ignore
+                    runDefault store "INSERT INTO children VALUES (9999,NULL)" |> ignore
+
+                    let readCount hint bounds expected =
+                        let sql =
+                            $"SELECT SUM((SELECT COUNT(*) FROM children c {hint} WHERE c.parent_id=p.id AND {bounds})) FROM parents p"
+
+                        let before = System.GC.GetAllocatedBytesForCurrentThread()
+                        let result = runDefault store sql
+                        let allocated = System.GC.GetAllocatedBytesForCurrentThread() - before
+
+                        match result with
+                        | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal actual expected sql
+                        | other -> failtestf "expected one correlated count, got %A" other
+
+                        allocated
+
+                    let between = "c.id BETWEEN p.id AND p.id+500"
+                    let forced = readCount "FORCE INDEX (ix_child)" between "750"
+                    let unhinted = readCount "" between "750"
+
+                    Expect.isLessThan unhinted (forced * 3L) "the broad primary-key range does not inflate allocations"
+
+                    readCount "" "c.id>p.id AND c.id<=p.id+500" "500" |> ignore
+                    readCount "" "c.id BETWEEN p.id+500 AND p.id" "0" |> ignore
+                    readCount "IGNORE INDEX (ix_child)" between "750" |> ignore
+
+                    runDefault store "CREATE TABLE ranked (id INT PRIMARY KEY, parent_id INT, rank_value INT, KEY ix_rank(parent_id, rank_value DESC, id))" |> ignore
+                    runDefault store "INSERT INTO ranked VALUES (10,1,NULL),(11,1,1),(12,1,2),(13,1,2),(14,1,3),(15,2,3),(16,2,4),(17,2,5),(18,NULL,3)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            ("SELECT p.id, (SELECT COUNT(*) FROM ranked c "
+                             + "WHERE c.parent_id=p.id AND c.rank_value>=p.id AND c.rank_value<p.id+2) "
+                             + "FROM parents p WHERE p.id<=3 ORDER BY p.id")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "3" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]
+                            "descending suffixes keep the correct exclusive boundary and ignore null values"
+                    | other -> failtestf "expected three correlated counts, got %A" other
+
                 testCase "correlated plain and functional candidates intersect in conjuncts and OR branches"
                 <| fun _ ->
                     let mutable calls = 0

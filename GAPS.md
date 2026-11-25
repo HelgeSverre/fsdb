@@ -2711,9 +2711,12 @@ implementation effort:
    broader source preparation and evaluation-context costs remain open.
    In a [native peer comparison](benchmarks/results/2026-11-25-native-feature-peers.md#correlated-range-controls),
    a correlated count with an equality and an outer-dependent primary-key
-   range took 512 ms versus 3 ms on MySQL. Forcing the composite child
-   index cut Fsdb's latency by 13× in a separate control. Planning the
-   equality prefix and range together remains open.
+   range took 512 ms versus 3 ms on MySQL. Eligible signed-integer
+   correlated counts now use the equality prefix and range of a composite
+   index together. The [matched rerun](benchmarks/results/2026-11-25-correlated-integer-range-count.md)
+   measured 399 ms before, 12 ms after, and 1.8 ms on MySQL. Counts with
+   residual predicates and other projected expressions still need broader
+   access planning.
 
 2. Transaction scheduling. [Readers behind waiting writers under a global
    read lock](torture/findings/2026-11-06-global-read-waiting-writer-gate.md)

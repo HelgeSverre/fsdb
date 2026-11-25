@@ -6620,14 +6620,13 @@ type OrderedKeyTerm =
 let private tryOrderedIndexLookupWithPrefix
     (allowed: string -> bool)
     (store: Store)
-    (dbName: string)
-    (tableName: string)
+    (table: Table option)
     (terms: OrderedKeyTerm list)
     (prefixValues: Value list)
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     : OrderedLookup option =
-    tableAt store dbName tableName
+    table
     |> Option.bind (fun table ->
         let columnNames = terms |> List.map _.OrderedColumnName
         let transforms = terms |> List.map _.OrderedTransform
@@ -6765,7 +6764,7 @@ let internal tryOrderedIndexLookupWith
     (tableName: string)
     (terms: OrderedKeyTerm list)
     : OrderedLookup option =
-    tryOrderedIndexLookupWithPrefix allowed store dbName tableName terms [] None None
+    tryOrderedIndexLookupWithPrefix allowed store (tableAt store dbName tableName) terms [] None None
 
 let tryOrderedIndexLookup store dbName tableName terms =
     tryOrderedIndexLookupWith (fun _ -> true) store dbName tableName terms
@@ -6781,16 +6780,15 @@ let internal tryOrderedIndexPrefixLookupWith
     if prefixValues.IsEmpty || prefixValues.Length > terms.Length then
         None
     else
-        tryOrderedIndexLookupWithPrefix allowed store dbName tableName terms prefixValues None None
+        tryOrderedIndexLookupWithPrefix allowed store (tableAt store dbName tableName) terms prefixValues None None
 
 let internal tryOrderedIndexPrefixLookup store dbName tableName terms prefixValues =
     tryOrderedIndexPrefixLookupWith (fun _ -> true) store dbName tableName terms prefixValues
 
-let internal tryOrderedIndexPrefixRangeLookupWith
+let internal tryOrderedIndexPrefixRangeLookupInTableWith
     (allowed: string -> bool)
     (store: Store)
-    (dbName: string)
-    (tableName: string)
+    (table: Table)
     (terms: OrderedKeyTerm list)
     (prefixValues: Value list)
     (lower: (Value * bool) option)
@@ -6799,7 +6797,12 @@ let internal tryOrderedIndexPrefixRangeLookupWith
     if prefixValues.IsEmpty || prefixValues.Length >= terms.Length || (lower.IsNone && upper.IsNone) then
         None
     else
-        tryOrderedIndexLookupWithPrefix allowed store dbName tableName terms prefixValues lower upper
+        tryOrderedIndexLookupWithPrefix allowed store (Some table) terms prefixValues lower upper
+
+let internal tryOrderedIndexPrefixRangeLookupWith allowed store dbName tableName terms prefixValues lower upper =
+    tableAt store dbName tableName
+    |> Option.bind (fun table ->
+        tryOrderedIndexPrefixRangeLookupInTableWith allowed store table terms prefixValues lower upper)
 
 let internal tryOrderedIndexPrefixRangeLookup store dbName tableName terms prefixValues lower upper =
     tryOrderedIndexPrefixRangeLookupWith (fun _ -> true) store dbName tableName terms prefixValues lower upper

@@ -9420,7 +9420,11 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
 
     match select.From with
     | Some(FromItem.Qualified qualifier as source) when countRows && select.Joins.IsEmpty ->
-        match tryCorrelatedEqualityCount outer source select.Where with
+        let count =
+            tryCorrelatedEqualityCount outer source select.Where
+            |> Option.orElseWith (fun () -> tryCorrelatedIntegerRangeCount outer source select.Where)
+
+        match count with
         | Some count -> Some(Ok(VInt(int64 count)))
         | None ->
             tryCorrelatedSourceAccess outer.Store outer.Registry outer.DbName source select.Where (Some outer)
@@ -19058,6 +19062,76 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
                 |> List.map (physicalEquality projection)
                 |> tryAllSome
                 |> Option.bind (countRows projection))))
+
+/// A whole-key integer prefix and a two-sided integer interval can count
+/// directly from the ordered index when they cover every WHERE conjunct.
+and private tryCorrelatedIntegerRangeCount (outer: EvalContext) source whereExpr =
+    let equalities, ranges =
+        optionalConjuncts whereExpr
+        |> List.partition (function BinOp(Eq, _, _) -> true | _ -> false)
+
+    let isRangeComparison = function
+        | BinOp((Lt | Lte | Gt | Gte), _, _) -> true
+        | _ -> false
+
+    let hasTwoSidedRange =
+        match ranges with
+        | [ Between _ ] -> true
+        | [ lower; upper ] -> isRangeComparison lower && isRangeComparison upper
+        | _ -> false
+
+    match source with
+    | FromTable tableRef when hasTwoSidedRange && not equalities.IsEmpty && (tryLockingReadRows tableRef).IsNone ->
+        physicalFastPathTable outer.Store outer.DbName tableRef
+        |> Option.filter (fun table -> storedRowsMatchReadRows outer.Store table.Columns)
+        |> Option.bind (fun table ->
+            let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+            let scope = correlatedProbeSource qualifier table.Columns
+            let innerColumn = tryCorrelatedSignedIntegerColumn scope table.Columns
+
+            let bound = function
+                | LiteralValue(VInt _ as value) -> Some value
+                | (Col _ | QualifiedCol _ | BinOp((Add | Sub), (Col _ | QualifiedCol _), LiteralValue(VInt _))) as expression ->
+                    tryCorrelatedOuterValue scope outer expression
+                    |> Option.filter (function VInt _ -> true | _ -> false)
+                | _ -> None
+
+            let pins = equalities |> List.map (tryEqualityPredicate innerColumn bound) |> tryAllSome
+
+            match pins, collectRangeBounds innerColumn bound whereExpr with
+            | Some pins, [ { Column = column; Lower = Some _; Upper = Some _ } as range ]
+                when (tryDuplicateIgnoreCase fst pins).IsNone ->
+                let values =
+                    pins
+                    |> List.map (fun (name: string, value) -> name.ToLowerInvariant(), value)
+                    |> Map.ofList
+                let pinned = values |> Map.keys |> Set.ofSeq
+                let allowed = indexHintsFor IndexJoin tableRef |> indexAllowedBy
+                let suffix = [ { Column = column; Transform = None; Direction = Asc } ]
+
+                orderedIndexCandidates table
+                |> List.filter (fun candidate -> allowed candidate.Name)
+                |> List.tryPick (fun candidate ->
+                    tryIndexPrefix table pinned suffix candidate.Terms
+                    |> Option.filter (fun matched -> matched.PinnedCount = pins.Length)
+                    |> Option.bind (fun matched ->
+                        let terms = storageOrderTerms matched.Terms
+                        let prefixValues =
+                            matched.Terms
+                            |> List.take matched.PinnedCount
+                            |> List.map (fun term -> values.[term.Column.ToLowerInvariant()])
+
+                        Storage.tryOrderedIndexPrefixRangeLookupInTableWith
+                            (equalsIgnoreCase candidate.Name)
+                            outer.Store
+                            table
+                            terms
+                            prefixValues
+                            range.Lower
+                            range.Upper
+                        |> Option.map _.OrderedRowCount))
+            | _ -> None)
+    | _ -> None
 
 and private tryRangeAccessInTableWith
     (policy: IndexAccessPolicy)
