@@ -2784,7 +2784,7 @@ type private MutationJoinScope =
       DerivedRequirements: (string * PrivTarget) list
       DirectRequirements: (string * PrivTarget) list }
 
-let private mutationJoinScope store defaultDb ctes (initial: PrivilegeSource) (joins: Join list) =
+let private mutationJoinScope store defaultDb ctes initial (joins: Join list) =
     joins
     |> List.fold
         (fun scope (join: Join) ->
@@ -2806,7 +2806,7 @@ let private mutationJoinScope store defaultDb ctes (initial: PrivilegeSource) (j
               Requirements = scope.Requirements @ nested @ predicate @ keys
               DerivedRequirements = scope.DerivedRequirements @ derived
               DirectRequirements = scope.DirectRequirements @ direct })
-        { Sources = [ initial ]
+        { Sources = initial
           Requirements = []
           DerivedRequirements = []
           DirectRequirements = [] }
@@ -2843,7 +2843,7 @@ let private updateColumnRequirements store defaultDb (update: UpdateStmt) =
     let cteNames = mutationCteNames update.Ctes
 
     let scope =
-        mutationJoinScope store defaultDb cteNames (physicalSource store defaultDb update.From) update.Joins
+        mutationJoinScope store defaultDb cteNames [ physicalSource store defaultDb update.From ] update.Joins
     let sources, joinRequirements = scope.Sources, scope.Requirements
 
     let targetOf (assignment: Assignment) =
@@ -2885,14 +2885,14 @@ let private selectColumnRequirementsOnly requirements =
 /// their own column denial before update expressions and view projections.
 let internal requiredUpdateJoinReadsInStore store defaultDb (update: UpdateStmt) =
     let scope =
-        mutationJoinScope store defaultDb (mutationCteNames update.Ctes) (physicalSource store defaultDb update.From) update.Joins
+        mutationJoinScope store defaultDb (mutationCteNames update.Ctes) [ physicalSource store defaultDb update.From ] update.Joins
     selectColumnRequirementsOnly scope.DerivedRequirements,
     selectColumnRequirementsOnly scope.DirectRequirements
 
 let private deleteColumnRequirements store defaultDb (delete: DeleteStmt) =
     let cteNames = mutationCteNames delete.Ctes
 
-    let initial = sourcesForItem store defaultDb cteNames (FromTable delete.From) |> List.exactlyOne
+    let initial = sourcesForItem store defaultDb cteNames delete.From
 
     let scope =
         mutationJoinScope store defaultDb cteNames initial delete.Joins
@@ -2903,7 +2903,8 @@ let private deleteColumnRequirements store defaultDb (delete: DeleteStmt) =
         @ (delete.OrderBy |> List.map fst)
         @ (delete.Limit |> Option.toList)
 
-    joinRequirements
+    fromItemColumnRequirements store defaultDb [] cteNames [] delete.From
+    @ joinRequirements
     @ (expressions
      |> List.collect (expressionColumnRequirements store defaultDb sources [] cteNames Set.empty))
     @ (delete.Ctes
@@ -3096,18 +3097,21 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | Delete d ->
         let cteTables, boundCtes = cteReadTablesIn Set.empty defaultDb d.Ctes
 
+        let rec sourceReads = function
+            | FromTable _ -> []
+            | FromJoinGroup(source, joins) -> sourceReads source @ List.collect joinReads joins
+            | source -> fromItemReadTablesIn boundCtes defaultDb source
+        and joinReads (join: Join) =
+            exprReadTablesIn boundCtes defaultDb join.On @ sourceReads join.Table
+
         let readInExprs =
             (d.Where |> Option.map (exprReadTablesIn boundCtes defaultDb) |> Option.defaultValue [])
-            @ (d.Joins
-               |> List.collect (fun j ->
-                   exprReadTablesIn boundCtes defaultDb j.On
-                   @ (match j.Table with
-                      | FromTable _ -> []
-                      | source -> fromItemReadTablesIn boundCtes defaultDb source)))
+            @ sourceReads d.From
+            @ List.collect joinReads d.Joins
             |> List.distinct
 
         let sources =
-            (FromTable d.From :: (d.Joins |> List.map _.Table))
+            (d.From :: (d.Joins |> List.map _.Table))
             |> List.collect FromItem.leaves
             |> List.choose (function
                 | FromTable table when table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) boundCtes -> None
@@ -3115,8 +3119,9 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
                 | _ -> None)
 
         let targets, readSources =
-            if d.Joins.IsEmpty then sources, []
-            else
+            match d.Source with
+            | SingleDeleteTable _ -> sources, []
+            | MultiDeleteSource _ ->
                 sources
                 |> List.partition (fun table ->
                     let name = table.Alias |> Option.defaultValue table.Table

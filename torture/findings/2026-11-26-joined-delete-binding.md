@@ -87,3 +87,24 @@ Binary prepared execution matched the native INT result type, affected row
 count, and restored rows after rollback. In a two-session check, MySQL and
 WAL-backed Fsdb both waited for the writer that made the target row
 invisible to the view, then deleted zero rows after that writer committed.
+
+## Leading derived sources
+
+The [derived-source fixture](2026-11-26-leading-derived-delete.sql)
+starts both forms of multi-table DELETE with a derived query. A duplicate
+UNION ALL match deletes the target once. The audited RIGHT JOIN preserves
+an unmatched target, and a later ON clause sees an earlier grouped USING
+key. The fixture covers CTE-backed derived reads, text preparation, and
+rollback. A derived target returns 1288, an unknown target returns 1109
+before the invalid projection is checked, and explicit multi-table syntax
+rejects LIMIT even with only one source.
+
+Both storage modes match MySQL 8.4.11 for the fixture's rows and error
+codes and SQLSTATEs. The two 1064 syntax errors use engine-specific text.
+A restricted account needs the derived filter column grant. Its denial
+matches MySQL's 1143 with SQLSTATE 42000, and adding that grant permits
+the delete. Binary preparation binds separate parameters in the derived
+source and outer predicate. The contended execution waits for the target
+writer, then deletes zero rows once the committed row falls outside the
+view. Abruptly stopping the WAL-backed server after a separate committed
+delete preserves the deletion through replay.

@@ -410,12 +410,17 @@ let rec private rewriteStatementWith rules =
                 Joins = List.map (rewriteJoin rules) update.Joins
                 Limit = Option.map rewriteExpression update.Limit }
     | Delete delete ->
+        let source =
+            match delete.Source with
+            | SingleDeleteTable _ as table -> table
+            | MultiDeleteSource(from, joins) ->
+                MultiDeleteSource(rewriteFromItem rules from, List.map (rewriteJoin rules) joins)
         Delete
             { delete with
                 Ctes = delete.Ctes |> List.map (fun cte -> { cte with Body = rewriteSelectOrUnion rules cte.Body })
                 Where = Option.map rewriteExpression delete.Where
                 OrderBy = List.map rewriteOrderKey delete.OrderBy
-                Joins = List.map (rewriteJoin rules) delete.Joins
+                Source = source
                 Limit = Option.map rewriteExpression delete.Limit }
     | Explain(format, statement) -> Explain(format, rewriteStatementWith rules statement)
     | statement -> statement

@@ -4782,35 +4782,40 @@ let private updateStmt: Parser<Statement, unit> =
 
 /// `DELETE t1[, t2, ...] FROM t1 JOIN t2 ON ... [WHERE ...]` — the
 /// multi-table form naming its delete targets before `FROM`.
-let private namedTargetsDelete: Parser<string list * TableRef * Join list, unit> =
-    attempt (sepBy1 identifier (sym ",") .>> keyword "FROM" .>>. tableRef .>>. many joinClause)
-    |>> fun ((targets, from), joins) -> targets, from, joins
+let private namedTargetsDelete: Parser<string list * DeleteSource, unit> =
+    attempt (sepBy1 identifier (sym ",") .>> keyword "FROM")
+    .>>. fromJoinChain
+    |>> fun (targets, (source, joins)) -> targets, MultiDeleteSource(source, joins)
 
 /// `DELETE FROM t1[, t2, ...] USING t1 JOIN t2 ON ... [WHERE ...]` — the
 /// `USING` multi-table form; the target list (before `USING`) names which
 /// of the `USING` join's tables actually lose rows.
-let private usingDelete: Parser<string list * TableRef * Join list, unit> =
-    attempt (keyword "FROM" >>. sepBy1 identifier (sym ",") .>> keyword "USING" .>>. tableRef .>>. many joinClause)
-    |>> fun ((targets, from), joins) -> targets, from, joins
+let private usingDelete: Parser<string list * DeleteSource, unit> =
+    attempt (keyword "FROM" >>. sepBy1 identifier (sym ",") .>> keyword "USING")
+    .>>. fromJoinChain
+    |>> fun (targets, (source, joins)) -> targets, MultiDeleteSource(source, joins)
 
 /// `DELETE FROM t1 [WHERE ...] [ORDER BY ...] [LIMIT n]` — single-table;
 /// `Targets` is just `t1` itself (by its alias, if it has one).
-let private singleTableDeleteHead: Parser<string list * TableRef * Join list, unit> =
+let private singleTableDeleteHead: Parser<string list * DeleteSource, unit> =
     keyword "FROM" >>. tableRef
-    |>> fun from -> [ from.Alias |> Option.defaultValue from.Table ], from, []
+    |>> fun from -> [ from.Alias |> Option.defaultValue from.Table ], SingleDeleteTable from
 
 let private deleteStmt: Parser<Statement, unit> =
     keyword "DELETE" >>. (opt (keyword "IGNORE") |>> Option.isSome)
     .>>. (namedTargetsDelete <|> usingDelete <|> singleTableDeleteHead)
-    >>= fun (ignoreErrors, (targets, from, joins)) ->
-        opt (keyword "WHERE" >>. expr) .>>. singleTableOrderLimit joins
+    >>= fun (ignoreErrors, (targets, source)) ->
+        let orderLimit =
+            match source with
+            | SingleDeleteTable _ -> singleTableOrderLimit []
+            | MultiDeleteSource _ -> preturn ([], None)
+        opt (keyword "WHERE" >>. expr) .>>. orderLimit
         |>> fun (where, (orderBy, limit)) ->
             Delete
                 { Ctes = []
                   Ignore = ignoreErrors
                   Targets = targets
-                  From = from
-                  Joins = joins
+                  Source = source
                   Where = where
                   OrderBy = orderBy
                   Limit = limit }

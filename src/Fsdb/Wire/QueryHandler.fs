@@ -3416,7 +3416,7 @@ let rec private statementStatusCommand = function
     | SetVariables _ -> Some InformationSchema.StatusCommand.setOption
     | Update statement when statement.Joins.IsEmpty -> Some InformationSchema.StatusCommand.update
     | Update _ -> Some InformationSchema.StatusCommand.updateMulti
-    | Delete { Joins = []; Targets = [ _ ] } ->
+    | Delete { Source = SingleDeleteTable _ } ->
         Some InformationSchema.StatusCommand.delete
     | Delete _ -> Some InformationSchema.StatusCommand.deleteMulti
     | Truncate _ -> Some InformationSchema.StatusCommand.truncate
@@ -4022,7 +4022,7 @@ let private directAutocommitTarget =
     | Replace(table, _, _)
     | ReplaceSet(table, _) -> Some table
     | Update { Ctes = []; Joins = []; From = source } -> Some(SqlText.objectName source.Database source.Table)
-    | Delete { Ctes = []; Joins = []; Targets = [ _ ]; From = source } -> Some(SqlText.objectName source.Database source.Table)
+    | Delete { Ctes = []; Source = SingleDeleteTable source } -> Some(SqlText.objectName source.Database source.Table)
     | _ -> None
 
 let private canExecuteDirectAutocommit (session: Session) dbName statement =
@@ -4297,7 +4297,7 @@ let private permanentTemporaryOverlayWrite (session: Session) dbName statement =
 
     let temporarySources (ctes: CommonTableExpr list) from (joins: Join list) =
         let cteNames = ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
-        FromTable from :: List.map (fun (join: Join) -> join.Table) joins
+        from :: List.map (fun (join: Join) -> join.Table) joins
         |> List.collect FromItem.leaves
         |> List.choose (function
             | FromTable source when source.Database.IsSome || not (cteNames.Contains(source.Table.ToLowerInvariant())) ->
@@ -4314,13 +4314,13 @@ let private permanentTemporaryOverlayWrite (session: Session) dbName statement =
         if (temporaryTable update.From).IsNone && Executor.viewExists session.Store database update.From.Table then
             Some statement
         else None
-    | Delete delete when not delete.Joins.IsEmpty ->
+    | Delete ({ Source = MultiDeleteSource _ } as delete) ->
         let temporaryAliases = temporarySources delete.Ctes delete.From delete.Joins
         let targets = delete.Targets |> List.filter (fun name -> not (temporaryAliases.ContainsKey(name.ToLowerInvariant())))
         if targets.IsEmpty then None
         else Some(Delete { delete with Targets = targets })
     | Update update when not update.Joins.IsEmpty ->
-        let temporary = temporarySources update.Ctes update.From update.Joins
+        let temporary = temporarySources update.Ctes (FromTable update.From) update.Joins
         let isTemporary (assignment: Assignment) =
             match assignment.Table with
             | Some owner -> temporary.ContainsKey(owner.ToLowerInvariant())

@@ -14323,16 +14323,16 @@ and private runMutationJoin
     (dbName: string)
     (catalogs: MutationJoinCatalogs)
     (sourceOverrides: MutationSourceOverrides)
-    (from: TableRef)
+    (from: FromItem)
     (joins: Join list)
     : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
     let scope = joinEvaluationScope None
 
     let resolved =
         let cteNames = currentCteScope () |> Map.keys |> Set.ofSeq
-        validateRelationNames dbName cteNames [] (Some(FromTable from)) joins
-        |> Result.bind (fun () -> validateTableIndexHintSources catalogs.Source dbName cteNames (Some(FromTable from)) joins)
-        |> Result.bind (fun () -> prepareMutationJoinSource store registry dbName scope catalogs sourceOverrides (FromTable from))
+        validateRelationNames dbName cteNames [] (Some from) joins
+        |> Result.bind (fun () -> validateTableIndexHintSources catalogs.Source dbName cteNames (Some from) joins)
+        |> Result.bind (fun () -> prepareMutationJoinSource store registry dbName scope catalogs sourceOverrides from)
 
     match resolved with
     | Error e -> Error e
@@ -14343,7 +14343,7 @@ and private runMutationJoin
                 acc |> Result.bind (fun (state, leftOperand) ->
                     applyMutationJoin store registry dbName scope catalogs sourceOverrides state (Some leftOperand) join
                     |> Result.map (fun state -> state, FromJoinGroup(leftOperand, [ join ]))))
-            (Ok(initial, FromTable from))
+            (Ok(initial, from))
         |> Result.map fst
 
 /// NATURAL and USING joins expose common columns as coalesced values.
@@ -14572,7 +14572,7 @@ and private referencedDeleteCtes (delete: DeleteStmt) =
         @ (delete.OrderBy |> List.map fst)
         @ Option.toList delete.Limit
 
-    referencedMutationCtes delete.Ctes (Some(FromTable delete.From)) delete.Joins expressions
+    referencedMutationCtes delete.Ctes (Some delete.From) delete.Joins expressions
 
 and private tryMergeDirectView
     (store: Store)
@@ -24805,14 +24805,14 @@ and private fullTextScoreValues rowId computed =
 and private fullTextMutationSources
     (storeForSource: FromItem -> Store)
     (dbName: string)
-    (from: TableRef)
+    (from: FromItem)
     (joins: Join list)
     (matchNodes: Expr list)
     : Result<MutationSourceOverrides * (Expr -> Expr), QueryResult> =
     if matchNodes.IsEmpty then
         Ok(Map.empty, fun expression -> expression)
     else
-        let sourceItems = FromTable from :: (joins |> List.map _.Table) |> List.collect FromItem.leaves
+        let sourceItems = from :: (joins |> List.map _.Table) |> List.collect FromItem.leaves
 
         fullTextPhysicalSources storeForSource dbName sourceItems
         |> Result.bind (fun sources ->
@@ -26507,17 +26507,17 @@ let private bindJoinedDeleteTargetNames dbName (delete: DeleteStmt) =
     let cteNames =
         (currentCteScope () |> Map.keys |> Set.ofSeq, delete.Ctes)
         ||> List.fold (fun names cte -> Set.add (cte.CteName.ToLowerInvariant()) names)
-    if delete.Joins.IsEmpty then Ok(cteNames, [])
-    else
-        let from = FromTable delete.From
+    match delete.Source with
+    | SingleDeleteTable _ -> Ok(cteNames, [])
+    | MultiDeleteSource(from, joins) ->
         let sources =
-            (from :: (delete.Joins |> List.map _.Table))
+            (from :: (joins |> List.map _.Table))
             |> List.collect FromItem.leaves
             |> List.choose (fun source ->
                 FromItem.tryQualifier source
                 |> Option.map (fun qualifier -> qualifier, source))
 
-        validateRelationNames dbName cteNames delete.Ctes (Some from) delete.Joins
+        validateRelationNames dbName cteNames delete.Ctes (Some from) joins
         |> Result.bind (fun () ->
             let known = sources |> List.map (fun (name, _) -> name.ToLowerInvariant()) |> Set.ofList
             match delete.Targets |> List.tryFind (fun name -> not (Set.contains (name.ToLowerInvariant()) known)) with
@@ -26543,17 +26543,17 @@ let private validateJoinedDeleteTargets store registry dbName (delete: DeleteStm
                 | None -> Some(nonUpdatableTarget "DELETE" target)
         | _ -> Some(nonUpdatableTarget "DELETE" target)
 
-    let rec withoutJoinConditions (join: Join) =
-        let rec source = function
-            | FromJoinGroup(first, joins) -> FromJoinGroup(source first, List.map withoutJoinConditions joins)
-            | other -> other
+    let rec withoutSourceConditions = function
+        | FromJoinGroup(first, joins) -> FromJoinGroup(withoutSourceConditions first, List.map withoutJoinConditions joins)
+        | other -> other
+    and withoutJoinConditions (join: Join) =
         let kind =
             match join.Kind with
             | NaturalJoin -> InnerJoin
             | NaturalLeftJoin -> LeftJoin
             | NaturalRightJoin -> RightJoin
             | other -> other
-        { join with Kind = kind; Table = source join.Table; On = Lit(VInt 1L); Using = [] }
+        { join with Kind = kind; Table = withoutSourceConditions join.Table; On = Lit(VInt 1L); Using = [] }
 
     // Resolve sources before rejecting a named target, but leave this
     // query block's join predicates and WHERE until after that decision.
@@ -26570,7 +26570,7 @@ let private validateJoinedDeleteTargets store registry dbName (delete: DeleteStm
                     |> Map.map (fun name aggregate ->
                         if Functions.isUnmodifiedBuiltinAggregate name registry then aggregate
                         else fun _ -> VNull) }
-        let query = mutationSourceQuery (Some(FromTable delete.From)) (List.map withoutJoinConditions delete.Joins) delete.Ctes [ Lit(VInt 1L) ]
+        let query = mutationSourceQuery (Some(withoutSourceConditions delete.From)) (List.map withoutJoinConditions delete.Joins) delete.Ctes [ Lit(VInt 1L) ]
         let result, _, _ =
             DynamicScope.withValue statementMemo (freshStatementMemo ()) (fun () ->
                 withPlanningProbe (fun () ->
@@ -26657,7 +26657,7 @@ let private prepareDeleteViewSource store registry (stored: StoredView) (view: U
         else
             // Score against the original indexed corpus before the view
             // input becomes a CTE. Keep the physical identity of each row.
-            withoutCteScope (fun () -> fullTextMutationSources (fun _ -> viewStore) schema input [] matchNodes)
+            withoutCteScope (fun () -> fullTextMutationSources (fun _ -> viewStore) schema (FromTable input) [] matchNodes)
             |> Result.bind (fun (sources, rewrite) ->
                 let qualifier = input.Alias |> Option.defaultValue input.Table
 
@@ -26712,7 +26712,7 @@ let private prepareDeleteViewSource store registry (stored: StoredView) (view: U
 
 let private prepareDeleteViewSources store registry dbName (delete: DeleteStmt) =
     let isTarget qualifier = delete.Targets |> List.exists (equalsIgnoreCase qualifier)
-    (FromTable delete.From :: (delete.Joins |> List.map _.Table))
+    (delete.From :: (delete.Joins |> List.map _.Table))
     |> List.collect FromItem.leaves
     |> List.choose (function
         | FromTable source when not (source.Database.IsNone && Map.containsKey (source.Table.ToLowerInvariant()) (currentCteScope ())) ->
@@ -28869,10 +28869,10 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         | Err(code, message) -> Error(Err(code, message))
         | _ -> Ok()
 
-    let checkMutationWhere (fromRef: TableRef) (joins: Join list) (expressions: Expr list) : Result<unit, QueryResult> =
-        let query = mutationSourceQuery (Some(FromTable fromRef)) joins [] expressions
+    let checkMutationWhere (source: FromItem) (joins: Join list) (expressions: Expr list) : Result<unit, QueryResult> =
+        let query = mutationSourceQuery (Some source) joins [] expressions
         let onlyPhysicalTables =
-            joins |> List.forall (fun join -> match join.Table with FromTable _ -> true | _ -> false)
+            source :: (joins |> List.map _.Table) |> List.forall (function FromTable _ -> true | _ -> false)
         let result, _, _ =
             withPlanningProbe (fun () ->
                 DynamicScope.withValue emptyPhysicalPlanningProbe onlyPhysicalTables (fun () ->
@@ -28938,7 +28938,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                       if not u.OrderBy.IsEmpty then "Using filesort" ]
         let subqueryExprs = (u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)) @ (u.OrderBy |> List.map fst)
 
-        let validate () = checkMutationWhere u.From u.Joins ((u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)))
+        let validate () = checkMutationWhere (FromTable u.From) u.Joins ((u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)))
 
         match tryExplainBoundViewUpdate store registry account dbName id u with
         | Some(Error error) -> error
@@ -28967,7 +28967,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             |> Result.bind (fun () ->
                 let consumption = joinConsumptionFor d.Limit
 
-                explainJoinBlock store registry dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins d.Where extra subqueryExprs 0 None consumption)
+                explainJoinBlock store registry dbName nextId acc id "DELETE" (Some d.From) d.Joins d.Where extra subqueryExprs 0 None consumption)
         )
     | Insert(table, _, rowsExprs, _, _)
     | Replace(table, _, rowsExprs) ->
@@ -29145,7 +29145,7 @@ let private validateBindingsWith describeColumns validateFunction store registry
                 | Err(code, message) -> code, message
                 | _ -> 1105, "Failed to validate DELETE targets")
             |> Result.bind (fun () ->
-                mutationSourceQuery (Some(FromTable delete.From)) delete.Joins delete.Ctes (Option.toList delete.Where)
+                mutationSourceQuery (Some delete.From) delete.Joins delete.Ctes (Option.toList delete.Where)
                 |> PlainSelect |> validateBody)
         | InsertSelect(_, _, select, assignments, _) ->
             validateBody (PlainSelect select)
@@ -29961,9 +29961,19 @@ type private TriggerRoutineScope =
 let private triggerDmlStatements = StoredProgram.sqlStatements
 let private triggerConditions = StoredProgram.expressions
 
-/// The one table a trigger body statement writes — what 1442's "already
-/// used by the statement which invoked this trigger" check points at.
-let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string) option =
+let private deleteTargets (delete: DeleteStmt) =
+    match delete.Source with
+    | SingleDeleteTable table -> [ table ]
+    | MultiDeleteSource(from, joins) ->
+        from :: (joins |> List.map _.Table)
+        |> List.collect FromItem.leaves
+        |> List.choose (function
+            | FromTable table when delete.Targets |> List.exists (equalsIgnoreCase (table.Alias |> Option.defaultValue table.Table)) -> Some table
+            | _ -> None)
+
+/// The tables written by a trigger body statement participate in error 1442.
+let private writtenTablesOf (dbName: string) (stmt: Statement) =
+    let target (table: TableRef) = table.Database |> Option.defaultValue dbName, normalizeTableName table.Table
     match stmt with
     | Insert(t, _, _, _, _)
     | InsertSelect(t, _, _, _, _)
@@ -29971,10 +29981,10 @@ let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string
     | ReplaceSelect(t, _, _)
     | ReplaceSet(t, _) ->
         let db, t = splitQualified dbName t
-        Some(db, normalizeTableName t)
-    | Update u -> Some(u.From.Database |> Option.defaultValue dbName, normalizeTableName u.From.Table)
-    | Delete d -> Some(d.From.Database |> Option.defaultValue dbName, normalizeTableName d.From.Table)
-    | _ -> None
+        [ db, normalizeTableName t ]
+    | Update u -> [ target u.From ]
+    | Delete d -> deleteTargets d |> List.map target
+    | _ -> []
 
 /// Every database an INSERT into `dbName.tableName` can reach through its
 /// AFTER INSERT triggers, following the chain transitively.
@@ -29989,12 +29999,13 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
         let tableRefTarget (table: TableRef) =
             table.Database |> Option.defaultValue defaultDb, normalizeTableName table.Table
 
-        let joinTargets (joins: Join list) =
-            joins
-            |> List.collect (fun join -> FromItem.leaves join.Table)
+        let sourceTargets source =
+            FromItem.leaves source
             |> List.choose (function
                 | FromTable table -> Some(tableRefTarget table)
                 | _ -> None)
+
+        let joinTargets (joins: Join list) = joins |> List.collect (_.Table >> sourceTargets)
 
         StoredProgram.sqlStatements triggerStatement
         |> List.collect (function
@@ -30004,7 +30015,7 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
             | ReplaceSelect(table, _, _)
             | ReplaceSet(table, _) -> [ splitQualified defaultDb table |> fun (db, name) -> db, normalizeTableName name ]
             | Update update -> tableRefTarget update.From :: joinTargets update.Joins
-            | Delete delete -> tableRefTarget delete.From :: joinTargets delete.Joins
+            | Delete delete -> sourceTargets delete.From @ joinTargets delete.Joins
             | _ -> [])
 
     let rec visit (visited: Set<string * string>) (db: string) (table: string) =
@@ -30660,7 +30671,7 @@ let rec private executeAsWithViewSources
                 | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" trigger.Name msg))
                 | Result.Ok bodyStatements ->
                     let dmlStatements = bodyStatements |> List.collect StoredProgram.sqlStatements
-                    let targets = dmlStatements |> List.choose (writtenTableOf db)
+                    let targets = dmlStatements |> List.collect (writtenTablesOf db)
 
                     match targets |> List.tryFind protectedTables.Contains with
                     | Some target -> Result.Error(err1442 (snd target))
@@ -31298,7 +31309,7 @@ let rec private executeAsWithViewSources
                                     WriteTable = None }) ]
 
                 let joined row =
-                    runMutationJoin runStore registry db (mutationJoinCatalogs runStore) (overrideFor row) from joins
+                    runMutationJoin runStore registry db (mutationJoinCatalogs runStore) (overrideFor row) (FromTable from) joins
                     |> Result.mapError (function
                         | Err(code, message) -> ExpressionError(code, message)
                         | error -> ExpressionError(1105, sprintf "Join view check failed: %A" error))
@@ -31925,7 +31936,8 @@ let rec private executeAsWithViewSources
                                 Limit = None }
                     else
                         Update update
-                | Delete delete -> Delete { delete with From = { delete.From with Database = Some access.Database; Table = access.Table } }
+                | Delete ({ Source = SingleDeleteTable table } as delete) ->
+                    Delete { delete with Source = SingleDeleteTable { table with Database = Some access.Database; Table = access.Table } }
                 | other -> other
 
         let checkAnyViewColumnGrant account database table privilege =
@@ -34490,7 +34502,7 @@ let rec private executeAsWithViewSources
                 |> List.distinct
 
             let prepared =
-                fullTextMutationSources sourceStore dbName updateStmt.From updateStmt.Joins matchNodes
+                fullTextMutationSources sourceStore dbName (FromTable updateStmt.From) updateStmt.Joins matchNodes
                 |> Result.bind (fun (sourceOverrides, rewrite) ->
                     let catalogs, rewriteCondition =
                         match split with
@@ -34515,7 +34527,7 @@ let rec private executeAsWithViewSources
                             |> Option.defaultValue sourceOverrides
                         else sourceOverrides
 
-                    runMutationJoin snapshot registry dbName catalogs sourceOverrides rewritten.From rewritten.Joins
+                    runMutationJoin snapshot registry dbName catalogs sourceOverrides (FromTable rewritten.From) rewritten.Joins
                     |> Result.map (fun joined -> rewritten, catalogs.Condition, joined))
 
             match prepared with
@@ -34753,24 +34765,23 @@ let rec private executeAsWithViewSources
                             ids, Affected(uint64 (if foundRows then matched else List.sum counts))
                         | Error e -> ids, storageErr e)
 
-    | Delete deleteStmt when deleteStmt.Joins.IsEmpty
-                             && deleteStmt.From.Database.IsNone
-                             && (currentCteScope () |> Map.containsKey (deleteStmt.From.Table.ToLowerInvariant())) ->
-        let target = deleteStmt.From.Alias |> Option.defaultValue deleteStmt.From.Table
+    | Delete { Source = SingleDeleteTable source } when source.Database.IsNone
+                                                        && (currentCteScope () |> Map.containsKey (source.Table.ToLowerInvariant())) ->
+        let target = source.Alias |> Option.defaultValue source.Table
         ids, Err(nonUpdatableTarget "DELETE" target)
 
-    | Delete deleteStmt when deleteStmt.Joins.IsEmpty && tryStoredView store (deleteStmt.From.Database |> Option.defaultValue dbName) deleteStmt.From.Table |> Option.isSome ->
-        let viewDb = deleteStmt.From.Database |> Option.defaultValue dbName
+    | Delete ({ Source = SingleDeleteTable source } as deleteStmt) when tryStoredView store (source.Database |> Option.defaultValue dbName) source.Table |> Option.isSome ->
+        let viewDb = source.Database |> Option.defaultValue dbName
 
-        match tryUpdatableView store viewDb deleteStmt.From.Table with
-        | None -> ids, Err(nonUpdatableTarget "DELETE" deleteStmt.From.Table)
+        match tryUpdatableView store viewDb source.Table with
+        | None -> ids, Err(nonUpdatableTarget "DELETE" source.Table)
         | Some view when not view.UpdateJoins.IsEmpty ->
             ids, Err(joinViewDeleteError view)
         | Some view ->
             let rewrite = rewriteViewExpression view
             let rewritten =
                 { deleteStmt with
-                    From = view.UpdateFrom
+                    Source = SingleDeleteTable view.UpdateFrom
                     Targets = [ view.UpdateFrom.Alias |> Option.defaultValue view.Table ]
                     Where = combineViewPredicate view.Predicate (deleteStmt.Where |> Option.map rewrite)
                     OrderBy =
@@ -34783,9 +34794,9 @@ let rec private executeAsWithViewSources
             let target = view.Targets |> Map.values |> Seq.head
             executeViewWrite view view target target (Delete rewritten) None None
 
-    | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
-        let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
-        let tableAlias = deleteStmt.From.Alias |> Option.defaultValue deleteStmt.From.Table
+    | Delete ({ Source = SingleDeleteTable source } as deleteStmt) ->
+        let db, table = (source.Database |> Option.defaultValue dbName), source.Table
+        let tableAlias = source.Alias |> Option.defaultValue source.Table
         let beforeTriggers = triggersFor store db table "BEFORE" "DELETE"
         let afterTriggers = triggersFor store db table "AFTER" "DELETE"
         let useSnapshot = deleteStmt.Ignore || not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
@@ -34797,7 +34808,7 @@ let rec private executeAsWithViewSources
         let physicalCandidates =
             tableRoot
             |> Option.bind (fun table ->
-                tryPhysicalCandidatesInTable targetStore registry table deleteStmt.From deleteStmt.Where)
+                tryPhysicalCandidatesInTable targetStore registry table source deleteStmt.Where)
 
         let physicalCandidateIds =
             physicalCandidates
@@ -34889,28 +34900,28 @@ let rec private executeAsWithViewSources
                             Storage.commitCatalogInto store baseCatalog targetStore
                         ids, Affected(uint64 affected)
 
-    | Delete deleteStmt ->
+    | Delete ({ Source = MultiDeleteSource(from, joins) } as deleteStmt) ->
         let matchNodes =
             (deleteStmt.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])
-            @ (deleteStmt.Joins |> List.collect (Join.conditions >> List.collect collectMatchAgainst))
+            @ (joins |> List.collect (Join.conditions >> List.collect collectMatchAgainst))
             |> List.distinct
 
         let prepared =
             validateJoinedDeleteTargets store registry dbName deleteStmt
-            |> Result.bind (fun () -> fullTextMutationSources (fun _ -> store) dbName deleteStmt.From deleteStmt.Joins matchNodes)
+            |> Result.bind (fun () -> fullTextMutationSources (fun _ -> store) dbName from joins matchNodes)
             |> Result.bind (fun (sourceOverrides, rewrite) ->
                 let viewSources = prepareDeleteViewSources store registry dbName deleteStmt
                 let sources = Map.fold (fun sources name source -> Map.add name source sources) sourceOverrides viewSources
                 let rewritten =
                     { deleteStmt with
-                        Joins = deleteStmt.Joins |> List.map (Join.mapConditions rewrite)
+                        Source = MultiDeleteSource(from, joins |> List.map (Join.mapConditions rewrite))
                         Where = deleteStmt.Where |> Option.map rewrite }
 
                 runMutationJoin store registry dbName (mutationJoinCatalogs store) sources rewritten.From rewritten.Joins
                 |> Result.bind (fun ((sources, _) as joined) ->
-                    if rewritten.Joins |> List.exists joinCoalescesColumns then
+                    if fromCoalescesColumns from || (joins |> List.exists joinCoalescesColumns) then
                         let query =
-                            { mutationSourceQuery (Some(FromTable rewritten.From)) rewritten.Joins [] [] with
+                            { mutationSourceQuery (Some rewritten.From) rewritten.Joins [] [] with
                                 Where = rewritten.Where }
                         rewriteNaturalSelect query (sources |> List.map (fun source -> source.Qualifier, source.Columns))
                         |> Result.map (fun query -> { rewritten with Where = query.Where }, joined)
@@ -34925,7 +34936,7 @@ let rec private executeAsWithViewSources
             let qualifiers = qualifierRanges combinedColumns
             let ctxFor =
                 contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) qualifiers None
-                >> joinOutputScope qualifiers (Some(FromTable deleteStmt.From)) deleteStmt.Joins
+                >> joinOutputScope qualifiers (Some deleteStmt.From) deleteStmt.Joins
 
             match
                 deleteStmt.Targets
@@ -35231,11 +35242,11 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
             distinctQualifiers
             && (unfilteredRightDelete || (sources.Tail |> List.exists hasSourceFilter))
 
-    let check (targetRef: TableRef) (joins: Join list) (whereExpr: Expr option) (limit: Expr option) (singleTarget: bool) =
+    let check source (joins: Join list) (whereExpr: Expr option) (limit: Expr option) (singleTarget: bool) =
         if limit.IsSome then Ok()
         else
             let tables =
-                (FromTable targetRef :: (joins |> List.map _.Table))
+                (source :: (joins |> List.map _.Table))
                 |> List.collect FromItem.leaves
                 |> List.choose (function
                     | FromTable tableRef ->
@@ -35281,7 +35292,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
                         if possibleTruths = Some(Set.singleton (Some true)) then None else whereExpr
                     match whereExpr with
                     | Some predicate when tables |> List.exists (fun (table, tableRef) -> usesKey table tableRef predicate) -> Ok()
-                    | _ when singleTarget && hasKeyedJoinFilter targetRef joins effectiveWhere -> Ok()
+                    | _ when singleTarget && (match source with FromTable table -> hasKeyedJoinFilter table joins effectiveWhere | _ -> false) -> Ok()
                     | _ when tables.IsEmpty -> Ok()
                     | _ -> Error unsafeError
 
@@ -35289,10 +35300,11 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
     | Update update ->
         let target = tableQualifier update.From
         let singleTarget = update.Assignments |> List.forall (fun assignment -> assignment.Table |> Option.forall (equalsIgnoreCase target))
-        check update.From update.Joins update.Where update.Limit singleTarget
+        check (FromTable update.From) update.Joins update.Where update.Limit singleTarget
     | Delete delete ->
-        let target = tableQualifier delete.From
-        let singleTarget = delete.Targets |> List.forall (equalsIgnoreCase target)
+        let singleTarget =
+            FromItem.tryQualifier delete.From
+            |> Option.exists (fun target -> delete.Targets |> List.forall (equalsIgnoreCase target))
         check delete.From delete.Joins delete.Where delete.Limit singleTarget
     | _ -> Ok()
 
@@ -35992,12 +36004,11 @@ let private transactionWriteTargetsIn
                                 else None)
         | _ -> []
 
-    let joinedTargets resolveTarget (from: TableRef) (joins: Join list) (names: string list) predicate =
-        let joinedTables =
-            joins
-            |> List.collect (fun (join: Join) -> FromItem.leaves join.Table)
+    let joinedTargets resolveTarget from (joins: Join list) (names: string list) predicate =
+        let sources =
+            from :: (joins |> List.map _.Table)
+            |> List.collect FromItem.leaves
             |> List.choose (function FromTable table -> Some table | _ -> None)
-        let sources = from :: joinedTables
 
         names
         |> List.distinctBy (fun name -> name.ToLowerInvariant())
@@ -36027,7 +36038,7 @@ let private transactionWriteTargetsIn
                 joins |> List.collect (_.On >> conjuncts)
             else []
         let conditions = optionalConjuncts where @ innerConditions
-        let sources = FromTable from :: List.map (fun (join: Join) -> join.Table) joins |> List.collect FromItem.leaves
+        let sources = from :: List.map (fun (join: Join) -> join.Table) joins |> List.collect FromItem.leaves
         let names = sources |> List.choose FromItem.tryQualifier |> List.map _.ToLowerInvariant()
         // A duplicate alias has no unique visible schema.
         if (qualifiedLiteralEqualities conditions).IsEmpty || (Set.ofList names).Count <> names.Length then Map.empty
@@ -36106,7 +36117,7 @@ let private transactionWriteTargetsIn
                 |> Option.map (fun claims -> source.Database |> Option.defaultValue dbName, source.Table, protectKeyMove bound.Table claims))
             |> Option.orElseWith (fun () -> targets source where)
 
-        joinedTargets resolve from joins names predicate
+        joinedTargets resolve (FromTable from) joins names predicate
 
     match statement with
     | Update update when update.Joins.IsEmpty ->
@@ -36124,7 +36135,7 @@ let private transactionWriteTargetsIn
 
             match assignmentTargets with
             | Some [ target ] when temporaryCatalog.IsSome ->
-                let bounds = lazy (joinedPrimaryBounds update.From [] update.Where)
+                let bounds = lazy (joinedPrimaryBounds (FromTable update.From) [] update.Where)
                 let reference =
                     { Database = Some target.Database
                       Table = target.Table
@@ -36151,7 +36162,7 @@ let private transactionWriteTargetsIn
             |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
             |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
-        let primaryBounds = lazy (joinedPrimaryBounds update.From update.Joins update.Where)
+        let primaryBounds = lazy (joinedPrimaryBounds (FromTable update.From) update.Joins update.Where)
         let update = writableViewFirst store dbName update
         let allSourceItems =
             FromTable update.From
@@ -36296,7 +36307,7 @@ let private transactionWriteTargetsIn
                             | [ (table, _) ] -> Some(table.Alias |> Option.defaultValue table.Table)
                             | _ -> None)
             let resolve = if temporaryCatalog.IsSome then mixedPhysicalTarget primaryBounds else targets
-            target :: (otherViewTargets @ joinedTargets resolve update.From update.Joins externalNames None)
+            target :: (otherViewTargets @ joinedTargets resolve (FromTable update.From) update.Joins externalNames None)
             |> combineTargets
         | None ->
             let projectedNames body =
@@ -36378,13 +36389,13 @@ let private transactionWriteTargetsIn
             |> Result.toOption
             |> Option.map (fun names ->
                 if temporaryCatalog.IsSome then
-                    joinedTargets (mixedPhysicalTarget primaryBounds) update.From update.Joins names None
+                    joinedTargets (mixedPhysicalTarget primaryBounds) (FromTable update.From) update.Joins names None
                 else joinedUpdateTargets update.From update.Joins names update.Where)
             |> Option.defaultValue []
-    | Delete delete when delete.Joins.IsEmpty ->
-        let viewDatabase = delete.From.Database |> Option.defaultValue dbName
+    | Delete ({ Source = SingleDeleteTable source } as delete) ->
+        let viewDatabase = source.Database |> Option.defaultValue dbName
 
-        match tryUpdatableView store viewDatabase delete.From.Table with
+        match tryUpdatableView store viewDatabase source.Table with
         | Some view when view.UpdateJoins.IsEmpty ->
             let predicate =
                 delete.Where
@@ -36393,11 +36404,11 @@ let private transactionWriteTargetsIn
 
             targets view.UpdateFrom predicate |> Option.toList
         | _ ->
-            let keys = pendingOrderedInsertKeys delete.From delete.Where delete.OrderBy delete.Limit
-            targets delete.From delete.Where
+            let keys = pendingOrderedInsertKeys source delete.Where delete.OrderBy delete.Limit
+            targets source delete.Where
             |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
             |> Option.toList
-    | Delete delete when not delete.Joins.IsEmpty ->
+    | Delete ({ Source = MultiDeleteSource _ } as delete) ->
         let primaryBounds = lazy (joinedPrimaryBounds delete.From delete.Joins delete.Where)
 
         let resolveDeleteTarget (source: TableRef) predicate =

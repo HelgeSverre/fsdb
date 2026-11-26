@@ -532,7 +532,7 @@ let private inferParameters
         update.OrderBy |> List.iter (fst >> inferExpression scope None DescribeOnly)
         update.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) ValidateUnsignedInteger)
     | Delete delete ->
-        let scope = inferScope [] delete.Ctes (Some(FromTable delete.From)) delete.Joins
+        let scope = inferScope [] delete.Ctes (Some delete.From) delete.Joins
         delete.Where |> Option.iter (inferExpression scope None DescribeOnly)
         delete.OrderBy |> List.iter (fst >> inferExpression scope None DescribeOnly)
         delete.Limit |> Option.iter (inferExpression scope (Some(ColumnWire.parameterMetadataOfType(TBigInt true))) ValidateUnsignedInteger)

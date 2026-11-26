@@ -1432,6 +1432,10 @@ and UpdateStmt =
       OrderBy: OrderKey list
       Limit: Expr option }
 
+and DeleteSource =
+    | SingleDeleteTable of TableRef
+    | MultiDeleteSource of FromItem * Join list
+
 /// `DELETE FROM t1 [WHERE ...] [ORDER BY ...] [LIMIT n]` (single-table —
 /// `Targets = [t1's alias-or-name]`), `DELETE t1[, t2] FROM t1 JOIN t2 ON
 /// ... [WHERE ...]`, or `DELETE FROM t1 USING t1 JOIN t2 ON ... [WHERE ...]`
@@ -1443,11 +1447,18 @@ and DeleteStmt =
     { Ctes: CommonTableExpr list
       Ignore: bool
       Targets: string list
-      From: TableRef
-      Joins: Join list
+      Source: DeleteSource
       Where: Expr option
       OrderBy: OrderKey list
       Limit: Expr option }
+    member statement.From =
+        match statement.Source with
+        | SingleDeleteTable table -> FromTable table
+        | MultiDeleteSource(source, _) -> source
+    member statement.Joins =
+        match statement.Source with
+        | SingleDeleteTable _ -> []
+        | MultiDeleteSource(_, joins) -> joins
 
 /// Literal values are independent of the spelling retained for result metadata.
 let (|LiteralValue|_|) = function

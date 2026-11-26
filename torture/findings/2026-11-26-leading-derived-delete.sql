@@ -1,0 +1,47 @@
+CREATE DATABASE leading_delete_probe;
+USE leading_delete_probe;
+CREATE TABLE base(id INT PRIMARY KEY,n INT);
+CREATE TABLE source(id INT PRIMARY KEY,flag INT);
+INSERT INTO base VALUES(1,10),(2,20),(3,30);
+INSERT INTO source VALUES(1,1),(2,0);
+CREATE VIEW writable AS SELECT id AS k,n FROM base WHERE n<40;
+
+START TRANSACTION;
+DELETE v FROM (SELECT id AS k FROM source WHERE flag=1 UNION ALL SELECT 1) d
+JOIN writable v USING(k) WHERE (SELECT k)=1;
+SELECT ROW_COUNT();
+SELECT k,n FROM writable ORDER BY k;
+ROLLBACK;
+
+START TRANSACTION;
+DELETE FROM v USING (SELECT id AS k FROM source) d
+RIGHT JOIN writable v USING(k) WHERE (SELECT k)=3;
+SELECT ROW_COUNT();
+SELECT k,n FROM writable ORDER BY k;
+ROLLBACK;
+
+START TRANSACTION;
+DELETE v FROM ((SELECT id AS k FROM source) d JOIN writable v USING(k))
+JOIN source s ON (SELECT k)=s.id WHERE s.flag=1;
+SELECT ROW_COUNT();
+ROLLBACK;
+
+START TRANSACTION;
+PREPARE leading_delete FROM 'DELETE v FROM (SELECT id AS k FROM source) d JOIN writable v USING(k) WHERE v.k=?';
+SET @key=2;
+EXECUTE leading_delete USING @key;
+SELECT ROW_COUNT();
+DEALLOCATE PREPARE leading_delete;
+ROLLBACK;
+
+START TRANSACTION;
+WITH keys_to_delete AS (SELECT id AS k FROM source WHERE flag=1)
+DELETE v FROM (SELECT k FROM keys_to_delete) d JOIN writable v USING(k);
+SELECT ROW_COUNT();
+ROLLBACK;
+
+DELETE d FROM (SELECT id FROM base) d WHERE d.id=1;
+DELETE missing FROM (SELECT nonexistent FROM base) d;
+DELETE v FROM (SELECT 1 AS k) d JOIN writable v USING(k) LIMIT 1;
+DELETE v FROM writable v LIMIT 1;
+SELECT id,n FROM base ORDER BY id;

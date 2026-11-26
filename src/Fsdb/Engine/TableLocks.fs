@@ -929,7 +929,7 @@ let private deleteAccesses defaultDb (delete: DeleteStmt) =
         | nested -> sourceAccesses boundCtes defaultDb nested
 
     ctes
-    @ source delete.From
+    @ sourceItem delete.From
     @ (delete.Joins
        |> List.collect (fun join ->
            sourceItem join.Table

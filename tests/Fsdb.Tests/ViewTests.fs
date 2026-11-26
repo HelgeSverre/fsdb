@@ -90,6 +90,50 @@ let tests =
                   (Affected 1UL) "the delete predicate sees the unmatched right key"
               Expect.equal (rows store "SELECT k FROM merged_base") [] "both physical rows were deleted"
 
+          testCase "joined DELETE keeps leading derived and grouped sources"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE leading_base(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE leading_source(id INT PRIMARY KEY,flag INT)"
+                    "INSERT INTO leading_base VALUES(1,10),(2,20),(3,30)"
+                    "INSERT INTO leading_source VALUES(1,1),(2,0)"
+                    "CREATE VIEW leading_writable AS SELECT id AS k,n FROM leading_base WHERE n<40" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (run store "DELETE v FROM (SELECT id AS k FROM leading_source WHERE flag=1 UNION ALL SELECT 1) d JOIN leading_writable v USING(k) WHERE (SELECT k)=1")
+                  (Affected 1UL) "a duplicate derived match deletes the physical row once"
+              Expect.equal
+                  (run store "DELETE FROM v USING (SELECT id AS k FROM leading_source) d RIGHT JOIN leading_writable v USING(k) WHERE (SELECT k)=3")
+                  (Affected 1UL) "the preserved right row retains its merged key"
+              Expect.equal
+                  (run store "DELETE v FROM ((SELECT id AS k FROM leading_source) d JOIN leading_writable v USING(k)) JOIN leading_source s ON (SELECT k)=s.id WHERE s.flag=0")
+                  (Affected 1UL) "a later ON sees the earlier grouped USING key"
+              Expect.equal (rows store "SELECT id FROM leading_base") [] "all three physical targets were deleted"
+              Expect.equal
+                  (run store "DELETE d FROM (SELECT id FROM leading_base) d WHERE d.id=1")
+                  (Err(1288, "The target table d of the DELETE is not updatable")) "a derived source is read only"
+              Expect.equal
+                  (run store "DELETE missing FROM (SELECT nonexistent FROM leading_base) d")
+                  (Err(1109, "Unknown table 'missing' in MULTI DELETE")) "target names bind before source columns"
+
+              for sql in
+                  [ "INSERT INTO leading_base VALUES(1,10)"
+                    "CREATE USER leading_writer"
+                    "GRANT DELETE,SELECT ON fsdb.leading_writable TO leading_writer"
+                    "GRANT SELECT(id) ON fsdb.leading_source TO leading_writer" ] do
+                  expectOk (run store sql) sql
+              let writer = { Fsdb.Session.create 1 store with User = "leading_writer" }
+              let delete = "DELETE v FROM (SELECT id AS k FROM leading_source WHERE flag=1) d JOIN leading_writable v USING(k)"
+              let denied = Fsdb.QueryHandler.handle writer delete |> snd |> errorInfo
+              Expect.equal
+                  (denied |> Option.map (fun error -> error.Code, error.State, error.Message))
+                  (Some(1143, "42000", "SELECT command denied to user 'leading_writer'@'localhost' for column 'flag' in table 'leading_source'"))
+                  "the leading derived source requires its filter column grant"
+              expectOk (run store "GRANT SELECT(flag) ON fsdb.leading_source TO leading_writer") "grant the filter column"
+              Expect.equal (Fsdb.QueryHandler.handle writer delete |> snd) (Affected 1UL) "the complete grants permit deletion"
+
           testCase "joined DELETE classifies stored view targets before filtering rows"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

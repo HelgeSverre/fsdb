@@ -1816,8 +1816,7 @@ let tests =
                             { Ctes = []
                               Ignore = false
                               Targets = [ "t" ]
-                              From = { Database = Some "app"; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
-                              Joins = []
+                              Source = SingleDeleteTable { Database = Some "app"; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
                               Where = None
                               OrderBy = []
                               Limit = None })
@@ -2167,8 +2166,7 @@ let tests =
                             { Ctes = []
                               Ignore = false
                               Targets = [ "t" ]
-                              From = { Database = None; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
-                              Joins = []
+                              Source = SingleDeleteTable { Database = None; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
                               OrderBy = []
                               Limit = None })
@@ -2182,8 +2180,7 @@ let tests =
                             { Ctes = []
                               Ignore = false
                               Targets = [ "t" ]
-                              From = { Database = None; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
-                              Joins = []
+                              Source = SingleDeleteTable { Database = None; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
                               Where = None
                               OrderBy = []
                               Limit = None })
@@ -2197,8 +2194,7 @@ let tests =
                             { Ctes = []
                               Ignore = false
                               Targets = [ "t" ]
-                              From = { Database = None; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
-                              Joins = []
+                              Source = SingleDeleteTable { Database = None; Table = "t"; Alias = None; Partitions = []; IndexHints = [] }
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
                               OrderBy = []
                               Limit = Some(Lit(VInt 100L)) })
@@ -2267,16 +2263,16 @@ let tests =
                 <| fun _ ->
                     match parseOk "DELETE t1 FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t2.flag = 1" with
                     | Delete { Targets = [ "t1" ]
-                               From = { Table = "t1" }
-                               Joins = [ { Kind = InnerJoin; Table = FromTable { Table = "t2" } } ] } -> ()
+                               Source = MultiDeleteSource(FromTable { Table = "t1" },
+                                   [ { Kind = InnerJoin; Table = FromTable { Table = "t2" } } ]) } -> ()
                     | other -> failtestf "expected a named-target multi-table DELETE, got %A" other
 
                 testCase "DELETE FROM t1 USING t1 JOIN t2 ON ..."
                 <| fun _ ->
                     match parseOk "DELETE FROM t1 USING t1 JOIN t2 ON t1.id = t2.t1_id WHERE t2.flag = 1" with
                     | Delete { Targets = [ "t1" ]
-                               From = { Table = "t1" }
-                               Joins = [ { Kind = InnerJoin; Table = FromTable { Table = "t2" } } ] } -> ()
+                               Source = MultiDeleteSource(FromTable { Table = "t1" },
+                                   [ { Kind = InnerJoin; Table = FromTable { Table = "t2" } } ]) } -> ()
                     | other -> failtestf "expected a USING-form multi-table DELETE, got %A" other ]
 
           testCase "DO parses a comma-separated expression list"

@@ -166,7 +166,7 @@ let collect querySource statement =
                 ((update.Assignments |> List.map _.Value) @ Option.toList update.Where
                  @ (update.OrderBy |> List.map fst) @ Option.toList update.Limit)
         | Delete delete ->
-            mutation delete.Ctes (FromTable delete.From) delete.Joins
+            mutation delete.Ctes delete.From delete.Joins
                 (Option.toList delete.Where @ (delete.OrderBy |> List.map fst) @ Option.toList delete.Limit)
         | Insert(table, _, rows, assignments, _) -> mutation [] (mutationSource table) [] (List.concat rows @ (assignments |> List.map snd))
         | Replace(table, _, rows) -> mutation [] (mutationSource table) [] (List.concat rows)

@@ -1340,6 +1340,9 @@ now carries the permanent binding through multiple writable views,
 correlated view predicates, and indexed ngram MATCH. [Mixed joined writes](torture/findings/2026-11-26-joined-update-shadow.md#primary-key-locking-follow-up)
 can lock just the permanent row when integer equalities identify its
 complete primary key. Missing and unproven keys still use broader claims.
+[Joined DELETE with a leading derived source](torture/findings/2026-11-26-joined-delete-binding.md#leading-derived-sources)
+supports both target-list forms, grouped and outer joins to writable
+views, CTE-backed sources, and prepared execution.
 [Standalone view UPDATE](torture/findings/2026-11-26-joined-update-shadow.md#standalone-update-follow-up)
 now resolves qualified and unqualified outer references from caller
 subqueries against the view's output columns. The audited prepared writes
