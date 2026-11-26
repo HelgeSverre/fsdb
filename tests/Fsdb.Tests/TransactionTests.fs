@@ -1132,6 +1132,60 @@ let tests =
                   finally
                       run holder "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "XA table metadata survives prepare and connection close"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let admin = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let admin = run admin "INSERT INTO gate VALUES(1,10)" (Affected 1UL)
+              let admin = run admin "SET SESSION lock_wait_timeout=1" (Affected 0UL)
+              let holder = run (create 2 store) "XA START 'metadata'" (Affected 0UL)
+              let holder = run holder "UPDATE gate SET v=11 WHERE id=1" (Affected 1UL)
+              let expectWait () =
+                  match handle admin "DROP TABLE gate" |> snd with
+                  | Err(1205, _) -> ()
+                  | actual -> failtestf "DROP must wait on XA metadata, got %A" actual
+              expectWait ()
+              let holder = run holder "XA END 'metadata'" (Affected 0UL)
+              expectWait ()
+              let holder = run holder "XA PREPARE 'metadata'" (Affected 0UL)
+              let holder = run holder "XA START 'reader'" (Affected 0UL)
+              let holder = run holder "SELECT v FROM gate" (ResultSet([ "v" ], [ [ Some "10" ] ]))
+              let holder = run holder "XA END 'reader'" (Affected 0UL)
+              let holder = run holder "XA PREPARE 'reader'" (Affected 0UL)
+              Fsdb.QueryHandler.closeSession holder
+              expectWait ()
+              let resolver = run (create 3 store) "XA COMMIT 'metadata'" (Affected 0UL)
+              expectWait ()
+              run resolver "XA ROLLBACK 'reader'" (Affected 0UL) |> ignore
+              run admin "DROP TABLE gate" (Affected 0UL) |> ignore
+
+          testCase "XA savepoint before table access releases metadata and unwinds the write"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let admin = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let admin = run admin "INSERT INTO gate VALUES(1,10)" (Affected 1UL)
+              let admin = run admin "SET SESSION lock_wait_timeout=1" (Affected 0UL)
+              let holder = run (create 2 store) "XA START 'metadata'" (Affected 0UL)
+              let holder = run holder "SAVEPOINT boundary" (Affected 0UL)
+              let holder = run holder "UPDATE gate SET v=11 WHERE id=1" (Affected 1UL)
+              let holder = run holder "ROLLBACK TO SAVEPOINT boundary" (Affected 0UL)
+              let admin = run admin "ALTER TABLE gate ADD COLUMN added INT" (Affected 0UL)
+              // Reopening the changed table confirms both the restored read and a new claim.
+              let holder = run holder "SELECT v FROM gate" (ResultSet([ "v" ], [ [ Some "10" ] ]))
+              let holder = run holder "XA END 'metadata'" (Affected 0UL)
+              run holder "XA COMMIT 'metadata' ONE PHASE" (Affected 0UL) |> ignore
+              run admin "DROP TABLE gate" (Affected 0UL) |> ignore
+
           testCase "serializable primary ranges ignore snapshots of replaced tables"
           <| fun _ ->
               let run session sql expected =

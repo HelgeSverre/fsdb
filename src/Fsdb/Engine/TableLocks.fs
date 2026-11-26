@@ -26,6 +26,7 @@ type private TableState =
       StatementReaders: HashSet<int>
       StatementWriters: HashSet<int>
       TransactionReaders: HashSet<int>
+      mutable PreparedReaders: int
       mutable MetadataWriter: int option
       WaitingMetadataWriters: ResizeArray<int>
       WaitingWriters: HashSet<int>
@@ -51,6 +52,7 @@ type private Manager =
       Tables: Dictionary<string, TableState>
       Explicit: Dictionary<int, ExplicitContext>
       TransactionTables: Dictionary<int, HashSet<string>>
+      PreparedTables: Dictionary<Xa.Xid, HashSet<string>>
       MetadataWaits: Dictionary<int64, MetadataWait>
       GlobalReaders: HashSet<int>
       WaitingGlobalReaders: HashSet<int> }
@@ -66,6 +68,7 @@ let private managerFor (store: Store) =
               Tables = Dictionary(StringComparer.OrdinalIgnoreCase)
               Explicit = Dictionary()
               TransactionTables = Dictionary()
+              PreparedTables = Dictionary()
               MetadataWaits = Dictionary()
               GlobalReaders = HashSet()
               WaitingGlobalReaders = HashSet() }
@@ -99,6 +102,7 @@ let private stateFor (manager: Manager) key =
               StatementReaders = HashSet()
               StatementWriters = HashSet()
               TransactionReaders = HashSet()
+              PreparedReaders = 0
               MetadataWriter = None
               WaitingMetadataWriters = ResizeArray()
               WaitingWriters = HashSet()
@@ -185,6 +189,7 @@ let private stateIsIdle (state: TableState) =
     && hasNoOwners state.StatementReaders
     && hasNoOwners state.StatementWriters
     && hasNoOwners state.TransactionReaders
+    && state.PreparedReaders = 0
     && state.MetadataWriter.IsNone
     && state.WaitingMetadataWriters.Count = 0
     && hasNoOwners state.WaitingWriters
@@ -511,6 +516,64 @@ let internal releaseLaterTransactionAccess store owner retained =
 let internal releaseTransactionAccess store owner =
     releaseLaterTransactionAccess store owner Set.empty
 
+let private retainPreparedTables (manager: Manager) xid (tables: HashSet<string>) =
+    manager.PreparedTables.Add(xid, tables)
+    for key in tables do
+        let state = stateFor manager key
+        state.PreparedReaders <- state.PreparedReaders + 1
+
+let internal detachTransactionAccess store owner xid =
+    let manager = managerFor store
+    lock manager.SyncRoot (fun () ->
+        match manager.TransactionTables.TryGetValue owner with
+        | false, _ -> ()
+        | true, tables ->
+            retainPreparedTables manager xid tables
+            manager.TransactionTables.Remove owner |> ignore
+            for key in tables do
+                manager.Tables.[key].TransactionReaders.Remove owner |> ignore
+            Monitor.PulseAll manager.SyncRoot)
+
+let internal releasePreparedAccess store xid =
+    let manager = managerFor store
+    lock manager.SyncRoot (fun () ->
+        match manager.PreparedTables.TryGetValue xid with
+        | false, _ -> ()
+        | true, tables ->
+            manager.PreparedTables.Remove xid |> ignore
+            for key in tables do
+                let state = manager.Tables.[key]
+                state.PreparedReaders <- state.PreparedReaders - 1
+                removeIdleState manager key state
+            Monitor.PulseAll manager.SyncRoot)
+
+let internal restorePreparedAccess store =
+    // Recovery reconstructs metadata for tables with durable row changes.
+    // Views and other tables opened only for reading have no such record.
+    let rec writtenTables tables = function
+        | WithDdlAllowInvalidDates(_, event)
+        | WithFullTextWordLengths(_, event)
+        | WithNgramTokenSize(_, event)
+        | WithStopwordFiltering(_, event)
+        | WithFullTextStopwordSettings(_, event)
+        | WithFullTextStopwords(_, _, _, event) -> writtenTables tables event
+        | TransactionCommitted events -> List.fold writtenTables tables events
+        | RowsInserted(database, table, _)
+        | RowsUpdated(database, table, _)
+        | RowsDeleted(database, table, _)
+        | RowsUpdatedById(database, table, _)
+        | RowsDeletedById(database, table, _) -> Set.add (tableKey database table) tables
+        | _ -> tables
+
+    let branches = preparedXas store
+    if not branches.IsEmpty then
+        let manager = managerFor store
+        lock manager.SyncRoot (fun () ->
+            for xid, branch in branches do
+                let tables = List.fold writtenTables Set.empty branch.Events
+                if not tables.IsEmpty then
+                    retainPreparedTables manager xid (HashSet tables))
+
 let internal withMetadataWrite timeout store owner targets accesses body =
     let manager = managerFor store
     let keys = targets |> List.map (fun (database, table) -> tableKey database table) |> Set.ofList
@@ -534,7 +597,9 @@ let internal withMetadataWrite timeout store owner targets accesses body =
                 |> Seq.filter ((<>) owner)
                 |> Seq.map int64
             try
-                let result = waitForMetadata timeout timeout owner true manager (blockers >> Seq.isEmpty) blockers
+                // Detached readers can block DDL but cannot wait for another owner.
+                let available () = state.PreparedReaders = 0 && (blockers () |> Seq.isEmpty)
+                let result = waitForMetadata timeout timeout owner true manager available blockers
                 if result = Granted then
                     state.MetadataWriter <- Some owner
                     reserved.Add key

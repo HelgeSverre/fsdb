@@ -446,6 +446,30 @@ MySQL and both Fsdb storage modes matched all 434 maintained checks.
 A separate matrix matched 55 savepoint schedules. A WAL restart
 confirmed the later commit survived and the rolled-back rows stayed absent.
 
+#### XA metadata lifetime
+
+Table DDL waits after an XA branch reads, locks, or writes a table. A
+matched no-op update and a duplicate-key failure also keep their metadata.
+`XA END` preserves those claims. `XA PREPARE` transfers them to the branch,
+including the view and base table opened by a view read. Closing or reusing
+the original connection leaves the prepared claims in place. Completing
+one branch releases its claims while another prepared branch on the same
+table keeps DDL waiting. A branch with no table access never blocks table DDL.
+
+An XA savepoint made before the first engine access can release the table
+claims and roll back a later write. After the engine is active, rolling back
+an ordinary read can release its claim, while a later locking read can keep
+its claim. One-phase commit and rollback of an ended branch release their
+remaining claims.
+
+After restart, MySQL restores table metadata for tables the prepared branch
+changed. A table that the branch only read, even with `FOR UPDATE`, can be
+dropped. The same holds for a view that the branch only read. Fsdb rebuilds
+these claims from durable row changes in WAL and checkpoint recovery. In the
+tested read-only, locking-read-only, no-op, and duplicate-key-only cases,
+MySQL stopped reporting the XIDs after restart. Fsdb continues to report them
+with no recovered table metadata claims.
+
 #### Metadata queue order
 
 Both engines queue a new reader behind a waiting `DROP TABLE` and let

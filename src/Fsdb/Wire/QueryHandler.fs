@@ -2734,7 +2734,16 @@ let private prepareXa xid session =
                 let catalog, snapshot = Storage.beginTransactionSnapshotWithBase session.Store
                 catalog, Storage.carryTransactionLocks transaction.Snapshot snapshot
 
-        if Storage.prepareXa session.Store xid validateWholeSnapshot baseCatalog snapshot then
+        let prepared =
+            // Completion from another connection must see the metadata handoff.
+            lock session.Store.PreparedXas (fun () ->
+                if Storage.prepareXa session.Store xid validateWholeSnapshot baseCatalog snapshot then
+                    TableLocks.detachTransactionAccess session.Store session.ConnectionId xid
+                    true
+                else
+                    false)
+
+        if prepared then
             removeXaAssociation session xid
             removeTransactionView session
             { session with Tx = None; Cursors = Map.empty }, Affected 0UL
@@ -2744,22 +2753,28 @@ let private prepareXa xid session =
     | _ -> session, xaRmFail "NON-EXISTING"
 
 let private completePreparedXa commit xid session =
-    if commit then
-        if Storage.commitPreparedXaWithTimeout (lockWaitTimeout session) session.Store xid then
-            session, Affected 0UL
+    lock session.Store.PreparedXas (fun () ->
+        if commit then
+            if Storage.commitPreparedXaWithTimeout (lockWaitTimeout session) session.Store xid then
+                TableLocks.releasePreparedAccess session.Store xid
+                session, Affected 0UL
+            else
+                session, xaUnknown
         else
-            session, xaUnknown
-    else
-        match Storage.rollbackPreparedXa session.Store xid with
-        | Some prepared ->
-            Storage.bumpAutoIncrementsIntoChanged session.Store prepared.BaseCatalog prepared.Catalog
-            session, Affected 0UL
-        | None -> session, xaUnknown
+            match Storage.rollbackPreparedXa session.Store xid with
+            | Some prepared ->
+                try
+                    Storage.bumpAutoIncrementsIntoChanged session.Store prepared.BaseCatalog prepared.Catalog
+                finally
+                    TableLocks.releasePreparedAccess session.Store xid
+                session, Affected 0UL
+            | None -> session, xaUnknown)
 
 let private commitXa xid onePhase session =
     match session.Tx, xaAssociation session with
     | Some transaction, Some(current, Idle) when current = xid && onePhase ->
         publishTransaction false session transaction
+        TableLocks.releaseTransactionAccess session.Store session.ConnectionId
         removeXaAssociation session xid
         removeTransactionView session
         { session with Tx = None; Cursors = Map.empty }, Affected 0UL
@@ -2775,6 +2790,7 @@ let private rollbackXa xid session =
             Storage.bumpAutoIncrementsIntoChanged session.Store transaction.BaseCatalog transaction.Snapshot.Catalog
 
         Storage.releaseTransactionLocks transaction.Snapshot
+        TableLocks.releaseTransactionAccess session.Store session.ConnectionId
         removeTransactionView session
         { session with Tx = None; Cursors = Map.empty }, Affected 0UL
     | _, Some(_, state) -> session, xaRmFail (xaStateName state)
@@ -3177,7 +3193,7 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
 let private rollbackToSavepoint (name: string) (session: Session) : Session * QueryResult =
     match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
     | Some(tx, savepoint) ->
-        let resetEngine = tx.Xa.IsNone && not savepoint.EngineActive
+        let resetEngine = not savepoint.EngineActive
         let engineLocked = tx.EngineAccess = LockedEngine || Storage.transactionLockStructCount tx.Snapshot <> 0UL
                            || Storage.transactionRollbackWork tx.Snapshot > 0L
         // Real MySQL never rolls back a burned AUTO_INCREMENT id — not even
@@ -3206,7 +3222,7 @@ let private rollbackToSavepoint (name: string) (session: Session) : Session * Qu
                 if buffer.Count > savepoint.PendingEventCount then
                     buffer.RemoveRange(savepoint.PendingEventCount, buffer.Count - savepoint.PendingEventCount))
 
-        if tx.Xa.IsNone && (resetEngine || not engineLocked) then
+        if resetEngine || not engineLocked then
             TableLocks.releaseLaterTransactionAccess session.Store session.ConnectionId savepoint.MetadataTables
 
         // Real MySQL also destroys every savepoint established *after* the
@@ -3401,8 +3417,7 @@ let private retainsTransactionAfterStatement (session: Session) =
     || sessionValue session "autocommit" = Some "0"
 
 let private retainsTransactionMetadata session =
-    retainsTransactionAfterStatement session
-    && (session.Tx |> Option.exists (fun tx -> tx.Xa.IsNone))
+    retainsTransactionAfterStatement session && session.Tx.IsSome
 
 let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) =
     match session.Tx with

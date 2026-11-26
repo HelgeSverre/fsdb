@@ -894,6 +894,46 @@ let tests =
               | _ -> ()
               Expect.equal (preparedXas recovered |> List.length) 15 "a branch decoded from the shared base remains committable"
 
+          testCase "XA recovery holds table metadata for row changes"
+          <| fun _ ->
+              let run session sql =
+                  let next, result = handle session sql
+                  match result with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> next
+
+              for checkpoint, completion in [ false, "ROLLBACK"; true, "COMMIT" ] do
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+                  let setup =
+                      [ "CREATE TABLE written(id INT PRIMARY KEY,v INT)"
+                        "CREATE TABLE read_only_table(id INT PRIMARY KEY)"
+                        "CREATE VIEW read_view AS SELECT id FROM read_only_table"
+                        "INSERT INTO written VALUES(1,10)"
+                        "INSERT INTO read_only_table VALUES(1)"
+                        "XA START 'metadata'"
+                        "UPDATE written SET v=11 WHERE id=1"
+                        "SELECT id FROM read_view"
+                        "XA END 'metadata'"
+                        "XA PREPARE 'metadata'" ]
+
+                  List.fold run (Fsdb.Session.create 1 store) setup |> Fsdb.QueryHandler.closeSession
+                  if checkpoint then snapshotNow dir store
+
+                  let recovered = load dir
+                  attach dir recovered
+                  let ddl = run (Fsdb.Session.create 1 recovered) "SET SESSION lock_wait_timeout=1"
+                  let ddl = run ddl "DROP VIEW read_view"
+                  let ddl = run ddl "DROP TABLE read_only_table"
+
+                  match handle ddl "ALTER TABLE written ADD COLUMN added INT" |> snd with
+                  | Err(1205, _) -> ()
+                  | actual -> failtestf "checkpoint=%b: ALTER must wait after recovery, got %A" checkpoint actual
+
+                  run (Fsdb.Session.create 2 recovered) $"XA {completion} 'metadata'" |> ignore
+                  run ddl "ALTER TABLE written ADD COLUMN added INT" |> ignore
+
           testCase "prepared XA branches survive snapshot rotation and restart"
           <| fun _ ->
               let dir = tempDataDir ()

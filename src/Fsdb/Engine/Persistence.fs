@@ -2625,6 +2625,7 @@ let load (dataDir: string) : Store =
     configureFullTextWordLengths store.FullTextWordLengths store
     deferFullTextStopwordReload store
     restorePreparedXaLocks store
+    TableLocks.restorePreparedAccess store
     store
 
 let private attachWithSignalCheckpoint registerSignalCheckpoint (dataDir: string) (store: Store) : unit =

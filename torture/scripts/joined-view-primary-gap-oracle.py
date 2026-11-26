@@ -1379,6 +1379,79 @@ def check(port, mysql):
                 0,
             )
 
+    for label, statements, target, completion in (
+        ("empty", (), "gate", "ROLLBACK"),
+        ("read-only", ("SELECT v FROM gate",), "gate", "COMMIT"),
+        ("no-op update", ("UPDATE gate SET v=v WHERE id=1",), "gate", "ROLLBACK"),
+        (
+            "failed write",
+            ("INSERT INTO gate VALUES(1,20)",),
+            "gate",
+            "ROLLBACK",
+        ),
+        (
+            "write and view read",
+            ("INSERT INTO sibling VALUES(2)", "SELECT * FROM visible"),
+            "visible",
+            "COMMIT",
+        ),
+    ):
+        with fixture(port, schema, mysql, failure_setup) as (_, _, holder, ddl, other):
+            execute(ddl, "SET SESSION lock_wait_timeout=1")
+            execute(holder, "XA START 'metadata'")
+            for statement in statements:
+                if label == "failed write":
+                    expect(label, outcome(holder, statement), DUPLICATE)
+                else:
+                    execute(holder, statement)
+
+            # DROP IF EXISTS leaves an empty branch's control case repeatable.
+            drop = (
+                "DROP VIEW IF EXISTS visible"
+                if target == "visible"
+                else "DROP TABLE IF EXISTS gate"
+            )
+            expected = TIMEOUT if statements else 0
+            expect(f"active XA {label}", outcome(ddl, drop), expected)
+            execute(holder, "XA END 'metadata'")
+            expect(f"ended XA {label}", outcome(ddl, drop), expected)
+            execute(holder, "XA PREPARE 'metadata'")
+            expect(f"detached XA {label}", outcome(ddl, drop), expected)
+            if target == "visible":
+                expect(
+                    "detached XA view read holds its base table",
+                    outcome(ddl, "DROP TABLE gate"),
+                    TIMEOUT,
+                )
+            execute(other, f"XA {completion} 'metadata'")
+            expect(f"completed XA {label}", outcome(ddl, drop), 0)
+
+    for earlier, later, waits in (
+        (None, "SELECT v FROM gate FOR UPDATE", False),
+        ("SELECT id FROM sibling", "SELECT v FROM gate", False),
+        ("SELECT id FROM sibling", "SELECT v FROM gate FOR UPDATE", True),
+    ):
+        with fixture(port, schema, mysql, failure_setup) as (_, _, holder, ddl, _):
+            execute(ddl, "SET SESSION lock_wait_timeout=1")
+            execute(holder, "XA START 'metadata_savepoint'")
+            if earlier:
+                execute(holder, earlier)
+            execute(holder, "SAVEPOINT boundary")
+            execute(holder, later)
+            execute(holder, "ROLLBACK TO SAVEPOINT boundary")
+            expect(
+                f"XA savepoint after {earlier} and {later}",
+                outcome(ddl, "DROP TABLE gate"),
+                TIMEOUT if waits else 0,
+            )
+            execute(holder, "XA END 'metadata_savepoint'")
+            execute(holder, "XA ROLLBACK 'metadata_savepoint'")
+            expect(
+                "ended XA rollback releases metadata",
+                outcome(ddl, "DROP TABLE IF EXISTS gate"),
+                0,
+            )
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 
