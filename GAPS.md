@@ -2928,6 +2928,9 @@ implementation effort:
    [Correlated `ORDER BY … LIMIT`](torture/findings/2026-11-26-correlated-index-top-n.md)
    now streams an eligible composite index slice through `LATERAL` and
    scalar queries. The filtered fixture examines 43 rows, down from 1,617.
+   [Text equality prefixes](torture/findings/2026-11-27-correlated-text-index-top-n.md)
+   now merge collation-equal spelling runs in suffix order before applying
+   the offset and limit.
    `EXPLAIN` still reports the correlated access as a full scan.
    Other computed lookup keys, residual predicates, and broader
    aggregate shapes still need work.

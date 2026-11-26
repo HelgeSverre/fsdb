@@ -38,6 +38,8 @@ after two warm-ups and checked every row against MySQL.
 
 MySQL used the `recent` index and still sorted each inner result in this
 benchmark. Fsdb's `EXPLAIN ANALYZE` still labels the inner table as `ALL`.
-The new path requires a supported physical index order and predicates
-over direct integer columns. Coercive filters, warning-producing
-expressions, and incompatible index hints use the existing execution path.
+The [text-prefix follow-up](2026-11-27-correlated-text-index-top-n.md) adds
+direct text equalities that use the index collation. The ordered suffix
+still requires a supported physical index order. Coercive filters,
+warning-producing expressions, and incompatible index hints use the
+existing execution path.

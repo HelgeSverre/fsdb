@@ -7656,14 +7656,55 @@ let private tryOrderedIndexSliceWithPrefix allowed store table terms prefixValue
     |> Option.map (fun (table, entries, prefix, slice, traversal) ->
         table, slice (orderedPrefixBounds entries prefix), traversal)
 
-let private orderedLookup ((table: Table), (slice: SecondaryOrderSlice), traversal) : OrderedLookup =
-    let entries = orderedEntries traversal slice
+let private orderedEqualityPrefixSlices entries prefix slice =
+    orderedEqualityPrefixBounds entries prefix
+    |> Seq.map slice
+    |> Seq.filter (fun run -> run.First < run.AfterLast)
+    |> Seq.toList
+
+let private orderedLookupFromEntries (table: Table) (slice: SecondaryOrderSlice) count (entries: SecondaryOrderEntry seq) : OrderedLookup =
     { OrderedIndexName = slice.IndexName
       OrderedColumnIndices = slice.ColumnIndices
       OrderedColumns = table.Columns
-      OrderedRowCount = slice.AfterLast - slice.First
+      OrderedRowCount = count
       OrderedRows = entries |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
       OrderedGroups = entries |> orderedGroupCounts slice.ColumnIndices.Length }
+
+let private orderedLookup (table, slice, traversal) =
+    orderedLookupFromEntries table slice (slice.AfterLast - slice.First) (orderedEntries traversal slice)
+
+/// Merge the ordered suffixes of spelling runs that share a SQL equality key.
+/// Bounds apply separately within each spelling before the merge.
+let internal tryMergedEqualityPrefixOrderWith allowed store table terms prefixValues lower upper =
+    tryOrderedIndexWithPrefix allowed store (Some table) terms prefixValues lower upper
+    |> Option.map (fun (table, entries, prefix, slice, traversal) ->
+        match orderedEqualityPrefixSlices entries prefix slice with
+        | [] -> orderedLookup (table, slice (0, 0), traversal)
+        | [ run ] -> orderedLookup (table, run, traversal)
+        | first :: _ as runs ->
+            let width = terms.Length - prefix.Length
+            let collations = entries.[first.First].CollationNames |> List.skip prefix.Length |> List.take width
+            let directions = terms |> List.skip prefix.Length |> List.map _.OrderedDirection
+            let compareSuffix left right = compareIndexedKeys collations directions left right
+            let step = if traversal = Forward then 1 else -1
+            let merged =
+                seq {
+                    let queue = PriorityQueue<SecondaryOrderSlice * int, Value list>(Comparer<Value list>.Create(compareSuffix))
+                    let enqueue run position =
+                        let priority = entries.[position].Values |> List.skip prefix.Length |> List.take width
+                        queue.Enqueue((run, position), priority)
+
+                    for run in runs do
+                        enqueue run (if step = 1 then run.First else run.AfterLast - 1)
+
+                    while queue.Count > 0 do
+                        let run, position = queue.Dequeue()
+                        yield entries.[position]
+                        let next = position + step
+                        if next >= run.First && next < run.AfterLast then enqueue run next
+                }
+            let count = runs |> List.sumBy (fun run -> run.AfterLast - run.First)
+            orderedLookupFromEntries table first count merged)
 
 let internal tryOrderedIndexLookupWith
     (allowed: string -> bool)
@@ -7721,11 +7762,7 @@ let internal tryOrderedEqualityPrefixRangeRowsInTableWith allowed store table te
     if prefixValues |> List.exists (function VString _ -> true | _ -> false) then
         tryOrderedIndexWithPrefix allowed store (Some table) terms prefixValues lower upper
         |> Option.map (fun (table, entries, prefix, slice, traversal) ->
-            let slices =
-                orderedEqualityPrefixBounds entries prefix
-                |> Seq.map slice
-                |> Seq.filter (fun slice -> slice.First < slice.AfterLast)
-                |> Seq.toList
+            let slices = orderedEqualityPrefixSlices entries prefix slice
             let count = slices |> List.sumBy (fun slice -> slice.AfterLast - slice.First)
             let ordered = if traversal = Backward then List.rev slices else slices
             let rows =

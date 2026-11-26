@@ -46,6 +46,45 @@ let tests =
               Expect.isLessThan examined 100L "each invocation reads a bounded part of its index slice"
               Expect.isGreaterThan scanExamined (10L * examined) "IGNORE INDEX prevents the ordered seek"
 
+          testCase "correlated top-N merges collation-equal index prefixes in suffix order"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE outer_row(id INT PRIMARY KEY,tenant VARCHAR(12) COLLATE utf8mb4_0900_ai_ci,cutoff INT)"
+                    "INSERT INTO outer_row VALUES (1,'café',98),(2,'CAFE',100),(3,'別',100),(4,NULL,100),(5,'missing',100)"
+                    "CREATE TABLE evt(id INT PRIMARY KEY,tenant VARCHAR(12) COLLATE utf8mb4_0900_ai_ci,state INT,stamp INT,visible INT,KEY recent(tenant,state,stamp DESC,id))"
+                    "CREATE TABLE digit(d INT PRIMARY KEY)"
+                    "INSERT INTO digit VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
+                    "INSERT INTO evt SELECT t.d*100+x.d*10+y.d,ELT(t.d+1,'Cafe','CAFÉ','café','別','noise','other'),1,x.d*10+y.d,MOD(y.d,3) FROM digit t CROSS JOIN digit x CROSS JOIN digit y WHERE t.d<6"
+                    "INSERT INTO evt VALUES (1000,'Cafe',2,99,1),(1001,NULL,1,97,1)" ] do
+                  match runDefault store sql with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s: %A" sql other
+
+              let query hint =
+                  "SELECT o.id,q.id,q.stamp FROM outer_row o LEFT JOIN LATERAL (SELECT e.id,e.stamp FROM evt e " + hint
+                  + " WHERE e.tenant=o.tenant AND e.state=1 AND e.stamp<=o.cutoff AND e.visible=1 "
+                  + "ORDER BY e.stamp DESC,e.id LIMIT 2 OFFSET 1) q ON TRUE ORDER BY o.id,q.stamp DESC,q.id"
+              let expected =
+                  [ [ 1; 197; 97 ]; [ 1; 297; 97 ]; [ 2; 197; 97 ]; [ 2; 297; 97 ]; [ 3; 394; 94 ]; [ 3; 391; 91 ] ]
+                  |> List.map (List.map (string >> Some))
+                  |> fun rows -> rows @ [ [ Some "4"; None; None ]; [ Some "5"; None; None ] ]
+              let indexed, examined = withExaminedRows (fun () -> runDefault store (query ""))
+              let scanned, scanExamined = withExaminedRows (fun () -> runDefault store (query "IGNORE INDEX (recent)"))
+              Expect.equal indexed (ResultSet([ "id"; "id"; "stamp" ], expected)) "MySQL merges equal spellings before applying OFFSET"
+              Expect.equal scanned indexed "ignoring the index returns the same rows"
+              Expect.isLessThan examined 100L "the query streams the merged suffixes"
+              Expect.isGreaterThan scanExamined (10L * examined) "the unrestricted scan visits the full input"
+
+              let reverse =
+                  "SELECT o.id,(SELECT e.id FROM evt e WHERE o.tenant=e.tenant AND e.state=1 AND e.stamp<=o.cutoff AND e.visible=1 "
+                  + "ORDER BY e.stamp,e.id DESC LIMIT 1 OFFSET 1) AS chosen FROM outer_row o ORDER BY o.id"
+              let reverseRows =
+                  [ [ Some "1"; Some "101" ]; [ Some "2"; Some "101" ]; [ Some "3"; Some "304" ]; [ Some "4"; None ]; [ Some "5"; None ] ]
+              let scalar, scalarExamined = withExaminedRows (fun () -> runDefault store reverse)
+              Expect.equal scalar (ResultSet([ "id"; "chosen" ], reverseRows)) "the scalar subquery merges descending index traversal"
+              Expect.isLessThan scalarExamined 100L "reverse traversal stops at its offset and limit"
+
           testList
               "joined correlated COUNT and EXISTS"
               [ let joinedStore () =
