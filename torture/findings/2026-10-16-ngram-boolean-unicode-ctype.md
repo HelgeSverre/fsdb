@@ -442,6 +442,33 @@ matching rows after the move. Fsdb still returned one row after
 with the background worker's scheduling.
 [InnoDB full-text cache](https://dev.mysql.com/doc/refman/8.4/en/innodb-fulltext-index.html#innodb-fulltext-index-cache).
 
+The `--cache-pressure` oracle tests two automatic flushes. The query
+returns ID 1 before pressure, after a small batch, and after a large
+batch rolls back. After a large batch commits, it returns IDs 1 and 2
+on MySQL. A new `東南` row stays cached until a second flush, when it
+joins the result as ID 4. Fsdb returns ID 1 in all three later stages.
+MySQL's index metadata confirms that the deleted `東京` posting stays
+on disk and that `日日` occupies more disk segments after the second
+flush. The oracle compares the deleted posting's inferred frequency
+against a control term, canceling differences in estimated table
+population for the wide rows.
+
+MySQL 8.4.11 reported 165,350 and 807,049 bytes at the two startup-cache
+settings in the initial pressure probe. A separate diagnostic matched
+the allocation totals for eight controlled cases, from a single gram
+at 430 bytes to 64 documents containing 2,047 occurrences each at
+179,318 bytes. The model uses encoded document and position deltas,
+allocation growth, term and document metadata, and the 64 KiB boundary
+for a posting segment. A single distinct gram can fill the cache.
+MySQL 8.4.11 requests sync after cache growth exceeds a tenth of the
+configured size. On the tested 64-bit build, the allocation model charges 16 bytes
+per document, 336 plus the spelling's byte length per new term, and
+56 per posting segment. When growing a posting list, the budget
+adds the new capacity minus the old used length. The logged sync
+size can exceed the request threshold while writes continue.
+[InnoDB posting-list allocation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0fts.cc#L982).
+[Sync trigger](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0fts.cc#L3444).
+
 Fsdb's orderly CLI shutdown now closes accepted clients, waits for
 their work to finish, and flushes the ngram cache in the final
 checkpoint. SQL `SHUTDOWN`, SIGTERM, and SIGINT all reopened the
@@ -458,4 +485,5 @@ reopen.
 ```sh
 dotnet build src/Fsdb.Cli -c Release
 uv run --no-project --with pymysql python torture/scripts/ngram-multicol-oracle.py --cache-lifecycle
+uv run --no-project --with pymysql python torture/scripts/ngram-multicol-oracle.py --cache-pressure
 ```

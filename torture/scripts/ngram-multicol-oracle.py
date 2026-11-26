@@ -3,7 +3,8 @@
 Build Fsdb.Cli in Release first. Requires native mysqld/mysqladmin and PyMySQL.
 Each token size uses disposable servers and data directories.
 Use --legacy-punctuation, --legacy-radicals, or --legacy-range for the expanded
-utf8mb4_unicode_ci corpora, or --cache-lifecycle for fresh and flushed postings.
+utf8mb4_unicode_ci corpora, --cache-lifecycle for explicit flushes, or
+--cache-pressure for automatic flushes.
 """
 
 import argparse
@@ -450,10 +451,119 @@ def verify_cache_lifecycle(mysql, fsdb):
     return failures
 
 
+def verify_cache_pressure(mysql, fsdb):
+    documents = [("東京", ""), ("東海", ""), ("大阪", "")]
+    mode = "IN BOOLEAN MODE"
+    search = "東京 東*"
+    assert query(mysql, "SELECT @@innodb_ft_cache_size")[0][0] == 8_000_000
+    for connection in (mysql, fsdb):
+        query(connection, "SET SESSION innodb_ft_enable_stopword=OFF")
+        setup(connection, 2, documents, "utf8mb4_bin")
+        query(connection, "INSERT INTO docs VALUES(9999,'東京 東北','')")
+        query(connection, "DELETE FROM docs WHERE id=9999")
+    query(mysql, "SET GLOBAL innodb_ft_aux_table='probe/docs'")
+
+    def posting_counts(term):
+        return tuple(
+            query(
+                mysql,
+                f"SELECT COUNT(DISTINCT DOC_ID) FROM information_schema.INNODB_FT_INDEX_{source} WHERE WORD=%s",
+                (term,),
+            )[0][0]
+            for source in ("CACHE", "TABLE")
+        )
+
+    def disk_segments(term):
+        return query(
+            mysql,
+            "SELECT DISTINCT FIRST_DOC_ID,LAST_DOC_ID FROM information_schema.INNODB_FT_INDEX_TABLE WHERE WORD=%s",
+            (term,),
+        )
+
+    def insert_documents(start, count):
+        for first in range(start, start + count, 64):
+            rows = ",".join(
+                f"({id},REPEAT('日',2048),'')" for id in range(first, min(first + 64, start + count))
+            )
+            for connection in (mysql, fsdb):
+                query(connection, f"INSERT INTO docs VALUES {rows}")
+
+    failures = 0
+
+    def compare(stage, expected, wait_for_flush=False):
+        nonlocal failures
+
+        def read(connection):
+            deadline = time.monotonic() + 5 if wait_for_flush else time.monotonic()
+            while True:
+                found = result(connection, search, mode)
+                if found == expected or time.monotonic() >= deadline:
+                    return found
+                time.sleep(0.05)
+
+        reference = read(mysql)
+        assert reference == expected, (stage, expected, reference)
+        actual = read(fsdb)
+        print(f"{stage}: MySQL IDs {reference}, Fsdb IDs {actual}")
+        failures += actual != reference
+
+    compare("fresh", (1,))
+    insert_documents(100, 64)
+    compare("below pressure", (1,))
+    for connection in (mysql, fsdb):
+        query(connection, "START TRANSACTION")
+    insert_documents(200, 448)
+    for connection in (mysql, fsdb):
+        query(connection, "ROLLBACK")
+    compare("rolled back", (1,))
+    assert posting_counts("東京") == (2, 0)
+
+    for connection in (mysql, fsdb):
+        query(connection, "START TRANSACTION")
+    insert_documents(200, 448)
+    for connection in (mysql, fsdb):
+        query(connection, "COMMIT")
+    compare("first automatic flush", (1, 2), wait_for_flush=True)
+
+    # The deleted row still has a physical posting after a cache flush.
+    assert posting_counts("東京") == (0, 2)
+    first_segments = set(disk_segments("日日"))
+    assert len(first_segments) > 1, first_segments
+    for connection in (mysql, fsdb):
+        query(connection, "ANALYZE TABLE docs")
+
+    def frequency_ratio(connection):
+        common = scored_result(connection, "東京", mode)
+        rare = scored_result(connection, "大阪", mode)
+        assert len(common) == len(rare) == 1, (common, rare)
+        assert (common[0][0], rare[0][0]) == (1, 3), (common, rare)
+        # Each live row has one occurrence. Comparing the two inverse document
+        # frequencies cancels each server's independent table-row estimate.
+        return 10 ** (math.sqrt(rare[0][1]) - math.sqrt(common[0][1]))
+
+    reference = frequency_ratio(mysql)
+    actual = frequency_ratio(fsdb)
+    assert math.isclose(reference, 2, rel_tol=1e-5), reference
+    print(f"retained frequency ratio after flush: MySQL {reference:.6f}, Fsdb {actual:.6f}")
+    failures += not math.isclose(reference, actual, rel_tol=1e-5)
+
+    for connection in (mysql, fsdb):
+        query(connection, "INSERT INTO docs VALUES(4,'東南','')")
+    compare("new cached prefix", (1, 2))
+    assert posting_counts("東南") == (1, 0)
+    insert_documents(700, 512)
+    compare("second automatic flush", (1, 2, 4), wait_for_flush=True)
+    assert posting_counts("東南") == (0, 1)
+    second_segments = set(disk_segments("日日"))
+    assert first_segments < second_segments, (first_segments, second_segments)
+    print(f"MySQL disk posting segments for 日日: {len(first_segments)} then {len(second_segments)}")
+    return failures
+
+
 def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None,
            collation_override=None, legacy_term_range=None, weight_checks=False,
            mixed_checks=False, order_checks=False, cldr_pinyin=None,
-           tailoring_probe=False, all_range_scalars=False, cache_lifecycle=False):
+           tailoring_probe=False, all_range_scalars=False, cache_lifecycle=False, cache_pressure=False):
     prefix = '中' * (size - 1)
     if legacy_radicals:
         legacy_chars = LEGACY_RADICALS
@@ -523,6 +633,8 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                 fsdb_connection = connect(host="127.0.0.1", port=port)
                 if cache_lifecycle:
                     return verify_cache_lifecycle(mysql_connection, fsdb_connection)
+                if cache_pressure:
+                    return verify_cache_pressure(mysql_connection, fsdb_connection)
                 for connection in (mysql_connection, fsdb_connection):
                     setup(connection, size, documents, collation)
 
@@ -714,6 +826,7 @@ if __name__ == "__main__":
     corpus.add_argument("--legacy-radicals", action="store_true")
     corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
     corpus.add_argument("--cache-lifecycle", action="store_true", help="compare binary bigram ranks across cache and disk transitions")
+    corpus.add_argument("--cache-pressure", action="store_true", help="compare automatic binary-bigram cache flushes under write load")
     parser.add_argument("--all-range-scalars", action="store_true", help="include range scalars missing from Python's Unicode character database")
     parser.add_argument("--legacy-term-range", help="search only this subrange of --legacy-range while indexing the whole range")
     parser.add_argument("--weight-checks", action="store_true", help="compare exact WEIGHT_STRING bytes for --legacy-range")
@@ -723,10 +836,10 @@ if __name__ == "__main__":
     parser.add_argument("--mixed-checks", action="store_true", help="compare compatibility forms wrapped with ASCII or Han")
     parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_0900_as_ci", "utf8mb4_ja_0900_as_cs_ks", "utf8mb4_0900_as_cs", "utf8mb4_zh_0900_as_cs"))
     args = parser.parse_args()
-    if args.cache_lifecycle:
+    if args.cache_lifecycle or args.cache_pressure:
         if args.sizes not in ([], [2]) or args.collation:
-            parser.error("--cache-lifecycle uses binary bigrams")
-        raise SystemExit(bool(verify(2, cache_lifecycle=True)))
+            parser.error("the cache probes use binary bigrams")
+        raise SystemExit(bool(verify(2, cache_lifecycle=args.cache_lifecycle, cache_pressure=args.cache_pressure)))
     legacy_range = None
     if args.legacy_range:
         try:
