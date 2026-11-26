@@ -411,6 +411,24 @@ matrix confirms that the residual is in line/polygon relation construction,
 not in the point predicates or the distance calculation. The production
 topology logic is unchanged by this probe expansion.
 
+## Incoming side of the first line-area turn
+
+The [native relation probe](../native/geographic-line-polygon-relate-probe.cpp)
+also reports whether the source fraction is zero and whether a sole
+turn arrives from inside. All nine distinct residuals have a zero source
+fraction and fail Boost's incoming-side test. The crossing controls at
+longitudes `1.00001` and `1.001` in the 0° base-latitude fixture also
+have a zero source fraction, and both pass that test. A zero fraction alone therefore cannot classify the contact.
+The `2.99` crossing control has a nonzero fraction and passes. The
+polar disjoint control produces no turns.
+
+For these cases the first-turn decision compares the original source
+start against azimuths formed by the directed polygon edge and the
+computed intersection. This provides a control for an event-based
+line relation. The point-in-polygon results and the intersection WKT
+still follow their respective strategies.
+[Boost 1.84 line/area relation](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/relate/linear_areal.hpp#L235-L320).
+
 ## Current-head overlay check
 
 A current-head rerun still finds 11/448 geographic line/polygon relation
