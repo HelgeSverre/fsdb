@@ -2457,12 +2457,16 @@ let private geographicPartitionContacts referenceSystem lineSections boundarySec
         for struct (line, boundary), _ in pairs do visit line boundary
         List.ofSeq ordered
 
-let private tryGeographicRoundedBoundaryVertex referenceSystem source =
+let private geographicRoundedOverlayContacts referenceSystem ((start, endpoint) as source) =
     let spheroid, flattening = geographicIntersectionSpheroid referenceSystem
     let distance = geographicInverseDistanceRadians false spheroid
     let azimuth first last = geographicSegmentAzimuthsRadians flattening first last |> fst
     let sourceStart, sourceEnd = geographicLatitudeOrderedSegment source
-    fun ((first, last) as boundary) ->
+    let forward origin destination point =
+        let delta = azimuth origin point - azimuth origin destination
+        abs (normalizedLongitudeRadians delta) <= Math.PI / 2.0
+
+    let boundaryVertex ((first, last) as boundary) =
         let edgeStart, edgeEnd = geographicLatitudeOrderedSegment boundary
         if not (boostGeoEqual (distance sourceStart edgeEnd) 0.0) then None
         else
@@ -2474,10 +2478,22 @@ let private tryGeographicRoundedBoundaryVertex referenceSystem source =
             // A source endpoint on the edge already owns the turn. A rounded
             // boundary vertex is a separate turn when the source straddles it.
             if sourceSide sourceStart * sourceSide sourceEnd >= 0 then None
-            else
-                let delta = azimuth sourceStart edgeEnd - azimuth sourceStart sourceEnd
-                if abs (normalizedLongitudeRadians delta) > Math.PI / 2.0 then None
-                else Some(if fst first > fst last then first else last)
+            elif forward sourceStart sourceEnd edgeEnd then
+                Some(if fst first > fst last then first else last)
+            else None
+
+    let sourceEndpoint boundary =
+        let edgeStart, edgeEnd = geographicLatitudeOrderedSegment boundary
+        if boostGeoEqual (distance edgeStart sourceEnd) 0.0
+           && not (boostGeoEqual (distance edgeStart sourceStart) 0.0)
+           && forward edgeStart edgeEnd sourceEnd then
+            let sourceAzimuth = azimuth sourceStart sourceEnd
+            let side point = geographicAzimuthSide (azimuth sourceStart point) sourceAzimuth
+            if side edgeStart * side edgeEnd < 0 then Some(if fst start > fst endpoint then start else endpoint)
+            else None
+        else None
+
+    boundaryVertex, sourceEndpoint
 
 let private geographicAreaLinePieces referenceSystem includePoints polygons boundarySegments ((start, endpoint) as segment) =
     let areaPosition point =
@@ -2497,7 +2513,7 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
         let crossing boundary =
             tryGeographicCrossingPoint id referenceSystem segment boundary
             |> Option.filter (fun _ -> not (geographicTurnRejectsRoundedEndpoint referenceSystem segment boundary))
-        let roundedVertex = tryGeographicRoundedBoundaryVertex referenceSystem segment
+        let roundedVertex, roundedEndpoint = geographicRoundedOverlayContacts referenceSystem segment
         let side = geographicTurnSide referenceSystem
         let sourceStart, sourceEnd = geographicPointRadians start, geographicPointRadians endpoint
 
@@ -2518,8 +2534,12 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                     let cut = roundedCut |> Option.orElseWith (fun () -> crossing (b, a))
                     let point =
                         if not includePoints then []
-                        elif fst a <> fst b then Option.toList cut
-                        else roundedVertex boundary |> Option.orElseWith (fun () -> crossing boundary) |> Option.toList
+                        else
+                            roundedEndpoint boundary
+                            |> Option.orElseWith (fun () ->
+                                if fst a <> fst b then cut
+                                else roundedVertex boundary |> Option.orElseWith (fun () -> crossing boundary))
+                            |> Option.toList
                     let turns =
                         match cut with
                         | None -> turns

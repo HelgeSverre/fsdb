@@ -1106,3 +1106,29 @@ clipped line.
 uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays --seeded-relations --seed 615801 --seeded-polygons 400
 uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays --seeded-relations --seed 615801 --seeded-polygons 400 --reverse-lines
 ```
+
+### Rounded source endpoints in the point pass
+
+When the latitude-ordered source endpoint rounds to the beginning of
+the boundary arc, the point pass can emit the original source point.
+The turn must be forward along the boundary, and the edge endpoints
+must straddle the source. The existing section traversal orders the
+point alongside the other turns, and the finished clipped linework
+still determines whether it survives.
+[Boost geographic endpoint handling](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
+
+In the seeded polar sweep, intersection differences fell from 68 to
+8 of 768. Every remaining polar result includes a point that MySQL
+removes beside a short clipped fragment. In the mixed-latitude sweep,
+intersection differences fell from 58 to 38 of 3,200. The other
+operations retained their results, and all previously matching cases
+still match. The structured and longitude-first comparisons retained
+their prior results.
+
+The eight remaining results come from two fixtures tried in both source
+directions and operand orders. Their solver outputs agree with Boost
+in radians. In one
+fixture the clipped latitude changes by one ULP during the conversion
+to degrees and back. In the other the point latitude changes by one
+ULP. In both line directions, the coverage check removes each point
+when fed the original radians and keeps it after the conversion.

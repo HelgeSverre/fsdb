@@ -835,6 +835,17 @@ let tests =
                         Expect.isLessThan (abs (longitude - (-22.155048334107008))) 1e-10 "the contact longitude matches"
                     | actual -> failtestf "expected the full line and a point, got %A" actual
 
+                testCase "geographic intersections report rounded source endpoints as isolated points"
+                <| fun _ ->
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]
+                    let area =
+                        geometry (
+                            "POLYGON((79.32988764595470 -148.61759354182291,79.32988764595470 -143.72031461546149,85.11508517319146 -143.72031461546149,85.11508517319146 -148.61759354182291,79.32988764595470 -148.61759354182291),"
+                            + "(80.77618702776390 -147.39327381023256,83.66878579138226 -147.39327381023256,83.66878579138226 -144.94463434705185,80.77618702776390 -144.94463434705185,80.77618702776390 -147.39327381023256))")
+                    let line = geometry "LINESTRING(80.77618702776390 -147.39327281023256,83.66878579138226 -147.39327281023256)"
+                    let expected = geometry "GEOMETRYCOLLECTION(POINT(83.66878579138226 -147.39327281023256),POINT(80.77618702776390 -147.39327381023256))"
+                    Expect.equal (call "ST_Intersection" [ line; area ]) expected "the source endpoint precedes the polygon vertex"
+
                 testCase "geographic MBR predicates use geodesic, circular and degenerate bounds"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"
