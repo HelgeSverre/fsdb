@@ -1754,11 +1754,11 @@ and discarding transient writes at commit. Required phrases apply
 their document-ID bounds separately to cached and flushed postings.
 An orderly CLI shutdown or durable host close flushes the cache at
 the final checkpoint. Crash recovery and ordinary checkpoints
-preserve the cached state. Boolean ranks retain committed deleted
-posting counts across both checkpoints and shutdown. Full-text-only
-optimize purges those counts. Historical counts in natural-language
-and query-expansion ranks, automatic flushing, and multiple disk
-segments per gram remain open.
+preserve the cached state. Boolean, compound natural-language, and
+query-expansion ranks use retained deleted posting counts across
+checkpoints and shutdown. Single-term natural-language ranks use the
+live frequency. Full-text-only optimize purges the retained counts.
+Automatic flushing and multiple disk segments per gram remain open.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.

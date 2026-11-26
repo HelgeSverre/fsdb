@@ -399,6 +399,7 @@ and scores about 0.015610. Required `+東*` counts all four postings
 and scores about 1.89e-9. Deleted rows never appear in either result.
 After full-text-only optimize, `東京` scores about 0.362476 and
 `+東*` returns about 0.090619.
+[InnoDB rank optimization and deleted-document adjustment](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3119).
 
 Fsdb preserves those frequencies across WAL replay, checkpoints, and
 clean shutdown. Clean shutdown moves retained postings to disk, where
@@ -412,16 +413,34 @@ flat query. After flushing four documents and deleting a newly cached
 `東京 東北` row, `+京都 +東* +東京` skips the disjoint cached `東京`
 posting and scores about 0.462487. With `東京` optional or inside
 `+(東京)`, it still counts the posting and scores about 0.387477.
-The lifecycle fixture matches 378 queries. A 3,856-query deletion holdout
-matched with both cached and mixed postings for binary bigrams, binary
+The lifecycle fixture matches 594 queries across all three search modes.
+A 3,856-query Boolean deletion holdout matched with both cached and
+mixed postings for binary bigrams, binary
 trigrams, and `utf8mb4_0900_ai_ci` bigrams. Another 45 comparisons
 matched across multi-update commits, deletes after updates, full rollback,
 and rollback to a savepoint.
 
-Natural-language and query-expansion ranks still diverge when a
-matched gram belongs to a deleted document in the audited compound
-and expansion searches. Automatic cache flushing remains open.
-[InnoDB rank optimization and deleted-document adjustment](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3119).
+In the same four-live-row corpus, natural-language `東京` uses the
+live frequency and scores about 0.362476. Natural-language `東京 東北`
+and query expansion on `東京` use the retained frequency and score
+about 0.090619. Repeated `東京 東京` counts both posting visits and
+scores about 1.89e-9 in both modes. A deleted-only term supplies no
+result or expansion seed. These cases also matched after a clean
+restart and after full-text-only optimize. A 3,856-query holdout run
+in both modes matched with mixed binary bigrams, mixed binary
+trigrams, and cached and mixed `utf8mb4_0900_ai_ci` bigrams.
+[InnoDB's single-term optimization](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3327).
+
+Automatic cache flushing remains open. A MySQL 8.4.11 probe starts
+with `東京`, `東海`, and `大阪`. It adds rows containing
+`REPEAT('日', 2048)` in batches. At the 1,600,000-byte cache setting,
+the two `東*` postings had moved to disk by the 64-row observation.
+At the default 8,000,000-byte setting, they were still cached at
+256 rows and had moved by 384. `東京 東*` began returning both
+matching rows after the move. Fsdb still returned one row after
+512 inserts. The observation points bound the flush and can vary
+with the background worker's scheduling.
+[InnoDB full-text cache](https://dev.mysql.com/doc/refman/8.4/en/innodb-fulltext-index.html#innodb-fulltext-index-cache).
 
 Fsdb's orderly CLI shutdown now closes accepted clients, waits for
 their work to finish, and flushes the ngram cache in the final

@@ -413,6 +413,29 @@ let tests =
               assertScore flushed "東京" [ 1 ] 0.3624762296676636
               assertScore flushed "+東*" [ 1; 2 ] 0.0906190574169159
 
+          testCase "ngram natural relevance counts deleted postings in compound and expanded searches"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_bin" |> Option.get
+              let index =
+                  buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation
+                      [ 1, [ "東京" ]; 2, [ "東海" ]; 3, [ "大阪" ]; 4, [ "札幌" ] ]
+                  |> flushPostings
+                  |> addDocument 99 "東京 東北"
+                  |> removeDocument 99
+              let check scores expected label =
+                  Expect.equal (scores |> Map.keys |> Seq.toList) [ 1 ] label
+                  closeTo expected scores.[1] label
+
+              check (naturalScores index "東京") 0.3624762296676636 "single natural term"
+              check (naturalScores index "東京 x") 0.3624762296676636 "short token leaves a single gram"
+              check (naturalScores index "東京 東北") 0.0906190574169159 "compound natural query"
+              check (naturalScores index "東京 東京") 1.885928302414186e-9 "repeated natural term"
+              check (naturalScoresWithin (Set.singleton 1) index "東京 東北") 0.0906190574169159 "candidate filter keeps the full frequency"
+              check (expansionScores index "東京") 0.0906190574169159 "one-term expansion"
+              check (expansionScores index "東京 東京") 1.885928302414186e-9 "repeated expanded term"
+              check (expansionScores (flushPostings index) "東京") 0.3624762296676636 "optimize purges the deleted frequency"
+              Expect.isEmpty (expansionScores index "東北") "a deleted-only gram cannot seed expansion"
+
           testCase "a required ngram prefix bounds a later required gram"
           <| fun _ ->
               let collation = tryFind "utf8mb4_bin" |> Option.get

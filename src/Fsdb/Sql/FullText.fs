@@ -721,11 +721,23 @@ let private idf (view: ReadView<'id>) (df: int) : float =
     if df = 0 then 0.0
     else max (log10 (float view.DocumentCount / float df)) idfFloor
 
-let private termScoresWithin (candidateIds: Set<'id> option) (view: ReadView<'id>) (term: string) : Map<'id, float> =
+let private wordFrequencyWeight (view: ReadView<'id>) frequency =
+    max (abs (log10 (float view.DocumentCount / frequency))) idfFloor
+
+let private indexedDocumentCount (view: ReadView<'id>) term liveCount =
+    match Map.tryFind term view.Deleted.Words with
+    | Some deleted -> int64 liveCount + int64 deleted.Count
+    | None -> int64 liveCount
+
+let private indexedWordWeight view term liveCount =
+    if view.Deleted.Words.IsEmpty then idf view liveCount
+    else wordFrequencyWeight view (float (indexedDocumentCount view term liveCount))
+
+let private termScoresWithin weightFor (candidateIds: Set<'id> option) (view: ReadView<'id>) (term: string) : Map<'id, float> =
     match Map.tryFind term view.Postings with
     | None -> Map.empty
     | Some rows ->
-        let weight = idf view rows.Count
+        let weight = weightFor term rows.Count
         let scale = weight * weight
 
         match candidateIds with
@@ -734,8 +746,6 @@ let private termScoresWithin (candidateIds: Set<'id> option) (view: ReadView<'id
             candidates
             |> Seq.choose (fun id -> Map.tryFind id rows |> Option.map (fun frequency -> id, float frequency * scale))
             |> Map.ofSeq
-
-let private termScores view term = termScoresWithin None view term
 
 /// Short Boolean terms can reach historical postings, but not larger ngrams
 /// whose collation keys happen to contract to the same spelling.
@@ -815,21 +825,22 @@ let private naturalTerms (view: ReadView<'id>) (query: string) : string[] =
 /// Accumulates into one result map rather than retaining one map per term,
 /// so peak memory stays O(rows), not
 /// O(terms × rows) for a query with many distinct terms.
-let private sumTermScoresWithin (candidateIds: Set<'id> option) (view: ReadView<'id>) (terms: string[]) : Map<'id, float> =
+let private sumTermScoresWithin weightFor candidateIds (view: ReadView<'id>) (terms: string[]) : Map<'id, float> =
+    let scoreTerm = termScoresWithin weightFor candidateIds view
     match terms with
     | [||] -> Map.empty
-    | [| term |] -> termScoresWithin candidateIds view term
+    | [| term |] -> scoreTerm term
     | _ ->
         terms
         |> Array.skip 1
         |> Array.fold
             (fun scores term ->
-                termScoresWithin candidateIds view term
+                scoreTerm term
                 |> Map.fold
                     (fun scores id score ->
                         Map.change id (fun current -> Some(score + Option.defaultValue 0.0 current)) scores)
                     scores)
-            (termScoresWithin candidateIds view terms.[0])
+            (scoreTerm terms.[0])
 
 type private NaturalClause =
     | NaturalWord of key: string
@@ -900,17 +911,12 @@ let private naturalWordMatches candidateIds (view: ReadView<'id>) clauses =
     { Occurrences = clauses |> Array.collect (naturalClauseKeys view.Rules) |> Array.countBy id |> Map.ofArray
       Documents = clauses |> Array.fold addClause Map.empty }
 
-let private wordFrequencyWeight (view: ReadView<'id>) frequency =
-    max (abs (log10 (float view.DocumentCount / frequency))) idfFloor
-
-let private queryOccurrenceWeight view documentFrequency occurrences =
-    wordFrequencyWeight view (float documentFrequency * float occurrences)
-
 let private scoreNaturalWordMatches (view: ReadView<'id>) matches =
     matches.Documents
     |> Map.fold (fun scores key ids ->
         let rows = view.Postings.[key]
-        let weight = queryOccurrenceWeight view rows.Count matches.Occurrences.[key]
+        let frequency = float (indexedDocumentCount view key rows.Count) * float matches.Occurrences.[key]
+        let weight = wordFrequencyWeight view frequency
         ids |> Set.fold (fun scores id ->
             let contribution = float rows.[id] * weight * weight
             Map.change id (fun current -> Some(contribution + Option.defaultValue 0.0 current)) scores) scores) Map.empty
@@ -922,7 +928,12 @@ let internal naturalScoresInView candidateIds (view: ReadView<'id>) query =
         |> naturalWordMatches candidateIds view
         |> scoreNaturalWordMatches view
     else
-        sumTermScoresWithin candidateIds view (naturalTerms view query)
+        let terms = naturalTerms view query
+        // InnoDB removes deleted postings from the single-term natural rank.
+        let weightFor =
+            if terms.Length = 1 then fun _ -> idf view
+            else indexedWordWeight view
+        sumTermScoresWithin weightFor candidateIds view terms
 
 let naturalScores (index: Index<'id>) (query: string) : Map<'id, float> =
     naturalScoresInView None (readView index) query
@@ -2098,7 +2109,7 @@ let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: st
     | None ->
         Array.append (naturalTerms view query) seedTerms
         |> Array.distinct
-        |> sumTermScoresWithin candidateIds view
+        |> sumTermScoresWithin (indexedWordWeight view) candidateIds view
 
 let expansionScores (index: Index<'id>) (query: string) : Map<'id, float> =
     expansionScoresInView None (readView index) query

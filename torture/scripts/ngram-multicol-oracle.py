@@ -305,7 +305,10 @@ def verify_cache_lifecycle(mysql, fsdb):
         "+京都 +東* +東京",
         "+京都 +東* +(東京)",
     )
-    mode = "IN BOOLEAN MODE"
+    natural_terms = ("東京", "東京 x", "東京 東北", "東京 東京", "東京 札幌", "東北")
+    searches = [(term, "IN BOOLEAN MODE") for term in terms]
+    for mode in ("IN NATURAL LANGUAGE MODE", "WITH QUERY EXPANSION"):
+        searches.extend((term, mode) for term in natural_terms)
     seed = "INSERT INTO docs VALUES(1,'東京',''),(2,'東海',''),(3,'大阪','')"
     # Refresh the estimated document count after flushing so it cannot mask
     # changes caused by the posting lookup.
@@ -425,23 +428,23 @@ def verify_cache_lifecycle(mysql, fsdb):
             )
 
         membership = relevance = 0
-        for term in terms:
+        for term, mode in searches:
             expected = result(mysql, term, mode)
             actual = result(fsdb, term, mode)
             if actual != expected:
-                print(f"{stage}: {term!r}: MySQL IDs {expected}, Fsdb IDs {actual}")
+                print(f"{stage}: {mode}: {term!r}: MySQL IDs {expected}, Fsdb IDs {actual}")
                 membership += 1
             expected_scores = scored_result(mysql, term, mode)
             actual_scores = scored_result(fsdb, term, mode)
             if not scores_agree(expected_scores, actual_scores):
                 if actual == expected:
                     print(
-                        f"{stage}: {term!r}: MySQL ranks {expected_scores}, Fsdb ranks {actual_scores}"
+                        f"{stage}: {mode}: {term!r}: MySQL ranks {expected_scores}, Fsdb ranks {actual_scores}"
                     )
                 relevance += 1
         print(
             f"{stage}: MySQL cache/disk postings {posting_counts}, "
-            f"{membership} membership and {relevance} relevance differences in {len(terms)} queries"
+            f"{membership} membership and {relevance} relevance differences in {len(searches)} queries"
         )
         failures += membership + relevance
     return failures
