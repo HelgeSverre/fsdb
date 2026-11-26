@@ -6410,18 +6410,20 @@ type internal IntegerPrimaryRead =
     /// Range edges in physical index order. A partial edge includes or excludes its whole prefix.
     | PrimaryRange of lower: (Value list * bool) option * upper: (Value list * bool) option
 
+type internal PrimaryScanDirection = ForwardScan | ReverseScan
+
 type internal IntegerPrimaryReadPlan =
     { ReadDatabase: string
       ReadTableName: string
       ReadSchemaRevision: int64
       ReadAccess: IntegerPrimaryRead
-      ReadRangeRowsToVisit: int option }
+      ReadRangeLimit: (PrimaryScanDirection * int) option }
 
 let internal compareIntegerPrimaryValues = compareIndexedValues None
 
 type private PrimaryGapScan =
     | OrdinaryGap
-    | LimitedGap of stoppedAtRecord: bool
+    | LimitedGap of direction: PrimaryScanDirection * stoppedAtRecord: bool
 
 // A limited scan returns false after waiting for one key so its caller can
 // reselect the stopping row before claiming a gap or waiting for another key.
@@ -6454,6 +6456,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
             let current () =
                 tableAt live database tableKey |> Option.filter (fun table -> table.SchemaRevision = observed.SchemaRevision)
             let cache = keyLockCache live (lockNamespaceKey database tableKey)
+            let reverse = match scan with LimitedGap(ReverseScan, _) -> true | _ -> false
             let probe, lower, upper =
                 match read with
                 | PrimaryPoint values -> encode observed values, Some(values, false), Some(values, false)
@@ -6464,8 +6467,19 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             + (if inclusive then "i" else "e")
                         | None -> "-"
                     let anchor (values: Value list, inclusive) = values, values.Length = width || not inclusive
-                    let prefix = if scan = LimitedGap true then "stopped:" else "range:"
-                    prefix + identity lower + ":" + identity upper, Option.map anchor lower, Option.map anchor upper
+                    let prefix =
+                        match scan with
+                        | LimitedGap(ReverseScan, _) -> "reverse:"
+                        | LimitedGap(ForwardScan, true) -> "stopped:"
+                        | _ -> "range:"
+                    // A reverse cursor protects the gap before its last visited row
+                    // and the gap before the successor of its initial seek.
+                    let lowerAnchor, upperAnchor =
+                        if reverse then
+                            Option.map (fun (values, _) -> values, false) lower,
+                            Option.map (fun (values, inclusive) -> values, not inclusive) upper
+                        else Option.map anchor lower, Option.map anchor upper
+                    prefix + identity lower + ":" + identity upper, lowerAnchor, upperAnchor
             let needsGap table =
                 match read with
                 | PrimaryRange _ -> true
@@ -6534,7 +6548,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             match read with
                             // An inclusive descending scan can reach the end of the index.
                             | PrimaryRange(_, Some(stoppingKey, true))
-                                when scan <> LimitedGap true && group.Directions = [ Desc ]
+                                when not reverse && scan <> LimitedGap(ForwardScan, true) && group.Directions = [ Desc ]
                                      && (nearest false (stoppingKey, false) table).IsNone ->
                                 None
                             | _ -> upper |> Option.bind (fun edge -> nearest false edge table)
@@ -6588,7 +6602,8 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                                 rangeBlockers lower upper
                                 |> Seq.fold (fun first ((_, _, values) as candidate) ->
                                     match first with
-                                    | Some(_, _, earlier) when compare earlier values <= 0 -> first
+                                    | Some(_, _, earlier) when
+                                        (if reverse then compare earlier values >= 0 else compare earlier values <= 0) -> first
                                     | _ -> Some candidate) None
                             if blocker.IsNone then install ()
                             blocker)
@@ -6643,10 +6658,18 @@ let private primaryRangeRows (table: Table) lower upper limit =
                 let first, after = orderedPrefixBounds entries values
                 if inclusive then after else first)
             |> Option.defaultValue entries.Count
-        let stop = limit |> Option.filter (fun count -> count <= finish - start)
-        let after = stop |> Option.map ((+) start) |> Option.defaultValue finish
-        [ for index in start .. after - 1 do entries.[index].RowId ],
-        (stop |> Option.map (fun _ -> entries.[after - 1].Values))
+        match limit with
+        | Some(ReverseScan, count) ->
+            // An exhausted reverse scan tests the first record below the range.
+            // That record is locked even though it fails the predicate.
+            let last = if count <= finish - start then finish - count else max 0 (start - 1)
+            [ for index in finish - 1 .. -1 .. last do entries.[index].RowId ],
+            (if last < finish then Some entries.[last].Values else None)
+        | _ ->
+            let stop = limit |> Option.map snd |> Option.filter (fun count -> count <= finish - start)
+            let after = stop |> Option.map ((+) start) |> Option.defaultValue finish
+            [ for index in start .. after - 1 do entries.[index].RowId ],
+            (stop |> Option.map (fun _ -> entries.[after - 1].Values))
 
 let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Store) (plan: IntegerPrimaryReadPlan) =
     let deadline = DateTime.UtcNow + timeout
@@ -6664,7 +6687,7 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
         |> Option.bind (fun table ->
             match plan.ReadAccess with
             | PrimaryPoint values -> tryPrimaryWriteLockTargets snapshot table values |> Option.map (fun targets -> targets.RowIds, None)
-            | PrimaryRange(lower, upper) -> Some(primaryRangeRows table lower upper plan.ReadRangeRowsToVisit))
+            | PrimaryRange(lower, upper) -> Some(primaryRangeRows table lower upper plan.ReadRangeLimit))
     let rec acquire snapshot ((rowIds, _) as selection) =
         let timeout = remaining ()
         match plan.ReadAccess with
@@ -6677,11 +6700,14 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
         | Some next when next <> selection -> acquire current next
         | _ -> current
 
-    let rec acquireLimited lower rangeUpper snapshot ((rowIds, stop) as selection) =
+    let rec acquireLimited direction lower upper snapshot ((rowIds, stop) as selection) =
         let retained = transactionGapLocks snapshot
-        let upper = stop |> Option.map (fun key -> key, true) |> Option.orElse rangeUpper
-        let read = PrimaryRange(lower, upper)
-        let installed = acquirePrimaryReadGap (remaining ()) live snapshot database tableName (LimitedGap stop.IsSome) read
+        let stoppingEdge = stop |> Option.map (fun key -> key, true)
+        let read =
+            match direction with
+            | ReverseScan -> PrimaryRange(stoppingEdge, upper)
+            | ForwardScan -> PrimaryRange(lower, stoppingEdge |> Option.orElse upper)
+        let installed = acquirePrimaryReadGap (remaining ()) live snapshot database tableName (LimitedGap(direction, stop.IsSome)) read
         let current = refresh ()
         match rows current with
         | None ->
@@ -6689,21 +6715,21 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
             current
         | Some next when not installed || next <> selection ->
             releaseLaterGapLocks snapshot retained
-            acquireLimited lower rangeUpper current next
+            acquireLimited direction lower upper current next
         | Some _ ->
             lockRows current rowIds
             let current = refresh ()
             match rows current with
             | Some next when next <> selection ->
-                acquireLimited lower rangeUpper current next
+                acquireLimited direction lower upper current next
             | _ -> current
 
     let initial = refresh ()
     match rows initial with
     | Some selection ->
         withTransactionLockCheckpoint initial (fun () ->
-            match plan.ReadAccess, plan.ReadRangeRowsToVisit with
-            | PrimaryRange(lower, upper), Some _ -> acquireLimited lower upper initial selection
+            match plan.ReadAccess, plan.ReadRangeLimit with
+            | PrimaryRange(lower, upper), Some(direction, _) -> acquireLimited direction lower upper initial selection
             | _ -> acquire initial selection)
     | None -> initial
 

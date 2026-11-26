@@ -907,6 +907,39 @@ let tests =
               finally
                   run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "serializable reverse limits keep the seek gap and stop after the visited row"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY)" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES (10),(20),(30),(40)" (Affected 4UL) |> ignore
+              let probe = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let attempt sql =
+                  let transaction = run probe "BEGIN" (Affected 0UL)
+                  let transaction, result = handle transaction sql
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  result
+
+              let reader = run (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+              let reader = run reader "BEGIN" (Affected 0UL)
+              let reader = run reader "SELECT id FROM gate FORCE INDEX (PRIMARY) WHERE id BETWEEN 20 AND 30 ORDER BY id DESC LIMIT 1"
+                               (ResultSet([ "id" ], [ [ Some "30" ] ]))
+              try
+                  match attempt "SELECT id FROM gate WHERE id=30 FOR UPDATE NOWAIT" with
+                  | Err(3572, _) -> ()
+                  | actual -> failtestf "the visited row must be locked, got %A" actual
+                  for key in [ 25; 35 ] do
+                      match attempt $"INSERT INTO gate VALUES ({key})" with
+                      | Err(1205, _) -> ()
+                      | actual -> failtestf "the gap containing %d must be locked, got %A" key actual
+                  Expect.equal (attempt "INSERT INTO gate VALUES (15)") (Affected 1UL) "the unvisited tail stays writable"
+              finally
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "serializable primary ranges follow descending and composite index order"
           <| fun _ ->
               let run session sql expected =

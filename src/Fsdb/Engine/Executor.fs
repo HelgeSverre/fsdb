@@ -34734,7 +34734,7 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                 |> Option.map _.Direction
                 |> Option.defaultValue Asc
 
-            let rangeRowsToVisit prefixLength =
+            let rangeLimit prefixLength =
                 match select.Limit, select.OrderBy with
                 | None, [] when select.Offset.IsNone -> Some None
                 | Some limit, _ :: _ when literalRowCounts && not select.Distinct && not select.CalculateFoundRows && rowCount limit > 0 ->
@@ -34752,17 +34752,22 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                         resolved |> Option.bind predicateColumn |> Option.map (fun column -> column, direction)
 
                     let constantKeys, orderedKeys = List.splitAt prefixLength keys
-                    let followsPrimaryOrder (ordering: (string * Direction) list) =
+                    let scanDirection (ordering: (string * Direction) list) =
                         let varyingOrder =
                             ordering |> List.filter (fun (column, _) -> not (List.exists (equalsIgnoreCase column) constantKeys))
-                        List.length varyingOrder = List.length orderedKeys
-                        && List.forall2 (fun (column, direction) key -> equalsIgnoreCase column key && direction = keyDirection key)
-                            varyingOrder orderedKeys
+                        let followsPrimaryKeys =
+                            List.length varyingOrder = List.length orderedKeys
+                            && List.forall2 (fun (column, _) key -> equalsIgnoreCase column key) varyingOrder orderedKeys
+                        if not followsPrimaryKeys then None
+                        elif varyingOrder |> List.forall (fun (column, direction) -> direction = keyDirection column) then Some Storage.ForwardScan
+                        elif keys.Length = 1 then Some Storage.ReverseScan
+                        else None
 
-                    select.OrderBy |> List.map orderColumn |> tryAllSome |> Option.filter followsPrimaryOrder
-                    |> Option.map (fun _ ->
+                    select.OrderBy |> List.map orderColumn |> tryAllSome |> Option.bind scanDirection
+                    |> Option.map (fun direction ->
                         let offset = select.Offset |> Option.map rowCount |> Option.defaultValue 0
-                        Some(min (int64 System.Int32.MaxValue) (int64 offset + int64 (rowCount limit)) |> int))
+                        let count = min (int64 System.Int32.MaxValue) (int64 offset + int64 (rowCount limit)) |> int
+                        Some(direction, count))
                 | _ -> None
 
             let isIntegerColumn column =
@@ -34796,8 +34801,8 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
             let range () =
                 let prefix =
                     keys |> Seq.map boundFor |> Seq.takeWhile Option.isSome |> Seq.choose id |> List.ofSeq
-                match List.skip prefix.Length keys, rangeRowsToVisit prefix.Length with
-                | key :: remaining, Some rowsToVisit when prefix.Length = equalities.Length ->
+                match List.skip prefix.Length keys, rangeLimit prefix.Length with
+                | key :: remaining, Some limit when prefix.Length = equalities.Length ->
                     let keyColumn = predicateColumn >> Option.filter (equalsIgnoreCase key)
                     let predicates =
                         conditions |> List.filter (equality >> Option.isNone)
@@ -34823,7 +34828,7 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                         let exactBound = Option.forall (fun (values, _) -> Storage.isExactPrimaryKeyPrefix store table values)
                         let physicalLower, physicalUpper =
                             if keyDirection key = Desc then edge upper, edge lower else edge lower, edge upper
-                        let rangeRead = Some(Storage.PrimaryRange(physicalLower, physicalUpper), rowsToVisit)
+                        let rangeRead = Some(Storage.PrimaryRange(physicalLower, physicalUpper), limit)
                         if not (exactBound physicalLower && exactBound physicalUpper) then None
                         else
                             match lower, upper with
@@ -34841,12 +34846,12 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                 exact ()
                 |> Option.map (fun access -> access, None)
                 |> Option.orElseWith range
-                |> Option.map (fun (access, rowsToVisit) ->
+                |> Option.map (fun (access, limit) ->
                     { ReadDatabase = database
                       ReadTableName = source.Table
                       ReadSchemaRevision = table.SchemaRevision
                       ReadAccess = access
-                      ReadRangeRowsToVisit = rowsToVisit }))
+                      ReadRangeLimit = limit }))
     | _ -> None
 
 let transactionWriteTargets

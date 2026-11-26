@@ -279,9 +279,32 @@ deletes `20`, the reader waits and returns `30` after commit.
 MySQL and both Fsdb modes matched all 207 checks in the expanded oracle.
 [InnoDB next-key locking](https://dev.mysql.com/doc/refman/8.4/en/innodb-next-key-locking.html).
 
-Reverse-order scans remain open. MySQL can lock an additional gap at
-the start of a reverse scan, and an empty reverse scan can lock a row
-outside the predicate. Unordered limits also remain open.
+### Reverse ordered limits
+
+The reverse path covers an ordered limit over a single-column integer
+primary key, in either physical index direction. The seek protects the
+gap before its physical successor. Each row consumed by the scan,
+including rows skipped by `OFFSET`, protects the preceding gap. If the
+scan runs out of matches, it also locks the first record it visits
+outside the predicate, when one exists.
+
+With keys `10, 20, 30, 40`, `id BETWEEN 20 AND 30 ORDER BY id DESC
+LIMIT 1` locks row `30` and both adjacent gaps. A writer can still
+insert `15`. In the empty range `id BETWEEN 12 AND 19`, the same
+ordering visits and locks row `10`. A pending insertion at `11` makes
+that empty read wait, while a pending `5` lies past its stopping point.
+When two pending inserts at `37` and `35` precede the first result in
+reverse order, the reader can return `37` as soon as that writer commits.
+
+MySQL and both Fsdb modes matched all 252 checks in the expanded oracle.
+A separate 48-case comparison matched 404 checks. It compared row
+results, record locks, and sampled gap locks through competing statements
+against MySQL's `performance_schema.data_locks` on both index directions.
+
+Composite reverse scans and unordered limits remain open. On the
+mixed key `(a ASC,b DESC)`, MySQL used a backward scan for `a=2 ORDER BY
+b ASC`, and a filesort after adding `b BETWEEN 12 AND 39`. The two
+plans protect different rows and gaps.
 
 Run the live schedules against disposable servers. Use `--data-dir`
 to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.
