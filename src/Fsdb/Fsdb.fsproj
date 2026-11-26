@@ -47,6 +47,7 @@
     <Compile Include="Sql/GeometryOperations.fs" />
     <Compile Include="Sql/Privileges.fs" />
     <Compile Include="Sql/BooleanWordChars.fs" />
+    <Compile Include="Sql/FullTextCache.fs" />
     <Compile Include="Sql/FullText.fs" />
     <Compile Include="Sql/Ast.fs" />
     <Compile Include="Sql/ForeignKeyIndexes.fs" />

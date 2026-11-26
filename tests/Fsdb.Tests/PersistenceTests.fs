@@ -2488,6 +2488,63 @@ let tests =
               verify replayed
               Expect.equal replayed.Catalog.[defaultDatabase].["docs"].RowsArray.Length 4 "WAL tail survives recovery"
 
+          testCase "cached ngram term order survives checkpoints and WAL replay"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+              let execute sql = handle session sql |> ignore
+              execute "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin"
+              execute "INSERT INTO docs VALUES(1,'東京 東北 東京'),(3,'大阪')"
+              execute "DELETE FROM docs WHERE id=3"
+              snapshotNow dir store
+              execute "INSERT INTO docs VALUES(2,'東海'),(4,'札幌'),(3,'大阪')"
+              let check (current: Store) =
+                  let table = current.Catalog.[defaultDatabase].["docs"]
+                  let first = table.RowsArray.Indexed |> Seq.find (fun (_, row) -> row.[0] = VInt 1L) |> fst
+                  let score = Fsdb.FullText.booleanScores table.FullTextIndexes.["ft"] "東*" |> Map.find first
+                  Expect.floatClose Accuracy.high score 0.031219376251101494 "the deleted term still influences the lookup after recovery"
+              check store
+              let replayed = load dir
+              check replayed
+              snapshotNow dir replayed
+              load dir |> check
+
+          testCase "only committed documents affect the cached ngram lookup order"
+          <| fun _ ->
+              for concurrent in [ false; true ] do
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+                  let mutable session = Fsdb.Session.create 1 store
+                  let execute sql =
+                      let updated, result = handle session sql
+                      session <- updated
+                      match result with
+                      | Err(code, message) -> failtestf "%s failed with %d: %s" sql code message
+                      | _ -> ()
+
+                  execute "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,flag INT DEFAULT 0,FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin"
+                  execute "INSERT INTO docs(id,body) VALUES(1,'東京 東北 東京')"
+                  snapshotNow dir store
+                  execute "START TRANSACTION"
+                  execute "INSERT INTO docs(id,body) VALUES(3,'大阪')"
+                  execute "DELETE FROM docs WHERE id=3"
+                  if concurrent then
+                      let other = Fsdb.Session.create 2 store
+                      Expect.equal (handle other "UPDATE docs SET flag=1 WHERE id=1" |> snd) (Affected 1UL) "the other session updated the table"
+                  execute "COMMIT"
+                  execute "INSERT INTO docs(id,body) VALUES(2,'東海'),(4,'札幌'),(3,'大阪')"
+
+                  let check (current: Store) =
+                      let table = current.Catalog.[defaultDatabase].["docs"]
+                      let first = table.RowsArray.Indexed |> Seq.find (fun (_, row) -> row.[0] = VInt 1L) |> fst
+                      let score = Fsdb.FullText.booleanScores table.FullTextIndexes.["ft"] "東*" |> Map.find first
+                      Expect.floatClose Accuracy.high score 0.015609688125550747 "the transient term leaves no cache history"
+                  check store
+                  load dir |> check
+
           testCase "ngram posting flush positions survive checkpoints and WAL replay"
           <| fun _ ->
               let dir = tempDataDir ()

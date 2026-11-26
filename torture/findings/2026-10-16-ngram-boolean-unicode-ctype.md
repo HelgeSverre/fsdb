@@ -355,15 +355,40 @@ Fsdb now separates flushed and newly written ngram postings by
 their document order. Full-text-only optimize publishes a flush
 position, and Fsdb preserves it through metadata-only ALTER,
 checkpoints, and WAL replay. The lifecycle fixture now matches all
-221 membership checks, with five relevance differences in the
-cached-frequency case. On the 3,856-query fresh binary bigram holdout,
-membership differences fell from 606 to zero and relevance differences
-fell from 944 to 168. Both the term order within the cache and the
-history retained for deleted postings still affect relevance in MySQL.
-Clean-shutdown flushing and automatic cache flushing also remain open.
-The same holdout matches on fresh and flushed binary trigrams and on
-flushed binary bigrams. The maintained two-column corpus matches all
-3,870 searches at token sizes 1–10.
+221 membership checks. Counting visits to the right posting source
+reduced differences on the 3,856-query fresh binary bigram holdout
+from 606 to zero for membership and from 944 to 168 for relevance.
+
+Fsdb now retains the cache terms in their first insertion order and
+reproduces the cache tree's prefix traversal. Terms from committed
+deletions keep their positions until a flush. A term from a row
+inserted and deleted within one transaction stays out of the
+committed cache, including during WAL replay. Checkpoints preserve
+the insertion order, including retained terms whose rows are gone.
+
+The 221 lifecycle checks now match in membership and relevance.
+Another 256 prefix checks match across 24 exhaustive insertion
+orders of the four-row fixture and 40 seeded orders of the larger
+corpus. The 3,856-query fresh holdout has two relevance differences
+in each of the binary and accent-insensitive bigram indexes. Reduced
+examples are `生日 (+東京駅 +京*) (+生日)` and `学校 (+京都 +生* +学校)`.
+Both revisit a phrase from a required group after a short prefix
+has restricted the posting range. With `京都`, `生日`, `学校`,
+and `大阪`, MySQL scores `学校 (+京都 +生* +学校)` at 0.362476
+with cached postings and 0.090619 with flushed postings. The
+cache skips the disjoint posting before counting it. Fsdb currently
+uses the flushed count in both states.
+
+The same holdout matches on fresh
+and flushed binary trigrams and on flushed binary bigrams. The maintained
+two-column corpus matches all 3,870 searches at token sizes 1–10.
+
+Deleted postings can still change frequency totals. After deleting one
+of two cached `東京` postings in a four-row live corpus, MySQL returns
+roughly 0.090619 for `東京`; after a full-text flush it returns 0.362476.
+The retained term tree now reproduces the traversal order, while the
+frequency totals still use live postings. Clean-shutdown flushing
+and automatic cache flushing also remain open.
 
 ```sh
 dotnet build src/Fsdb.Cli -c Release

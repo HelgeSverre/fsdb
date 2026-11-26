@@ -294,6 +294,23 @@ let tests =
                       let expected = if restoreOriginal then [ "1" ] else [ "1"; "2" ]
                       Expect.equal (ids (run store ($"SELECT id FROM docs WHERE MATCH(body) AGAINST('{term}' IN BOOLEAN MODE) ORDER BY id"))) expected "published postings match the merged rows"
 
+          testCase "cached ngram prefixes rank in cache lookup order"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE docs(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin" |> ignore
+              let insert sql = run store ("INSERT INTO docs VALUES" + sql) |> ignore
+              let score () =
+                  let table = store.Catalog.[defaultDatabase].["docs"]
+                  let id = table.RowsArray.Indexed |> Seq.find (fun (_, row) -> row.[0] = VInt 1L) |> fst
+                  booleanScores table.FullTextIndexes.["ft"] "東*" |> Map.find id
+              insert "(1,'東京 東北 東京'),(2,'東海'),(4,'札幌'),(3,'大阪')"
+              Expect.floatClose Accuracy.high (score ()) 0.015609688125550747 "the fresh cache visits 東北 before 東京"
+              run store "TRUNCATE TABLE docs" |> ignore
+              insert "(1,'東京 東北 東京'),(3,'大阪'),(2,'東海'),(4,'札幌')"
+              run store "DELETE FROM docs WHERE id=3" |> ignore
+              insert "(3,'大阪')"
+              Expect.floatClose Accuracy.high (score ()) 0.031219376251101494 "the cached term from a deleted row preserves its tree position"
+
           testCase "ngram prefixes after a phrase skip cached postings until flushed"
           <| fun _ ->
               let store = create ()

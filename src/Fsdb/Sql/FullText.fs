@@ -154,6 +154,7 @@ type Index<'id when 'id: comparison> =
           StopwordReload: Lazy<StopwordPolicy> option
           NextDocumentOrder: int64
           FlushedThrough: int64 option
+          CachedTerms: FullTextCache.Terms
           DocumentOrderFollowsIds: bool
           HasDocumentOrder: bool }
 
@@ -187,6 +188,7 @@ type internal ReadView<'id when 'id: comparison> =
           DocumentCount: int
           VisibleDocumentIds: Set<'id> option
           FlushedThrough: int64 option
+          CachedTerms: FullTextCache.Terms
           DocumentOrderFollowsIds: bool
           HasDocumentOrder: bool }
 
@@ -199,6 +201,7 @@ let internal readView (index: Index<'id>) : ReadView<'id> =
       DocumentCount = index.Documents.Count
       VisibleDocumentIds = None
       FlushedThrough = index.FlushedThrough |> Option.filter (fun through -> through < index.NextDocumentOrder - 1L)
+      CachedTerms = index.CachedTerms
       DocumentOrderFollowsIds = index.DocumentOrderFollowsIds
       HasDocumentOrder = index.HasDocumentOrder }
 
@@ -312,6 +315,10 @@ let private isExactLookup rules token =
 let private indexedTokens (document: Document) =
     Array.concat document.Fields |> Array.filter (isSearchable document.Rules)
 
+let private cacheDocumentTerms (words: (string * Token[])[]) terms =
+    (terms, Array.sortBy fst words)
+    ||> Array.fold (fun terms (key, grams) -> FullTextCache.add key grams.[0].Text terms)
+
 let private prefixKeys (collation: Collation) (token: Token) =
     let mutable length = 0
     [| for rune in token.Text.EnumerateRunes() do
@@ -361,6 +368,7 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       StopwordReload = None
       NextDocumentOrder = 1L
       FlushedThrough = None
+      CachedTerms = FullTextCache.empty
       DocumentOrderFollowsIds = true
       HasDocumentOrder = true }
 
@@ -458,6 +466,9 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
         Postings = postings
         PrefixPostings = prefixPostings
         NextDocumentOrder = index.NextDocumentOrder + 1L
+        CachedTerms =
+            if index.FlushedThrough.IsSome then cacheDocumentTerms words index.CachedTerms
+            else index.CachedTerms
         HasDocumentOrder = index.HasDocumentOrder || index.Documents.IsEmpty
         DocumentOrderFollowsIds =
             index.Documents.IsEmpty
@@ -530,18 +541,58 @@ let internal withDocumentOrderFrom (source: Index<'id>) (target: Index<'id>) =
         Documents = target.Documents |> Map.map (fun id document -> { document with Order = source.Documents.[id].Order })
         NextDocumentOrder = source.NextDocumentOrder
         FlushedThrough = source.FlushedThrough
+        CachedTerms = source.CachedTerms
         DocumentOrderFollowsIds = source.DocumentOrderFollowsIds
         HasDocumentOrder = source.HasDocumentOrder }
 
 let internal flushPostings (index: Index<'id>) =
     match index.Rules.Tokenizer with
     | Words _ -> index
-    | Ngrams _ -> { index with FlushedThrough = Some(index.NextDocumentOrder - 1L) }
+    | Ngrams _ ->
+        { index with
+            FlushedThrough = Some(index.NextDocumentOrder - 1L)
+            CachedTerms = FullTextCache.empty }
 
 let internal flushedThrough (index: Index<'id>) = index.FlushedThrough
 
 let internal restoreFlushedThrough through (index: Index<'id>) =
     { index with FlushedThrough = through |> Option.map (min (index.NextDocumentOrder - 1L)) }
+
+let internal cachedTermsInInsertionOrder (index: Index<'id>) =
+    FullTextCache.inInsertionOrder index.CachedTerms
+
+let private cacheDocumentsAfter through (index: Index<'id>) initial =
+    index.Documents
+    |> Map.values
+    |> Seq.filter (fun document -> document.Order > through)
+    |> Seq.sortBy _.Order
+    |> Seq.fold (fun terms document ->
+        let words = indexedTokens document.Content |> Array.groupBy _.Key
+        cacheDocumentTerms words terms) initial
+
+let internal restoreCachedTerms saved (index: Index<'id>) =
+    match index.FlushedThrough with
+    | None -> index
+    | Some through ->
+        let terms =
+            match saved with
+            | Some spellings ->
+                spellings |> Seq.fold (fun terms text -> FullTextCache.add (index.Collation.FullTextKeyOf text) text terms) FullTextCache.empty
+            | None ->
+                // Older snapshots can reproduce the insertion order of live documents.
+                cacheDocumentsAfter through index FullTextCache.empty
+        { index with CachedTerms = terms }
+
+let internal publishCachedTerms (baseline: Index<'id>) (index: Index<'id>) =
+    if index.FlushedThrough.IsNone
+       || index.FlushedThrough <> baseline.FlushedThrough
+       || index.NextDocumentOrder < baseline.NextDocumentOrder
+       || obj.ReferenceEquals(index.CachedTerms, baseline.CachedTerms) then
+        index
+    else
+        // Only final documents are indexed by a committing transaction.
+        let terms = cacheDocumentsAfter (baseline.NextDocumentOrder - 1L) index baseline.CachedTerms
+        { index with CachedTerms = terms }
 
 let internal rulesInUse (index: Index<'id>) =
     seq {
@@ -1224,6 +1275,37 @@ let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'va
         |> Seq.choose (fun id -> Map.tryFind id scores |> Option.map (fun score -> id, score))
         |> Map.ofSeq
 
+let private prefixRowsWithCacheOrder candidateIds key (view: ReadView<'id>) (rows: Map<'id, int>) =
+    match view.FlushedThrough with
+    | Some through when not rows.IsEmpty ->
+        let comparePrefix gramKey text =
+            if prefixKeys view.Collation { Key = gramKey; Text = text } |> Array.contains key then 0
+            else String.CompareOrdinal(key, gramKey)
+
+        match FullTextCache.prefixOrder comparePrefix view.CachedTerms with
+        | _ :: _ :: _ as grams ->
+            let rows = restrictScores candidateIds rows
+            let frequencies = Collections.Generic.Dictionary<'id, int>()
+            let record id frequency =
+                if view.Documents.[id].Order > through then
+                    frequencies.TryAdd(id, frequency) |> ignore
+
+            for gram in grams do
+                match Map.tryFind gram view.Postings with
+                | Some posting when posting.Count <= rows.Count ->
+                    posting |> Map.iter (fun id frequency ->
+                        if rows.ContainsKey id then record id frequency)
+                | Some posting ->
+                    rows |> Map.iter (fun id _ -> Map.tryFind id posting |> Option.iter (record id))
+                | None -> ()
+
+            rows |> Map.map (fun id frequency ->
+                match frequencies.TryGetValue id with
+                | true, first -> first
+                | _ -> frequency)
+        | _ -> rows
+    | _ -> rows
+
 let private booleanCandidates (results: (BoolOp * Map<'id, float>) list) : seq<'id> =
     let required =
         results
@@ -1275,6 +1357,7 @@ let rec private evalTerm
             let weight = prefixWeight view 1 posting
             posting.Rows
             |> restrictScores candidateIds
+            |> prefixRowsWithCacheOrder None term.Key view
             |> Map.map (fun _ frequency -> float frequency * weight * weight)
     | BPhrase(words, proximity) ->
         let candidates =
@@ -1440,6 +1523,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             let exactVisits = Collections.Generic.Dictionary<string, int>()
             let prefixCounts = Collections.Generic.Dictionary<string, int64>()
             let diskPrefixes = Collections.Generic.Dictionary<string, PrefixPosting<'id> option>()
+            let scoringPrefixes = Collections.Generic.Dictionary<string, Map<'id, int>>()
             let contributionOrder = Collections.Generic.Dictionary<NgramScoringKey, int>()
             let mutable postingBounds = None
             let mutable inPhraseMode = false
@@ -1608,8 +1692,14 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 let rows, weight =
                     match term with
                     | NgramPrefix key ->
-                        let posting = view.PrefixPostings.[key]
-                        posting.Rows, ngramPrefixWeight view.DocumentCount (float prefixCounts.[key])
+                        let rows =
+                            match scoringPrefixes.TryGetValue key with
+                            | true, rows -> rows
+                            | _ ->
+                                let rows = prefixRowsWithCacheOrder candidateIds key view view.PrefixPostings.[key].Rows
+                                scoringPrefixes.Add(key, rows)
+                                rows
+                        rows, ngramPrefixWeight view.DocumentCount (float prefixCounts.[key])
                     | ExactNgram key ->
                         let rows = view.Postings.[key]
                         rows, queryOccurrenceWeight view rows.Count exactVisits.[key]
@@ -1661,7 +1751,9 @@ let internal tryFlatBooleanScoresDictionaryInView
         let postingFor (term: Token, prefix) =
             if prefix then
                 Map.tryFind term.Key view.PrefixPostings
-                |> Option.map (fun posting -> posting.Rows, prefixWeight view 1 posting)
+                |> Option.map (fun posting ->
+                    let rows = prefixRowsWithCacheOrder candidateIds term.Key view posting.Rows
+                    rows, prefixWeight view 1 posting)
             elif isExactLookup view.Rules term then
                 booleanPostingRows view term |> Option.map (fun rows -> rows, idf view rows.Count)
             else None

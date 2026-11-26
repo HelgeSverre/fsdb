@@ -1748,8 +1748,11 @@ recovery. The [cache lifecycle oracle](torture/findings/2026-10-16-ngram-boolean
 now matches membership across fresh, flushed, and mixed postings.
 Short prefixes after a phrase visit flushed postings unless required.
 Full-text-only optimize publishes a flush position that survives
-checkpoints and WAL replay. Cache term order, deleted posting history,
-clean-shutdown flushing, and segmented postings remain open.
+checkpoints and WAL replay. Cached prefix ranking now follows the
+cache tree's term order, preserving terms from committed deletions
+and discarding transient writes at commit. Deleted posting frequency,
+cache-specific phrase frequency, clean-shutdown flushing, and
+segmented postings remain open.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.

@@ -11584,9 +11584,37 @@ let mergeCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog:
 let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
     mergeCatalogIntoWithTimeout (Fsdb.Limits.lockWaitTimeout ()) store baseCatalog batchCatalog
 
+let private publishDatabaseCachedTerms (before: Database) (after: Database) =
+    if obj.ReferenceEquals(before, after) then after
+    else
+        (after, after)
+        ||> Map.fold (fun result name table ->
+            match Map.tryFind name before with
+            | Some previous when not table.FullTextIndexes.IsEmpty
+                                 && not (obj.ReferenceEquals(table.FullTextIndexes, previous.FullTextIndexes))
+                                 && table.Indexes = previous.Indexes && table.Columns = previous.Columns ->
+                let indexes =
+                    (table.FullTextIndexes, table.FullTextIndexes)
+                    ||> Map.fold (fun indexes name index ->
+                        match Map.tryFind name previous.FullTextIndexes with
+                        | Some source ->
+                            let published = FullText.publishCachedTerms source index
+                            if obj.ReferenceEquals(published, index) then indexes else Map.add name published indexes
+                        | None -> indexes)
+                if obj.ReferenceEquals(indexes, table.FullTextIndexes) then result
+                else Map.add name { table with FullTextIndexes = indexes } result
+            | _ -> result)
+
+let internal publishCachedTermsForReplay (before: Catalog) (store: Store) =
+    for KeyValue(db, slot) in store.Databases do
+        match Map.tryFind db before with
+        | Some database -> slot.Value <- publishDatabaseCachedTerms database slot.Value
+        | None -> ()
+
 let private commitCatalogIntoWith
     (timeout: TimeSpan)
     (validateWholeSnapshot: bool)
+    (publishCachedTerms: bool)
     (prepareCommit: Store -> Store -> (unit -> unit))
     (store: Store)
     (baseCatalog: Catalog)
@@ -11665,13 +11693,17 @@ let private commitCatalogIntoWith
                     changedKeys
                     |> Seq.map (fun dbName ->
                         let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
-
-                        match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
-                        | Some baseDb, None when obj.ReferenceEquals(slot.Value, baseDb) -> dbName, slot, None
-                        | None, Some batchDb when not (store.Databases.ContainsKey dbName) -> dbName, slot, Some batchDb
-                        | Some _, Some batchDb when validateWholeSnapshot -> dbName, slot, Some batchDb
-                        | Some baseDb, Some batchDb -> dbName, slot, Some(mergeDatabase dbName baseDb batchDb slot.Value)
-                        | _ -> raise (LockWaitTimeout dbName))
+                        let database =
+                            match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+                            | Some baseDb, None when obj.ReferenceEquals(slot.Value, baseDb) -> None
+                            | None, Some batchDb when not (store.Databases.ContainsKey dbName) -> Some batchDb
+                            | Some _, Some batchDb when validateWholeSnapshot -> Some batchDb
+                            | Some baseDb, Some batchDb -> Some(mergeDatabase dbName baseDb batchDb slot.Value)
+                            | _ -> raise (LockWaitTimeout dbName)
+                        let database =
+                            if publishCachedTerms then database |> Option.map (publishDatabaseCachedTerms slot.Value)
+                            else database
+                        dbName, slot, database)
                     |> Seq.toList
 
                 publishCatalogRoots store (fun () ->
@@ -11694,11 +11726,11 @@ let private commitCatalogIntoWith
 
 let commitCatalogIntoWithTimeout (timeout: TimeSpan) (publishFlat: bool) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock SharedAccess store (fun () ->
-        commitCatalogIntoWith timeout false (prepareTransactionEventsWith publishFlat) store baseCatalog snapshot)
+        commitCatalogIntoWith timeout false (not publishFlat) (prepareTransactionEventsWith publishFlat) store baseCatalog snapshot)
 
 let commitCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock SharedAccess store (fun () ->
-        commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) false prepareTransactionEvents store baseCatalog snapshot)
+        commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) false true prepareTransactionEvents store baseCatalog snapshot)
 
 let commitSerializableCatalogIntoWithTimeout
     (timeout: TimeSpan)
@@ -11708,11 +11740,11 @@ let commitSerializableCatalogIntoWithTimeout
     (snapshot: Store)
     : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->
-        commitCatalogIntoWith timeout true (prepareTransactionEventsWith publishFlat) store baseCatalog snapshot)
+        commitCatalogIntoWith timeout true (not publishFlat) (prepareTransactionEventsWith publishFlat) store baseCatalog snapshot)
 
 let commitSerializableCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->
-        commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) true prepareTransactionEvents store baseCatalog snapshot)
+        commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) true true prepareTransactionEvents store baseCatalog snapshot)
 
 let prepareXa
     (store: Store)
@@ -11827,6 +11859,7 @@ let commitPreparedXaWithTimeout (timeout: TimeSpan) (store: Store) (xid: Xa.Xid)
                 commitCatalogIntoWith
                     timeout
                     prepared.ValidateWholeSnapshot
+                    true
                     (prepareXaCommitEvents xid)
                     store
                     prepared.BaseCatalog
