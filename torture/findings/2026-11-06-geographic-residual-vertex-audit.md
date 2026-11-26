@@ -1191,7 +1191,34 @@ Fsdb. Linux Fsdb fixes 68 comparisons against the pinned image. The
 fixes cover intersection, difference, union, and symmetric difference.
 Every previously matching result still matches its reference build.
 The remaining pinned-image differences include isolated intersection
-points and short line fragments. The regression test passes on both
-platforms. The Linux geography test filter still reproduces three
-existing failures around solver-coordinate subtraction, partitioned
-contact order, and line/polygon boundary classification.
+points and short line fragments. The regression test passed on both
+platforms. At `2a85e005`, the Linux geography test filter still reproduced
+three failures around solver-coordinate subtraction, partitioned contact
+order, and line/polygon boundary classification.
+
+### Cross-platform geographic regressions
+
+The three failures used expectations from a native macOS run. For the
+old polar sliver, pinned Linux MySQL and Linux Fsdb retain an isolated
+point, while native macOS MySQL and Fsdb return only the line. The old
+descending near-hole line touches on Linux and crosses on macOS in both
+engines. At the old partition origin of 10 degrees, the two MySQL builds
+retain a fourth contact when the padding triggers partitioning. macOS
+Fsdb omits that contact.
+
+The replacement polar sliver comes from seed `261184` with 96 polygons,
+at zero-based fixture index 343. Both line directions and both operand
+orders return a single clipped line. Reconstructing the solver radians
+from output degrees reintroduces an isolated point in both directions
+on macOS and Linux ARM64.
+
+At the replacement partition origin of 11.2 degrees, the same four
+contacts occur with and without padding. The contacts from the middle
+section come first with padding, and those from the left section come
+first without it. The existing antimeridian fixture also agrees. The
+replacement descending line runs at longitude `98.66242717585151`
+and crosses in both directions.
+
+The replacement fixtures agree with native MySQL 8.4.11 on macOS ARM64
+and the pinned MySQL 8.4.11 image on Linux ARM64 and x64. The geography
+test filter passes all 67 tests on both Linux architectures.

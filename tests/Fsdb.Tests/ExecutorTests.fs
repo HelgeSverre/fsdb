@@ -20071,7 +20071,7 @@ let tests =
                         [ "LINESTRING(-41.32501886778000 117.11836854278431,-42.22648840683095 117.11836854278431)", descendingTouchArea, [ Some "0"; Some "1"; Some "0"; Some "0" ]
                           "LINESTRING(3 2.999,1 2.999)", nearHole, [ Some "1"; Some "0"; Some "0"; Some "0" ]
                           "LINESTRING(0.100001 -0.1,-0.1 0.100001)", "POLYGON((0 0,0 4,4 4,4 0,0 0))", [ Some "1"; Some "0"; Some "0"; Some "0" ]
-                          "LINESTRING(-30.64493281884515 98.66242736334891,-31.49660196433541 98.66242736334891)", descendingArea, [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(-30.64493281884515 98.66242717585151,-31.49660196433541 98.66242717585151)", descendingArea, [ Some "1"; Some "0"; Some "0"; Some "0" ]
                           "LINESTRING(1 2.999,3 2.999)", nearHole, [ Some "0"; Some "1"; Some "0"; Some "0" ]
                           "LINESTRING(1 2.99999,3 2.99999)", nearHole, [ Some "0"; Some "1"; Some "0"; Some "0" ]
                           "LINESTRING(1 1.00001,3 1.00001)", nearHole, [ Some "1"; Some "0"; Some "0"; Some "0" ]

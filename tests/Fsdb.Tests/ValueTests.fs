@@ -862,18 +862,19 @@ let tests =
                     let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]
                     let area =
                         geometry (
-                            "POLYGON((71.45560162577510 -118.01542423838433,71.45560162577510 -111.51325001828516,75.80346757517412 -111.51325001828516,75.80346757517412 -118.01542423838433,71.45560162577510 -118.01542423838433),"
-                            + "(72.54256811312486 -116.38988068335954,74.71650108782437 -116.38988068335954,74.71650108782437 -113.13879357330995,72.54256811312486 -113.13879357330995,72.54256811312486 -116.38988068335954))")
-                    let first = "72.54256811312486 -116.38987068335953"
-                    let last = "74.71650108782437 -116.38987068335953"
+                            "POLYGON((-74.72754707448667 5.01452041609839,-74.72754707448667 8.76790864859917,-72.59364704386911 8.76790864859917,-72.59364704386911 5.01452041609839,-74.72754707448667 5.01452041609839),"
+                            + "(-74.19407206683228 5.95286747422359,-73.12712205152350 5.95286747422359,-73.12712205152350 7.82956159047398,-74.19407206683228 7.82956159047398,-74.19407206683228 5.95286747422359))")
+                    let first = "-74.19407206683228 7.82955159047398"
+                    let last = "-73.12712205152350 7.82955159047398"
                     for start, endpoint, reversed in [ first, last, false; last, first, true ] do
                         let line = geometry $"LINESTRING({start},{endpoint})"
-                        match call "ST_Intersection" [ line; area ] with
-                        | VGeometry { Shape = GLineString [ firstPoint; lastPoint ] } ->
-                            let original, cut = if reversed then lastPoint, firstPoint else firstPoint, lastPoint
-                            Expect.equal (fst original) 72.54256811312486 "the fragment retains the original endpoint"
-                            Expect.isLessThan (abs (fst cut - 72.54256819438783)) 1e-10 "the clip turn ends the fragment"
-                        | actual -> failtestf "expected only the clipped fragment, got %A" actual
+                        for left, right in [ line, area; area, line ] do
+                            match call "ST_Intersection" [ left; right ] with
+                            | VGeometry { Shape = GLineString [ firstPoint; lastPoint ] } ->
+                                let cut, original = if reversed then lastPoint, firstPoint else firstPoint, lastPoint
+                                Expect.equal original (-73.12712205152350, 7.82955159047398) "the fragment retains the original endpoint"
+                                Expect.isLessThan (abs (fst cut - (-73.12712209704166))) 1e-10 "the clip turn bounds the fragment"
+                            | actual -> failtestf "expected only the clipped fragment, got %A" actual
 
                     let diagonalArea =
                         geometry (
@@ -1076,7 +1077,7 @@ let tests =
                     let axis = VString "axis-order=long-lat"
                     let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
                     for origin, expected in
-                        [ 10.0, [ 12.236578; 10.665219; 10.403067 ]
+                        [ 11.2, [ 13.436578; 14.268186; 11.865219; 11.603067 ]
                           177.03, [ 179.266578; -179.901814; 177.695219; 177.433067 ] ] do
                         let position (offset, latitude) =
                             let longitude = origin + offset
