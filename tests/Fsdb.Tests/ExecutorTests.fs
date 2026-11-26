@@ -19871,8 +19871,18 @@ let tests =
                     let store = newStore ()
                     let exterior = "POLYGON((0 0,0 3,3 3,3 0,0 0))"
                     let hole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(0.5 0.5,3.5 0.5,3.5 3.5,0.5 3.5,0.5 0.5))"
+                    let nearHole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,3 1,3 3,1 3,1 1))"
+                    let descendingArea =
+                        "POLYGON((-31.92243653708054 98.06618357864312,-31.92243653708054 100.45115776347663,-30.21909824610001 100.45115776347663,-30.21909824610001 98.06618357864312,-31.92243653708054 98.06618357864312),(-31.49660196433541 98.66242712485150,-30.64493281884515 98.66242712485150,-30.64493281884515 99.85491421726826,-31.49660196433541 99.85491421726826,-31.49660196433541 98.66242712485150))"
                     let cases =
-                        [ "LINESTRING(-1 1,4 1)", exterior, [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                        [ "LINESTRING(3 2.999,1 2.999)", nearHole, [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(0.100001 -0.1,-0.1 0.100001)", "POLYGON((0 0,0 4,4 4,4 0,0 0))", [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(-30.64493281884515 98.66242736334891,-31.49660196433541 98.66242736334891)", descendingArea, [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(1 2.999,3 2.999)", nearHole, [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(1 2.99999,3 2.99999)", nearHole, [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(1 1.00001,3 1.00001)", nearHole, [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(1 2.99,3 2.99)", nearHole, [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                          "LINESTRING(-1 1,4 1)", exterior, [ Some "1"; Some "0"; Some "0"; Some "0" ]
                           "LINESTRING(1 1,2 2)", exterior, [ Some "0"; Some "0"; Some "1"; Some "1" ]
                           "LINESTRING(4 1,5 1)", exterior, [ Some "0"; Some "0"; Some "0"; Some "0" ]
                           "LINESTRING(-1 1,0 1)", exterior, [ Some "0"; Some "1"; Some "0"; Some "0" ]

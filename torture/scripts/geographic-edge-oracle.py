@@ -1,4 +1,4 @@
-"""Compare sampled EPSG 4326 line/polygon boundaries with native MySQL 8.4.11.
+"""Compare geographic line/polygon boundaries with native MySQL 8.4.11.
 
 Build Fsdb.Cli in Release first. Requires native mysqld/mysqladmin and PyMySQL.
 The servers and data directories are disposable; only mismatches are printed.
@@ -29,9 +29,9 @@ def connect(**options):
     raise RuntimeError("database server did not become ready")
 
 
-def result(connection, line, polygon):
-    shape = f"ST_GeomFromText('{line}',4326)"
-    area = f"ST_GeomFromText('{polygon}',4326)"
+def result(connection, line, polygon, srid=4326):
+    shape = f"ST_GeomFromText('{line}',{srid})"
+    area = f"ST_GeomFromText('{polygon}',{srid})"
     sql = (
         f"SELECT ST_Crosses({shape},{area}),ST_Touches({shape},{area}),"
         f"ST_Within({shape},{area}),ST_Contains({area},{shape}),"
@@ -128,11 +128,8 @@ def cases():
         for delta in (0.01, 0.1, 1.0):
             for excess in (0.000001, 0.0001, 0.01):
                 near = delta + excess
-                yield (
-                    f"LINESTRING({latitude_shift - delta} {near},"
-                    f"{latitude_shift + near} {-delta})",
-                    polygon,
-                )
+                line = f"LINESTRING({latitude_shift - delta} {near},{latitude_shift + near} {-delta})"
+                yield line, polygon
     yield (
         "LINESTRING(-1 0,8 0)",
         "MULTIPOLYGON(((0 0,0 3,3 3,3 0,0 0)),((5 -1,5 1,7 1,7 -1,5 -1)))",
@@ -177,6 +174,49 @@ def cases():
             yield line, shifted_polygon
 
 
+def reverse_line(line):
+    points = line.removeprefix("LINESTRING(").removesuffix(")")
+    return "LINESTRING(" + ",".join(reversed(points.split(","))) + ")"
+
+
+def seeded_relation_cases():
+    def coordinates(origin, size, vertices):
+        latitude, longitude = origin
+        height, width = size
+        return (
+            "("
+            + ",".join(
+                f"{latitude + height * x:.14f} {longitude + width * y:.14f}"
+                for x, y in vertices
+            )
+            + ")"
+        )
+
+    rng = random.Random(148731)
+    for _ in range(500):
+        origin = rng.uniform(-76, 76), rng.uniform(-174, 174)
+        size = rng.uniform(0.04, 3.5), rng.uniform(0.04, 3.5)
+        outer = coordinates(origin, size, ((0, 0), (0, 1), (1, 1), (1, 0), (0, 0)))
+        inner = coordinates(
+            origin,
+            size,
+            ((0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75), (0.25, 0.25)),
+        )
+        polygon = f"POLYGON({outer},{inner})"
+
+        random_segment = [
+            (rng.uniform(-0.8, 1.8), rng.uniform(-0.8, 1.8)) for _ in range(2)
+        ]
+        yield f"LINESTRING{coordinates(origin, size, random_segment)}", polygon
+
+        epsilon = rng.choice([-1, 1]) * rng.choice([1e-7, 1e-5, 1e-3, 0.03])
+        longitude_fraction = rng.choice([0.25, 0.75, 0.5]) + epsilon
+        near_hole = [(0.25, longitude_fraction), (0.75, longitude_fraction)]
+        if rng.randrange(2):
+            near_hole.reverse()
+        yield f"LINESTRING{coordinates(origin, size, near_hole)}", polygon
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -188,6 +228,22 @@ def main():
         "--compare-overlays",
         action="store_true",
         help="show both engines' intersection geometry for mismatching lines",
+    )
+    parser.add_argument(
+        "--reverse-lines",
+        action="store_true",
+        help="reverse each source line before checking its directed relations",
+    )
+    parser.add_argument(
+        "--seeded-relations",
+        action="store_true",
+        help="compare 1,000 seeded lines against polygons with holes",
+    )
+    parser.add_argument(
+        "--srid",
+        type=int,
+        default=4326,
+        help="SRID for the line relation cases (point controls use EPSG 4326)",
     )
     args = parser.parse_args()
     if not FSDB.exists():
@@ -253,20 +309,26 @@ def main():
 
         count = 0
         mismatches = []
-        for line, polygon in cases():
+        line_cases = seeded_relation_cases() if args.seeded_relations else cases()
+        for line, polygon in line_cases:
+            if args.reverse_lines:
+                line = reverse_line(line)
             count += 1
-            expected = result(mysql_connection, line, polygon)
-            actual = result(fsdb_connection, line, polygon)
+            expected = result(mysql_connection, line, polygon, args.srid)
+            actual = result(fsdb_connection, line, polygon, args.srid)
             if actual != expected:
                 mismatches.append((line, polygon, expected, actual))
         print(f"{count} cases; {len(mismatches)} mismatches")
         for mismatch in mismatches:
             print(mismatch)
             line, polygon, _, _ = mismatch
-            shape = f"ST_GeomFromText('{line}',4326)"
-            area = f"ST_GeomFromText('{polygon}',4326)"
+            shape = f"ST_GeomFromText('{line}',{args.srid})"
+            area = f"ST_GeomFromText('{polygon}',{args.srid})"
             if args.trace_first_line_mismatch and mismatch == mismatches[0]:
-                for label, connection in (("MySQL", mysql_connection), ("fsdb", fsdb_connection)):
+                for label, connection in (
+                    ("MySQL", mysql_connection),
+                    ("fsdb", fsdb_connection),
+                ):
                     for fraction in (0, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 0.001):
                         point = f"ST_LineInterpolatePoint({shape},{fraction})"
                         with connection.cursor() as cursor:
@@ -288,7 +350,9 @@ def main():
                 print("fsdb distance", cursor.fetchone())
                 if args.compare_overlays:
                     try:
-                        cursor.execute(f"SELECT ST_AsText(ST_Intersection({shape},{area}))")
+                        cursor.execute(
+                            f"SELECT ST_AsText(ST_Intersection({shape},{area}))"
+                        )
                         print("fsdb intersection", cursor.fetchone())
                     except pymysql.MySQLError as error:
                         print("fsdb intersection error", error.args)

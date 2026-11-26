@@ -576,7 +576,7 @@ limited derived sources and limited or `TEMPTABLE` views use the exposed alias.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [current edge audit](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#reduced-length-operation-order) matches all 100 seeded point-to-line distances, all 36 added short-corner crossings, and all 189 near-hole point distances, no point relation mismatches, no mismatch across four near-exterior controls or 49 polar-corner points, and 11 line relation mismatches across 448 cases; near-tangent crossings, unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
+| Remaining spatial behavior | geographic point-set crossing of lines and polygons now uses member positions; [geographic line/line crossing, touching, overlap, containment, and equality](torture/findings/2026-10-11-geographic-line-topology-oracle.md) now cover audited cases; [geographic line/polygon crossing, touching, and containment](torture/findings/2026-10-11-geographic-line-polygon-topology.md) also cover audited cases; [geographic polygon/polygon topology](torture/findings/2026-10-11-geographic-polygon-topology.md) covers audited overlap, containment, touching, and equality; the [current edge audit](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#reduced-length-operation-order) matches all 100 seeded point-to-line distances, all 36 added short-corner crossings, and all 189 near-hole point distances, no point relation mismatches, no mismatch across four near-exterior controls or 49 polar-corner points, and no line relation mismatches across 448 cases in each direction; 13 differences remain across 1,000 seeded line/area cases, alongside broader near-tangent crossings and unsampled geodesic path deviations, other non-point topology, and reference systems beyond the audited EPSG subset remain | low |
 
 The [current-head overlay check](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#current-head-overlay-check)
 confirms eleven line mismatches. MySQL returns geographic
@@ -3213,8 +3213,10 @@ implementation effort:
    The coordinate-side line/polygon crossing candidates now retain ordered
    fractions, interpolated points, and boundary segments for the relation
    predicates. The overlay uses geodesic crossings and returns the short
-   line fragments in those cases. The 11/448 `Crosses` versus `Touches`
-   residual remains.
+   line fragments in those cases. The [directed first-turn refinement](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#directed-proper-turns-in-linearea-predicates)
+   closes the 11 original near-hole relation differences and four reverse-line
+   differences. All 448 line/area fixtures now match in each direction.
+   The wider seeded set still differs on 13 of 1,000 relations.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
 

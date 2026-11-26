@@ -39,6 +39,9 @@ let private encodedStrategyLength = strategyCodeLength + sizeof<double>
 let private radians degrees = degrees * Math.PI / 180.0
 let private mysqlRadians degrees = degrees * geographicRadiansPerDegree
 
+let private geographicPointRadians (latitude, longitude) =
+    mysqlRadians latitude, mysqlRadians longitude
+
 let internal planarPointDistance (firstX: float, firstY: float) (secondX: float, secondY: float) =
     let deltaX, deltaY = secondX - firstX, secondY - firstY
     sqrt (deltaX * deltaX + deltaY * deltaY)
@@ -457,6 +460,9 @@ let private sampleGeographicSegment referenceSystem start endpoint =
 let private boostGeoEqual first second =
     abs (first - second) <= (Math.BitIncrement(1.0) - 1.0) * max 1.0 (max (abs first) (abs second))
 
+let private equalGeographicCoordinates (latitude, longitude) (otherLatitude, otherLongitude) =
+    boostGeoEqual latitude otherLatitude && boostGeoEqual longitude otherLongitude
+
 let private normalizedLongitude delta =
     let value = delta % 360.0
     if value > 180.0 then value - 360.0
@@ -472,6 +478,11 @@ let private normalizedLongitudeRadians delta =
     if value > Math.PI then value - period
     elif value <= -Math.PI then value + period
     else value
+
+let private geographicAzimuthSide azimuth baseline =
+    let delta = normalizedLongitudeRadians (azimuth - baseline)
+    if boostGeoEqual delta 0.0 || boostGeoEqual (abs delta) Math.PI then 0
+    else -Math.Sign delta
 
 let private longitudeDistanceRadians first second = normalizedLongitudeRadians (second - first)
 let private longitudeEqualRadians first second = boostGeoEqual (longitudeDistanceRadians first second) 0.0
@@ -525,6 +536,13 @@ let private geographicRingAreaSign referenceSystem ring =
             if sum > 0.0 then -polar else polar
     // Boost's counterclockwise polygon trait negates the ring strategy result.
     -area
+
+let private orientGeographicPolygonRings referenceSystem =
+    let orient hole ring =
+        let area = geographicRingAreaSign referenceSystem ring
+        if (hole && area > 0.0) || (not hole && area < 0.0) then List.rev ring else ring
+
+    List.mapi (fun index ring -> orient (index > 0) ring)
 
 let private geographicRingContains referenceSystem includeBoundary point ring =
     let flattening = referenceSystem.InverseFlattening |> Option.map (fun value -> 1.0 / value) |> Option.defaultValue 0.0
@@ -720,27 +738,26 @@ let private geographicSegmentsShareEndpoint (firstStart, firstEnd) (secondStart,
     firstStart = secondStart || firstStart = secondEnd
     || firstEnd = secondStart || firstEnd = secondEnd
 
+let private geographicIntersectionSpheroid referenceSystem =
+    let major = referenceSystem.SemiMajorAxis.Value
+    let minor = major * (1.0 - 1.0 / referenceSystem.InverseFlattening.Value)
+    let flattening = 1.0 - minor / major
+    { referenceSystem with SemiMajorAxis = Some 1.0; InverseFlattening = Some(1.0 / flattening) }, flattening
+
 let private tryGeographicSegmentCrossing referenceSystem first second =
     let firstStart, firstEnd = first
     let secondStart, secondEnd = second
     if geographicSegmentsShareEndpoint first second then None
     else
-        let major = referenceSystem.SemiMajorAxis.Value
-        let minor = major * (1.0 - 1.0 / referenceSystem.InverseFlattening.Value)
-        let flattening = 1.0 - minor / major
-        let normalized = { referenceSystem with SemiMajorAxis = Some 1.0; InverseFlattening = Some(1.0 / flattening) }
+        let normalized, flattening = geographicIntersectionSpheroid referenceSystem
         let endpoints start endpoint =
-            let radians (latitude, longitude) = mysqlRadians latitude, mysqlRadians longitude
             let start, endpoint = if fst start > fst endpoint then endpoint, start else start, endpoint
-            radians start, radians endpoint
+            geographicPointRadians start, geographicPointRadians endpoint
         let a, b = endpoints firstStart firstEnd
         let c, d = endpoints secondStart secondEnd
         let azimuth start endpoint = geographicSegmentAzimuthsRadians flattening start endpoint |> fst
         let firstAzimuth, secondAzimuth = azimuth a b, azimuth c d
-        let side baseline start point =
-            let delta = normalizedLongitudeRadians (azimuth start point - baseline)
-            if boostGeoEqual delta 0.0 || boostGeoEqual (abs delta) Math.PI then 0
-            else Math.Sign delta
+        let side baseline start point = geographicAzimuthSide (azimuth start point) baseline
         if side firstAzimuth a c * side firstAzimuth a d >= 0
            || side secondAzimuth c a * side secondAzimuth c b >= 0 then None
         else
@@ -1140,7 +1157,7 @@ let internal geographicBoundaryEvents referenceSystem boundarySegments (start, e
             else None
     boundarySegments |> List.choose crossingEvent |> List.sortBy _.Fraction
 
-let internal geographicLinePolygonTopology referenceSystem lines polygons =
+let private sampleGeographicLinePolygonTopology referenceSystem lines polygons =
     let boundarySegments = polygons |> List.collect id |> List.collect List.pairwise
     let exteriorBoundarySegments = polygons |> List.choose List.tryHead |> List.collect List.pairwise
     let lineSegments = lines |> List.collect List.pairwise
@@ -1225,6 +1242,75 @@ let internal geographicLinePolygonTopology referenceSystem lines polygons =
           Crosses = intersects && hasInterior && hasOutside
           Touches = intersects && not hasInterior
           LineWithinPolygon = hasInterior && not hasOutside }
+
+let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segment) rings sampled =
+    let flattening = 1.0 / referenceSystem.InverseFlattening.Value
+    let side first last query =
+        if equalGeographicCoordinates first last
+           || equalGeographicCoordinates first query
+           || equalGeographicCoordinates last query then 0
+        else
+            let azimuth point = geographicSegmentAzimuthsRadians flattening first point |> fst
+            geographicAzimuthSide (azimuth query) (azimuth last)
+
+    let edges =
+        orientGeographicPolygonRings referenceSystem rings
+        |> List.collect (List.rev >> List.pairwise)
+    let crossings =
+        edges
+        |> Seq.choose (fun edge ->
+            tryGeographicSegmentCrossing referenceSystem segment edge
+            |> Option.map (fun point -> edge, point))
+        |> Seq.truncate 2
+        |> Seq.toList
+
+    match crossings with
+    | [ ((first, last) as edge), point ] ->
+        let a, b = geographicPointRadians first, geographicPointRadians last
+        let sourceStart, sourceEnd = geographicPointRadians start, geographicPointRadians endpoint
+        let endpointContact =
+            edges |> List.exists (fun other ->
+                other <> edge && not (List.isEmpty (geographicSharedSegmentEndpoints referenceSystem segment other)))
+        if endpointContact || equalGeographicCoordinates point a || equalGeographicCoordinates point b then None
+        else
+            // The incoming interval uses two sub-arcs of the directed ring edge.
+            // Its side can differ from an independent point-in-polygon test.
+            let incoming = side a point sourceStart
+            let onward = side a point b
+            let fromInside =
+                if incoming * onward = -1 then incoming = -1
+                else side point b sourceStart = -1
+            let spheroid, _ = geographicIntersectionSpheroid referenceSystem
+            let distance = geographicInverseDistanceRadians false spheroid
+            // The intersection strategy orders segments by latitude. For a
+            // reversed segment it subtracts the cut distance from the total.
+            let startDistance =
+                if fst sourceStart > fst sourceEnd then distance sourceEnd sourceStart - distance sourceEnd point
+                else distance sourceStart point
+
+            match side a b sourceEnd with
+            // An exit at a rounded start does not establish an interior
+            // interval. An interior entry establishes one even if sampling
+            // skips it beside a vertex.
+            | 1 when sampled.Crosses && startDistance = 0.0 && not fromInside ->
+                Some { sampled with Crosses = false; Touches = true }
+            | -1 when not sampled.Intersects && startDistance > 0.0 && not fromInside ->
+                Some
+                    { Intersects = true
+                      Crosses = true
+                      Touches = false
+                      LineWithinPolygon = false }
+            | _ -> None
+    | _ -> None
+
+let internal geographicLinePolygonTopology referenceSystem lines polygons =
+    let sampled = sampleGeographicLinePolygonTopology referenceSystem lines polygons
+    let refined =
+        match lines, polygons with
+        | [ [ start; endpoint ] ], [ rings ] when sampled.Crosses || not sampled.Intersects ->
+            tryGeographicSingleTurn referenceSystem (start, endpoint) rings sampled
+        | _ -> None
+    Option.defaultValue sampled refined
 
 let internal geographicPolygonPolygonDistance referenceSystem firstPolygons secondPolygons =
     let firstRings = firstPolygons |> List.collect id
@@ -1436,12 +1522,6 @@ let internal overlay kind (first: Geometry) (second: Geometry) =
 
     attempt first.Srid (fun () -> OverlayNGRobust.Overlay(toNts first, toNts second, spatialFunction))
 
-let private geographicPointRadians (latitude, longitude) =
-    mysqlRadians latitude, mysqlRadians longitude
-
-let private equalGeographicCoordinates (latitude, longitude) (otherLatitude, otherLongitude) =
-    boostGeoEqual latitude otherLatitude && boostGeoEqual longitude otherLongitude
-
 // Points compare in radians. A cell is wider than the relative comparison
 // tolerance anywhere in the geographic coordinate domain.
 let private geographicPointIndex () =
@@ -1620,13 +1700,6 @@ let private overlayGeographicPoints kind firstShape (first: (float * float) list
             except (GMultiPoint included, included) (GMultiPoint shared, shared)
 
     geographicPointResult points
-
-let private orientGeographicPolygonRings referenceSystem =
-    let orient hole ring =
-        let area = geographicRingAreaSign referenceSystem ring
-        if (hole && area > 0.0) || (not hole && area < 0.0) then List.rev ring else ring
-
-    List.mapi (fun index ring -> orient (index > 0) ring)
 
 let private orientGeographicPolygons referenceSystem =
     let polygon = orientGeographicPolygonRings referenceSystem

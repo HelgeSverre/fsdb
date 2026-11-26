@@ -429,6 +429,35 @@ line relation. The point-in-polygon results and the intersection WKT
 still follow their respective strategies.
 [Boost 1.84 line/area relation](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/relate/linear_areal.hpp#L235-L320).
 
+## Directed proper turns in line/area predicates
+
+For a two-vertex line with one proper turn against a polygon, the line
+relation checks the incoming interval against that directed turn. A
+near-start exit whose fraction rounds to zero reports a touch when the
+incoming side is outside. A proper entry with an exterior incoming side
+can establish a crossing when sampling misses the small interval beside
+a corner. The intersection strategy orders each segment by latitude.
+For a descending line, the source distance is the ordered segment length
+minus the ordered distance to the turn. Computing that distance directly
+from the original start can round a genuine crossing to zero.
+
+Native MySQL 8.4.11 and Release Fsdb matched all 448 structured line/area
+cases in each direction. The preceding revision disagreed on 11 forward
+and four reversed cases. MySQL changed its result when direction reversed
+in 13 cases. The point relation and distance lanes continued to match.
+A wider seeded set of 1,000 EPSG 4326 relations improved from 20
+differences to 13. Reversing that set reduced differences from 21 to 9.
+The forward fixtures in EPSG 4258 and EPSG 4267 each improved from 21 to 14.
+Each sampled difference in the candidate also occurred in the baseline.
+The remaining cases include near-endpoint classifications where Boost
+rejects a turn and cases where the two engines differ on its fraction.
+[Boost 1.84 geographic segment strategy](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
+
+The structured reverse and seeded checks use `--reverse-lines` and
+`--seeded-relations`. The extra reference systems use `--srid 4258`
+and `--srid 4267` with the seeded mode.
+[Geographic edge oracle](../scripts/geographic-edge-oracle.py).
+
 ## Current-head overlay check
 
 A current-head rerun still finds 11/448 geographic line/polygon relation
