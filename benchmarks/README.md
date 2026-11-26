@@ -266,15 +266,17 @@ These tables summarize immutable, linked result artifacts. They are historical
 measurements, not claims about the current branch; use a fresh run for a current
 comparison.
 
-The [native peer benchmark at `baf72b20`](results/baf72b20-peer-refresh.md)
+The [native peer benchmark at `78c40bbe`](results/78c40bbe-peer-refresh.md)
 compares Fsdb with MySQL, MariaDB, and Dolt across verified point reads,
-durable updates, joined views, correlated aggregates, spatial predicates,
-and CJK searches. The
+durable updates, joined views, correlated aggregates, spatial predicates
+and overlays, and CJK searches. The
+[previous native run](results/baf72b20-peer-refresh.md) measured the same
+load fixtures before the recent lock-scheduling and spatial changes. The
 [earlier GC control](results/ac7d4a67-peer-comparison.md#fsdb-garbage-collection-control)
 compares default and Server GC for durable Fsdb point reads. The
 [WAL attachment control](results/ddbd4602-peer-comparison.md#wal-attachment-control)
 compares point reads with and without WAL on the same Fsdb build. The
-[previous native run](results/cc2cb5f6-peer-comparison.md) includes the
+[older native run](results/cc2cb5f6-peer-comparison.md) includes the
 same load fixtures. The
 [intermediate SQL refresh](results/2026-11-26-spatial-cjk-refresh.md)
 covers the geographic and ngram changes against MySQL. The

@@ -3,6 +3,7 @@
 open System
 open System.Diagnostics
 open System.Globalization
+open System.Text.RegularExpressions
 open MySqlConnector
 
 let arguments = fsi.CommandLineArgs |> Array.skip 1
@@ -16,6 +17,7 @@ let modes =
       "projected-range-controls"
       "projected-filter-controls"
       "correlated-residual-controls"
+      "overlay-controls"
       "edge-controls" ]
 
 let engine, port, pass, mode =
@@ -312,6 +314,34 @@ let geographicTurns () =
             let query = $"SELECT 1000*ST_Intersects({line},{area}) + 100*ST_Crosses({line},{area}) + 10*ST_Touches({line},{area}) + ST_Within({line},{area})"
             measure lane 150 (fun () -> scalar query |> require lane expected))
 
+let geographicOverlays () =
+    let geometry wkt = $"ST_GeomFromText('{wkt}',4326)"
+    let box = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
+    let nearPole = "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))"
+    let cases =
+        [ "geographic-overlay-corner", box, "LINESTRING(-0.01 0.010001,0.010001 -0.01)", "LINESTRING", [ -0.01; 0.010001; 0.0000010557728948424692; 0. ]
+          "geographic-overlay-polar-touch", nearPole, "LINESTRING(86 1.00001,88 1.00001)", "POINT", [ 86.; 1. ] ]
+
+    let ordered = if pass % 2 = 0 then List.rev cases else cases
+    for lane, area, line, kind, expected in ordered do
+        probe lane (fun () ->
+            let query = $"SELECT ST_AsText(ST_Intersection({geometry line},{geometry area}))"
+
+            measure lane 150 (fun () ->
+                use statement = command query
+                let wkt = string (statement.ExecuteScalar())
+                let shape = Regex.Match(wkt, @"^([A-Z]+)(?:\s*\(([^()]*)\)| EMPTY)$")
+                let coordinates =
+                    Regex.Matches(shape.Groups[2].Value, @"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+                    |> Seq.map (fun value -> Double.Parse(value.Value, CultureInfo.InvariantCulture))
+                    |> Seq.toList
+
+                require lane kind shape.Groups[1].Value
+                require lane expected.Length coordinates.Length
+                List.iter2 (fun wanted actual ->
+                    if abs (wanted - actual) > 1e-10 then
+                        raise (ResultMismatch $"{lane} expected coordinate {wanted} got {actual}")) expected coordinates))
+
 let fullText cases =
     probe "cjk-ngram" (fun () ->
         write "CREATE TABLE articles (id INT PRIMARY KEY, body VARCHAR(100) NOT NULL, FULLTEXT KEY ix_body(body) WITH PARSER ngram) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
@@ -350,7 +380,7 @@ try
     write $"CREATE DATABASE {database}"
     try
         write $"USE {database}"
-        if mode <> "edge-controls" then seedAccounts ()
+        if mode <> "edge-controls" && mode <> "overlay-controls" then seedAccounts ()
 
         let workloads =
             if mode = "range-controls" then [ readRangeControls ]
@@ -361,6 +391,7 @@ try
                 write "CREATE VIEW positive_parent AS SELECT id, value FROM parent WHERE value > 0 WITH CASCADED CHECK OPTION"
                 [ viewPrefixUpdates ]
             elif mode = "edge-controls" then [ geographicTurns; fullTextOperators ]
+            elif mode = "overlay-controls" then [ geographicOverlays ]
             else [ readQueries; viewUpdates; spatial; fullTextPhrases ]
 
         let ordered = if pass % 2 = 0 then List.rev workloads else workloads

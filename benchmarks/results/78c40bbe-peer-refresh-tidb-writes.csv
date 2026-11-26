@@ -1,0 +1,9 @@
+engine,pass,workers,workload,status,ops_per_second,p99_ms,retries,warm_acks,warm_committed,timed_acks,timed_committed
+TiDB,1,1,disjoint,ok,1411.298,4.374500,0,1021,1021,8468,8468
+TiDB,1,1,hot-row,ok,1215.892,19.520700,0,2317,2317,7305,7305
+TiDB,1,16,disjoint,ok,7717.577,21.902200,0,8340,8340,46315,46315
+TiDB,1,16,hot-row,ok,2029.590,28.630700,0,3180,3180,12189,12189
+TiDB,2,16,hot-row,ok,1254.493,35.544000,0,2340,2340,7538,7538
+TiDB,2,16,disjoint,ok,6527.735,22.042100,0,7872,7872,39172,39172
+TiDB,2,1,hot-row,ok,1714.094,2.453000,0,2831,2831,10285,10285
+TiDB,2,1,disjoint,ok,1867.679,0.963100,0,3202,3202,11207,11207

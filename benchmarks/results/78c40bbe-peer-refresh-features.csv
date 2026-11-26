@@ -1,0 +1,173 @@
+engine,pass,suite,workload,status,samples,p50_ms,p95_ms,detail
+Fsdb,1,features,correlated-equality,ok,60,2.368800,3.052800,
+Fsdb,1,features,correlated-range,ok,60,4.908800,11.850600,
+Fsdb,1,features,joined-view-update,ok,60,1.027300,1.194300,
+Fsdb,1,features,spatial-mbr,ok,150,0.248400,0.290500,
+Fsdb,1,features,spatial-geographic,ok,150,0.145200,0.183500,
+Fsdb,1,features,cjk-ngram-japanese,ok,100,0.655700,0.725600,
+Fsdb,1,features,cjk-ngram-chinese,ok,100,0.713500,0.810300,
+Fsdb,1,features,cjk-ngram-korean,ok,100,0.616700,0.694700,
+Fsdb,1,correlated-residual-controls,derived-count,ok,30,3.171700,16.232400,
+Fsdb,1,correlated-residual-controls,derived-column-equality,ok,30,4.183600,12.439700,
+Fsdb,1,correlated-residual-controls,nested-or-sum,ok,30,4.752000,11.972300,
+Fsdb,1,correlated-residual-controls,cte-not-in-count,ok,30,3.895200,11.594900,
+Fsdb,1,correlated-residual-controls,outer-comparison-or-sum,ok,30,4.619200,12.130300,
+Fsdb,1,prefix-controls,joined-view-prefix-500,ok,60,1.110800,1.250300,
+Fsdb,1,prefix-controls,joined-view-prefix-5000,ok,60,1.118600,1.229300,
+Fsdb,1,edge-controls,geographic-mixed-turn-forward,ok,150,2.050000,3.106500,
+Fsdb,1,edge-controls,geographic-mixed-turn-reverse,ok,150,1.882700,1.972500,
+Fsdb,1,edge-controls,geographic-near-hole-touch,ok,150,1.829800,1.963600,
+Fsdb,1,edge-controls,geographic-near-hole-cross,ok,150,1.784100,1.881400,
+Fsdb,1,edge-controls,cjk-ngram-wildcard,ok,100,0.385100,0.495200,
+Fsdb,1,edge-controls,cjk-ngram-exclude-phrase,ok,100,0.613900,0.747900,
+Fsdb,1,overlay-controls,geographic-overlay-corner,ok,150,0.484700,0.549500,
+Fsdb,1,overlay-controls,geographic-overlay-polar-touch,mismatch,0,,,"geographic-overlay-polar-touch expected ""POINT"" got ""GEOMETRYCOLLECTION"""
+Fsdb,2,features,cjk-ngram-japanese,ok,100,0.623400,0.702600,
+Fsdb,2,features,cjk-ngram-chinese,ok,100,0.659300,0.717800,
+Fsdb,2,features,cjk-ngram-korean,ok,100,0.592700,0.719400,
+Fsdb,2,features,spatial-mbr,ok,150,0.207200,0.286600,
+Fsdb,2,features,spatial-geographic,ok,150,0.136900,0.207300,
+Fsdb,2,features,joined-view-update,ok,60,1.052900,1.215800,
+Fsdb,2,features,correlated-range,ok,60,3.272700,8.118200,
+Fsdb,2,features,correlated-equality,ok,60,1.733600,1.861900,
+Fsdb,2,correlated-residual-controls,outer-comparison-or-sum,ok,30,7.684000,15.294000,
+Fsdb,2,correlated-residual-controls,cte-not-in-count,ok,30,5.711100,10.608700,
+Fsdb,2,correlated-residual-controls,nested-or-sum,ok,30,5.187900,11.518200,
+Fsdb,2,correlated-residual-controls,derived-column-equality,ok,30,4.031100,9.068400,
+Fsdb,2,correlated-residual-controls,derived-count,ok,30,3.117700,9.289300,
+Fsdb,2,prefix-controls,joined-view-prefix-5000,ok,60,1.166400,1.369600,
+Fsdb,2,prefix-controls,joined-view-prefix-500,ok,60,1.141700,1.396700,
+Fsdb,2,edge-controls,cjk-ngram-exclude-phrase,ok,100,0.805300,0.912100,
+Fsdb,2,edge-controls,cjk-ngram-wildcard,ok,100,0.505000,0.578700,
+Fsdb,2,edge-controls,geographic-near-hole-cross,ok,150,3.153300,3.427100,
+Fsdb,2,edge-controls,geographic-near-hole-touch,ok,150,1.948600,2.161000,
+Fsdb,2,edge-controls,geographic-mixed-turn-reverse,ok,150,2.011400,2.150600,
+Fsdb,2,edge-controls,geographic-mixed-turn-forward,ok,150,2.001200,2.103700,
+Fsdb,2,overlay-controls,geographic-overlay-polar-touch,mismatch,0,,,"geographic-overlay-polar-touch expected ""POINT"" got ""GEOMETRYCOLLECTION"""
+Fsdb,2,overlay-controls,geographic-overlay-corner,ok,150,0.247500,0.296000,
+MySQL,1,features,correlated-equality,ok,60,1.417500,1.448500,
+MySQL,1,features,correlated-range,ok,60,1.740200,1.834600,
+MySQL,1,features,joined-view-update,ok,60,0.175000,0.301000,
+MySQL,1,features,spatial-mbr,ok,150,0.125000,0.188900,
+MySQL,1,features,spatial-geographic,ok,150,0.100300,1.165500,
+MySQL,1,features,cjk-ngram-japanese,ok,100,0.476900,0.598700,
+MySQL,1,features,cjk-ngram-chinese,ok,100,0.502900,0.613300,
+MySQL,1,features,cjk-ngram-korean,ok,100,0.493900,0.608700,
+MySQL,1,correlated-residual-controls,derived-count,ok,30,1.739100,1.839700,
+MySQL,1,correlated-residual-controls,derived-column-equality,ok,30,2.411300,2.533500,
+MySQL,1,correlated-residual-controls,nested-or-sum,ok,30,2.523800,2.685100,
+MySQL,1,correlated-residual-controls,cte-not-in-count,ok,30,2.536200,2.692400,
+MySQL,1,correlated-residual-controls,outer-comparison-or-sum,ok,30,2.567500,2.614600,
+MySQL,1,prefix-controls,joined-view-prefix-500,ok,60,0.134100,0.189200,
+MySQL,1,prefix-controls,joined-view-prefix-5000,ok,60,0.138200,0.193100,
+MySQL,1,edge-controls,geographic-mixed-turn-forward,ok,150,0.197100,0.243600,
+MySQL,1,edge-controls,geographic-mixed-turn-reverse,ok,150,0.150700,0.193100,
+MySQL,1,edge-controls,geographic-near-hole-touch,ok,150,0.134600,0.173700,
+MySQL,1,edge-controls,geographic-near-hole-cross,ok,150,0.134800,0.175400,
+MySQL,1,edge-controls,cjk-ngram-wildcard,ok,100,0.332500,0.392300,
+MySQL,1,edge-controls,cjk-ngram-exclude-phrase,ok,100,0.458700,0.554200,
+MySQL,1,overlay-controls,geographic-overlay-corner,ok,150,0.097800,0.128000,
+MySQL,1,overlay-controls,geographic-overlay-polar-touch,ok,150,0.098800,0.106700,
+MySQL,2,features,cjk-ngram-japanese,ok,100,0.460200,0.505000,
+MySQL,2,features,cjk-ngram-chinese,ok,100,0.502300,0.577500,
+MySQL,2,features,cjk-ngram-korean,ok,100,0.463200,0.526600,
+MySQL,2,features,spatial-mbr,ok,150,0.120000,0.165700,
+MySQL,2,features,spatial-geographic,ok,150,0.074200,0.096800,
+MySQL,2,features,joined-view-update,ok,60,0.122900,0.157400,
+MySQL,2,features,correlated-range,ok,60,1.744900,1.812200,
+MySQL,2,features,correlated-equality,ok,60,1.443800,1.495000,
+MySQL,2,correlated-residual-controls,outer-comparison-or-sum,ok,30,2.643700,2.753000,
+MySQL,2,correlated-residual-controls,cte-not-in-count,ok,30,2.615700,2.766800,
+MySQL,2,correlated-residual-controls,nested-or-sum,ok,30,2.662600,2.740700,
+MySQL,2,correlated-residual-controls,derived-column-equality,ok,30,2.562400,2.712000,
+MySQL,2,correlated-residual-controls,derived-count,ok,30,1.810700,1.877200,
+MySQL,2,prefix-controls,joined-view-prefix-5000,ok,60,0.139300,0.204700,
+MySQL,2,prefix-controls,joined-view-prefix-500,ok,60,0.132600,0.191100,
+MySQL,2,edge-controls,cjk-ngram-exclude-phrase,ok,100,0.511000,0.583500,
+MySQL,2,edge-controls,cjk-ngram-wildcard,ok,100,0.362200,0.425200,
+MySQL,2,edge-controls,geographic-near-hole-cross,ok,150,0.169200,0.213900,
+MySQL,2,edge-controls,geographic-near-hole-touch,ok,150,0.132700,0.155500,
+MySQL,2,edge-controls,geographic-mixed-turn-reverse,ok,150,0.143600,0.194400,
+MySQL,2,edge-controls,geographic-mixed-turn-forward,ok,150,0.143400,0.160900,
+MySQL,2,overlay-controls,geographic-overlay-polar-touch,ok,150,0.100700,0.133300,
+MySQL,2,overlay-controls,geographic-overlay-corner,ok,150,0.097300,0.115000,
+MariaDB,1,features,correlated-equality,ok,60,1.036400,1.185900,
+MariaDB,1,features,correlated-range,ok,60,1.139500,1.196600,
+MariaDB,1,features,joined-view-update,ok,60,0.122200,0.130200,
+MariaDB,1,features,spatial-mbr,mismatch,0,,,spatial strict interior matches expected 1L got 9L
+MariaDB,1,features,spatial-geographic,rejected,0,,,1582/42000
+MariaDB,1,features,cjk-ngram,rejected,0,,,1128/HY000
+MariaDB,1,correlated-residual-controls,derived-count,ok,30,1.330300,1.439600,
+MariaDB,1,correlated-residual-controls,derived-column-equality,ok,30,1.653500,1.764300,
+MariaDB,1,correlated-residual-controls,nested-or-sum,ok,30,1.672500,1.778000,
+MariaDB,1,correlated-residual-controls,cte-not-in-count,ok,30,1.595100,1.670000,
+MariaDB,1,correlated-residual-controls,outer-comparison-or-sum,ok,30,1.681700,1.783700,
+MariaDB,1,prefix-controls,joined-view-prefix-500,ok,60,0.133700,0.150300,
+MariaDB,1,prefix-controls,joined-view-prefix-5000,ok,60,0.130700,0.144700,
+MariaDB,1,edge-controls,geographic-mixed-turn-forward,mismatch,0,,,geographic-mixed-turn-forward expected 1010L got 1110L
+MariaDB,1,edge-controls,geographic-mixed-turn-reverse,mismatch,0,,,geographic-mixed-turn-reverse expected 1100L got 1110L
+MariaDB,1,edge-controls,geographic-near-hole-touch,mismatch,0,,,geographic-near-hole-touch expected 1010L got 1110L
+MariaDB,1,edge-controls,geographic-near-hole-cross,mismatch,0,,,geographic-near-hole-cross expected 1100L got 1110L
+MariaDB,1,edge-controls,cjk-ngram,rejected,0,,,1128/HY000
+MariaDB,1,overlay-controls,geographic-overlay-corner,mismatch,0,,,geographic-overlay-corner expected coordinate -0.01 got 9.99999999999582E-07
+MariaDB,1,overlay-controls,geographic-overlay-polar-touch,mismatch,0,,,"geographic-overlay-polar-touch expected ""POINT"" got ""MULTIPOINT"""
+MariaDB,2,features,cjk-ngram,rejected,0,,,1128/HY000
+MariaDB,2,features,spatial-mbr,mismatch,0,,,spatial strict interior matches expected 1L got 9L
+MariaDB,2,features,spatial-geographic,rejected,0,,,1582/42000
+MariaDB,2,features,joined-view-update,ok,60,0.125100,0.158600,
+MariaDB,2,features,correlated-range,ok,60,1.237400,1.292700,
+MariaDB,2,features,correlated-equality,ok,60,1.110200,1.178000,
+MariaDB,2,correlated-residual-controls,outer-comparison-or-sum,ok,30,1.623600,1.727000,
+MariaDB,2,correlated-residual-controls,cte-not-in-count,ok,30,1.585000,1.639700,
+MariaDB,2,correlated-residual-controls,nested-or-sum,ok,30,1.639000,1.723800,
+MariaDB,2,correlated-residual-controls,derived-column-equality,ok,30,1.626900,1.699000,
+MariaDB,2,correlated-residual-controls,derived-count,ok,30,1.309500,1.393600,
+MariaDB,2,prefix-controls,joined-view-prefix-5000,ok,60,0.127500,0.162800,
+MariaDB,2,prefix-controls,joined-view-prefix-500,ok,60,0.117400,0.162400,
+MariaDB,2,edge-controls,cjk-ngram,rejected,0,,,1128/HY000
+MariaDB,2,edge-controls,geographic-near-hole-cross,mismatch,0,,,geographic-near-hole-cross expected 1100L got 1110L
+MariaDB,2,edge-controls,geographic-near-hole-touch,mismatch,0,,,geographic-near-hole-touch expected 1010L got 1110L
+MariaDB,2,edge-controls,geographic-mixed-turn-reverse,mismatch,0,,,geographic-mixed-turn-reverse expected 1100L got 1110L
+MariaDB,2,edge-controls,geographic-mixed-turn-forward,mismatch,0,,,geographic-mixed-turn-forward expected 1010L got 1110L
+MariaDB,2,overlay-controls,geographic-overlay-polar-touch,mismatch,0,,,"geographic-overlay-polar-touch expected ""POINT"" got ""MULTIPOINT"""
+MariaDB,2,overlay-controls,geographic-overlay-corner,mismatch,0,,,geographic-overlay-corner expected coordinate -0.01 got 9.99999999999582E-07
+Dolt,1,features,correlated-equality,ok,60,3.026500,3.736100,
+Dolt,1,features,correlated-range,ok,60,7.215300,8.066600,
+Dolt,1,features,joined-view-update,rejected,0,,,1105/HY000
+Dolt,1,features,spatial-mbr,rejected,0,,,1105/HY000
+Dolt,1,features,spatial-geographic,rejected,0,,,1105/HY000
+Dolt,1,features,cjk-ngram,rejected,0,,,1105/HY000
+Dolt,1,correlated-residual-controls,derived-count,ok,30,12.194700,13.370700,
+Dolt,1,correlated-residual-controls,derived-column-equality,ok,30,12.985400,14.286600,
+Dolt,1,correlated-residual-controls,nested-or-sum,ok,30,12.490300,13.307800,
+Dolt,1,correlated-residual-controls,cte-not-in-count,ok,30,11.708700,12.662800,
+Dolt,1,correlated-residual-controls,outer-comparison-or-sum,ok,30,12.471200,13.373700,
+Dolt,1,prefix-controls,joined-view-prefix-500,rejected,0,,,1105/HY000
+Dolt,1,prefix-controls,joined-view-prefix-5000,rejected,0,,,1105/HY000
+Dolt,1,edge-controls,geographic-mixed-turn-forward,rejected,0,,,1105/HY000
+Dolt,1,edge-controls,geographic-mixed-turn-reverse,rejected,0,,,1105/HY000
+Dolt,1,edge-controls,geographic-near-hole-touch,rejected,0,,,1105/HY000
+Dolt,1,edge-controls,geographic-near-hole-cross,rejected,0,,,1105/HY000
+Dolt,1,edge-controls,cjk-ngram,rejected,0,,,1105/HY000
+Dolt,1,overlay-controls,geographic-overlay-corner,rejected,0,,,1105/HY000
+Dolt,1,overlay-controls,geographic-overlay-polar-touch,rejected,0,,,1105/HY000
+Dolt,2,features,cjk-ngram,rejected,0,,,1105/HY000
+Dolt,2,features,spatial-mbr,rejected,0,,,1105/HY000
+Dolt,2,features,spatial-geographic,rejected,0,,,1105/HY000
+Dolt,2,features,joined-view-update,rejected,0,,,1105/HY000
+Dolt,2,features,correlated-range,ok,60,7.031400,7.776900,
+Dolt,2,features,correlated-equality,ok,60,2.794900,3.248900,
+Dolt,2,correlated-residual-controls,outer-comparison-or-sum,ok,30,12.506200,13.550900,
+Dolt,2,correlated-residual-controls,cte-not-in-count,ok,30,11.671400,12.953100,
+Dolt,2,correlated-residual-controls,nested-or-sum,ok,30,12.270500,12.984100,
+Dolt,2,correlated-residual-controls,derived-column-equality,ok,30,12.469400,14.851300,
+Dolt,2,correlated-residual-controls,derived-count,ok,30,11.686000,12.599600,
+Dolt,2,prefix-controls,joined-view-prefix-5000,rejected,0,,,1105/HY000
+Dolt,2,prefix-controls,joined-view-prefix-500,rejected,0,,,1105/HY000
+Dolt,2,edge-controls,cjk-ngram,rejected,0,,,1105/HY000
+Dolt,2,edge-controls,geographic-near-hole-cross,rejected,0,,,1105/HY000
+Dolt,2,edge-controls,geographic-near-hole-touch,rejected,0,,,1105/HY000
+Dolt,2,edge-controls,geographic-mixed-turn-reverse,rejected,0,,,1105/HY000
+Dolt,2,edge-controls,geographic-mixed-turn-forward,rejected,0,,,1105/HY000
+Dolt,2,overlay-controls,geographic-overlay-polar-touch,rejected,0,,,1105/HY000
+Dolt,2,overlay-controls,geographic-overlay-corner,rejected,0,,,1105/HY000
