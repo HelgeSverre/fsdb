@@ -7,7 +7,7 @@ and a separate `gate` table. The update probes `gate.id=3` while
 writing through a joined view. The key is absent, and the update
 affects zero rows.
 
-MySQL matched all 49 checks. Fsdb matched 31. The remaining differences
+MySQL matched all 58 checks. Fsdb matched 37. The remaining differences
 are insertions and primary-key moves that succeed on Fsdb while
 MySQL returns lock wait timeout 1205. The oracle rolls back each
 test insert so the next attempt sees the same data.
@@ -52,6 +52,17 @@ back, protection extends to the next surviving record on that side.
 A deletion of a previously committed lower record follows the narrower
 boundary observed above. The Fsdb joined-read path tracks retained row
 IDs and waits on the exact probed key.
+
+### Consistent read views
+
+A consistent read view opened before the deletion of the upper record
+at `5` delays the change in the gap. With that view open, an insert at
+`4` times out and an insert at `6` succeeds after the deletion commits.
+This holds when the gap holder owns the read view and when an independent
+session owns it. After the independent session ends, the insert at `6`
+eventually times out while the gap holder stays open. The oracle allows
+purge time after the reader ends.
+[InnoDB multi-versioning and purge](https://dev.mysql.com/doc/refman/8.4/en/innodb-multi-versioning.html).
 
 ## Prepared XA and restart
 

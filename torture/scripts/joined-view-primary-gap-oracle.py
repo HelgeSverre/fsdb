@@ -6,6 +6,7 @@ The script connects as root without a password and creates a disposable schema.
 
 import os
 from contextlib import ExitStack, contextmanager
+from time import monotonic, sleep
 from uuid import uuid4
 
 import pymysql
@@ -172,6 +173,41 @@ def check(port, mysql):
                 insert(range(7)),
                 expected,
             )
+            execute(writer, "ROLLBACK")
+
+        isolation(admin, "REPEATABLE READ")
+        for view_owner in ("gap holder", "other session"):
+            reset_gate()
+            reader = writer if view_owner == "gap holder" else admin
+            execute(reader, "START TRANSACTION")
+            expect(
+                f"read view opened by {view_owner}",
+                scalar(reader, "SELECT COUNT(*) FROM gate"),
+                4,
+            )
+            if reader is not writer:
+                execute(writer, "START TRANSACTION")
+            expect(f"lookup with {view_owner} read view", outcome(writer, update), 0)
+            expect(
+                f"delete successor with {view_owner} read view",
+                outcome(owner, "DELETE FROM gate WHERE id=5"),
+                1,
+            )
+            expect(
+                f"inserts at 4,6 with {view_owner} read view",
+                insert((4, 6)),
+                (TIMEOUT, 1),
+            )
+            if reader is not writer:
+                execute(reader, "ROLLBACK")
+                deadline = monotonic() + 4
+                result = insert((6,))
+                while result == (1,) and monotonic() < deadline:
+                    sleep(0.05)
+                    result = insert((6,))
+                expect(
+                    "insert at 6 after the independent reader ends", result, (TIMEOUT,)
+                )
             execute(writer, "ROLLBACK")
 
         for label, rows, expected in (
