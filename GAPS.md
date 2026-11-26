@@ -3225,8 +3225,10 @@ implementation effort:
    [Reduced-latitude tangent and rounded turn rejection](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#reduced-latitude-tangent-and-rounded-turn-rejection)
    close the dense offset sweep and the wider forward and reverse WGS 84
    sweeps. [Ordered proper entry and exit cuts](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#interior-interval-between-two-proper-turns)
-   recover the short corner crossing that sampling missed. Six forward
-   and five reverse differences remain in the independent holdout.
+   recover the short corner crossing that sampling missed.
+   [Paired trigonometry and signed cut distances](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#near-coincident-endpoints-and-signed-cut-distances)
+   resolve two near-vertex geometries in both directions. Four forward
+   and three reverse differences remain in the independent holdout.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
 

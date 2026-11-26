@@ -19953,6 +19953,23 @@ let tests =
                                 Expect.equal row [ Some crossing; Some crossing; Some "0"; Some "0" ] line
                             | result -> failtestf "unexpected line topology for {line}: %A" result
 
+                testCase "geographic turns retain the separation from a nearby hole vertex"
+                <| fun _ ->
+                    let store = newStore ()
+                    for polygon, first, last in
+                        [ "POLYGON((-32.70509094861362 -173.67760838979825,-32.70509094861362 -173.00663066532113,-30.56218198660672 -173.00663066532113,-30.56218198660672 -173.67760838979825,-32.70509094861362 -173.67760838979825),(-32.16936370811190 -173.50986395867898,-31.09790922710845 -173.50986395867898,-31.09790922710845 -173.17437509644040,-32.16936370811190 -173.17437509644040,-32.16936370811190 -173.50986395867898))",
+                          "-31.09790922710845 -173.17437516353817", "-32.16936370811190 -173.17437516353817"
+                          "POLYGON((-45.72724884151095 -119.90362220404167,-45.72724884151095 -118.49928781728492,-43.60480673981800 -118.49928781728492,-43.60480673981800 -119.90362220404167,-45.72724884151095 -119.90362220404167),(-45.19663831608771 -119.55253860735247,-44.13541726524124 -119.55253860735247,-44.13541726524124 -118.85037141397410,-45.19663831608771 -118.85037141397410,-45.19663831608771 -119.55253860735247))",
+                          "-44.13541726524124 -118.85037155440754", "-45.19663831608771 -118.85037155440754" ] do
+                        let area = $"ST_GeomFromText('{polygon}',4326)"
+                        for start, endpoint in [ first, last; last, first ] do
+                            let line = $"ST_GeomFromText('LINESTRING({start},{endpoint})',4326)"
+                            let sql = $"SELECT ST_Intersects({line},{area}),ST_Crosses({line},{area}),ST_Touches({line},{area}),ST_Within({line},{area})"
+                            match runDefault store sql with
+                            | ResultSet(_, [ row ]) ->
+                                Expect.equal row [ Some "1"; Some "1"; Some "0"; Some "0" ] line
+                            | result -> failtestf "unexpected line topology for {line}: %A" result
+
                 testCase "geographic line-polygon topology distinguishes crossing and boundaries"
                 <| fun _ ->
                     let store = newStore ()

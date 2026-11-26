@@ -593,6 +593,24 @@ isolated endpoint calculation, paired sine and cosine preserved the
 nonzero separation seen in the native turn trace. Separate sine and
 cosine rounded the endpoints together and triggered turn rejection.
 
+## Near-coincident endpoints and signed cut distances
+
+Paired sine and cosine in the Andoyer inverse retain the nonzero endpoint
+separation for both geometries. The proper cuts themselves can still have
+an inverse distance that rounds to zero. The segment check now tests the
+signed distance against the segment bounds, so a negative zero remains
+on the segment. A nonzero distance behind the segment still falls outside
+the bounds. [Boost geographic segment intersection](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
+
+The two geometries and all 484 nearby longitude-offset cases match
+MySQL 8.4.11. The offset sweep covers both source directions and 121
+positions per geometry, from −0.0000006° through +0.0000006° in
+0.00000001° steps. The independent holdout drops from six to four forward
+differences and from five to three reversed, with no new differences.
+The wider WGS 84, dense offset, and short-corner sweeps still match.
+Global line pairs, shared endpoints, rings, and polygon-validity probes
+also match.
+
 ## Current-head overlay check
 
 A current-head rerun still finds 11/448 geographic line/polygon relation

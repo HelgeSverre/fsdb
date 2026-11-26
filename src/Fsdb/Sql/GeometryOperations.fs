@@ -83,8 +83,9 @@ let private geographicInverseDistanceRadians preserveTinyMeridians referenceSyst
         let firstLatitude, firstLongitude = first
         let secondLatitude, secondLongitude = second
         let longitudeDelta = secondLongitude - firstLongitude
-        let sinFirst, cosFirst = sin firstLatitude, cos firstLatitude
-        let sinSecond, cosSecond = sin secondLatitude, cos secondLatitude
+        // Paired trigonometry preserves Boost's rounding at near-coincident endpoints.
+        let struct (sinFirst, cosFirst) = Math.SinCos firstLatitude
+        let struct (sinSecond, cosSecond) = Math.SinCos secondLatitude
 
         let cosineDistance =
             Math.FusedMultiplyAdd(sinFirst, sinSecond,
@@ -779,10 +780,11 @@ let private tryGeographicSegmentCrossing referenceSystem first second =
                 let inside start endpoint baseline =
                     let distance = geographicPointDistanceRadians normalized start point
                     let length = geographicPointDistanceRadians normalized start endpoint
-                    // The side tests establish a proper crossing. The
-                    // inverse can round its distance to an endpoint.
-                    abs (normalizedLongitudeRadians (azimuth start point - baseline)) <= Math.PI / 2.0
-                    && distance <= length
+                    let directedDistance =
+                        if abs (normalizedLongitudeRadians (azimuth start point - baseline)) > Math.PI / 2.0 then -distance
+                        else distance
+                    // An inverse that rounds to signed zero is still on the segment.
+                    directedDistance >= 0.0 && directedDistance <= length
                 inside a b firstAzimuth && inside c d secondAzimuth)
 
 let private geographicSegmentsProperlyCross referenceSystem first second =
