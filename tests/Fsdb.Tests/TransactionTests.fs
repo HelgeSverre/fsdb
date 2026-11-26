@@ -5943,6 +5943,85 @@ let tests =
               finally
                   run writer "ROLLBACK" 0UL |> ignore
 
+          testCase "a cross-database cascade waits for the destination gap before publishing"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result (Affected expected) sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql, count in
+                  [ "CREATE DATABASE keys_db", 1UL
+                    "CREATE TABLE keys_db.source (id INT PRIMARY KEY)", 0UL
+                    "CREATE TABLE gate (id INT PRIMARY KEY, FOREIGN KEY (id) REFERENCES keys_db.source (id) ON UPDATE CASCADE)", 0UL
+                    "CREATE TABLE parent (id INT PRIMARY KEY,n INT)", 0UL
+                    "CREATE TABLE partner (id INT,seq INT,PRIMARY KEY(id,seq))", 0UL
+                    "CREATE VIEW active AS SELECT p.id,p.n,s.seq FROM parent p JOIN partner s ON p.id=s.id", 0UL
+                    "INSERT INTO parent VALUES (3,10)", 1UL
+                    "INSERT INTO partner VALUES (3,20)", 1UL
+                    "INSERT INTO keys_db.source VALUES (1),(5)", 2UL
+                    "INSERT INTO gate VALUES (1),(5)", 2UL ] do
+                  run setup sql count |> ignore
+
+              let writer = run (create 2 store) "START TRANSACTION" 0UL
+              let missingProbe =
+                  "UPDATE active a JOIN gate g ON g.id=a.id SET a.n=a.n+1 WHERE a.id=3 AND a.seq BETWEEN 20 AND 22"
+              let writer = run writer missingProbe 0UL
+
+              let cascade = "UPDATE keys_db.source SET id=4 WHERE id=5"
+              let expectKeys session table ids =
+                  match handle session $"SELECT id FROM {table} ORDER BY id" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows (ids |> List.map (fun id -> [ Some(string id) ])) table
+                  | result -> failtestf "expected committed keys in %s, got %A" table result
+
+              let contender = run (create 3 store) "SET SESSION innodb_lock_wait_timeout=1" 0UL
+              match handle contender cascade |> snd with
+              | Err(1205, _) -> ()
+              | result -> failtestf "the cascade should time out, got %A" result
+              expectKeys setup "keys_db.source" [ 1; 5 ]
+              expectKeys setup "gate" [ 1; 5 ]
+
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle (create 4 store) cascade)
+              try
+                  Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the cascade waits for the gap"
+                  let unrelated = Threading.Tasks.Task.Run(fun () ->
+                      run (create 5 store) "INSERT INTO keys_db.source VALUES (8)" 1UL
+                      |> fun session -> run session "INSERT INTO gate VALUES (8)" 1UL)
+                  Expect.isTrue (unrelated.Wait(TimeSpan.FromSeconds 5.0)) "a disjoint write commits while the cascade waits"
+                  unrelated.GetAwaiter().GetResult() |> ignore
+                  expectKeys setup "keys_db.source" [ 1; 5; 8 ]
+                  expectKeys setup "gate" [ 1; 5; 8 ]
+              finally
+                  run writer "ROLLBACK" 0UL |> ignore
+
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the cascade resumes after gap release"
+              Expect.equal (waiting.GetAwaiter().GetResult() |> snd) (Affected 1UL) cascade
+              expectKeys setup "keys_db.source" [ 1; 4; 8 ]
+              expectKeys setup "gate" [ 1; 4; 8 ]
+
+              let withShortWait connection = run (create connection store) "SET SESSION innodb_lock_wait_timeout=3" 0UL
+              let writer = run (withShortWait 6) "START TRANSACTION" 0UL
+              let writer = run writer missingProbe 0UL
+              let competingCascade = "UPDATE keys_db.source SET id=2 WHERE id=4"
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle (withShortWait 7) competingCascade)
+              try
+                  Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the cascade holds the parent row while waiting"
+                  let rowResult = handle writer "UPDATE keys_db.source SET id=id WHERE id=4" |> snd
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the mixed lock cycle resolves"
+                  let cascadeResult = waiting.GetAwaiter().GetResult() |> snd
+                  match rowResult, cascadeResult with
+                  | Err(1213, _), Affected 1UL ->
+                      expectKeys setup "keys_db.source" [ 1; 2; 8 ]
+                      expectKeys setup "gate" [ 1; 2; 8 ]
+                  | Affected 0UL, Err(1213, _) ->
+                      expectKeys setup "keys_db.source" [ 1; 4; 8 ]
+                      expectKeys setup "gate" [ 1; 4; 8 ]
+                  | results -> failtestf "expected one deadlock victim and one completed update, got %A" results
+              finally
+                  run writer "ROLLBACK" 0UL |> ignore
+
           testCase "a materialized joined update retains the rows read by its scan"
           <| fun _ ->
               let run session sql expected =

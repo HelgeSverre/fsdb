@@ -1040,13 +1040,16 @@ let private releaseLockStripes (context: TransactionLockContext) (stripes: seq<R
                 lock context.HeldStripes (fun () -> context.HeldStripes.Remove stripe |> ignore)
                 Threading.Monitor.PulseAll stripe.SyncRoot)
 
+let private releaseAllLockStripes (context: TransactionLockContext) =
+    let stripes = lock context.HeldStripes (fun () -> context.HeldStripes |> Seq.toArray)
+    releaseLockStripes context stripes
+
 let releaseTransactionLocks (store: Store) : unit =
     match store.TransactionLocks with
     | None -> ()
     | Some context ->
         store.ConsistentReadViews.TryRemove context.Owner |> ignore
-        let stripes = lock context.HeldStripes (fun () -> context.HeldStripes |> Seq.toArray)
-        releaseLockStripes context stripes
+        releaseAllLockStripes context
 
 let internal recordConsistentReadView (live: Store) (snapshot: Store) =
     snapshot.TransactionLocks
@@ -1452,6 +1455,26 @@ let private setCatalogDatabase databaseName database catalog =
     | Some(actualName, _) -> Map.add actualName database catalog
     | None -> Map.add databaseName database catalog
 
+let private withCurrentCatalogSlots (store: Store) dbName body =
+    lock store.Lock (fun () ->
+        let slots = databaseSlots store
+        withLockedDatabaseSlots slots (fun () ->
+            let attached =
+                slots
+                |> List.forall (fun (name, slot) ->
+                    match store.Databases.TryGetValue name with
+                    | true, current -> obj.ReferenceEquals(current, slot)
+                    | false, _ -> false)
+
+            if not attached then raise (LockWaitTimeout dbName)
+            let catalog = slots |> List.map (fun (name, slot) -> name, slot.Value) |> Map.ofList
+            body slots catalog))
+
+let private publishExistingCatalog (store: Store) (slots: (string * Database ref) list) (catalog: Catalog) =
+    publishCatalogRoots store (fun () ->
+        for name, slot in slots do
+            slot.Value <- Map.find name catalog)
+
 /// Qualified foreign keys couple otherwise independent database slots. Their
 /// statements lock and publish the catalog as one unit so parent validation
 /// and referential actions observe the same committed roots.
@@ -1472,33 +1495,15 @@ let private withReferentialCatalogPublishing
                 |> Result.map (fun (updatedCatalog, result) -> tryCatalogDatabase dbName updatedCatalog |> Option.get, result))
         | _ ->
             let published =
-                lock store.Lock (fun () ->
-                    let slots = databaseSlots store
-
-                    withLockedDatabaseSlots slots (fun () ->
-                        let attached =
-                            slots
-                            |> List.forall (fun (name, slot) ->
-                                match store.Databases.TryGetValue name with
-                                | true, current -> obj.ReferenceEquals(current, slot)
-                                | false, _ -> false)
-
-                        if not attached then
-                            raise (LockWaitTimeout dbName)
-                        else
-                            let currentCatalog = slots |> List.map (fun (name, slot) -> name, slot.Value) |> Map.ofList
-
-                            match tryCatalogDatabase dbName currentCatalog with
-                            | None -> Error(NoSuchDatabase dbName)
-                            | Some database ->
-                                captureIndexExpressionError (fun () ->
-                                    withIndexExpressionDiagnostics store (fun () -> operation currentCatalog database))
-                                |> Result.map (fun (updatedCatalog, result) ->
-                                    publishCatalogRoots store (fun () ->
-                                        for name, slot in slots do
-                                            slot.Value <- Map.find name updatedCatalog)
-
-                                    result, prepareResultEvents store eventsOf result)))
+                withCurrentCatalogSlots store dbName (fun slots currentCatalog ->
+                    match tryCatalogDatabase dbName currentCatalog with
+                    | None -> Error(NoSuchDatabase dbName)
+                    | Some database ->
+                        captureIndexExpressionError (fun () ->
+                            withIndexExpressionDiagnostics store (fun () -> operation currentCatalog database))
+                        |> Result.map (fun (updatedCatalog, result) ->
+                            publishExistingCatalog store slots updatedCatalog
+                            result, prepareResultEvents store eventsOf result))
 
             match published with
             | Error error -> Error error
@@ -4373,7 +4378,8 @@ let private primaryGapBlockers (cache: KeyLockCache) owner key =
             | _ -> ())
         blockers
 
-let private withWriteLocksFor
+let private withWriteLocksForContext
+    (transactionLocks: TransactionLockContext option)
     (timeout: TimeSpan)
     (store: Store)
     (dbName: string)
@@ -4468,7 +4474,7 @@ let private withWriteLocksFor
             result
 
     let context, releaseAfter =
-        match store.TransactionLocks with
+        match transactionLocks with
         | Some context -> context, false
         | None ->
             createTransactionLockContext (store.NextLockOwnerId()),
@@ -4501,7 +4507,7 @@ let private withWriteLocksFor
                 | Some(cache, key) -> acquire stripe (fun () -> primaryGapBlockers cache context.Owner key)
                 | None -> acquire stripe (fun () -> [])
 
-            if not releaseAfter then
+            if store.TransactionLocks.IsSome then
                 lock context.LockClaims (fun () ->
                     for claim in lockClaims do
                         if context.LockClaims.Add claim then
@@ -4521,16 +4527,20 @@ let private withWriteLocksFor
         if releaseAfter then
             releaseLockStripes context claimed
 
+let private withWriteLocksFor timeout (store: Store) dbName tableName rowIds keys body =
+    withWriteLocksForContext store.TransactionLocks timeout store dbName tableName rowIds keys body
+
 let private withRowLocks store dbName tableName rowIds body =
     withWriteLocksFor (Fsdb.Limits.statementLockWaitTimeout ()) store dbName tableName rowIds [] body
 
+let private fullScanRowIds store dbName tableName =
+    tableSnapshot store dbName tableName
+    |> Result.toOption
+    |> Option.map (fun table -> table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
+    |> Option.defaultValue []
+
 let private withFullScanRowLocks store dbName tableName body =
-    let rowIds =
-        tableSnapshot store dbName tableName
-        |> Result.toOption
-        |> Option.map (fun table -> table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
-        |> Option.defaultValue []
-    withRowLocks store dbName tableName rowIds body
+    withRowLocks store dbName tableName (fullScanRowIds store dbName tableName) body
 
 let private withInsertLocks store dbName tableName rowIds keys body =
     withWriteLocksFor (Fsdb.Limits.statementLockWaitTimeout ()) store dbName tableName rowIds keys body
@@ -12343,32 +12353,103 @@ let private withPointUpdateDatabase
                 acknowledge ()
                 result)))
 
-let private withMovedPrimaryKeys (store: Store) dbName tableName
-    (changes: RowUpdate list, cascaded: Map<TableAddress, RowUpdate list>, catalog: Catalog) publish =
-    let groups =
-        Map.add (tableAddress dbName tableName) changes cascaded
-        |> Map.toList
-        |> List.choose (fun (address, rows) ->
-            let database, tableName = catalogTableIdentity catalog address
-            let keys =
-                tryCatalogTable address catalog
-                |> Option.bind (fun table ->
-                    uniqueKeyGroups table
-                    |> List.tryFind (fun group -> group.Name = "PRIMARY")
-                    |> Option.map (fun primary ->
-                        rows |> List.choose (fun change ->
-                            if primary.Indices |> List.exists (fun index -> change.Before.[index] <> change.After.[index]) then
-                                let before = encodeUniqueKey table.Columns primary change.Before
-                                let after = encodeUniqueKey table.Columns primary change.After
-                                if before = after then None else after |> Option.map (fun key -> primaryLockKeyPrefix + key)
-                            else None)))
-                |> Option.defaultValue []
-            if keys.IsEmpty then None else Some(database, tableName, keys))
+let private movedPrimaryKeys dbName tableName
+    (changes: RowUpdate list, cascaded: Map<TableAddress, RowUpdate list>, catalog: Catalog) =
+    Map.change (tableAddress dbName tableName) (fun affected -> Some(changes @ Option.defaultValue [] affected)) cascaded
+    |> Map.toList
+    |> List.choose (fun (address, rows) ->
+        let database, tableName = catalogTableIdentity catalog address
+        let keys =
+            tryCatalogTable address catalog
+            |> Option.bind (fun table ->
+                uniqueKeyGroups table
+                |> List.tryFind (fun group -> group.Name = "PRIMARY")
+                |> Option.map (fun primary ->
+                    rows |> List.choose (fun change ->
+                        if primary.Indices |> List.exists (fun index -> change.Before.[index] <> change.After.[index]) then
+                            let before = encodeUniqueKey table.Columns primary change.Before
+                            let after = encodeUniqueKey table.Columns primary change.After
+                            if before = after then None else after |> Option.map (fun key -> primaryLockKeyPrefix + key)
+                        else None)))
+            |> Option.defaultValue []
+        if keys.IsEmpty then None else Some(database, tableName, keys))
+
+let private withUpdateLockOwner (store: Store) body =
+    match store.TransactionLocks with
+    | Some owner -> body owner
+    | None ->
+        // An autocommit update keeps one wait-graph identity across its row
+        // locks and every destination key in a referential action.
+        let owner = createTransactionLockContext (store.NextLockOwnerId())
+        try body owner
+        finally releaseAllLockStripes owner
+
+let private withUpdateLocks owner store database table rowIds keys body =
+    withWriteLocksForContext (Some owner) (Fsdb.Limits.statementLockWaitTimeout ())
+        store database table rowIds keys body
+
+let private withMovedPrimaryKeys owner (store: Store) groups publish =
     let rec claim = function
         | [] -> publish ()
         | (database, table, keys) :: remaining ->
-            withInsertLocks store database table [] keys (fun () -> claim remaining)
+            withUpdateLocks owner store database table [] keys (fun () -> claim remaining)
     claim groups
+
+let private withQualifiedUpdatePublishing
+    owner
+    (store: Store)
+    dbName
+    tableName
+    eventsOf
+    operation
+    =
+    let publishAfterKeyWait baseCatalog batchCatalog result keys () =
+        withMovedPrimaryKeys owner store keys (fun () ->
+            let acknowledge =
+                withReferentialSchemaLock SharedAccess store (fun () ->
+                    withCurrentCatalogSlots store dbName (fun slots liveCatalog ->
+                        let merged =
+                            (liveCatalog, batchCatalog)
+                            ||> Map.fold (fun catalog database batch ->
+                                let original = Map.find database baseCatalog
+                                if obj.ReferenceEquals(original, batch) then catalog
+                                else
+                                    match Map.tryFind database liveCatalog with
+                                    | None -> raise (LockWaitTimeout database)
+                                    | Some live ->
+                                        Map.add database (mergeDatabase database original batch live) catalog)
+
+                        let catalogUnchanged =
+                            baseCatalog.Count = liveCatalog.Count
+                            && (baseCatalog |> Map.forall (fun name original ->
+                                liveCatalog |> Map.tryFind name |> Option.exists (fun live -> obj.ReferenceEquals(original, live))))
+                        if store.ForeignKeyChecks && not catalogUnchanged then
+                            validateCatalogForeignKeys liveCatalog merged
+
+                        publishExistingCatalog store slots merged
+                        prepareResultEvents store eventsOf result))
+            acknowledge ())
+
+    let prepared =
+        withReferentialSchemaLock SharedAccess store (fun () ->
+            withCurrentCatalogSlots store dbName (fun slots baseCatalog ->
+                match tryCatalogDatabase dbName baseCatalog with
+                | None -> Error(NoSuchDatabase dbName)
+                | Some database ->
+                    operation baseCatalog database
+                    |> Result.map (fun (batchCatalog, result) ->
+                        match movedPrimaryKeys dbName tableName result with
+                        | [] ->
+                            publishExistingCatalog store slots batchCatalog
+                            result, prepareResultEvents store eventsOf result
+                        | keys ->
+                            // Wait after leaving the schema and catalog locks. A holder
+                            // must be able to commit or roll back before this can publish.
+                            result, publishAfterKeyWait baseCatalog batchCatalog result keys)))
+
+    prepared |> Result.map (fun (result, acknowledge) ->
+        acknowledge ()
+        result)
 
 let internal tryIgnoreUpdateConstraintError = function
     | (ForeignKeyParentMissing _ | ForeignKeyRestrict _ | DuplicateKey _) as error ->
@@ -12487,20 +12568,22 @@ let private updateRowsCore
                 let updated = publishRows table { table with RowsArray = builder.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
                 setCatalogTable address updated cascadeCatalog, (List.rev changesRev, cascaded, catalog)))
 
-    let publish () =
-        let qualifiedForeignKeys = catalogHasQualifiedForeignKeys store.Catalog
+    let publish owner =
+        let qualifiedForeignKeys =
+            catalogHasQualifiedForeignKeysAffecting store.Catalog (Set.singleton (dbName.ToLowerInvariant()))
+        let claimMovedKeys result = withMovedPrimaryKeys owner store (movedPrimaryKeys dbName tableName result)
         let publishPrepared rowIds applyRows =
             let operation db =
                 let catalog = setCatalogDatabase dbName db store.Catalog
                 applyRows catalog db
                 |> Result.map (fun (updatedCatalog, result) -> tryCatalogDatabase dbName updatedCatalog |> Option.get, result)
-            withPointUpdateDatabase store dbName tableName rowIds eventsOf (withMovedPrimaryKeys store dbName tableName) operation
+            withPointUpdateDatabase store dbName tableName rowIds eventsOf claimMovedKeys operation
 
         match candidates with
         | None ->
-            withFullScanRowLocks store dbName tableName (fun () ->
+            withUpdateLocks owner store dbName tableName (fullScanRowIds store dbName tableName) [] (fun () ->
                 if qualifiedForeignKeys then
-                    withReferentialCatalogPublishing store dbName SharedAccess eventsOf (apply None)
+                    withQualifiedUpdatePublishing owner store dbName tableName eventsOf (apply None)
                 else publishPrepared [] (apply None))
         | Some rows ->
             let rowIds = rows |> List.map fst
@@ -12515,13 +12598,15 @@ let private updateRowsCore
             let applyRefreshed catalog db = apply (Some(refreshCandidates db)) catalog db
 
             // Refresh only inside publication locks, retaining the requested row order.
-            withRowLocks store dbName tableName rowIds (fun () ->
+            withUpdateLocks owner store dbName tableName rowIds [] (fun () ->
                 if qualifiedForeignKeys then
-                    withReferentialCatalogPublishing store dbName SharedAccess eventsOf applyRefreshed
+                    withQualifiedUpdatePublishing owner store dbName tableName eventsOf applyRefreshed
                 else
                     publishPrepared rowIds applyRefreshed)
 
-    let result = captureIndexExpressionError (fun () -> withIndexExpressionDiagnostics store publish)
+    let result =
+        captureIndexExpressionError (fun () ->
+            withIndexExpressionDiagnostics store (fun () -> withUpdateLockOwner store publish))
 
     match result with
     | Ok(changes, _, _) -> Ok changes.Length

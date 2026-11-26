@@ -88,12 +88,22 @@ background purge removes the deleted record.
 ## Cross-schema foreign keys
 
 With a qualified foreign key from `gate.id` to a key in another
-database, MySQL returns 1205 for both a direct move of `gate.id`
-into the protected gap and a parent key update that moves it via
-`ON UPDATE CASCADE`. Fsdb allows both moves while the gap is
-held. Both engines allow the moves after the holder rolls back.
-With these six checks included, MySQL matches 75 of 75 and Fsdb
-matches 73 of 75.
+database, both engines return 1205 for a direct move of `gate.id`
+into the protected gap and for a parent key update that moves it
+via `ON UPDATE CASCADE`. Both allow the moves after the holder
+rolls back. All 75 schedule checks match on both engines.
+
+An autocommit cascade also waited while another connection
+committed disjoint rows in both databases. Both engines published
+the cascade after the gap holder rolled back and preserved the
+disjoint rows. In a cycle between the cascade's parent row lock
+and the destination gap, both engines returned 1213 to one
+transaction and allowed the other to proceed. MySQL aborted
+the row update, and Fsdb aborted the cascade.
+
+With Fsdb WAL enabled, a timed-out cascade left both keys at
+`5`. The subsequent successful cascade moved both to `4`.
+The committed values survived both a clean restart and a forced stop.
 
 ## Prepared XA and restart
 
