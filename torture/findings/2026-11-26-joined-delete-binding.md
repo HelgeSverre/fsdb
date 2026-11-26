@@ -69,3 +69,13 @@ view retains the join-view error, while an outer MERGE view over an
 UNDEFINED component can still return 1288. Fsdb's shape-based
 updatability does not yet account for this merge decision.
 [MySQL view and derived-table merge resolution](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_resolver.cc#L3108-L3123)
+
+## Correlated merged columns
+
+In the [merged-key fixture](2026-11-26-correlated-merged-keys.sql), MySQL
+8.4.11 resolves the unqualified outer key inside a scalar subquery. SELECT
+returns the merged key and joined DELETE affects one row in each transaction.
+The right join uses the preserved row's key even when the left side has no
+match. The scalar subquery in the later ON clause sees the earlier USING key.
+Fsdb returns 1052 in each of these cases. Both engines correctly reject the
+same reference as ambiguous when the join uses ON and exposes both keys.
