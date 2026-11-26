@@ -178,6 +178,20 @@ let search relation (bounds: GeometryBounds) (index: Index<'id>) =
 
 let count (index: Index<'id>) = Map.count index.Bounds
 
+let searchGeographicCandidates bounds index =
+    // Compare unwrapped envelopes in each possible longitude alignment.
+    // Keep rounded edge ties for the scalar predicate to resolve.
+    let margin = 8.0 * (System.Math.BitIncrement(1.0) - 1.0) * System.Math.PI
+    let period = 2.0 * System.Math.PI
+    [ -period; 0.0; period ]
+    |> List.fold (fun candidates shift ->
+        let probe =
+            { MinX = bounds.MinX + shift - margin
+              MaxX = bounds.MaxX + shift + margin
+              MinY = bounds.MinY - margin
+              MaxY = bounds.MaxY + margin }
+        Set.union candidates (search Intersects probe index)) Set.empty
+
 /// Diagnostic depth of the spatial search tree. Traversal stays iterative even
 /// when an existing index has a degenerate shape.
 let maximumDepth (index: Index<'id>) =

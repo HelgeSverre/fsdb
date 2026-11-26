@@ -842,7 +842,7 @@ let tests =
                     Expect.equal (coerceValue true column point) (Ok point) "point retained"
 
                     match coerceValue true column line with
-                    | Error(InvalidValueForColumn("location", _)) -> ()
+                    | Error(ExpressionError(1416, "Cannot get geometry object from data you send to the GEOMETRY field")) -> ()
                     | other -> failtestf "expected geometry type rejection, got %A" other
 
                 testCase "an SRID-restricted column rejects a mismatched geometry"

@@ -20380,7 +20380,7 @@ let tests =
                     runDefault store "CREATE TABLE places (shape POINT)" |> ignore
 
                     match runDefault store "INSERT INTO places VALUES (ST_GeomFromText('LINESTRING(0 0,1 1)'))" with
-                    | Err(1366, _) -> ()
+                    | Err(1416, "Cannot get geometry object from data you send to the GEOMETRY field") -> ()
                     | other -> failtestf "expected type coercion error, got %A" other
 
                 testCase "spatial index DDL follows MySQL constraints"
@@ -20483,6 +20483,72 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "range"; Some "sx"; Some "sx"; Some "34"; None; Some "3"; Some "100.00"; Some "Using where; Using filesort" ] ]) ->
                         ()
                     | other -> failtestf "expected a spatial range plan, got %A" other
+
+                testCase "geographic spatial lookup covers geodesic extrema and both sides of the antimeridian"
+                <| fun _ ->
+                    let store = newStore ()
+                    let run sql = runDefault store sql
+                    let geometry wkt = $"ST_GeomFromText('{wkt}',4326,'axis-order=long-lat')"
+                    Expect.equal
+                        (run "CREATE TABLE places (id INT PRIMARY KEY, shape GEOMETRY NOT NULL SRID 4326, hit INT, SPATIAL INDEX sx(shape))")
+                        (Affected 0UL) "the spatial column accepts a supported geographic SRID"
+                    let values =
+                        [ "LINESTRING(-60 70,60 70)"; "POINT(179 0)"; "POINT(-179 0)"
+                          "POINT(0 0)"; "MULTIPOINT(-60 70,60 70)" ]
+                        |> List.mapi (fun i wkt -> $"({i + 1},{geometry wkt},0)")
+                        |> String.concat ","
+                    Expect.equal (run ("INSERT INTO places VALUES " + values)) (Affected 5UL) "matching SRIDs are accepted"
+                    let rows ids = ResultSet([ "id" ], ids |> List.map (fun id -> [ Some id ]))
+                    let seam = geometry "POLYGON((170 -5,-170 -5,-170 5,170 5,170 -5))"
+                    let poleward = geometry "POINT(0 75)"
+                    let query hint predicate = $"SELECT id FROM places {hint} WHERE {predicate} ORDER BY id"
+                    for predicate, ids in
+                        [ $"MBRIntersects(shape,{seam})", [ "2"; "3" ]
+                          $"MBRWithin(shape,{seam})", [ "2"; "3" ]
+                          $"MBRContains({seam},shape)", [ "2"; "3" ]
+                          $"MBRIntersects(shape,{poleward})", [ "1" ] ] do
+                        let indexed = query "FORCE INDEX (sx)" predicate
+                        Expect.equal (run indexed) (rows ids) predicate
+                        Expect.equal (run (query "IGNORE INDEX (sx)" predicate)) (rows ids) "scan result"
+                        match run ("EXPLAIN " + indexed) with
+                        | ResultSet(_, [ row ]) ->
+                            Expect.equal row.[4] (Some "range") "spatial range access"
+                            Expect.equal row.[6] (Some "sx") "spatial index chosen"
+                        | other -> failtestf "expected one explained access, got %A" other
+                    Expect.equal
+                        (run $"UPDATE places SET hit=1 WHERE MBRWithin(shape,{seam})")
+                        (Affected 2UL) "only matching rows are updated"
+                    Expect.equal
+                        (run $"DELETE FROM places WHERE MBRContains({seam},shape) AND hit=1")
+                        (Affected 2UL) "only matching rows are removed"
+                    Expect.equal (run (query "FORCE INDEX (sx)" $"MBRIntersects(shape,{seam})")) (rows []) "index entries are removed"
+                    let moved = geometry "POINT(-179 0)"
+                    Expect.equal (run $"UPDATE places SET shape={moved} WHERE id=4") (Affected 1UL) "move a point across the seam"
+                    Expect.equal (run (query "FORCE INDEX (sx)" $"MBRIntersects(shape,{seam})")) (rows [ "4" ]) "the updated envelope is searchable"
+
+                testCase "declared spatial SRIDs are enforced on writes and schema changes"
+                <| fun _ ->
+                    let store = newStore ()
+                    let run sql = runDefault store sql
+                    Expect.equal (run "CREATE TABLE places (p POINT NOT NULL SRID 4326, SPATIAL INDEX sx(p))") (Affected 0UL) "geographic SRID"
+                    Expect.equal (run "INSERT INTO places VALUES (ST_GeomFromText('POINT(59 10)',4326))") (Affected 1UL) "matching SRID"
+                    let assertError code sql =
+                        match run sql with
+                        | Err(actual, _) -> Expect.equal actual code sql
+                        | other -> failtestf "expected error %d, got %A" code other
+                    assertError 3643 "UPDATE places SET p=ST_GeomFromText('POINT(0 0)')"
+                    assertError 1416 "INSERT INTO places VALUES (ST_GeomFromText('LINESTRING(0 0,1 1)',4326))"
+                    assertError 3644 "ALTER TABLE places DROP INDEX sx, MODIFY p POINT NOT NULL SRID 4258"
+                    Expect.equal (run "ALTER TABLE places DROP INDEX sx") (Affected 0UL) "remove index in a separate statement"
+                    assertError 3643 "ALTER TABLE places MODIFY p POINT NOT NULL SRID 4258"
+                    assertError 3548 "CREATE TABLE unknown_srs (p GEOMETRY SRID 999999)"
+                    Expect.equal (run "CREATE TABLE projected (p GEOMETRY SRID 3857)") (Affected 0UL) "projected SRID"
+                    for table, declaration in
+                        [ "places", "`p` point NOT NULL /*!80003 SRID 4326 */"
+                          "projected", "`p` geometry /*!80003 SRID 3857 */ DEFAULT NULL" ] do
+                        match Fsdb.InformationSchema.showCreateTable store.Catalog defaultDatabase table with
+                        | Ok(_, [ [ _; Some ddl ] ]) -> Expect.stringContains ddl declaration table
+                        | other -> failtestf "expected SHOW CREATE output, got %A" other
 
                 testCase "spatial candidates narrow UPDATE and DELETE"
                 <| fun _ ->

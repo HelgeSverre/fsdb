@@ -16134,26 +16134,22 @@ and private spatialLookupPredicates scope registry (tref: TableRef) whereExpr : 
         | QualifiedCol(qualifier, name) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
         | _ -> None
 
-    let geometryFromTextLiteral srid = function
-        | LiteralValue((VString _ | VEncodedString _) as value) ->
-            Value.toText value |> Option.bind (tryGeometryFromText srid)
-        | _ -> None
-
     let geometry expression =
-        let parsed =
-            match expression with
-            | LiteralValue(VGeometry value) -> Some value
-            | FuncCall(name, [ wkt ]) when isGeometryTextConstructor name ->
-                geometryFromTextLiteral 0 wkt
-            | FuncCall(name, [ wkt; Lit(VInt srid) ])
-                when 0L <= srid && srid <= int64 System.Int32.MaxValue && isGeometryTextConstructor name ->
-                geometryFromTextLiteral (int srid) wkt
+        match expression with
+        | LiteralValue(VGeometry value) when SpatialReferenceSystems.tryFind value.Srid |> Option.isSome ->
+            Some value
+        | FuncCall(name, args) when isGeometryTextConstructor name ->
+            let literals =
+                args |> traverse (function LiteralValue value -> Ok value | _ -> Error())
+            match literals, Functions.lookup name registry with
+            | Ok values, Some construct ->
+                try
+                    match construct values with
+                    | VGeometry value -> Some value
+                    | _ -> None
+                with SqlError _ -> None
             | _ -> None
-
-        // The MBR builtin must still report errors for unknown or geographic SRSs.
-        parsed |> Option.filter (fun value ->
-            SpatialReferenceSystems.tryFind value.Srid
-            |> Option.exists (fun referenceSystem -> referenceSystem.SemiMajorAxis.IsNone))
+        | _ -> None
 
     let predicate relation column value =
         Option.map2
@@ -19583,12 +19579,13 @@ and private trySpatialAccessInTable
     (tref: TableRef)
     (whereExpr: Expr option)
     : Storage.SpatialLookup option =
+    let allowed = indexAllowedBy (indexHintsFor IndexJoin tref)
     (if storedRowsMatchReadRows store table.Columns then
          spatialLookupPredicates scope registry tref whereExpr
      else
          [])
     |> List.tryPick (fun predicate ->
-        Storage.trySpatialLookupInTable table predicate.Column predicate.Relation predicate.Geometry)
+        Storage.trySpatialLookupInTableWhere allowed table predicate.Column predicate.Relation predicate.Geometry)
 
 and private trySpatialAccess
     (scope: ColumnReferenceScope)

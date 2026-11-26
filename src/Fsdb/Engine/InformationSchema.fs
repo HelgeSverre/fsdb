@@ -4466,7 +4466,6 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
             | TMediumBlob
             | TLongBlob
             | TJson
-            | TGeometry _
             | TVector _ -> true
             | _ -> false
 
@@ -4513,7 +4512,7 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
 
         [ SqlText.quoteIdentifier c.Name; columnTypeTextOfColumn c ]
         @ charsetCollate
-        @ [ srid; generatedPart; notNull; defaultPart; onUpdatePart; extra; if c.Comment = "" then "" else sprintf "COMMENT '%s'" (showCreateString c.Comment) ]
+        @ [ generatedPart; notNull; srid; defaultPart; onUpdatePart; extra; if c.Comment = "" then "" else sprintf "COMMENT '%s'" (showCreateString c.Comment) ]
         |> List.filter ((<>) "")
         |> String.concat " "
 

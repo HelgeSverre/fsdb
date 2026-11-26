@@ -648,9 +648,8 @@ It used 44 structured cases across the five supported geographic
 SRIDs, another 400 seeded cases, and both operand orders. The
 structured cases cover wrapped boundary rounding, geodesic
 latitude extrema, polar lines and areas, point and line boxes,
-multipart and nested collections, and empty members. This adds
-scalar evaluation for geographic bounds. Geographic index planning
-remains open.
+multipart and nested collections, and empty members. This comparison
+covers scalar evaluation of geographic bounds.
 
 ### Coverage, equality, overlap, disjointness, and touch
 
@@ -698,18 +697,37 @@ measure index selectivity, write throughput, or durability costs.
 
 #### SRID-restricted spatial indexes
 
-MySQL 8.4.11 accepts `GEOMETRY NOT NULL SRID 4326` with or without a
-`SPATIAL INDEX`. Fsdb returns `3548 / SR001` for both declarations
-and for `SRID 3857`. An indexed `SRID 0` column works on both engines.
-The declaration check in Fsdb currently rejects every nonzero SRID, even
-when the scalar spatial catalog supports it.
+Fsdb now accepts SRID declarations from its supported spatial catalog.
+Writes check the declared SRID, and an indexed column needs a separate
+index drop before an SRID change. MySQL 8.4.11 and Fsdb agree on the
+tested DDL, geometry subtype and SRID errors, and catalog IDs.
 
-On a 404-row geographic table, native MySQL chose a forced spatial range
-for all seven MBR predicates other than `MBRCovers` and `MBRCoveredBy`.
-Forced and ignored index queries returned the same IDs in all ten checks,
-including a point within the latitude extremum of a geodesic and a box
-crossing the antimeridian. Fsdb's spatial tree stores planar bounds and
-the planner filters geographic probes. Geographic indexing needs
-candidate bounds that account for geodesic latitude extrema and the
-antimeridian before the scalar predicate can recheck candidates.
+The index stores geodesic envelopes for geographic columns. It searches
+equivalent longitude ranges for `MBRIntersects`, `MBRWithin`, and
+`MBRContains`, then rechecks the full SQL predicate. Wide bounds retain
+uncommon degenerate envelopes whose line interpretation can extend past
+their stored latitude. Generated out-of-range values remain candidates
+so scalar evaluation can report their coordinate error. MySQL can skip
+such values when a forced spatial probe excludes them.
+
+All 400 queries matched across Fsdb and MySQL with the spatial index
+both forced and ignored. The corpus used points, lines, multipoints, and
+polygons on all five supported geographic SRIDs. Separate fixtures cover
+latitude extrema, both sides of the antimeridian, updates, deletes,
+WAL replay, and checkpoint reload.
+
+The same-host, durable Release benchmark used 24,000 WGS 84 grid points
+and one geodesic line. Each query returned ordered IDs, with three
+warmups and seven timed runs per mode over TCP.
+
+| Query | Rows | MySQL scan (ms) | Fsdb scan (ms) | MySQL forced index (ms) | Fsdb forced index (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Local rectangle | 6 | 115.438 | 106.742 | 0.272 | 0.496 |
+| Antimeridian rectangle | 16 | 130.137 | 127.231 | 0.417 | 0.537 |
+| Geodesic latitude extremum | 1 | 75.347 | 65.596 | 0.188 | 0.335 |
+
+MySQL chose a spatial range under `FORCE INDEX` for the three timed
+queries. In the geodesic extremum query without hints, Fsdb chose the
+spatial index and MySQL chose a scan. Additional geographic predicate
+access paths and cost-model parity remain open.
 [MySQL spatial index optimization](https://dev.mysql.com/doc/refman/8.4/en/spatial-index-optimization.html).

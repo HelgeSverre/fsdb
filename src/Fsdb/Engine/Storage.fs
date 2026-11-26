@@ -2167,11 +2167,12 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | TJson -> charsetChecked (v |> toText |> Option.defaultValue "") |> Result.map VJson
         | TGeometry requiredKind ->
             match v with
+            | VGeometry geometry when requiredKind <> Geometry && geometryKind geometry.Shape <> requiredKind ->
+                Error(ExpressionError(1416, "Cannot get geometry object from data you send to the GEOMETRY field"))
             | VGeometry geometry
-                when (requiredKind = Geometry || geometryKind geometry.Shape = requiredKind)
-                     && (col.Srid |> Option.forall ((=) (uint32 geometry.Srid))) ->
+                when col.Srid |> Option.forall ((=) (uint32 geometry.Srid)) ->
                 Ok(VGeometry geometry)
-            | VGeometry geometry when col.Srid.IsSome ->
+            | VGeometry geometry ->
                 let columnSrid = Option.defaultValue 0u col.Srid
                 Error(
                     ExpressionError(
@@ -2916,7 +2917,13 @@ let private fullTextKeyGroups (table: Table) : FullTextKeyGroup list =
 type private SpatialKeyGroup =
     { Name: string
       ColumnIndex: int
-      Visible: bool }
+      Visible: bool
+      Geography: SpatialReferenceSystems.SpatialReferenceSystem option }
+
+let private declaredGeography (column: ColumnDef) =
+    column.Srid
+    |> Option.bind (int >> SpatialReferenceSystems.tryFind)
+    |> Option.filter (fun referenceSystem -> referenceSystem.SemiMajorAxis.IsSome)
 
 let private spatialKeyGroups (table: Table) : SpatialKeyGroup list =
     table.Indexes
@@ -2928,12 +2935,20 @@ let private spatialKeyGroups (table: Table) : SpatialKeyGroup list =
             |> Option.map (fun columnIndex ->
                 { Name = index.Name
                   ColumnIndex = columnIndex
-                  Visible = index.Visible })
+                  Visible = index.Visible
+                  Geography = declaredGeography table.Columns.[columnIndex] })
         | _ -> None)
 
-let private spatialBoundsAt columnIndex (row: Value[]) =
-    match row.[columnIndex] with
-    | VGeometry geometry -> geometryBounds geometry
+let private spatialBoundsAt (group: SpatialKeyGroup) (row: Value[]) =
+    match row.[group.ColumnIndex], group.Geography with
+    | VGeometry geometry, Some referenceSystem ->
+        if SpatialReferenceSystems.tryGeometryParameterDomainError geometry |> Option.isSome then
+            // Writes may store a generated out-of-range geometry. Pass it
+            // through to scalar validation even when probing a distant box.
+            Some { MinX = Double.NegativeInfinity; MaxX = Double.PositiveInfinity
+                   MinY = Double.NegativeInfinity; MaxY = Double.PositiveInfinity }
+        else GeometryOperations.geographicMbrIndexBounds referenceSystem geometry
+    | VGeometry geometry, None -> geometryBounds geometry
     | _ -> None
 
 let private fullTextFields (indices: int list) (row: Value[]) =
@@ -3390,7 +3405,7 @@ let private rebuildSpatialIndexes (table: Table) : SpatialIndexes =
             table.RowsArray.Indexed
             |> Seq.fold
                 (fun index (rowId, row) ->
-                    spatialBoundsAt group.ColumnIndex row
+                    spatialBoundsAt group row
                     |> Option.fold (fun index bounds -> SpatialIndex.add rowId bounds index) index)
                 SpatialIndex.empty
 
@@ -3623,8 +3638,8 @@ let private publishRowsWithDocumentRules rulesFor (before: Table) (after: Table)
             |> List.fold
                 (fun indexes group ->
                     let update index (rowId, removed: Value[] option, added: Value[] option) =
-                        let removedBounds = removed |> Option.bind (spatialBoundsAt group.ColumnIndex)
-                        let addedBounds = added |> Option.bind (spatialBoundsAt group.ColumnIndex)
+                        let removedBounds = removed |> Option.bind (spatialBoundsAt group)
+                        let addedBounds = added |> Option.bind (spatialBoundsAt group)
 
                         if removedBounds = addedBounds then
                             index
@@ -5944,7 +5959,8 @@ type SpatialLookup =
       SpatialColumns: ColumnDef list
       SpatialRows: (RowId * Value[]) list }
 
-let internal trySpatialLookupInTable
+let internal trySpatialLookupInTableWhere
+    (allowed: string -> bool)
     (table: Table)
     (columnName: string)
     (relation: SpatialIndex.Relation)
@@ -5953,17 +5969,22 @@ let internal trySpatialLookupInTable
     resolveColumn table.Columns columnName
     |> Result.toOption
     |> Option.bind (fun columnIndex ->
-        match table.Columns.[columnIndex].Srid, geometryBounds geometry with
-        | Some srid, Some bounds when int64 srid = int64 geometry.Srid ->
+        match table.Columns.[columnIndex].Srid with
+        | Some srid when int64 srid = int64 geometry.Srid ->
             spatialKeyGroups table
-            |> List.filter _.Visible
-            |> List.tryFind (fun group -> group.ColumnIndex = columnIndex)
+            |> List.tryFind (fun group -> group.ColumnIndex = columnIndex && group.Visible && allowed group.Name)
             |> Option.bind (fun group ->
-                table.SpatialIndexes
-                |> Map.tryFind group.Name
-                |> Option.map (fun index ->
+                let search =
+                    match group.Geography with
+                    | Some referenceSystem when SpatialReferenceSystems.tryGeometryParameterDomainError geometry |> Option.isNone ->
+                        GeometryOperations.geographicMbrIndexBounds referenceSystem geometry
+                        |> Option.map SpatialIndex.searchGeographicCandidates
+                    | Some _ -> None
+                    | None -> geometryBounds geometry |> Option.map (SpatialIndex.search relation)
+
+                Option.map2 (fun search index ->
                     let rows =
-                        SpatialIndex.search relation bounds index
+                        search index
                         |> Seq.choose (fun rowId ->
                             table.RowsArray.TryFind rowId
                             |> Option.map (fun row -> rowId, row))
@@ -5972,7 +5993,9 @@ let internal trySpatialLookupInTable
                     { SpatialIndexName = group.Name
                       SpatialColumnIndex = columnIndex
                       SpatialColumns = table.Columns
-                      SpatialRows = rows }))
+                      SpatialRows = rows })
+                    search
+                    (Map.tryFind group.Name table.SpatialIndexes))
         | _ -> None)
 
 let trySpatialLookup
@@ -5984,7 +6007,7 @@ let trySpatialLookup
     (geometry: Geometry)
     : SpatialLookup option =
     tableAt store dbName tableName
-    |> Option.bind (fun table -> trySpatialLookupInTable table columnName relation geometry)
+    |> Option.bind (fun table -> trySpatialLookupInTableWhere (fun _ -> true) table columnName relation geometry)
 
 let internal equalityIndexesForColumns (table: Table) (columnNames: string list) : EqualityIndex list =
     columnNames
@@ -7197,7 +7220,7 @@ let internal validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
         Error(ExpressionError(1294, sprintf "Invalid ON UPDATE clause for '%s' column" c.Name))
     | None when c.Srid.IsSome && (match c.Type with TGeometry _ -> false | _ -> true) ->
         Error(ExpressionError(1221, "Incorrect usage of SRID and non-geometry column"))
-    | None when c.Srid |> Option.exists ((<>) 0u) ->
+    | None when c.Srid |> Option.exists (fun srid -> SpatialReferenceSystems.tryFind (int srid) |> Option.isNone) ->
         Error(ExpressionError(3548, sprintf "There's no spatial reference system with SRID %u." (Option.defaultValue 0u c.Srid)))
     | None ->
         match c.Type with
@@ -8919,6 +8942,24 @@ let private convertAlterRows mode (original: Table) (candidate: Table) actions c
                     checkUnique values |> Result.bind (fun values -> checkRow candidate values |> Result.map (fun () -> values)))
             |> Result.map (fun rows -> { candidate with RowsArray = rows })))
 
+let private validateIndexedSridChanges (original: Table) (candidate: Table) actions =
+    match spatialKeyGroups original with
+    | [] -> Ok()
+    | indexed ->
+        alterColumnSources original actions
+        |> Result.bind (fun sources ->
+            candidate.Columns
+            |> List.tryPick (fun column ->
+                match Map.tryFind (column.Name.ToLowerInvariant()) sources with
+                | Some(StoredColumn(index, true))
+                    when column.Srid <> original.Columns.[index].Srid
+                         && List.exists (fun group -> group.ColumnIndex = index) indexed ->
+                    Some(ExpressionError(
+                        3644,
+                        sprintf "The SRID specification on the column '%s' cannot be changed because there is a spatial index on the column. Please remove the spatial index before altering the SRID specification." original.Columns.[index].Name))
+                | _ -> None)
+            |> function Some error -> Error error | None -> Ok())
+
 let private validateForeignKeyDrops (table: Table) actions =
     let names = table.ForeignKeys |> List.map (fun foreignKey -> foreignKey.Name.ToLowerInvariant()) |> Set.ofList
     actions
@@ -9222,6 +9263,9 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 validateForeignKeyDrops table requestedActions
                 |> Result.bind (fun () -> validateIndexNames indexes)
                 |> Result.bind (fun () -> actions |> List.fold step (Ok(origKey, definition, true, [])))
+                |> Result.bind (fun ((_, candidate, _, _) as state) ->
+                    if convertsColumns then validateIndexedSridChanges table candidate actions |> Result.map (fun () -> state)
+                    else Ok state)
                 |> Result.bind (fun state -> validateForeignKeyNames db addedForeignKeys |> Result.map (fun () -> state))
                 |> Result.bind (fun ((_, candidate, _, _) as state) ->
                     let validation =

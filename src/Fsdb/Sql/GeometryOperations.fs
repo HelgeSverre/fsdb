@@ -2368,6 +2368,15 @@ let private mbrBoundsEqual first second =
 let private geographicBoundsAsMbr box =
     { MinX = box.West; MaxX = box.East; MinY = box.South; MaxY = box.North }
 
+let internal geographicMbrIndexBounds referenceSystem geometry =
+    geographicMbr referenceSystem geometry.Shape
+    |> Option.map (fun bounds ->
+        if bounds.South = bounds.North && bounds.South <> 0.0 && bounds.West <> bounds.East then
+            // A collapsed horizontal box can participate in Contains as a
+            // geodesic segment that extends beyond its stored intervals.
+            { MinX = -Math.PI; MaxX = Math.PI; MinY = -Math.PI / 2.0; MaxY = Math.PI / 2.0 }
+        else geographicBoundsAsMbr bounds)
+
 let private geographicLongitudeCovers outer inner =
     let period = 2.0 * Math.PI
     let outerWidth = outer.East - outer.West

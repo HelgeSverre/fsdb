@@ -3128,9 +3128,12 @@ implementation effort:
    use geodesic, wrapped longitude, and degenerate bounds at scalar
    evaluation. The [complete scalar MBR family](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#coverage-equality-overlap-disjointness-and-touch)
    also covers inclusive coverage, equality including empty bounds,
-   overlap, disjointness, and touch. [Nonzero SRID column declarations and
-   geographic index planning](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#srid-restricted-spatial-indexes),
-   residual isolated points, and near-hole relation differences remain.
+   overlap, disjointness, and touch. [SRID-restricted spatial indexes](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#srid-restricted-spatial-indexes)
+   accept supported projected and geographic columns. Geographic
+   `MBRIntersects`, `MBRWithin`, and `MBRContains` can use geodesic
+   bounds for candidate selection with a scalar recheck. Index paths
+   for other geographic MBR predicates, spatial cost estimates, residual
+   isolated points, and near-hole relation differences remain.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
    [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)

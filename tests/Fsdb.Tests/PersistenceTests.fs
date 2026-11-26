@@ -791,6 +791,36 @@ let tests =
               | Some lookup -> Expect.equal lookup.SpatialRows.Length 1 "snapshot spatial entries"
               | None -> failtest "expected the snapshot spatial index"
 
+          testCase "recovery rebuilds geographic spatial entries across the antimeridian"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+              let run session sql = handle session sql |> snd
+              Expect.equal
+                  (run session "CREATE TABLE places (id INT PRIMARY KEY, p POINT NOT NULL SRID 4326, SPATIAL INDEX sx(p))")
+                  (Affected 0UL) "geographic schema"
+              Expect.equal
+                  (run session "INSERT INTO places VALUES (1,ST_GeomFromText('POINT(0 -179)',4326)),(2,ST_GeomFromText('POINT(0 0)',4326))")
+                  (Affected 2UL) "geographic rows"
+              let check () =
+                  let recovered = Fsdb.Session.create 2 (load dir)
+                  let query =
+                      "SELECT id FROM places FORCE INDEX(sx) WHERE MBRIntersects(p,ST_GeomFromText('POLYGON((-5 170,-5 -170,5 -170,5 170,-5 170))',4326))"
+                  Expect.equal
+                      (run recovered query)
+                      (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                      "only the wrapped point matches"
+                  match run recovered ("EXPLAIN " + query) with
+                  | ResultSet(_, [ row ]) ->
+                      Expect.equal row.[4] (Some "range") "the recovered index can be searched"
+                      Expect.equal row.[6] (Some "sx") "the recovered index is chosen"
+                  | other -> failtestf "expected the recovered spatial index, got %A" other
+              check ()
+              snapshotNow dir store
+              check ()
+
           testCase "WAL and snapshot recovery retain typed TIME values"
           <| fun _ ->
               let dir = tempDataDir ()
