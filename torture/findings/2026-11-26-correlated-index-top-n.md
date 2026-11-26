@@ -37,7 +37,8 @@ after two warm-ups and checked every row against MySQL.
 | Scalar cutoff | 504.65 ms | 33.40 ms | 15.1× |
 
 MySQL used the `recent` index and still sorted each inner result in this
-benchmark. Fsdb's `EXPLAIN ANALYZE` still labels the inner table as `ALL`.
+benchmark. Fsdb's [ANALYZE output](2026-11-27-explain-analyze-correlated-top-n.md)
+now reports the ordered index access when execution uses it.
 The [text-prefix follow-up](2026-11-27-correlated-text-index-top-n.md) adds
 direct text equalities that use the index collation. The ordered suffix
 still requires a supported physical index order. Coercive filters,

@@ -1118,6 +1118,52 @@ let private lockingReadStore = System.Threading.AsyncLocal<(unit -> Store) optio
 let private lockingReadTimeout = System.Threading.AsyncLocal<System.TimeSpan option>()
 let private examinedRows = System.Threading.AsyncLocal<int64 ref option>()
 
+type private AnalyzedIndexLookup =
+    { mutable Loops: int64
+      mutable Rows: int64 }
+
+type private AnalyzedCorrelatedOrder =
+    { Indexes: Dictionary<string, AnalyzedIndexLookup>
+      mutable OtherLoops: int64 }
+
+type private AnalyzeExecution =
+    { CorrelatedQueries: Dictionary<SelectStmt, AnalyzedCorrelatedOrder>
+      CorrelatedBlocks: Dictionary<int, AnalyzedCorrelatedOrder> }
+
+let private analyzedCorrelatedQueries = System.Threading.AsyncLocal<Dictionary<SelectStmt, AnalyzedCorrelatedOrder> option>()
+
+let private observeCorrelatedOrder (select: SelectStmt) correlated (lookup: Storage.OrderedLookup option) =
+    match analyzedCorrelatedQueries.Value with
+    | Some queries when correlated && select.Limit.IsSome && not select.OrderBy.IsEmpty
+                        && not metadataProbe.Value && not planningProbe.Value ->
+        let observation =
+            match queries.TryGetValue select with
+            | true, observation -> observation
+            | false, _ ->
+                let observation = { Indexes = Dictionary(); OtherLoops = 0L }
+                queries.Add(select, observation)
+                observation
+
+        match lookup with
+        | None ->
+            observation.OtherLoops <- observation.OtherLoops + 1L
+            None
+        | Some lookup ->
+            let index =
+                match observation.Indexes.TryGetValue lookup.OrderedIndexName with
+                | true, index -> index
+                | false, _ ->
+                    let index = { Loops = 0L; Rows = 0L }
+                    observation.Indexes.Add(lookup.OrderedIndexName, index)
+                    index
+            index.Loops <- index.Loops + 1L
+            let rows =
+                lookup.OrderedRows |> Seq.map (fun row ->
+                    index.Rows <- index.Rows + 1L
+                    row)
+            Some { lookup with OrderedRows = rows }
+    | _ -> lookup
+
 let internal withExaminedRows body =
     let count = ref 0L
     let result = DynamicScope.withValue examinedRows (Some count) body
@@ -16082,6 +16128,7 @@ and private runUnlockedSelectStmt
 
                         let orderedPrefix =
                             tryCorrelatedTopOrder store registry dbName tref select outer
+                            |> observeCorrelatedOrder select outer.IsSome
                             |> Option.map (fun lookup -> lookup.OrderedColumns, lookup.OrderedRows, select)
                             |> Option.orElseWith (fun () ->
                                 tryEqualityPrefixOrder store registry dbName tref select equalityAccess
@@ -28487,6 +28534,7 @@ let rec private explainJoinBlock
     (dbName: string)
     (nextId: unit -> int)
     (acc: ResizeArray<ExplainRendering.ExplainRow>)
+    (analysis: AnalyzeExecution option)
     (id: int)
     (selectType: string)
     (from: FromItem option)
@@ -28656,7 +28704,7 @@ let rec private explainJoinBlock
         match item with
         | FromJoinGroup(source, innerJoins) ->
             let groupExtra = if idx = tableCount - 1 then extra else []
-            explainJoinBlock store registry dbName nextId acc id selectType
+            explainJoinBlock store registry dbName nextId acc analysis id selectType
                 (Some source) innerJoins None groupExtra (innerJoins |> List.map _.On) 0 None consumption
         | FromTable tref ->
             explainTableStats store registry dbName tref
@@ -28692,12 +28740,11 @@ let rec private explainJoinBlock
                 | false, None ->
                     emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty)
         | FromSubquery(PlainSelect sub, _alias)
-        // A LATERAL body plans like any other derived table here; only its
-        // per-left-row evaluation differs, which EXPLAIN doesn't model.
+        // LATERAL uses the same plan traversal as other derived tables.
         | FromLateral(PlainSelect sub, _alias) ->
             let derivedId = nextId ()
             emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
-            explainSelectBlock store registry dbName nextId acc derivedId "DERIVED" sub
+            explainSelectBlock store registry dbName nextId acc analysis derivedId "DERIVED" sub
         | FromJsonTable(_, _, _, alias) ->
             // A table function has no stats and no derived block — one
             // "ALL" row under its alias, close enough to MySQL's
@@ -28714,8 +28761,8 @@ let rec private explainJoinBlock
             let derivedId = nextId ()
             emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
 
-            explainSelectBlock store registry dbName nextId acc derivedId "DERIVED" first
-            |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> explainSelectBlock store registry dbName nextId acc (nextId ()) "UNION" s))
+            explainSelectBlock store registry dbName nextId acc analysis derivedId "DERIVED" first
+            |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> explainSelectBlock store registry dbName nextId acc analysis (nextId ()) "UNION" s))
             |> Result.map ignore
 
 
@@ -28743,7 +28790,7 @@ let rec private explainJoinBlock
         expressionSubqueries
         |> traverse (fun (sid, sub) ->
             let stype = if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY"
-            explainSelectBlock store registry dbName nextId acc sid stype sub)
+            explainSelectBlock store registry dbName nextId acc analysis sid stype sub)
         |> Result.map ignore)
 
 /// One `SELECT`'s (or `FROM (SELECT ...)` derived table's) `EXPLAIN` block.
@@ -28753,10 +28800,16 @@ and private explainSelectBlock
     (dbName: string)
     (nextId: unit -> int)
     (acc: ResizeArray<ExplainRendering.ExplainRow>)
+    (analysis: AnalyzeExecution option)
     (id: int)
     (selectType: string)
     (select: SelectStmt)
     : Result<unit, QueryResult> =
+    analysis |> Option.iter (fun observed ->
+        match observed.CorrelatedQueries.TryGetValue select with
+        | true, access when access.Indexes.Count > 0 -> observed.CorrelatedBlocks.Add(id, access)
+        | _ -> ())
+
     let joins = planJoinOrder store dbName select
 
     let indexOrderPlan =
@@ -28813,6 +28866,7 @@ and private explainSelectBlock
         dbName
         nextId
         acc
+        analysis
         id
         selectType
         select.From
@@ -28855,15 +28909,27 @@ let private renderExplainRows (rows: ExplainRendering.ExplainRow list) : QueryRe
 let private renderExplainJson shape derivedAliases rows =
     ResultSet([ "EXPLAIN" ], [ [ Some(ExplainRendering.renderJson shape derivedAliases rows) ] ])
 
-let private renderExplainAnalyze (rows: ExplainRendering.ExplainRow list) (elapsedMilliseconds: float) (actualRows: int) : QueryResult =
+let private renderExplainAnalyze (rows: ExplainRendering.ExplainRow list) analysis (elapsedMilliseconds: float) (actualRows: int) : QueryResult =
+    let correlatedAccess (row: ExplainRendering.ExplainRow) =
+        Option.map2 (fun observed id -> observed.CorrelatedBlocks.TryGetValue id) analysis row.Id
+        |> Option.bind (function true, access -> Some access | _ -> None)
+
     let planRows =
         rows
         |> List.sortBy (fun row -> row.Id |> Option.defaultValue System.Int32.MaxValue)
-        |> List.map (fun row ->
+        |> List.collect (fun row ->
             let source = row.Table |> Option.defaultValue "no tables used"
-            let access = row.Type |> Option.defaultValue row.SelectType
-            let estimate = row.Rows |> Option.map string |> Option.defaultValue "unknown"
-            sprintf "    -> %s on %s (estimated rows=%s)" access source estimate)
+            match correlatedAccess row with
+            | None ->
+                let access = row.Type |> Option.defaultValue row.SelectType
+                let estimate = row.Rows |> Option.map string |> Option.defaultValue "unknown"
+                [ sprintf "    -> %s on %s (estimated rows=%s)" access source estimate ]
+            | Some access ->
+                [ for KeyValue(name, index) in access.Indexes |> Seq.sortBy _.Key do
+                      let average = float index.Rows / float index.Loops
+                      sprintf "    -> Ordered index lookup on %s using %s (actual rows=%.2f loops=%d)" source name average index.Loops
+                  if access.OtherLoops > 0L then
+                      sprintf "    -> %s (other access loops=%d)" source access.OtherLoops ])
 
     let root =
         sprintf
@@ -29163,6 +29229,11 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         counter.Value
 
     let acc = ResizeArray<ExplainRendering.ExplainRow>()
+    let analysis =
+        if format = ExplainAnalyze then
+            // Sibling queries may reuse the same table alias and index.
+            Some { CorrelatedQueries = Dictionary(HashIdentity.Reference); CorrelatedBlocks = Dictionary() }
+        else None
     let mutable analyzedMilliseconds = 0.0
     let mutable analyzedRows = 0
     let mutable analyzedStatements = 0
@@ -29224,7 +29295,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 | Union(_, rest, orderBy, limit, offset) ->
                     renderExplainTree limit offset (not (unionMaterializesResult orderBy rest)) rows
                 | _ -> renderExplainTree None None false rows
-            | ExplainAnalyze when analyzedStatements = 1 -> renderExplainAnalyze rows analyzedMilliseconds analyzedRows
+            | ExplainAnalyze when analyzedStatements = 1 -> renderExplainAnalyze rows analysis analyzedMilliseconds analyzedRows
             | ExplainAnalyze -> Err(1235, "EXPLAIN ANALYZE currently supports one SELECT")
         | Error e -> e
 
@@ -29239,9 +29310,11 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
     let checkSelect (select: SelectStmt) : Result<unit, QueryResult> =
         let stopwatch = System.Diagnostics.Stopwatch.StartNew()
         let result, _, rows =
-            if format = ExplainAnalyze then
-                runSelectStmt store registry dbName select None
-            else
+            match analysis with
+            | Some observed ->
+                DynamicScope.withValue analyzedCorrelatedQueries (Some observed.CorrelatedQueries) (fun () ->
+                    runSelectStmt store registry dbName select None)
+            | None ->
                 withPlanningProbe (fun () ->
                     withMetadataProbe (fun () -> runSelectStmt store validationRegistry dbName select None))
         stopwatch.Stop()
@@ -29281,7 +29354,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             | Error error -> error
             | Ok() -> renderExplainZeroLimit format
         else
-            finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc id selectType select))
+            finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc analysis id selectType select))
     | Union(first, rest, orderBy, limit, _) ->
         let id1 = nextId ()
         let materializesResult = unionMaterializesResult orderBy rest
@@ -29291,12 +29364,12 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         finish (
             checkSelect first
             |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> checkSelect s) |> Result.map ignore)
-            |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc id1 "PRIMARY" first)
+            |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc analysis id1 "PRIMARY" first)
             |> Result.bind (fun () ->
                 rest
                 |> traverse (fun (_, s) ->
                     let sid = nextId ()
-                    explainSelectBlock store registry dbName nextId acc sid "UNION" s |> Result.map (fun () -> sid)))
+                    explainSelectBlock store registry dbName nextId acc analysis sid "UNION" s |> Result.map (fun () -> sid)))
             |> Result.map (fun restIds ->
                 if materializesResult && not restIds.IsEmpty then
                     let label = sprintf "<union%s>" (id1 :: restIds |> List.map string |> String.concat ",")
@@ -29333,7 +29406,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             validate ()
             |> Result.bind (fun () ->
                 let consumption = joinConsumptionFor u.Limit
-                explainJoinBlock store registry dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs 0 None consumption)
+                explainJoinBlock store registry dbName nextId acc analysis id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs 0 None consumption)
             |> finish
     | Delete d when not d.Ctes.IsEmpty ->
         match validateJoinedDeleteTargets store registry dbName d with
@@ -29353,7 +29426,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             |> Result.bind (fun () ->
                 let consumption = joinConsumptionFor d.Limit
 
-                explainJoinBlock store registry dbName nextId acc id "DELETE" (Some d.From) d.Joins d.Where extra subqueryExprs 0 None consumption)
+                explainJoinBlock store registry dbName nextId acc analysis id "DELETE" (Some d.From) d.Joins d.Where extra subqueryExprs 0 None consumption)
         )
     | Insert(table, _, rowsExprs, _, _)
     | Replace(table, _, rowsExprs) ->
@@ -29372,7 +29445,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 |> List.collect collectSubqueries
                 |> traverse (fun sub ->
                     let sid = nextId ()
-                    explainSelectBlock store registry dbName nextId acc sid (if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
+                    explainSelectBlock store registry dbName nextId acc analysis sid (if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
                 |> Result.map ignore)
         )
     | ReplaceSet(table, assignments) ->
@@ -29386,7 +29459,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 |> List.collect (snd >> collectSubqueries)
                 |> traverse (fun sub ->
                     let sid = nextId ()
-                    explainSelectBlock store registry dbName nextId acc sid (if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
+                    explainSelectBlock store registry dbName nextId acc analysis sid (if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
                 |> Result.map ignore)
         )
     | InsertSelect(table, _, select, _, _)
@@ -29404,7 +29477,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = selectType; Table = Some table; Type = None; Key = None; Ref = None; Rows = None; Extra = [] })
             |> Result.bind (fun () ->
                 let sid = nextId ()
-                explainSelectBlock store registry dbName nextId acc sid "SUBQUERY" select)
+                explainSelectBlock store registry dbName nextId acc analysis sid "SUBQUERY" select)
         )
     | Explain(nestedFormat, inner) -> explainStatement nestedFormat store registry account dbName inner
     | _ -> Err(1064, "EXPLAIN is not supported for this statement")

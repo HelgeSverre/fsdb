@@ -85,6 +85,34 @@ let tests =
               Expect.equal scalar (ResultSet([ "id"; "chosen" ], reverseRows)) "the scalar subquery merges descending index traversal"
               Expect.isLessThan scalarExamined 100L "reverse traversal stops at its offset and limit"
 
+              let planLines query =
+                  match runDefault store ("EXPLAIN ANALYZE " + query) with
+                  | ResultSet([ "EXPLAIN" ], rows) -> rows |> List.choose (List.tryHead >> Option.flatten)
+                  | other -> failtestf "expected an analyzed plan, got %A" other
+
+              for sql in [ query ""; reverse ] do
+                  let plan = planLines sql |> String.concat "\n"
+                  Expect.stringContains plan "Ordered index lookup on e using recent" "the correlated block reports its observed index"
+                  Expect.stringContains plan "loops=4" "the index opened only for the four non-NULL outer keys"
+                  Expect.stringContains plan "other access loops=1" "the NULL-key invocation used the fallback path"
+
+              let mixed =
+                  "SELECT o.id,"
+                  + "(SELECT e.id FROM evt e WHERE e.tenant=o.tenant AND e.state=1 ORDER BY e.stamp DESC,e.id LIMIT 1),"
+                  + "(SELECT e.id FROM evt e IGNORE INDEX (recent) WHERE e.tenant=o.tenant AND e.state=1 ORDER BY e.stamp DESC,e.id LIMIT 1) "
+                  + "FROM outer_row o WHERE o.tenant IS NOT NULL ORDER BY o.id"
+              let mixedPlan = planLines mixed
+              let indexedBlocks = mixedPlan |> List.filter (fun line -> line.Contains "Ordered index lookup on e using recent")
+              Expect.hasLength indexedBlocks 1 "the index observation belongs only to the block that used it"
+              Expect.isTrue (mixedPlan |> List.exists (fun line -> line.Contains "ALL on e")) "the hinted sibling retains its scan"
+
+              match runDefault store "DELETE FROM outer_row" with
+              | Affected _ -> ()
+              | other -> failtestf "could not empty the outer source: %A" other
+              let emptyPlan = planLines (query "") |> String.concat "\n"
+              Expect.stringContains emptyPlan "rows=0 loops=1" "the root returns no rows"
+              Expect.isFalse (emptyPlan.Contains "Ordered index lookup") "binding an empty lateral source does not record a lookup"
+
           testList
               "joined correlated COUNT and EXISTS"
               [ let joinedStore () =

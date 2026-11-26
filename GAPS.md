@@ -2931,7 +2931,9 @@ implementation effort:
    [Text equality prefixes](torture/findings/2026-11-27-correlated-text-index-top-n.md)
    now merge collation-equal spelling runs in suffix order before applying
    the offset and limit.
-   `EXPLAIN` still reports the correlated access as a full scan.
+   [`EXPLAIN ANALYZE`](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md)
+   reports the observed ordered index, rows per loop, and fallback
+   invocations. Static `EXPLAIN` still estimates a scan for these accesses.
    Other computed lookup keys, residual predicates, and broader
    aggregate shapes still need work.
 
