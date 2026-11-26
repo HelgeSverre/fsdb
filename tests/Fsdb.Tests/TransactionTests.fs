@@ -975,6 +975,45 @@ let tests =
                   finally
                       run transaction "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "serializable reverse composite suffix ranges lock what the scan visits"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for keyOrder, orderDirection, result, lockedRows, lockedGaps in
+                  [ "a,b", "DESC", "30", [ 30 ], [ 25; 35 ]
+                    "a,b DESC", "ASC", "20", [ 20; 30 ], [ 25 ]
+                    "a DESC,b DESC", "ASC", "20", [ 20 ], [ 15; 25 ] ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = run (create 1 store) $"CREATE TABLE gate(a INT,b INT,PRIMARY KEY({keyOrder}))" (Affected 0UL)
+                  run setup "INSERT INTO gate VALUES (1,40),(2,10),(2,20),(2,30),(2,40),(4,40)" (Affected 6UL) |> ignore
+                  let probe = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+                  let attempt sql =
+                      let transaction = run probe "BEGIN" (Affected 0UL)
+                      let transaction, result = handle transaction sql
+                      run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                      result
+
+                  let reader = run (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let sql = $"SELECT b FROM gate FORCE INDEX (PRIMARY) WHERE a=2 AND b BETWEEN 20 AND 30 ORDER BY b {orderDirection} LIMIT 1"
+                  let reader = run reader sql (ResultSet([ "b" ], [ [ Some result ] ]))
+                  try
+                      for key in [ 20; 30; 40 ] do
+                          let actual = attempt $"SELECT b FROM gate WHERE a=2 AND b={key} FOR UPDATE NOWAIT"
+                          match List.contains key lockedRows, actual with
+                          | true, Err(3572, _) | false, ResultSet _ -> ()
+                          | _ -> failtestf "%s scan locked row %d incorrectly: %A" keyOrder key actual
+                      for key in [ 15; 25; 35 ] do
+                          let actual = attempt $"INSERT INTO gate VALUES (2,{key})"
+                          match List.contains key lockedGaps, actual with
+                          | true, Err(1205, _) | false, Affected 1UL -> ()
+                          | _ -> failtestf "%s scan locked gap at %d incorrectly: %A" keyOrder key actual
+                  finally
+                      run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "serializable primary ranges follow descending and composite index order"
           <| fun _ ->
               let run session sql expected =

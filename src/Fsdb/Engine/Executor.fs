@@ -34752,24 +34752,28 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                         resolved |> Option.bind predicateColumn |> Option.map (fun column -> column, direction)
 
                     let constantKeys, orderedKeys = List.splitAt prefixLength keys
-                    let scanDirection (ordering: (string * Direction) list) =
+                    let scanLimit (ordering: (string * Direction) list) =
                         let varyingOrder =
                             ordering |> List.filter (fun (column, _) -> not (List.exists (equalsIgnoreCase column) constantKeys))
                         let followsPrimaryKeys =
                             List.length varyingOrder = List.length orderedKeys
                             && List.forall2 (fun (column, _) key -> equalsIgnoreCase column key) varyingOrder orderedKeys
                         if not followsPrimaryKeys then None
-                        elif varyingOrder |> List.forall (fun (column, direction) -> direction = keyDirection column) then Some Storage.ForwardScan
-                        elif (keys.Length = 1 || (prefixLength > 0 && prefixLength = conditions.Length))
-                             && (varyingOrder |> List.forall (fun (column, direction) -> direction <> keyDirection column)) then
-                            Some Storage.ReverseScan
+                        elif varyingOrder |> List.forall (fun (column, direction) -> direction = keyDirection column) then
+                            Some(Some Storage.ForwardScan)
+                        elif varyingOrder |> List.forall (fun (column, direction) -> direction <> keyDirection column) then
+                            let firstDirection = keyDirection keys.Head
+                            let mixedOrder = orderedKeys |> List.exists (fun key -> keyDirection key <> firstDirection)
+                            // MySQL scans the full range before filesort when the ordered parts have mixed index directions.
+                            if mixedOrder && prefixLength <> conditions.Length then Some None
+                            else Some(Some Storage.ReverseScan)
                         else None
 
-                    select.OrderBy |> List.map orderColumn |> tryAllSome |> Option.bind scanDirection
-                    |> Option.map (fun direction ->
+                    select.OrderBy |> List.map orderColumn |> tryAllSome |> Option.bind scanLimit
+                    |> Option.map (Option.map (fun direction ->
                         let offset = select.Offset |> Option.map rowCount |> Option.defaultValue 0
                         let count = min (int64 System.Int32.MaxValue) (int64 offset + int64 (rowCount limit)) |> int
-                        Some(direction, count))
+                        direction, count))
                 | _ -> None
 
             let isIntegerColumn column =
@@ -34788,6 +34792,11 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                 | BinOp(Eq, left, right) ->
                     let bound column literal = Option.map2 (fun name value -> name, value) (predicateColumn column) (integer literal)
                     bound left right |> Option.orElseWith (fun () -> bound right left)
+                | Between(column, low, high) ->
+                    match integer low, integer high with
+                    | Some lower, Some upper when Storage.compareIntegerPrimaryValues lower upper = 0 ->
+                        predicateColumn column |> Option.map (fun name -> name, lower)
+                    | _ -> None
                 | _ -> None
 
             let equalities = List.choose equality conditions
@@ -34837,6 +34846,8 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                             | Some(low, includeLow), Some(high, includeHigh) when compare low high = 0 ->
                                 if not (includeLow && includeHigh) then None
                                 elif remaining.IsEmpty then point (prefix @ [ low ]) |> Option.map (fun access -> access, None)
+                                // Separate inequalities that collapse to a prefix can choose a wider backward scan.
+                                elif not select.OrderBy.IsEmpty && not (limit |> Option.exists (fun (direction, _) -> direction = Storage.ForwardScan)) then None
                                 else rangeRead
                             | Some(low, _), Some(high, _) when compare low high > 0 -> None
                             | _ -> rangeRead

@@ -323,10 +323,45 @@ included a three-column key with two varying ORDER BY columns and
 separate cases with two leading equalities. Seven additional
 pending-writer schedules also matched.
 
-Composite suffix ranges and unordered limits remain open. For the
-audited `a=2 AND b BETWEEN 12 AND 39`, MySQL used a backward scan on
-`(a ASC,b ASC)` ordered by `b DESC`. It used a filesort on
-`(a ASC,b DESC)` ordered by `b ASC`, with a different lock footprint.
+#### Composite ordered ranges
+
+The audited reverse-order queries now distinguish an actual backward
+scan from a range scan followed by filesort. For `a=2 AND b BETWEEN 20
+AND 30`, `(a ASC,b ASC)` ordered by `b DESC` stops at `30` with `LIMIT 1`.
+It locks row `30` and both adjacent gaps. On `(a ASC,b DESC)` ordered by
+`b ASC`, MySQL scans the entire range before sorting. It returns `20`
+and locks rows `20` and `30`, with only the gap between them locked.
+
+The audited cases include ranges on the leading key, ranges after one
+or two equalities, and both physical directions. MySQL compares the
+ordered parts with the first index part's direction when deciding
+whether to use a backward range scan. A differently ordered interior
+equality-bound part can be skipped. A single `BETWEEN` with identical
+integer endpoints can extend the equality prefix. Separate inequalities
+that collapse to a partial key can use different scans and remain open,
+as do unordered limits.
+[MySQL 8.4.11 optimizer source](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_optimizer.cc#L1706-L1804).
+
+MySQL and both Fsdb modes matched all 328 maintained schedule checks.
+Another 3,558 row, record-lock, and sampled gap checks matched across
+208 two- and three-column scans.
+
+#### Table replacement with a live snapshot
+
+A separate schedule held a repeatable-read transaction open after
+reading a sibling table. A second connection dropped `gate`, whose
+primary key was `(a)`, and recreated it with `(a,b DESC)`. A third
+connection began a serializable transaction and read the new table with
+`WHERE a=2 ORDER BY b DESC LIMIT 2`. MySQL returned `40, 30`. Fsdb
+returned 1105. Its server log showed a primary-index key width mismatch.
+The older transaction had read the sibling only, leaving it free of a
+MySQL metadata lock on `gate`.
+
+The same schedule can shorten a gap lock when the primary key stays
+`(a,b)`. The old table had `(2,35)`. The replacement had `(2,30)` and
+`(2,40)` with no key between them. A backward scan returned `30` on
+both engines. MySQL blocked inserts at `(2,34)` and `(2,36)`. Fsdb
+blocked `(2,34)` and allowed `(2,36)`.
 
 Run the live schedules against disposable servers. Use `--data-dir`
 to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.

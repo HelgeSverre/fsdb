@@ -811,6 +811,71 @@ def check(port, mysql):
             ),
             (("(2,25,1)", TIMEOUT), ("(2,15,1)", TIMEOUT), ("(2,35,1)", 1)),
         ),
+        (
+            "backward composite suffix range",
+            ("CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a,b))", composite_rows),
+            "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=2 AND b BETWEEN 20 AND 30 ORDER BY b DESC LIMIT 1",
+            ((30,),),
+            (("a=2 AND b=20", 1), ("a=2 AND b=30", 3572)),
+            (("(2,15)", 1), ("(2,25)", TIMEOUT), ("(2,35)", TIMEOUT)),
+        ),
+        (
+            "empty backward composite suffix range",
+            ("CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a,b))", composite_rows),
+            "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=3 AND b BETWEEN 20 AND 30 ORDER BY b DESC LIMIT 1",
+            (),
+            (("a=2 AND b=40", 3572), ("a=4 AND b=10", 1)),
+            (("(2,35)", TIMEOUT), ("(3,25)", TIMEOUT), ("(2,25)", 1)),
+        ),
+        (
+            "backward descending composite suffix range",
+            (
+                "CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a DESC,b DESC))",
+                composite_rows,
+            ),
+            "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=2 AND b BETWEEN 20 AND 30 ORDER BY b ASC LIMIT 1",
+            ((20,),),
+            (("a=2 AND b=20", 3572), ("a=2 AND b=30", 1)),
+            (("(2,15)", TIMEOUT), ("(2,25)", TIMEOUT), ("(2,35)", 1)),
+        ),
+        (
+            "filesort locks the complete composite suffix range",
+            composite_range,
+            "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=2 AND b BETWEEN 20 AND 30 ORDER BY b ASC LIMIT 1",
+            ((20,),),
+            (("a=2 AND b=20", 3572), ("a=2 AND b=30", 3572), ("a=2 AND b=40", 1)),
+            (("(2,15)", 1), ("(2,25)", TIMEOUT), ("(2,35)", 1)),
+        ),
+        (
+            "backward range skips an equality-bound key direction",
+            (
+                "CREATE TABLE gate(a INT,b INT,c INT,PRIMARY KEY(a,b DESC,c))",
+                "INSERT INTO gate VALUES (2,10,5),(2,20,5),(2,20,10),(2,30,5)",
+            ),
+            "SELECT c FROM gate FORCE INDEX(PRIMARY) WHERE a=2 AND b=20 AND c BETWEEN 5 AND 10 ORDER BY c DESC LIMIT 1",
+            ((10,),),
+            (("a=2 AND b=20 AND c=5", 1), ("a=2 AND b=20 AND c=10", 3572)),
+            (("(2,20,7)", TIMEOUT), ("(2,15,5)", TIMEOUT), ("(2,25,5)", 1)),
+        ),
+        (
+            "filesort locks the complete leading composite range",
+            composite_range,
+            "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a BETWEEN 2 AND 3 ORDER BY a DESC,b ASC LIMIT 1",
+            ((10,),),
+            (("a=2 AND b=10", 3572), ("a=2 AND b=40", 3572), ("a=4 AND b=10", 1)),
+            (("(3,10)", TIMEOUT), ("(4,5)", 1)),
+        ),
+        (
+            "equal BETWEEN bounds extend the equality prefix",
+            (
+                "CREATE TABLE gate(a INT,b INT,c INT,PRIMARY KEY(a,b,c DESC))",
+                "INSERT INTO gate VALUES (2,10,5),(2,20,5),(2,20,10),(2,30,5)",
+            ),
+            "SELECT c FROM gate FORCE INDEX(PRIMARY) WHERE a=2 AND b BETWEEN 20 AND 20 ORDER BY c ASC LIMIT 1",
+            ((5,),),
+            (("a=2 AND b=20 AND c=5", 3572), ("a=2 AND b=20 AND c=10", 1)),
+            (("(2,20,7)", TIMEOUT), ("(2,25,5)", TIMEOUT), ("(2,15,5)", 1)),
+        ),
     ):
         with fixture(port, schema, mysql, setup) as (_, _, reader, _, probe):
             execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
@@ -895,6 +960,14 @@ def check(port, mysql):
         (2, 5),
         (2, 7),
         ((5,),),
+    )
+    check_limited_wait(
+        "backward composite suffix range",
+        ("CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a,b))", composite_rows),
+        "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=2 AND b BETWEEN 12 AND 39 ORDER BY b DESC LIMIT 1",
+        (2, 38),
+        (2, 35),
+        ((38,),),
     )
 
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
