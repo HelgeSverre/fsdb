@@ -391,6 +391,34 @@ let tests =
               let updated = addDocument 1 "서울역 서울역" original
               Expect.equal (booleanScores updated query |> ids) [ 1; 2 ] "the updated document extends the posting across the bounds"
 
+          testCase "required ngram phrases count cached and flushed postings separately"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_bin" |> Option.get
+              let build flushed cached =
+                  let disk =
+                      flushed
+                      |> List.mapi (fun offset text -> offset + 1, [ text ])
+                      |> buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation
+                      |> flushPostings
+                  (disk, cached)
+                  ||> List.fold (fun index (id, text) -> addDocument id text index)
+              let query = "学校 (+京都 +生* +学校)"
+              let prefixGroup = "+学校 (+京都 +生*)"
+              let fresh = build [] [ 1, "京都"; 2, "生日"; 3, "学校"; 4, "大阪" ]
+              closeTo 0.3624762296676636 (booleanScores fresh query).[3] "disjoint cached postings contribute no frequency"
+              closeTo 0.0906190574169159 (booleanScores (flushPostings fresh) query).[3] "disjoint flushed postings still contribute frequency"
+              let separate = build [ "学校"; "京都"; "生日"; "大阪" ] [ 5, "学校"; 6, "札幌" ]
+              closeTo 0.0906190574169159 (booleanScores separate query).[5] "only the flushed posting counts on the second visit"
+              Expect.isEmpty (booleanScores separate prefixGroup) "two disjoint segments do not make one overlapping posting"
+              let diskOverlap = build [ "学校"; "京都"; "学校"; "生日"; "大阪" ] [ 6, "学校" ]
+              closeTo 0.006269669625908136 (booleanScores diskOverlap query).[1] "the cache segment is disjoint"
+              Expect.equal (booleanScores diskOverlap prefixGroup |> Map.keys |> Seq.toList) [ 1; 3 ] "the overlapping disk segment remains available in full"
+              let cacheOverlap = build [ "学校"; "大阪" ] [ 3, "学校"; 4, "京都"; 5, "学校"; 6, "生日" ]
+              Expect.equal (booleanScores cacheOverlap prefixGroup |> Map.keys |> Seq.toList) [ 3; 5 ] "the overlapping cache segment remains available in full"
+              let multi = build [ "学校园"; "京都"; "学校"; "生日"; "大阪" ] [ 6, "学校园" ]
+              Expect.isEmpty (booleanScores multi "+学校园 (+京都 +生*)") "one disjoint gram makes the whole phrase unavailable"
+              closeTo 0.09688872843980789 (booleanScores multi "学校园 (+京都 +生* +学校园)").[1] "the visitor counts disk postings through the first unavailable gram"
+
           testCase "general Unicode ngrams retain halfwidth voicing marks in relevance"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 6; Stopwords = StopwordPolicy.BuiltIn }

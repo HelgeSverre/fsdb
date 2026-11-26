@@ -823,9 +823,11 @@ let private naturalWordMatches candidateIds (view: ReadView<'id>) clauses =
     { Occurrences = clauses |> Array.collect (naturalClauseKeys view.Rules) |> Array.countBy id |> Map.ofArray
       Documents = clauses |> Array.fold addClause Map.empty }
 
-let private queryOccurrenceWeight (view: ReadView<'id>) documentFrequency occurrences =
-    let frequency = float documentFrequency * float occurrences
+let private wordFrequencyWeight (view: ReadView<'id>) frequency =
     max (abs (log10 (float view.DocumentCount / frequency))) idfFloor
+
+let private queryOccurrenceWeight view documentFrequency occurrences =
+    wordFrequencyWeight view (float documentFrequency * float occurrences)
 
 let private scoreNaturalWordMatches (view: ReadView<'id>) matches =
     matches.Documents
@@ -1520,7 +1522,8 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 if needsVisibleCorpus then view.VisibleDocumentIds
                 elif fullScope then None
                 else candidateIds
-            let exactVisits = Collections.Generic.Dictionary<string, int>()
+            let exactCounts = Collections.Generic.Dictionary<string, int64>()
+            let exactSegments = Collections.Generic.Dictionary<string, Map<'id, int> * Map<'id, int>>()
             let prefixCounts = Collections.Generic.Dictionary<string, int64>()
             let diskPrefixes = Collections.Generic.Dictionary<string, PrefixPosting<'id> option>()
             let scoringPrefixes = Collections.Generic.Dictionary<string, Map<'id, int>>()
@@ -1561,14 +1564,55 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                         let position = order id
                         min lower position, max upper position) (Int64.MaxValue, 0L)
 
-            let outsideBounds lower upper = function
-                | ExactNgram key ->
-                    view.Postings
-                    |> Map.tryFind key
-                    |> Option.forall (fun rows ->
+            let boundedExactPosting lower upper key (rows: Map<'id, int>) =
+                let withinBounds rows =
+                    if Map.isEmpty rows then Map.empty
+                    else
                         let first, last = documentBounds rows
-                        first > upper || last < lower)
-                | NgramPrefix _ -> false
+                        if first > upper || last < lower then Map.empty else rows
+
+                match view.FlushedThrough with
+                | None -> rows.Count, withinBounds rows
+                | Some 0L ->
+                    let cached = withinBounds rows
+                    cached.Count, cached
+                | Some through ->
+                    let disk, cache =
+                        match exactSegments.TryGetValue key with
+                        | true, segments -> segments
+                        | _ ->
+                            let segments = rows |> Map.partition (fun id _ -> view.Documents.[id].Order <= through)
+                            exactSegments.Add(key, segments)
+                            segments
+                    let availableDisk, availableCache = withinBounds disk, withinBounds cache
+                    // Disk counts all postings, and cache counts only the nodes it reads.
+                    let frequency = disk.Count + availableCache.Count
+                    if availableDisk.Count + availableCache.Count = rows.Count then frequency, rows
+                    elif availableDisk.IsEmpty then frequency, availableCache
+                    else frequency, availableDisk
+
+            let visitExactWords bounds found =
+                let rec visit offset candidates =
+                    if offset = Array.length found then Some candidates
+                    else
+                        match found.[offset] with
+                        | NgramPrefix _ -> visit (offset + 1) candidates
+                        | ExactNgram word ->
+                            let rows = Map.tryFind word view.Postings |> Option.defaultValue Map.empty
+                            let frequency, available =
+                                match bounds with
+                                | Some(lower, upper) -> boundedExactPosting lower upper word rows
+                                | None -> rows.Count, rows
+                            let _, count = exactCounts.TryGetValue word
+                            exactCounts.[word] <- count + int64 frequency
+                            match bounds with
+                            | Some _ when available.IsEmpty -> None
+                            | Some _ when available.Count < rows.Count ->
+                                let allowed = available |> Map.keys |> Set.ofSeq
+                                visit (offset + 1) (intersectCandidates candidates (Some allowed))
+                            | _ -> visit (offset + 1) candidates
+
+                visit 0 scope
 
             let adjustmentSteps term id =
                 match term with
@@ -1590,43 +1634,31 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 | term ->
                     if isPhrase term then inPhraseMode <- true
                     let found = keys term
-                    let firstOutside =
-                        match isRequired, postingBounds with
-                        | true, Some(lower, upper) -> Array.tryFindIndex (outsideBounds lower upper) found
-                        | _ -> None
-                    // InnoDB counts the skipped gram's frequency before testing
-                    // its posting bounds, then stops at that gram.
-                    let visited = firstOutside |> Option.map (fun index -> Array.take (index + 1) found) |> Option.defaultValue found
-                    for key in visited do
-                        match key with
-                        | ExactNgram word ->
-                            let _, count = exactVisits.TryGetValue word
-                            exactVisits.[word] <- count + 1
-                        | NgramPrefix _ -> ()
-
-                    if firstOutside.IsSome then Map.empty
-                    else
-                        let matches =
-                            match term with
-                            | BWord(word, true) ->
-                                // Required prefixes use the cache even after visiting a phrase.
-                                match prefixPosting (inPhraseMode && not isRequired) word.Key with
-                                | None -> Map.empty
-                                | Some posting ->
-                                    let _, count = prefixCounts.TryGetValue word.Key
-                                    prefixCounts.[word.Key] <- count + posting.GramDocumentCount
-                                    posting.Rows |> restrictScores scope |> Map.map (fun _ _ -> 0.0)
-                            | _ -> evalTerm scope view term
-                        match contributes with
-                        | Some accepts when
-                            (found |> Array.exists (contributionOrder.ContainsKey >> not))
-                            && (matches |> Map.exists (fun id _ -> accepts id)) ->
-                            // A gram gets its position when it first contributes to a document.
-                            for key in found do
-                                contributionOrder.TryAdd(key, contributionOrder.Count) |> ignore
-                        | _ -> ()
-                        let terms = Set.ofArray found
-                        matches |> Map.map (fun _ _ -> { Terms = terms; Adjustment = 0 })
+                    let matches =
+                        match term with
+                        | BWord(word, true) ->
+                            // Required prefixes use the cache even after visiting a phrase.
+                            match prefixPosting (inPhraseMode && not isRequired) word.Key with
+                            | None -> Map.empty
+                            | Some posting ->
+                                let _, count = prefixCounts.TryGetValue word.Key
+                                prefixCounts.[word.Key] <- count + posting.GramDocumentCount
+                                posting.Rows |> restrictScores scope |> Map.map (fun _ _ -> 0.0)
+                        | _ ->
+                            let bounds = if isRequired then postingBounds else None
+                            match visitExactWords bounds found with
+                            | Some candidates -> evalTerm candidates view term
+                            | None -> Map.empty
+                    match contributes with
+                    | Some accepts when
+                        (found |> Array.exists (contributionOrder.ContainsKey >> not))
+                        && (matches |> Map.exists (fun id _ -> accepts id)) ->
+                        // A gram gets its position when it first contributes to a document.
+                        for key in found do
+                            contributionOrder.TryAdd(key, contributionOrder.Count) |> ignore
+                    | _ -> ()
+                    let terms = Set.ofArray found
+                    matches |> Map.map (fun _ _ -> { Terms = terms; Adjustment = 0 })
 
             and matchNodes nodes =
                 // Ordinary terms seed the group before required terms and exclusions.
@@ -1702,7 +1734,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                         rows, ngramPrefixWeight view.DocumentCount (float prefixCounts.[key])
                     | ExactNgram key ->
                         let rows = view.Postings.[key]
-                        rows, queryOccurrenceWeight view rows.Count exactVisits.[key]
+                        rows, wordFrequencyWeight view (float exactCounts.[key])
 
                 float rows.[id] * weight * weight
 
