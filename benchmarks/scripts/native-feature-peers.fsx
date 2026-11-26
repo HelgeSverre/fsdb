@@ -14,6 +14,7 @@ let modes =
       "expression-count-controls"
       "exact-aggregate-controls"
       "projected-range-controls"
+      "projected-filter-controls"
       "edge-controls" ]
 
 let engine, port, pass, mode =
@@ -157,12 +158,23 @@ let readProjectedRanges () =
         $"{prefix} SELECT SUM((SELECT {aggregate} FROM {source} c WHERE c.parent_key = p.id AND c.sequence_no BETWEEN p.id AND p.id + 1000)) FROM parent p"
 
     let cases =
-        [ "physical-count", "SELECT SUM((SELECT COUNT(*) FROM child c WHERE c.parent_id = p.id AND c.id BETWEEN p.id AND p.id + 1000)) FROM parent p", 1500L
-          "derived-count", projected "" nested "COUNT(*)", 1500L
-          "derived-count-payload", projected "" nested "COUNT(c.payload)", 1200L
-          "derived-sum-sequence", projected "" nested "SUM(c.sequence_no)", 1125750L
-          "cte-count", projected $"WITH child_rows AS ({projection})" "child_rows" "COUNT(*)", 1500L
-          "filtered-derived-count", projected "" filtered "COUNT(*)", 1200L ]
+        let nullTest = "filtered-derived-count", projected "" filtered "COUNT(*)", 1200L
+        if mode = "projected-filter-controls" then
+            let equality = $"({projection} WHERE bucket = 1)"
+            let nestedFilter =
+                $"(SELECT sequence_no, parent_key, payload FROM ({projection} WHERE bucket <> 2 OR bucket IS NULL) reordered WHERE NOT (payload <> 1) OR payload IS NULL)"
+            let cteFilter = $"WITH child_rows AS ({projection} WHERE NOT (bucket <=> 1) AND bucket BETWEEN 0 AND 2)"
+            [ nullTest
+              "derived-equality-filter", projected "" equality "COUNT(*)", 400L
+              "nested-filtered-sum", projected "" nestedFilter "SUM(c.sequence_no)", 525250L
+              "cte-filtered-count", projected cteFilter "child_rows" "COUNT(*)", 800L ]
+        else
+            [ "physical-count", "SELECT SUM((SELECT COUNT(*) FROM child c WHERE c.parent_id = p.id AND c.id BETWEEN p.id AND p.id + 1000)) FROM parent p", 1500L
+              "derived-count", projected "" nested "COUNT(*)", 1500L
+              "derived-count-payload", projected "" nested "COUNT(c.payload)", 1200L
+              "derived-sum-sequence", projected "" nested "SUM(c.sequence_no)", 1125750L
+              "cte-count", projected $"WITH child_rows AS ({projection})" "child_rows" "COUNT(*)", 1500L
+              nullTest ]
 
     let ordered = if pass % 2 = 0 then List.rev cases else cases
     for lane, query, expected in ordered do
@@ -332,7 +344,7 @@ try
 
         let workloads =
             if mode = "range-controls" then [ readRangeControls ]
-            elif mode = "projected-range-controls" then [ readProjectedRanges ]
+            elif mode = "projected-range-controls" || mode = "projected-filter-controls" then [ readProjectedRanges ]
             elif mode = "nullable-count-controls" || mode = "expression-count-controls" then [ readCountArguments ]
             elif mode = "exact-aggregate-controls" then [ readExactAggregates ]
             elif mode = "prefix-controls" then

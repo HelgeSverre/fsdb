@@ -16078,6 +16078,24 @@ let tests =
                     let filteredBytes = measure "" filtered "COUNT(*)" 240M
                     Expect.isLessThan filteredBytes 4000000L "a null-test filter reuses the slice"
 
+                    let signedFilter =
+                        "(SELECT bucket AS payload, id AS sequence_no, parent_id AS parent_key FROM children WHERE bucket = 1)"
+                    let signedBytes = measure "" signedFilter "COUNT(*)" 80M
+                    Expect.isLessThan signedBytes 4000000L "a signed-integer source filter reuses the slice"
+
+                    let nestedFilter =
+                        "(SELECT b AS payload, k AS sequence_no, owner AS parent_key FROM "
+                        + "(SELECT bucket AS b, parent_id AS owner, id AS k FROM children WHERE bucket <> 2 OR bucket IS NULL) reordered "
+                        + "WHERE NOT (b <> 1) OR b IS NULL)"
+                    let nestedBytes = measure "" nestedFilter "SUM(c.sequence_no)" 21050M
+                    Expect.isLessThan nestedBytes 8000000L "nested filters retain SQL null semantics on the slice"
+
+                    let cteFilter =
+                        "WITH projected AS (SELECT bucket AS payload, id AS sequence_no, parent_id AS parent_key FROM children "
+                        + "WHERE NOT (bucket <=> 1) AND bucket BETWEEN 0 AND 2)"
+                    let cteBytes = measure cteFilter "projected" "COUNT(*)" 160M
+                    Expect.isLessThan cteBytes 4000000L "the CTE filter reuses the slice"
+
                 testCase "correlated integer count uses the equality prefix and range together"
                 <| fun _ ->
                     let store = newStore ()

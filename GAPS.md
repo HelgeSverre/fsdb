@@ -2821,6 +2821,11 @@ implementation effort:
    [Projected composite ranges](benchmarks/results/2026-11-25-correlated-integer-range-count.md#composite-ranges-through-projections)
    follow direct column aliases through nested derived tables and
    statement-stable CTEs. Direct source null tests can filter the slice.
+   [Signed-integer source filters](benchmarks/results/2026-11-26-correlated-projection-filters.md)
+   now keep the same slice through nested aliases and CTEs, including
+   Boolean combinations of comparisons, null tests, and `BETWEEN`.
+   The three timed controls went from about 300 ms to 8–11 ms and
+   matched MySQL's results.
    [Projected aggregate wire metadata](benchmarks/results/2026-11-25-correlated-integer-range-count.md#projected-aggregate-wire-metadata)
    preserves the audited numeric descriptors for scalar aggregates over
    derived tables and CTEs. [Binding checks for projected aggregates](benchmarks/results/2026-11-25-correlated-integer-range-count.md#reuse-of-derived-aggregate-bindings)

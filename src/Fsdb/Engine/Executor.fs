@@ -450,8 +450,8 @@ type private PhysicalProjection =
       PhysicalTableRef: TableRef
       PhysicalTable: Table
       PhysicalColumnIndices: int list
-      // Available when every projection filter is a direct null test.
-      NullTests: (int * bool) list option
+      // These predicates can run against stored rows selected by a later probe.
+      SilentFilters: (Value[] -> bool) list option
       Steps: PhysicalProjectionStep list }
 
 let private tryDuplicateIgnoreCase nameOf values =
@@ -17148,6 +17148,69 @@ and private tryPhysicalProjection
                 Dictionary<obj, PhysicalProjection option>(HashIdentity.Reference))
         getMemoized byScope (box scope) compute
 
+and private trySilentProjectionFilter resolveInputIndex (input: PhysicalProjection) predicate =
+    let physicalIndex expression =
+        resolveInputIndex expression
+        |> Option.map (fun index -> input.PhysicalColumnIndices.[index])
+
+    let operand = function
+        | LiteralValue VNull -> Some(fun _ -> VNull)
+        | expression ->
+            match correlatedSignedIntegerLiteral expression with
+            | Some literal ->
+                let value = VInt literal
+                Some(fun _ -> value)
+            | None ->
+                physicalIndex expression
+                |> Option.bind (fun index ->
+                    match input.PhysicalTable.Columns.[index].Type with
+                    | TTinyInt false | TSmallInt false | TMediumInt false | TInt false ->
+                        Some(fun (row: Value[]) -> row.[index])
+                    | _ -> None)
+
+    let comparison op left right =
+        let apply (readLeft: Value[] -> Value) (readRight: Value[] -> Value) row =
+            let left, right = readLeft row, readRight row
+            if left = VNull || right = VNull then
+                if op = NullSafeEq then ValueSome(left = right) else ValueNone
+            else
+                let order = Value.compare left right
+                ValueSome(
+                    match op with
+                    | Eq | NullSafeEq -> order = 0
+                    | Neq -> order <> 0
+                    | Lt -> order < 0
+                    | Lte -> order <= 0
+                    | Gt -> order > 0
+                    | Gte -> order >= 0
+                    | _ -> invalidOp "expected an integer projection comparison")
+        Option.map2 apply (operand left) (operand right)
+
+    let combine decisive left right row =
+        match left row with
+        | ValueSome truth when truth = decisive -> ValueSome decisive
+        | ValueSome _ -> right row
+        | ValueNone ->
+            if right row = ValueSome decisive then ValueSome decisive else ValueNone
+
+    let nullTest expectNull value =
+        physicalIndex value
+        |> Option.map (fun index (row: Value[]) -> ValueSome((row.[index] = VNull) = expectNull))
+
+    let rec compile = function
+        | IsNull value -> nullTest true value
+        | IsNotNull value -> nullTest false value
+        | BinOp((Eq | NullSafeEq | Neq | Lt | Lte | Gt | Gte as op), left, right) ->
+            comparison op left right
+        | Between(value, lower, upper) ->
+            Option.map2 (combine false) (comparison Gte value lower) (comparison Lte value upper)
+        | BinOp((And | Or as op), left, right) ->
+            Option.map2 (combine (op = Or)) (compile left) (compile right)
+        | Not value -> compile value |> Option.map (fun evaluate row -> ValueOption.map not (evaluate row))
+        | _ -> None
+
+    compile predicate |> Option.map (fun evaluate row -> evaluate row = ValueSome true)
+
 and private tryPhysicalProjectionUncached
     (store: Store)
     (registry: Registry)
@@ -17179,7 +17242,7 @@ and private tryPhysicalProjectionUncached
               PhysicalTableRef = tableRef
               PhysicalTable = table
               PhysicalColumnIndices = [ 0 .. table.Columns.Length - 1 ]
-              NullTests = Some []
+              SilentFilters = Some []
               Steps = [] })
 
     let tableProjection (tableRef: TableRef) =
@@ -17232,18 +17295,9 @@ and private tryPhysicalProjectionUncached
                         Some name
                     | _ -> None
 
-                let nullTest expectNull expression =
+                let directIndex expression =
                     directColumn expression
                     |> Option.bind (resolveColumn input.OutputColumns >> Result.toOption)
-                    |> Option.map (fun index -> [ input.PhysicalColumnIndices.[index], expectNull ])
-
-                // These tests are silent even on rows outside a later range.
-                // Resolve them against the input of this projection step.
-                let rec nullTests = function
-                    | IsNull value -> nullTest true value
-                    | IsNotNull value -> nullTest false value
-                    | BinOp(And, left, right) -> Option.map2 (@) (nullTests left) (nullTests right)
-                    | _ -> None
 
                 if not predicateIsStable then
                     None
@@ -17251,11 +17305,7 @@ and private tryPhysicalProjectionUncached
                     select.Projections
                     |> traverse (fun ({ Expression = expression } as projection) ->
                         match
-                            directColumn expression
-                            |> Option.bind (fun name ->
-                                resolveColumn input.OutputColumns name
-                                |> Result.toOption
-                                |> Option.map (fun index -> index, projectionLabel projection))
+                            directIndex expression |> Option.map (fun index -> index, projectionLabel projection)
                         with
                         | Some projected -> Ok projected
                         | None -> Error())
@@ -17274,9 +17324,12 @@ and private tryPhysicalProjectionUncached
                                         |> List.map (fun (index, name) -> derivedColumn input.OutputColumns.[index] name)
                                     PhysicalColumnIndices =
                                         outputIndices |> List.map (fun index -> input.PhysicalColumnIndices.[index])
-                                    NullTests =
-                                        let ownTests = select.Where |> Option.map nullTests |> Option.defaultValue (Some [])
-                                        Option.map2 (@) input.NullTests ownTests
+                                    SilentFilters =
+                                        match select.Where with
+                                        | None -> input.SilentFilters
+                                        | Some predicate ->
+                                            Option.map2 (fun filters filter -> filters @ [ filter ])
+                                                input.SilentFilters (trySilentProjectionFilter directIndex input predicate)
                                     Steps =
                                         input.Steps
                                         @ [ { InputColumns = input.OutputColumns
@@ -19508,8 +19561,8 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
         |> Option.filter (fun projection ->
             (tryLockingReadRows projection.PhysicalTableRef).IsNone
             && storedRowsMatchReadRows outer.Store projection.PhysicalTable.Columns)
-        |> Option.bind (fun projection -> projection.NullTests |> Option.map (fun tests -> projection, tests))
-        |> Option.bind (fun (projection, nullTests) ->
+        |> Option.bind (fun projection -> projection.SilentFilters |> Option.map (fun filters -> projection, filters))
+        |> Option.bind (fun (projection, sourceFilters) ->
             let table = projection.PhysicalTable
             let scope = correlatedProbeSource qualifier projection.OutputColumns
             let signedColumn = tryCorrelatedSignedIntegerColumn scope projection.OutputColumns
@@ -19605,14 +19658,13 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                 |> List.tryHead
                 |> Option.map (fun (lookup, covered) ->
                     let filtered =
-                        if nullTests.IsEmpty then lookup.OrderedRows
+                        if sourceFilters.IsEmpty then lookup.OrderedRows
                         else
                             lookup.OrderedRows
                             |> Seq.mapi (fun index row ->
                                 Limits.checkQueryCancellation index
                                 row)
-                            |> Seq.filter (fun row ->
-                                nullTests |> List.forall (fun (index, expectNull) -> (row.[index] = VNull) = expectNull))
+                            |> Seq.filter (fun row -> sourceFilters |> List.forall (fun keep -> keep row))
                     let rows =
                         if projection.Steps.IsEmpty then filtered
                         else
@@ -19621,7 +19673,7 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                             |> Seq.map (fun row -> indices |> Array.map (fun index -> row.[index]))
                     { Columns = projection.OutputColumns
                       Rows = rows
-                      RowCount = if nullTests.IsEmpty then Some lookup.OrderedRowCount else None
+                      RowCount = if sourceFilters.IsEmpty then Some lookup.OrderedRowCount else None
                       CoversWhere = covered })
             | _ -> None)
     | _ -> None
