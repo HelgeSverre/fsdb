@@ -790,6 +790,37 @@ let tests =
                     Expect.equal (call "ST_IsEmpty" [ result ]) (VInt 1L) "a turn-free line starts outside"
                     Expect.equal (call "ST_Intersection" [ firstInside; smallerArea ]) firstInside "a turn-free line starts inside"
 
+                testCase "geographic overlays retain rounded polar hole vertices"
+                <| fun _ ->
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]
+                    let area = geometry "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))"
+                    let overlay name first second = call "ST_AsText" [ call name [ first; second ] ]
+
+                    for wkt in [ "LINESTRING(86 1.00001,88 1.00001)"; "LINESTRING(88 1.00001,86 1.00001)" ] do
+                        let line = geometry wkt
+                        Expect.equal (overlay "ST_Intersection" line area) (VString "POINT(86 1)") wkt
+                        Expect.equal (overlay "ST_Intersection" area line) (VString "POINT(86 1)") wkt
+                        Expect.equal (overlay "ST_Difference" line area) (VString wkt) wkt
+
+                    for wkt, clipped, remaining in
+                        [ "LINESTRING(86 2.99999,88 2.99999)", "LINESTRING(86 2.99999,86 3)", "LINESTRING(86 3,88 2.99999)"
+                          "LINESTRING(88 2.99999,86 2.99999)", "LINESTRING(86 3,86 2.99999)", "LINESTRING(88 2.99999,86 3)" ] do
+                        let line = geometry wkt
+                        Expect.equal (overlay "ST_Intersection" line area) (VString clipped) wkt
+                        Expect.equal (overlay "ST_Difference" line area) (VString remaining) wkt
+
+                testCase "geographic overlay cuts with rounded distances stay between source endpoints"
+                <| fun _ ->
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]
+                    let line = geometry "LINESTRING(-37 1.00001,-39 1.00001)"
+                    let area = geometry "POLYGON((-40 0,-40 4,-36 4,-36 0,-40 0),(-39 1,-37 1,-37 3,-39 3,-39 1))"
+                    match call "ST_Intersection" [ line; area ] with
+                    | VGeometry { Shape = GGeometryCollection [ { Shape = GLineString [ start; (cutLatitude, _) ] }; { Shape = GPoint(contactLatitude, _) } ] } ->
+                        Expect.equal start (-37.0, 1.00001) "the fragment starts at the original vertex"
+                        Expect.isLessThan (abs (cutLatitude - (-37.00000012297912))) 1e-10 "the clip turn ends the fragment"
+                        Expect.isLessThan (abs (contactLatitude - (-37.000000084254474))) 1e-10 "the point turn stays separate"
+                    | actual -> failtestf "expected a short clipped line and a separate point, got %A" actual
+
                 testCase "geographic MBR predicates use geodesic, circular and degenerate bounds"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

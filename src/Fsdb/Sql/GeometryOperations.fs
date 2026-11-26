@@ -2457,6 +2457,28 @@ let private geographicPartitionContacts referenceSystem lineSections boundarySec
         for struct (line, boundary), _ in pairs do visit line boundary
         List.ofSeq ordered
 
+let private tryGeographicRoundedBoundaryVertex referenceSystem source =
+    let spheroid, flattening = geographicIntersectionSpheroid referenceSystem
+    let distance = geographicInverseDistanceRadians false spheroid
+    let azimuth first last = geographicSegmentAzimuthsRadians flattening first last |> fst
+    let sourceStart, sourceEnd = geographicLatitudeOrderedSegment source
+    fun ((first, last) as boundary) ->
+        let edgeStart, edgeEnd = geographicLatitudeOrderedSegment boundary
+        if not (boostGeoEqual (distance sourceStart edgeEnd) 0.0) then None
+        else
+            let edgeAzimuth = azimuth edgeStart edgeEnd
+            let sourceSide point =
+                if boostGeoEqual (distance edgeStart point) 0.0 then 0
+                else geographicAzimuthSide (azimuth edgeStart point) edgeAzimuth
+
+            // A source endpoint on the edge already owns the turn. A rounded
+            // boundary vertex is a separate turn when the source straddles it.
+            if sourceSide sourceStart * sourceSide sourceEnd >= 0 then None
+            else
+                let delta = azimuth sourceStart edgeEnd - azimuth sourceStart sourceEnd
+                if abs (normalizedLongitudeRadians delta) > Math.PI / 2.0 then None
+                else Some(if fst first > fst last then first else last)
+
 let private geographicAreaLinePieces referenceSystem includePoints polygons boundarySegments ((start, endpoint) as segment) =
     let areaPosition point =
         match geographicPointPolygonPosition referenceSystem point polygons with
@@ -2473,8 +2495,9 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
         // MySQL retains the solver's longitude in area overlay results,
         // even when a cut just beyond the antimeridian uses an extra turn.
         let crossing = tryGeographicCrossingPoint id referenceSystem segment
+        let roundedVertex = tryGeographicRoundedBoundaryVertex referenceSystem segment
         let side = geographicTurnSide referenceSystem
-        let sourceEnd = geographicPointRadians endpoint
+        let sourceStart, sourceEnd = geographicPointRadians start, geographicPointRadians endpoint
 
         let cuts, contacts, spans, turns, hasEndpointContact =
             boundarySegments
@@ -2489,16 +2512,21 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                     // The linear overlay traverses the polygon in the
                     // opposite direction to the point overlay. Equal-latitude
                     // edges can yield two distinct Sjöberg solutions.
-                    let cut = crossing (b, a)
+                    let roundedCut = roundedVertex (b, a)
+                    let cut = roundedCut |> Option.orElseWith (fun () -> crossing (b, a))
                     let point =
                         if not includePoints then []
                         elif fst a <> fst b then Option.toList cut
-                        else crossing boundary |> Option.toList
+                        else roundedVertex boundary |> Option.orElseWith (fun () -> crossing boundary) |> Option.toList
                     let turns =
                         match cut with
                         | None -> turns
                         | Some vertex ->
-                            match side (geographicPointRadians b) (geographicPointRadians a) sourceEnd with
+                            let first, last = geographicPointRadians b, geographicPointRadians a
+                            let after =
+                                if roundedCut.IsSome && fst start > fst endpoint then -(side first last sourceStart)
+                                else side first last sourceEnd
+                            match after with
                             | -1 -> Map.add vertex true turns
                             | 1 -> Map.add vertex false turns
                             | _ -> turns
@@ -2528,7 +2556,13 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                 | None, Some next -> Some(not next)
                 | _ -> None
 
-        let cuts = distinctGeographicPoints (start :: endpoint :: cuts) |> List.sortBy distance
+        let position point =
+            // Even a valid interior turn can have a rounded inverse distance
+            // at or outside the source endpoint's distance.
+            if point = start then 0, 0.0
+            elif point = endpoint then 2, 0.0
+            else 1, distance point
+        let cuts = distinctGeographicPoints (start :: endpoint :: cuts) |> List.sortBy position
         let pieces =
             cuts
             |> List.map (fun point -> distance point, point)

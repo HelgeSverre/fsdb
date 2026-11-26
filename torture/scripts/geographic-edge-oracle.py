@@ -263,6 +263,45 @@ def seeded_relation_cases(seed=148731, polygon_count=500):
         yield f"LINESTRING{coordinates(origin, size, near_hole)}", polygon
 
 
+def seeded_polar_overlay_cases(seed, polygon_count):
+    def path(points):
+        return ",".join(f"{lat:.14f} {lon:.14f}" for lat, lon in points)
+
+    def ring(points):
+        return f"({path([*points, points[0]])})"
+
+    rng = random.Random(seed)
+    for _ in range(polygon_count):
+        latitude = rng.uniform(70, 86) * rng.choice([-1, 1])
+        longitude = rng.uniform(-155, 155)
+        half_width = rng.uniform(0.5, 1.75)
+        half_height = rng.uniform(0.5, 1.75)
+        south, north = latitude - half_height, latitude + half_height
+        west, east = longitude - half_width, longitude + half_width
+        outer_south, outer_north = (
+            latitude - 2 * half_height,
+            latitude + 2 * half_height,
+        )
+        outer_west, outer_east = longitude - 2 * half_width, longitude + 2 * half_width
+        exterior = ring(
+            [
+                (outer_south, outer_west),
+                (outer_south, outer_east),
+                (outer_north, outer_east),
+                (outer_north, outer_west),
+            ]
+        )
+        hole = ring([(south, west), (north, west), (north, east), (south, east)])
+        polygon = f"POLYGON({exterior},{hole})"
+        for boundary, inward in ((west, 1), (east, -1)):
+            for offset in (1e-6, 1e-5):
+                line_longitude = boundary + inward * offset
+                yield (
+                    f"LINESTRING({path([(south, line_longitude), (north, line_longitude)])})",
+                    polygon,
+                )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -285,19 +324,25 @@ def main():
         action="store_true",
         help="reverse each source line before checking its directed relations",
     )
-    parser.add_argument(
+    seeded = parser.add_mutually_exclusive_group()
+    seeded.add_argument(
         "--seeded-relations",
         action="store_true",
         help="compare seeded lines against polygons with holes",
     )
+    seeded.add_argument(
+        "--seeded-polar-overlays",
+        action="store_true",
+        help="compare seeded near-polar lines beside polygon hole vertices",
+    )
     parser.add_argument(
-        "--seed", type=int, default=148731, help="seed for the line relation fixture"
+        "--seed", type=int, default=148731, help="seed for the generated fixtures"
     )
     parser.add_argument(
         "--seeded-polygons",
         type=int,
         default=500,
-        help="number of polygons in the seeded fixture (two lines per polygon)",
+        help="number of polygons in the selected seeded fixture",
     )
     parser.add_argument(
         "--srid",
@@ -308,6 +353,8 @@ def main():
     args = parser.parse_args()
     if args.seeded_polygons < 1:
         parser.error("--seeded-polygons must be positive")
+    if args.seeded_polar_overlays and not args.check_overlays:
+        parser.error("--seeded-polar-overlays requires --check-overlays")
     if not FSDB.exists():
         raise RuntimeError(f"Build the Release CLI first: {FSDB}")
     root = pathlib.Path(tempfile.mkdtemp(prefix="fsdb-spatial-edge-"))
@@ -371,11 +418,12 @@ def main():
 
         count = 0
         mismatches = []
-        line_cases = (
-            seeded_relation_cases(args.seed, args.seeded_polygons)
-            if args.seeded_relations
-            else cases()
-        )
+        if args.seeded_relations:
+            line_cases = seeded_relation_cases(args.seed, args.seeded_polygons)
+        elif args.seeded_polar_overlays:
+            line_cases = seeded_polar_overlay_cases(args.seed, args.seeded_polygons)
+        else:
+            line_cases = cases()
         if args.check_overlays:
             if args.reverse_lines:
                 line_cases = (

@@ -1033,3 +1033,41 @@ and multipart inputs.
 uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays
 uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays --reverse-lines
 ```
+
+### Rounded overlay vertices and source order
+
+The segment strategy can report a polygon vertex whose normalized
+Andoyer distance from the latitude-ordered source start rounds to zero.
+The edge direction determines whether it contributes to the clipping
+pass or the separate point pass. The clipped path also keeps the
+original endpoints at either end of its ordered cuts. For one reversed
+southern fixture, the inverse reported about 9.5 cm from the source
+start to itself and zero to the nearby cut. Sorting every point by
+that distance placed the cut before the start and lost the fragment.
+[Boost 1.84 geographic segment intersection](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
+
+All 7,168 results in the structured EPSG 4326 comparison now match
+native MySQL 8.4.11. The fixed cases include the isolated
+`POINT(86 1)` and the short clipped line through `(86 3)`, in both
+source directions. The separate longitude-first controls still have
+two seeded and twelve multipart intersection differences.
+
+A wider sweep generated 48 rectangular holes in both polar regions,
+with lines offset 10⁻⁶ or 10⁻⁵ degrees inside either side of each hole.
+Each operation compared both operand orders and source directions.
+
+| Operation | Results | Prior differences | Remaining differences |
+| --- | ---: | ---: | ---: |
+| Intersection | 768 | 358 | 208 |
+| Difference | 768 | 53 | 19 |
+| Union | 768 | 106 | 38 |
+| Symmetric difference | 768 | 106 | 38 |
+
+The wider sweep closed 320 differences. Every previously matching
+result still matches. Remaining cases include missing isolated points
+and short clipped fragments.
+
+```sh
+uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays --seeded-polar-overlays --seed 261184 --seeded-polygons 48
+uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays --seeded-polar-overlays --seed 261184 --seeded-polygons 48 --reverse-lines
+```
