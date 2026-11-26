@@ -3059,7 +3059,10 @@ implementation effort:
    qualifying partner rows. Fully bound signed-integer primary keys on
    [outer physical read operands](benchmarks/results/2026-11-25-bound-joined-view-update.md#outer-join-operand-locks)
    now wait for an owning transaction and retain a shared lock on the
-   published row, including after a delete and reinsert. [Missing-key gap
+   published row, including after a delete and reinsert. The same holds
+   through [unfiltered derived projections and simple CTEs](benchmarks/results/2026-11-25-bound-joined-view-update.md#locks-through-projected-outer-sources),
+   including renamed keys. Materialized scans still need shared locks
+   on the rows they read. [Missing-key gap
    locks](benchmarks/results/2026-11-25-bound-joined-view-update.md#scope-of-the-missing-key-gap)
    cover the interval between neighboring primary keys in MySQL at
    REPEATABLE READ and SERIALIZABLE. That interval and other outer join

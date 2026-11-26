@@ -5809,6 +5809,12 @@ let tests =
               let outerUpdate =
                   "UPDATE active a LEFT JOIN gate g ON g.id=a.id SET n=a.n+a.delta+g.delta WHERE a.id=1 AND a.seq BETWEEN 20 AND 22"
 
+              let derivedUpdate =
+                  "UPDATE active a JOIN (SELECT delta,id AS gate_id FROM gate) g ON g.gate_id=a.id SET a.n=a.n+a.delta+g.delta WHERE a.id=1 AND a.seq BETWEEN 20 AND 22"
+
+              let cteUpdate =
+                  "WITH gate_rows(gate_id,amount) AS (SELECT id,delta FROM gate) UPDATE active a JOIN gate_rows g ON g.gate_id=a.id SET a.n=a.n+a.delta+g.amount WHERE a.id=1 AND a.seq BETWEEN 20 AND 22"
+
               for index, isolation in [ "READ UNCOMMITTED"; "READ COMMITTED"; "REPEATABLE READ"; "SERIALIZABLE" ] |> List.indexed do
                   let writer = run (create (2 + index * 3) store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
                   let contender = create (3 + index * 3) store
@@ -5818,7 +5824,9 @@ let tests =
                         innerUpdate + " AND g.delta>=10", 0UL, true
                         innerUpdate + " AND a.delta>=10", 0UL, true
                         innerUpdate + " AND g.id=2", 0UL, false
-                        outerUpdate, 1UL, true ] do
+                        outerUpdate, 1UL, true
+                        derivedUpdate, 1UL, true
+                        cteUpdate, 1UL, true ] do
                       let writing = run writer "BEGIN" (Affected 0UL)
                       let writing = run writing update (Affected count)
 
@@ -5836,7 +5844,7 @@ let tests =
                       | ResultSet(_, [ [ Some "1" ] ]), ResultSet(_, [ [ Some "1" ] ]), ResultSet(_, [ [ Some "2" ] ]), false -> ()
                       | _ -> failtestf "%s: unexpected locks for %s, got %A, %A and %A" isolation update shared exclusive disjoint
 
-                  for replacesExisting in [ false; true ] do
+                  for replacesExisting, update in [ false, innerUpdate; true, innerUpdate; false, derivedUpdate; true, cteUpdate ] do
                       if not replacesExisting then run setup "DELETE FROM gate WHERE id=1" (Affected 1UL) |> ignore
                       let owner = run (create (4 + index * 3) store) "BEGIN" (Affected 0UL)
                       let owner =
@@ -5844,7 +5852,7 @@ let tests =
                           else owner
                       let owner = run owner "INSERT INTO gate VALUES (1,19)" (Affected 1UL)
                       let writing = run writer "BEGIN" (Affected 0UL)
-                      let pending = Threading.Tasks.Task.Run(fun () -> handle writing innerUpdate)
+                      let pending = Threading.Tasks.Task.Run(fun () -> handle writing update)
                       let waited = not (pending.Wait(TimeSpan.FromMilliseconds 100.0))
                       run owner "COMMIT" (Affected 0UL) |> ignore
                       Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 5.0)) "the outer read resumes after the insert commits"

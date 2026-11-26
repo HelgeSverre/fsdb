@@ -17137,7 +17137,7 @@ and private tryPhysicalProjection
     : PhysicalProjection option =
     let memo = currentStatementMemo ()
     let scope = currentCteScope ()
-    let compute () = tryPhysicalProjectionUncached store registry dbName source
+    let compute () = tryPhysicalProjectionUncached store registry dbName (tryPhysicalProjection store registry dbName) source
     // A rejected source shape is stable within one CTE binding too. Recursive
     // iterations can replace that binding, so retain its map by identity.
     if Map.isEmpty scope then
@@ -17152,6 +17152,7 @@ and private tryPhysicalProjectionUncached
     (store: Store)
     (registry: Registry)
     (dbName: string)
+    (resolveInput: FromItem -> PhysicalProjection option)
     (source: FromItem)
     : PhysicalProjection option =
     let simpleSelect (select: SelectStmt) =
@@ -17210,7 +17211,7 @@ and private tryPhysicalProjectionUncached
     | FromSubquery(PlainSelect select, _) when simpleSelect select ->
         match select.From with
         | Some(FromItem.Qualified sourceQualifier as innerSource) ->
-            tryPhysicalProjection store registry dbName innerSource
+            resolveInput innerSource
             |> Option.filter (fun input -> storedRowsMatchReadRows store input.PhysicalTable.Columns)
             |> Option.bind (fun input ->
                 let predicateScope =
@@ -35497,10 +35498,10 @@ let internal transactionWriteReadClaims
     match statement with
     | Update original when scope = WriteReadScope.LockingPartners || not original.Joins.IsEmpty ->
         let update = writableViewFirst store dbName original
-        let viewSources =
+        let outerSources =
             FromTable update.From :: (update.Joins |> List.map _.Table)
             |> List.collect FromItem.leaves
-            |> List.choose (function FromTable source -> Some source | _ -> None)
+        let viewSources = outerSources |> List.choose (function FromTable source -> Some source | _ -> None)
         let outerLiterals = literalEqualities update.Where
         let outerJoins = joinedEqualities update.From update.Joins
 
@@ -35509,32 +35510,48 @@ let internal transactionWriteReadClaims
                 update.Ctes |> List.tryFind (fun cte -> equalsIgnoreCase cte.CteName source.Table)
             else None
 
+        // Lock planning can run again with a refreshed snapshot. Its table
+        // identities must never come from the executor's statement memo.
+        let rec physicalProjection input =
+            tryPhysicalProjectionUncached store registry dbName physicalProjection input
+
+        let projections = lazy (Dictionary<FromItem, PhysicalProjection option>(HashIdentity.Reference))
+        let outerProjection input =
+            getMemoized projections.Value input (fun () ->
+                match input with
+                | FromTable source ->
+                    match cteFor source with
+                    | Some ({ Body = PlainSelect { From = Some(FromTable table) } } as cte)
+                        when (cteFor table).IsNone ->
+                        let alias = source.Alias |> Option.defaultValue source.Table
+                        physicalProjection (FromSubquery(cte.Body, alias))
+                        |> Option.bind (fun projection ->
+                            renameRelationColumns cte.CteColumns (fun (column: ColumnDef) -> column.Name)
+                                (fun name column -> { column with Name = name }) projection.OutputColumns
+                            |> Result.toOption
+                            |> Option.map (fun columns -> { projection with OutputColumns = columns }))
+                    | Some _ -> None
+                    | None -> physicalProjection input
+                // The UPDATE's CTE scope is not installed during lock planning.
+                | FromSubquery _ when update.Ctes.IsEmpty -> physicalProjection input
+                | _ -> None)
+
         let outerColumnTypes =
             lazy (
-                viewSources
-                |> List.collect (fun source ->
-                    let qualifier = source.Alias |> Option.defaultValue source.Table
-                    let database = source.Database |> Option.defaultValue dbName
+                outerSources
+                |> List.collect (fun input ->
                     let columns =
-                        match cteFor source with
-                        | Some ({ Body = PlainSelect { From = Some(FromTable input) } } as cte)
-                            when (cteFor input).IsNone ->
-                            tryPhysicalProjection store registry dbName (FromSubquery(cte.Body, qualifier))
-                            |> Option.map (fun projection ->
-                                let inferred = projection.OutputColumns
-                                if cte.CteColumns.IsEmpty then inferred
-                                elif sameLength cte.CteColumns inferred then
-                                    List.map2 (fun name (column: ColumnDef) -> { column with Name = name }) cte.CteColumns inferred
-                                else [])
-                            |> Option.defaultValue []
-                        | Some _ -> []
-                        | None ->
-                            physicalFastPathTable store dbName source
-                            |> Option.map _.Columns
-                            |> Option.orElseWith (fun () -> viewColumns store registry database source.Table)
-                            |> Option.defaultValue []
-
-                    columns |> List.map (fun column -> mutationColumnKey (qualifier, column.Name), column.Type))
+                        outerProjection input
+                        |> Option.map _.OutputColumns
+                        |> Option.orElseWith (fun () ->
+                            match input with
+                            | FromTable source when (cteFor source).IsNone ->
+                                viewColumns store registry (source.Database |> Option.defaultValue dbName) source.Table
+                            | _ -> None)
+                    match FromItem.tryQualifier input, columns with
+                    | Some qualifier, Some columns ->
+                        columns |> List.map (fun column -> mutationColumnKey (qualifier, column.Name), column.Type)
+                    | _ -> [])
                 |> Map.ofList)
 
         let innerJoin = function InnerJoin | StraightJoin -> true | _ -> false
@@ -35559,8 +35576,12 @@ let internal transactionWriteReadClaims
                 let sources =
                     update.Joins
                     |> List.map (function
-                        | { Table = FromTable source; Using = [] } when (cteFor source).IsNone ->
-                            physicalFastPathTable store dbName source |> Option.map (fun table -> source, table)
+                        | { Table = input; Using = [] } ->
+                            let projection =
+                                outerProjection input
+                                |> Option.filter (fun projection ->
+                                    projection.Steps |> List.forall (_.Predicate >> Option.isNone))
+                            Option.map2 (fun alias projection -> alias, projection) (FromItem.tryQualifier input) projection
                         | _ -> None)
                     |> tryAllSome
 
@@ -35576,7 +35597,7 @@ let internal transactionWriteReadClaims
                     elif allInner then outerSignedBounds.Value
                     else signedJoinBounds columnTypes edges where
 
-                let planReads (sources: (TableRef * Table) list) =
+                let planReads (sources: (string * PhysicalProjection) list) =
                     let written =
                         update.Assignments
                         |> List.map (fun assignment ->
@@ -35584,8 +35605,8 @@ let internal transactionWriteReadClaims
                                 match assignment.Table with
                                 | Some owner -> equalsIgnoreCase owner (qualifier viewRef)
                                 | None ->
-                                    sources |> List.forall (fun (_, table) ->
-                                        table.Columns |> List.forall (fun column -> not (equalsIgnoreCase column.Name assignment.Column)))
+                                    sources |> List.forall (fun (_, projection) ->
+                                        projection.OutputColumns |> List.forall (fun column -> not (equalsIgnoreCase column.Name assignment.Column)))
                             if writesView then Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets
                             else None)
                         |> tryAllSome
@@ -35600,15 +35621,28 @@ let internal transactionWriteReadClaims
                     match written with
                     | Some targets when not targets.IsEmpty && not bounds.IsEmpty && not conflicts ->
                         sources
-                        |> List.choose (fun (source, table) ->
+                        |> List.choose (fun (alias, projection) ->
+                            let source, table = projection.PhysicalTableRef, projection.PhysicalTable
                             let sourceDb = database source
                             let isWritten = targets |> List.exists (fun target ->
                                 equalsIgnoreCase target.Database sourceDb && equalsIgnoreCase target.Table source.Table)
 
                             if isWritten || not source.IndexHints.IsEmpty || not source.Partitions.IsEmpty then None
                             else
+                                let boundColumns =
+                                    projection.OutputColumns
+                                    |> List.choose (fun column ->
+                                        Map.tryFind (mutationColumnKey (alias, column.Name)) bounds
+                                        |> Option.bind (fun value ->
+                                            tryPhysicalProjectionColumn projection column.Name
+                                            |> Option.map (fun physical -> physical.Name, value)))
+                                let primaryBound column =
+                                    boundColumns
+                                    |> List.choose (fun (name, value) -> if equalsIgnoreCase name column then Some value else None)
+                                    |> List.distinct
+                                    |> function [ value ] -> Some value | _ -> None
                                 Storage.primaryKeyColumns table
-                                |> List.map (fun column -> Map.tryFind (mutationColumnKey (qualifier source, column)) bounds)
+                                |> List.map primaryBound
                                 |> tryAllSome
                                 |> Option.bind (fun values ->
                                     Storage.tryPrimaryWriteLockTargets store table values

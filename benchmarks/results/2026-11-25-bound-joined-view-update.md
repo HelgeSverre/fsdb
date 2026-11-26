@@ -332,6 +332,32 @@ transaction from inserting that key. Fsdb allows the insert. Fsdb can
 also reject a SERIALIZABLE commit after an unrelated writer commits
 first, matching its pre-existing whole-catalog validation rule.
 
+### Locks through projected outer sources
+
+An unfiltered projection can expose the outer table's primary key under
+a different name. Joined-update lock planning resolves the exposed
+column to the physical key through nested derived tables and simple
+CTEs, including explicit CTE column lists. When a pending insert or
+replacement publishes, the replan resolves the physical row from the
+refreshed snapshot.
+
+The native MySQL 8.4.11 probe matched 48 schedules across four isolation
+levels. It compared the direct table, an aliased projection, nested
+projections, and a CTE with explicit column names. A pending insert or
+delete-and-reinsert of key `3` blocked the joined writer, which read the
+published value after commit. An unrelated writer at key `5` proceeded
+independently. In each case a second reader could take a shared lock on
+key `3`, and an exclusive `NOWAIT` read returned error 3572 while the
+joined writer was open. An exclusive lock on key `5` remained available
+after its owner ended.
+
+Materialized reads remain a separate gap. With `gate` containing keys
+`1`, `3`, and `5`, MySQL held shared row locks on all three keys for a
+derived `LIMIT 50` or `DISTINCT` at READ COMMITTED and REPEATABLE READ.
+With `ORDER BY id LIMIT 1`, MySQL retained a lock only on `1` despite
+the outer update affecting zero rows. Fsdb allowed exclusive locks on
+all three keys in these materialized cases.
+
 ### Scope of the missing-key gap
 
 A native MySQL 8.4.11 follow-up moved the parent and partner to key `3`
@@ -348,3 +374,12 @@ open. Each successful insert was rolled back before the next attempt.
 
 MySQL returned error 1205 for all six blocked inserts. The observed
 lock covers the open interval between the neighboring primary keys.
+
+At REPEATABLE READ, an insert at `2` and a primary-key update from `5`
+to `4` also timed out while the joined writer remained open. An update
+of `delta` at the existing endpoint `5` succeeded. After `ROLLBACK TO
+SAVEPOINT` preceding the lookup, all three writes succeeded in this
+fixture. A prepared XA branch with a separate write to `parent` retained
+the gap until `XA ROLLBACK`. A prepared branch whose only operation was
+the no-op joined update allowed all three writes. Fsdb allowed both forms
+of key creation during the active gap. [InnoDB locking](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking.html).
