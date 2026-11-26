@@ -1126,6 +1126,7 @@ let hexValueWithStatus encodeText value =
     match value, tryRawBytes value with
     | VNull, _ -> VNull, false
     | VBit(_, bits), _ -> VString(bits.ToString "X"), false
+    | VGeometry geometry, _ -> encodedBytes (Fsdb.SpatialReferenceSystems.geometryToSqlBinary geometry)
     | _, Some bytes -> encodedBytes bytes
     | VString text, _ -> encodedBytes (encodeText text)
     | VInt number, _ -> VString(number.ToString "X"), false

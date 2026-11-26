@@ -566,6 +566,17 @@ let internal withAxisOrder axisOrder (geometry: Geometry) =
     | LatitudeLongitude -> geometry
     | LongitudeLatitude -> mapGeometry (fun (longitude, latitude) -> latitude, longitude) geometry
 
+/// SQL's SRID-prefixed representation and the internal model have opposite
+/// geographic axis order. The same swap converts in either direction.
+let internal swapMySqlGeographicAxes (geometry: Geometry) =
+    match tryFind geometry.Srid with
+    | Some referenceSystem when referenceSystem.SemiMajorAxis.IsSome ->
+        withAxisOrder LongitudeLatitude geometry
+    | _ -> geometry
+
+let internal geometryToSqlBinary geometry =
+    swapMySqlGeographicAxes geometry |> geometryToMySqlBinary
+
 let rec private tryPickCoordinate check = function
     | GEmpty -> None
     | GPoint(x, y) -> check (x, y)

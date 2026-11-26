@@ -221,7 +221,7 @@ let tryGeometryFromText (srid: int) (text: string) : Geometry option =
                 parseDelimited parsePolygon (index + 1) |> Option.map (fun (polygons, next) -> GMultiPolygon polygons, next)
             | WktWord "GEOMETRYCOLLECTION" ->
                 parseDelimited (fun cursor -> parseShape tokens (depth + 1) cursor |> Option.map (fun (shape, next) -> { Srid = srid; Shape = shape }, next)) (index + 1)
-                |> Option.map (fun (geometries, next) -> GGeometryCollection geometries, next)
+                |> Option.map (function [], next -> GEmpty, next | geometries, next -> GGeometryCollection geometries, next)
             | _ -> None
 
     tokenizeWkt text
@@ -607,124 +607,66 @@ let rec private shapeSegments = function
     | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> shapeSegments geometry.Shape)
     | _ -> []
 
-let private ringIsSimple ring =
-    let edges = ring |> List.pairwise |> List.indexed
-    let lastEdge = List.length edges - 1
+let private doubleRelativeEpsilon = Math.BitIncrement(1.0) - 1.0
 
-    edges
-    |> List.forall (fun (firstIndex, first) ->
-        edges
-        |> List.skip (firstIndex + 1)
-        |> List.forall (fun (secondIndex, second) ->
-            let adjacent = secondIndex = firstIndex + 1 || firstIndex = 0 && secondIndex = lastEdge
-            adjacent || not (segmentsIntersect first second)))
+let internal sameCartesianPosition (x, y) (u, v) =
+    let nearlyEqual left right =
+        left = right || abs (left - right) <= doubleRelativeEpsilon * max 1.0 (max (abs left) (abs right))
+    nearlyEqual x u && nearlyEqual y v
 
-let private pointStrictlyInRing point ring =
-    ringContains point ring && not (ring |> segments |> List.exists (pointOnSegment point))
-
-let private pointStrictlyInPolygon point = function
-    | shell :: holes ->
-        pointStrictlyInRing point shell
-        && holes |> List.forall (fun hole -> not (ringContains point hole))
+let internal lineHasDistinctPositions project = function
+    | first :: rest ->
+        let origin = project first
+        rest |> List.exists (fun point -> not (sameCartesianPosition origin (project point)))
     | [] -> false
 
-let private ringsIntersect first second =
-    first
-    |> segments
-    |> List.exists (fun firstSegment -> second |> segments |> List.exists (segmentsIntersect firstSegment))
+let internal geometryToNts (geometry: Geometry) =
+    let value = NetTopologySuite.IO.WKBReader().Read(geometryToWkb geometry)
+    value.SRID <- geometry.Srid
+    value
 
-let private ringsCrossOrOverlap first second =
-    let endpointIsInterior point (startPoint, endPoint) =
-        pointOnSegment point (startPoint, endPoint) && point <> startPoint && point <> endPoint
+let private finitePosition (x, y) = Double.IsFinite x && Double.IsFinite y
 
-    first
-    |> segments
-    |> List.exists (fun ((firstStart, firstEnd) as firstSegment) ->
-        second
-        |> segments
-        |> List.exists (fun ((secondStart, secondEnd) as secondSegment) ->
-            let sharedEndpoints =
-                [ firstStart; firstEnd ]
-                |> List.filter (fun point -> point = secondStart || point = secondEnd)
-                |> List.distinct
+let private ringsForPlanarValidation rings =
+    let normalize ring =
+        let appendPoint previous point =
+            match previous with
+            | last :: _ when sameCartesianPosition last point -> previous
+            | _ -> point :: previous
 
-            segmentsIntersect firstSegment secondSegment
-            && (sharedEndpoints.Length <> 1
-                || endpointIsInterior firstStart secondSegment
-                || endpointIsInterior firstEnd secondSegment
-                || endpointIsInterior secondStart firstSegment
-                || endpointIsInterior secondEnd firstSegment)))
+        // Collapse consecutive near-duplicates for the topology check and
+        // use an exact closing coordinate for the planar validator.
+        let reversed =
+            if isClosedRing ring && List.forall finitePosition ring then List.fold appendPoint [] ring
+            else []
 
-let private hasDistinctPoints = function
-    | first :: points -> points |> List.exists ((<>) first)
-    | [] -> false
+        match reversed with
+        | last :: rest when not rest.IsEmpty ->
+            let first = List.last rest
+            let vertices = if sameCartesianPosition first last then List.rev rest else List.rev (last :: rest)
+            if vertices.Length >= 3 then Some(vertices @ [ first ]) else None
+        | _ -> None
 
-let private polygonIsValid rings =
-    match rings with
-    | shell :: holes ->
-        let ringIsValid ring =
-            match ring with
-            | first :: _ :: _ :: _ :: _ when List.last ring = first ->
-                ringIsSimple ring
-                && ring
-                   |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
-            | _ -> false
+    if List.isEmpty rings then None
+    else rings |> List.map normalize |> Fsdb.Collections.tryAllSome
 
-        let holeIsValid hole =
-            ringIsValid hole
-            && hole |> List.take (List.length hole - 1) |> List.forall (fun point -> pointStrictlyInRing point shell)
-            && not (ringsIntersect shell hole)
+let rec geometryIsValidPlanar (geometry: Geometry) =
+    let validArea shape =
+        shape
+        |> Option.exists (fun shape -> (geometryToNts { geometry with Shape = shape }).IsValid)
 
-        let holesDoNotOverlap =
-            holes
-            |> List.indexed
-            |> List.forall (fun (firstIndex, first) ->
-                holes
-                |> List.skip (firstIndex + 1)
-                |> List.forall (fun second ->
-                    not (ringsIntersect first second)
-                    && not (pointStrictlyInRing first.Head second)
-                    && not (pointStrictlyInRing second.Head first)))
-
-        ringIsValid shell && holes |> List.forall holeIsValid && holesDoNotOverlap
-    | [] -> false
-
-let rec private shapeIsValid = function
+    let validLine points = List.forall finitePosition points && lineHasDistinctPositions id points
+    match geometry.Shape with
     | GEmpty -> true
-    | GPoint(x, y) -> Double.IsFinite x && Double.IsFinite y
-    | GLineString points ->
-        points
-        |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
-        && hasDistinctPoints points
-    | GMultiPoint points ->
-        not (List.isEmpty points)
-        && points |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
-    | GPolygon rings -> polygonIsValid rings
-    | GMultiLineString lines ->
-        not (List.isEmpty lines)
-        && lines
-           |> List.forall (fun points ->
-               hasDistinctPoints points
-               && points |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y))
+    | GPoint(x, y) -> finitePosition (x, y)
+    | GMultiPoint points -> not points.IsEmpty && List.forall finitePosition points
+    | GLineString points -> validLine points
+    | GMultiLineString lines -> not lines.IsEmpty && List.forall validLine lines
+    | GPolygon rings -> ringsForPlanarValidation rings |> Option.map GPolygon |> validArea
     | GMultiPolygon polygons ->
-        let polygonsAreSeparate =
-            polygons
-            |> List.indexed
-            |> List.forall (fun (firstIndex, first) ->
-                polygons
-                |> List.skip (firstIndex + 1)
-                |> List.forall (fun second ->
-                    match first, second with
-                    | firstShell :: _, secondShell :: _ ->
-                        not (ringsCrossOrOverlap firstShell secondShell)
-                        && not (firstShell |> List.exists (fun point -> pointStrictlyInPolygon point second))
-                        && not (secondShell |> List.exists (fun point -> pointStrictlyInPolygon point first))
-                    | _ -> false))
-
-        not (List.isEmpty polygons) && polygons |> List.forall polygonIsValid && polygonsAreSeparate
-    | GGeometryCollection geometries -> geometries |> List.forall (fun geometry -> shapeIsValid geometry.Shape)
-
-let geometryIsValidPlanar (geometry: Geometry) = shapeIsValid geometry.Shape
+        not polygons.IsEmpty
+        && (polygons |> List.map ringsForPlanarValidation |> Fsdb.Collections.tryAllSome |> Option.map GMultiPolygon |> validArea)
+    | GGeometryCollection geometries -> List.forall geometryIsValidPlanar geometries
 
 let geometryDistancePlanar (first: Geometry) (second: Geometry) : float option =
     let firstPoints = shapeCoordinates first.Shape

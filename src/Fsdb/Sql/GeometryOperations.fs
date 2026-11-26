@@ -48,8 +48,6 @@ let private squaredPlanarDistance (firstX: float, firstY: float) (secondX: float
 
 let internal planarPointDistance first second = sqrt (squaredPlanarDistance first second)
 
-let private doubleRelativeEpsilon = Math.BitIncrement(1.0) - 1.0
-
 let private furthestVertex first last distance =
     let mutable candidate = first
     let mutable maximum = -1.0
@@ -91,11 +89,7 @@ let private simplifyPath squaredTolerance (points: (float * float) array) =
                 pending.Push((first, split))
 
         match [ for index in 0 .. last do if retained.[index] then points.[index] ] with
-        | [ ((x, y) as first); ((u, v) as second) ] ->
-            let approximatelyEqual left right =
-                left = right || abs (left - right) <= doubleRelativeEpsilon * max 1.0 (max (abs left) (abs right))
-            if approximatelyEqual x u && approximatelyEqual y v then [ first ]
-            else [ first; second ]
+        | [ first; second ] when sameCartesianPosition first second -> [ first ]
         | simplified -> simplified
 
 let internal simplifyPlanar tolerance (geometry: Geometry) =
@@ -1148,6 +1142,8 @@ let rec internal geographicValidity referenceSystem (geometry: Geometry) =
     match geometry.Shape with
     | GPolygon rings -> tryValidateGeographicPolygon referenceSystem rings |> Option.isSome
     | GMultiPolygon polygons -> geographicMultiPolygonIsValid referenceSystem polygons
+    | GLineString points -> lineHasDistinctPositions geographicPointRadians points
+    | GMultiLineString lines -> not lines.IsEmpty && List.forall (lineHasDistinctPositions geographicPointRadians) lines
     | GGeometryCollection geometries -> geometries |> List.forall (geographicValidity referenceSystem)
     | _ -> geometryIsValidPlanar geometry
 
@@ -1881,13 +1877,8 @@ let internal tryDecodeBufferStrategy (bytes: byte[]) =
         | 6 when points = 0.0 -> Some BufferStrategy.PointSquare
         | _ -> None
 
-let private toNts (geometry: Geometry) =
-    let value = WKBReader().Read(geometryToWkb geometry)
-    value.SRID <- geometry.Srid
-    value
-
 let internal geometryCrossesPlanar first second =
-    let first, second = toNts first, toNts second
+    let first, second = geometryToNts first, geometryToNts second
     if first.IsEmpty || second.IsEmpty then None
     else
         match int first.Dimension, int second.Dimension with
@@ -1895,7 +1886,7 @@ let internal geometryCrossesPlanar first second =
         | _ -> None
 
 let internal geometryOverlapsPlanar first second =
-    let first, second = toNts first, toNts second
+    let first, second = geometryToNts first, geometryToNts second
     if first.IsEmpty || second.IsEmpty || first.Dimension <> second.Dimension then None
     else Some(RelateNG.Relate(first, second, RelatePredicate.Overlaps()))
 
@@ -1923,7 +1914,7 @@ let internal overlay kind (first: Geometry) (second: Geometry) =
         | OverlayKind.Difference -> SpatialFunction.Difference
         | OverlayKind.SymmetricDifference -> SpatialFunction.SymDifference
 
-    attempt first.Srid (fun () -> OverlayNGRobust.Overlay(toNts first, toNts second, spatialFunction))
+    attempt first.Srid (fun () -> OverlayNGRobust.Overlay(geometryToNts first, geometryToNts second, spatialFunction))
 
 // Points compare in radians. A cell is wider than the relative comparison
 // tolerance anywhere in the geographic coordinate domain.
@@ -3796,7 +3787,7 @@ let private closeRing points =
 let private polygon srid points =
     { Srid = srid
       Shape = GPolygon [ closeRing points ] }
-    |> toNts
+    |> geometryToNts
 
 let private union geometries =
     match geometries with
@@ -3966,7 +3957,7 @@ let private nondegenerateLineBuffer configuration srid distance closed points =
     let source =
         { Srid = srid
           Shape = GLineString points }
-        |> toNts
+        |> geometryToNts
 
     let core = bevelCore distance source
     let distinctPoints = if closed then points |> List.take (points.Length - 1) else points
@@ -4025,7 +4016,7 @@ let rec private customBuffer configuration distance (geometry: Geometry) =
 
     let rec bufferShape shape =
         match shape with
-        | GEmpty -> Some(toNts { geometry with Shape = GEmpty })
+        | GEmpty -> Some(geometryToNts { geometry with Shape = GEmpty })
         | GPoint(x, y) ->
             match configuration.Point with
             | BufferStrategy.PointCircle resolution -> Some(circle srid (int resolution) distance (x, y))
@@ -4042,7 +4033,7 @@ let rec private customBuffer configuration distance (geometry: Geometry) =
         | GLineString points -> Some(customLineBuffer configuration srid distance false points)
         | GMultiLineString lines -> lines |> List.map (customLineBuffer configuration srid distance false) |> union
         | GPolygon rings ->
-            let original = toNts { geometry with Shape = GPolygon rings }
+            let original = geometryToNts { geometry with Shape = GPolygon rings }
 
             rings
             |> List.map (customLineBuffer configuration srid (abs distance) true)
@@ -4068,7 +4059,7 @@ let internal buffer strategies distance (geometry: Geometry) =
     |> Result.bind (fun configuration ->
         attempt geometry.Srid (fun () ->
             match tryNtsParameters configuration with
-            | Some parameters -> BufferOp.Buffer(toNts geometry, distance, parameters)
+            | Some parameters -> BufferOp.Buffer(geometryToNts geometry, distance, parameters)
             | None ->
                 match customBuffer configuration distance geometry with
                 | Ok result -> result

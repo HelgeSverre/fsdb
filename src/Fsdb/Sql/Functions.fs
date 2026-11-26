@@ -6015,21 +6015,6 @@ let private geometryIsEmptyFn: Scalar =
         | _ -> VInt 0L
     | _ -> nativeParameterCountError "st_isempty"
 
-let private geometryIsValidFn: Scalar =
-    function
-    | [ VNull ] -> VNull
-    | [ value ] ->
-        let geometry = spatialOperationArgument "ST_ISVALID" value
-        let referenceSystem = spatialReferenceSystem "ST_ISVALID" geometry.Srid
-
-        let valid =
-            if referenceSystem.SemiMajorAxis.IsSome then
-                geographicValidity referenceSystem geometry
-            else geometryIsValidPlanar geometry
-
-        VInt(if valid then 1L else 0L)
-    | _ -> nativeParameterCountError "st_isvalid"
-
 let private pointCoordinateFn functionName select: Scalar =
     function
     | [ VNull ] -> VNull
@@ -6299,12 +6284,7 @@ let private gisGeometryArgument functionName value =
         | VBytes bytes
         | VBinaryLiteral bytes ->
             tryGeometryFromMySqlBinary bytes
-            |> Option.map (fun geometry ->
-                // MySQL's stored geographic WKB writes longitude first.
-                match SpatialReferenceSystems.tryFind geometry.Srid with
-                | Some referenceSystem when referenceSystem.SemiMajorAxis.IsSome ->
-                    SpatialReferenceSystems.withAxisOrder LongitudeLatitude geometry
-                | _ -> geometry)
+            |> Option.map SpatialReferenceSystems.swapMySqlGeographicAxes
         | _ -> None
 
     geometry
@@ -6315,6 +6295,25 @@ let private gisGeometryTypeName shape =
     match geometryKind shape with
     | GeometryCollection -> "GEOMCOLLECTION"
     | kind -> geometryTypeName kind
+
+let private requireWellFormedGisGeometry functionName (geometry: Geometry) =
+    if not (geometryShapeIsWellFormed geometry.Shape) || SpatialReferenceSystems.hasNonFiniteCoordinates geometry then
+        raise (SqlError(3037, $"Invalid GIS data provided to function {functionName}."))
+
+let private geometryValidityFn (name: string) project: Scalar =
+    let functionName = name.ToLowerInvariant()
+
+    function
+    | [ VNull ] -> VNull
+    | [ value ] ->
+        let geometry = gisGeometryArgument functionName value
+        let referenceSystem = spatialReferenceSystem functionName geometry.Srid
+        requireWellFormedGisGeometry functionName geometry
+        let valid =
+            if referenceSystem.SemiMajorAxis.IsSome then geographicValidity referenceSystem geometry
+            else geometryIsValidPlanar geometry
+        project geometry valid
+    | _ -> nativeParameterCountError name
 
 let private geometryVertexDistanceFn (name: string) quantity measure : Scalar =
     let functionName = name.ToLowerInvariant()
@@ -6598,8 +6597,7 @@ let private geometrySimplifyFn: Scalar =
         else
             let geometry = gisGeometryArgument "st_simplify" value
             let referenceSystem = spatialReferenceSystem "st_simplify" geometry.Srid
-            if not (geometryShapeIsWellFormed geometry.Shape) || SpatialReferenceSystems.hasNonFiniteCoordinates geometry then
-                raise (SqlError(3037, "Invalid GIS data provided to function st_simplify."))
+            requireWellFormedGisGeometry "st_simplify" geometry
             if tolerance <= 0.0 || Double.IsNaN tolerance then
                 raise (SqlError(1210, "Incorrect arguments to st_simplify"))
             if referenceSystem.SemiMajorAxis.IsSome then
@@ -7003,8 +7001,11 @@ let private registerGeometryConstructors construct constructors registry =
 
 let private registerSpatialBuiltins registry =
     let geometry = ColumnWire.parameterMetadataOfType(TGeometry Geometry)
+    let geometryResult = { geometry with ColumnLength = UInt32.MaxValue; Decimals = 0uy }
     let spatialDouble =
         { ColumnWire.parameterMetadataOfType(TDouble false) with CollationId = Some Collation.binaryId }
+    let validityResult =
+        { ColumnWire.parameterMetadataOfType(TBigInt false) with ColumnLength = 1u; CollationId = Some Collation.binaryId }
 
     registry
     |> registerGeometryConstructors geometryFromTextFn wktGeometryConstructors
@@ -7023,7 +7024,10 @@ let private registerSpatialBuiltins registry =
     |> registerScalar "ST_DIMENSION" geometryDimensionFn
     |> registerScalar "DIMENSION" geometryDimensionFn
     |> registerScalar "ST_ISEMPTY" geometryIsEmptyFn
-    |> registerScalar "ST_ISVALID" geometryIsValidFn
+    |> registerScalarWithSignature "ST_ISVALID" [ geometry ] validityResult
+        (geometryValidityFn "ST_IsValid" (fun _ valid -> VInt(if valid then 1L else 0L)))
+    |> registerScalarWithSignature "ST_VALIDATE" [ geometry ] geometryResult
+        (geometryValidityFn "ST_Validate" (fun geometry valid -> if valid then VGeometry geometry else VNull))
     |> registerScalar "ISEMPTY" geometryIsEmptyFn
     |> registerScalar "ST_X" (pointCoordinateFn "ST_X" (fun x _ -> x))
     |> registerScalar "ST_Y" (pointCoordinateFn "ST_Y" (fun _ y -> y))
@@ -7044,8 +7048,7 @@ let private registerSpatialBuiltins registry =
     // MySQL also describes the optional unit placeholder as GEOMETRY at prepare time.
     |> registerScalarWithSignature "ST_FRECHETDISTANCE" [ geometry; geometry; geometry ] spatialDouble geometryFrechetDistanceFn
     |> registerScalarWithSignature "ST_HAUSDORFFDISTANCE" [ geometry; geometry; geometry ] spatialDouble geometryHausdorffDistanceFn
-    |> registerScalarWithSignature "ST_SIMPLIFY" [ geometry; spatialDouble ]
-        { geometry with ColumnLength = UInt32.MaxValue; Decimals = 0uy } geometrySimplifyFn
+    |> registerScalarWithSignature "ST_SIMPLIFY" [ geometry; spatialDouble ] geometryResult geometrySimplifyFn
     |> registerScalar "ST_DISTANCE_SPHERE" geometryDistanceSphereFn
     |> registerScalar "ST_LENGTH" geometryLengthFn
     |> registerScalar "ST_LINEINTERPOLATEPOINT" (geometryLineInterpolateFn "ST_LineInterpolatePoint" FractionPoint)

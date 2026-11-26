@@ -662,6 +662,12 @@ Douglas–Peucker simplification for SRID 0 and projected geometries.
 It preserves the audited ring and component order, drops collapsed
 components, and reports MySQL's geographic-SRS and argument errors.
 
+[`ST_Validate`](torture/findings/2026-11-27-spatial-validate.md) preserves
+valid geometry and shares topology checks with `ST_IsValid`. The
+planar checks distinguish single-point ring contacts from disconnected
+interiors. Geographic SQL results and `HEX(geometry)` emit longitude
+first. Raw big-endian validation results still differ.
+
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 (`Use_leap_seconds = Y`) remain unsupported.

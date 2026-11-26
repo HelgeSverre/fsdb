@@ -5379,6 +5379,46 @@ let tests =
               | Error(1582, _) -> ()
               | other -> failtestf "expected invalid arity at prepare time, got %A" other
 
+          testCase "ST_Validate returns valid geometry and preserves polygon winding"
+          <| fun _ ->
+              let run = queryFixture [ "USE fsdb" ]
+              for wkt, srid, expected in
+                  [ "POLYGON((0 0,0 5,5 5,5 0,0 0),(1 1,2 1,2 2,1 2,1 1))", 0,
+                        Some "POLYGON((0 0,0 5,5 5,5 0,0 0),(1 1,2 1,2 2,1 2,1 1))"
+                    "POLYGON((0 0,8 0,8 8,0 8,0 0),(0 4,2 3,3 4,2 5,0 4))", 0,
+                        Some "POLYGON((0 0,8 0,8 8,0 8,0 0),(0 4,2 3,3 4,2 5,0 4))"
+                    "POLYGON((0 0,8 0,8 8,0 8,0 0),(0 4,4 3,8 4,4 5,0 4))", 0, None
+                    "LINESTRING(0 0,0.0000000000000001 0)", 0, None
+                    "LINESTRING(0 0,0 0,1 1)", 3857, Some "LINESTRING(0 0,0 0,1 1)"
+                    "POLYGON((0 0,0 10,10 10,10 0,0 0))", 4326, Some "POLYGON((0 0,0 10,10 10,10 0,0 0))"
+                    "GEOMETRYCOLLECTION()", 0, Some "GEOMETRYCOLLECTION EMPTY"
+                    "GEOMETRYCOLLECTION(POINT(1 1),LINESTRING(0 0,0 0))", 0, None ] do
+                  let geometry = $"ST_GeomFromText('{wkt}',{srid})"
+                  let sql = $"SELECT ST_AsText(ST_Validate({geometry})),ST_IsValid({geometry})"
+                  match run sql with
+                  | ResultSet(_, [ row ]) ->
+                      Expect.equal row [ expected; Some(if expected.IsSome then "1" else "0") ] sql
+                  | other -> failtestf "expected geometry validation results, got %A" other
+
+              let raw = "0xE6100000010100000000000000000024400000000000004E40"
+              match run ($"SELECT HEX(ST_Validate({raw})),ST_IsValid({raw})") with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some(raw.Substring 2); Some "1" ] "geographic SQL bytes use longitude first"
+              | other -> failtestf "expected validated binary geometry, got %A" other
+
+              TestSupport.Sql.expectError 3037 (run "SELECT ST_Validate('bad')") "malformed GIS data"
+              TestSupport.Sql.expectError 3731
+                  (run "SELECT ST_Validate(0xE610000001010000000000000000A066400000000000000000)") "longitude validation"
+
+              let session, _ = handle (create 1 (Fsdb.Storage.create ())) "USE fsdb"
+              match prepareStatementForSession session "SELECT ST_Validate(?) AS shape" with
+              | Ok(statement, count) ->
+                  let parameters, columns = preparedMetadata session statement count
+                  Expect.equal (parameters |> List.map _.TypeId) [ TypeGeometry ] "prepared input"
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId, column.Metadata.Flags))
+                      [ TypeGeometry, BinaryFlag ] "prepared GEOMETRY result"
+              | Error error -> failtestf "expected ST_Validate to prepare, got %A" error
+
           testCase "planar geometry functions retain result metadata without rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
