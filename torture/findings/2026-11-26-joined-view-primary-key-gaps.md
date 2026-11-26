@@ -223,16 +223,26 @@ and locks row `20` and blocks inserts at `11` and `29`. Rows `10` and
 rows and protects the single gap containing the range. A contradictory
 range leaves the sampled rows and gaps writable.
 
-Both Fsdb modes match all 138 checks in the expanded schedule oracle.
+Both Fsdb modes matched all 138 checks in the initial range oracle.
 
 A pending insertion in the predicate range makes the read wait.
 Once the owner commits, the returned row set includes the new key.
 The audited pending insertions outside the predicate do not delay
 the read. A separate unsigned XA fixture above `Int64.MaxValue`
 matches the gap boundaries and releases the locks when the read-only
-branch prepares. Wider scans, descending keys, composite ranges, and
-dependent predicates remain outside this path. MySQL can choose a
-full scan without an index hint, which can hold wider locks.
+branch prepares.
+
+The expanded path follows physical index order for descending columns
+and composite keys. A leading equality prefix can stand alone or be
+followed by a bounded range on the next column. On the sampled descending
+single-column scans, an inclusive stopping row protected the remaining
+gap when it was the last physical record. With a following record, the
+same stopping row left that gap open. Both Fsdb modes and MySQL matched
+all 152 checks in the expanded schedule oracle.
+[MySQL descending indexes](https://dev.mysql.com/doc/refman/8.4/en/descending-indexes.html).
+
+Wider scans and dependent predicates remain outside this path. MySQL
+can choose a full scan without an index hint, which can hold wider locks.
 
 Run the live schedules against disposable servers. Use `--data-dir`
 to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.

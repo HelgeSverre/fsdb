@@ -538,6 +538,51 @@ def check(port, mysql):
             )
             execute(reader, "ROLLBACK")
 
+    descending = "CREATE TABLE gate(id INT,PRIMARY KEY(id DESC))"
+    composite_rows = "INSERT INTO gate VALUES (1,40),(2,10),(2,20),(2,30),(2,40),(4,10)"
+    for label, setup, query, selected, inserts in (
+        (
+            "descending end gap",
+            (descending, "INSERT INTO gate VALUES (10),(20),(30),(40)"),
+            "SELECT id FROM gate FORCE INDEX (PRIMARY) WHERE id BETWEEN 10 AND 30",
+            ((10,), (20,), (30,)),
+            (("(5)", TIMEOUT), ("(35)", 1)),
+        ),
+        (
+            "descending end followed by a record",
+            (descending, "INSERT INTO gate VALUES (5),(10),(20),(30),(40)"),
+            "SELECT id FROM gate FORCE INDEX (PRIMARY) WHERE id BETWEEN 10 AND 30",
+            ((10,), (20,), (30,)),
+            (("(7)", 1), ("(15)", TIMEOUT)),
+        ),
+        (
+            "mixed-direction prefix",
+            ("CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a,b DESC))", composite_rows),
+            "SELECT a,b FROM gate FORCE INDEX (PRIMARY) WHERE a=2",
+            ((2, 10), (2, 20), (2, 30), (2, 40)),
+            (("(2,5)", TIMEOUT), ("(3,10)", TIMEOUT), ("(1,45)", 1)),
+        ),
+        (
+            "missing descending prefix",
+            ("CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a DESC,b))", composite_rows),
+            "SELECT a,b FROM gate FORCE INDEX (PRIMARY) WHERE a=3",
+            (),
+            (("(2,5)", TIMEOUT), ("(3,10)", TIMEOUT), ("(2,45)", 1)),
+        ),
+    ):
+        with fixture(port, schema, mysql, setup) as (_, _, reader, _, probe):
+            execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            execute(reader, "BEGIN")
+            with reader.cursor() as cursor:
+                cursor.execute(query)
+                expect(
+                    label + " selected rows", tuple(sorted(cursor.fetchall())), selected
+                )
+            for values, expected in inserts:
+                sql = f"INSERT INTO gate VALUES {values}"
+                expect(label + " " + sql, rolled_back_outcome(probe, sql), expected)
+            execute(reader, "ROLLBACK")
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 

@@ -5880,18 +5880,27 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
         | _ -> None
     | _ -> None
 
+let private exactPrimaryValues store table indices values =
+    List.zip indices values
+    |> traverse (fun (index, value) ->
+        match exactProbeValue store table index value with
+        | Some exact when exact <> VNull -> Ok exact
+        | _ -> Error())
+    |> Result.toOption
+
+let internal isExactPrimaryKeyPrefix store table (values: Value list) =
+    uniqueKeyGroups table
+    |> List.exists (fun group ->
+        group.Name = "PRIMARY" && indexesWholeColumns group && values.Length <= group.Indices.Length
+        && (exactPrimaryValues store table (List.take values.Length group.Indices) values).IsSome)
+
 /// Claims an exact primary key even before its row appears in the snapshot.
 let internal tryPrimaryWriteLockTargets (store: Store) (table: Table) (values: Value list) : WriteLockTargets option =
     uniqueKeyGroups table
     |> List.tryFind (fun group -> group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
     |> Option.filter (fun group -> sameLength group.Indices values)
     |> Option.bind (fun group ->
-        List.zip group.Indices values
-        |> traverse (fun (index, value) ->
-            match exactProbeValue store table index value with
-            | Some exact when exact <> VNull -> Ok exact
-            | _ -> Error())
-        |> Result.toOption
+        exactPrimaryValues store table group.Indices values
         |> Option.map (fun exact ->
             let key = encodeEqualityValues table.Columns group.Indices exact
             let rowId = table.UniqueIndex |> Map.tryFind group.Name |> Option.bind (Map.tryFind key)
@@ -6398,7 +6407,8 @@ type private PrimaryGapBoundary =
 
 type internal IntegerPrimaryRead =
     | PrimaryPoint of Value list
-    | PrimaryRange of lower: (Value * bool) option * upper: (Value * bool) option
+    /// Range edges in physical index order. A partial edge includes or excludes its whole prefix.
+    | PrimaryRange of lower: (Value list * bool) option * upper: (Value list * bool) option
 
 type internal IntegerPrimaryReadPlan =
     { ReadDatabase: string
@@ -6414,33 +6424,44 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
         let tableKey = normalizeTableName tableName
         let database = database.ToLowerInvariant()
         let integer column = isIntegerPrimaryKeyType observed.Columns.[column].Type
-        let width = match read with PrimaryPoint values -> values.Length | PrimaryRange _ -> 1
-
         uniqueKeyGroups observed
         |> List.tryFind (fun group ->
             group.Name = "PRIMARY" && indexesWholeColumns group
-            && group.Indices.Length = width && List.forall integer group.Indices)
+            && List.forall integer group.Indices
+            && (match read with
+                | PrimaryPoint values -> values.Length = group.Indices.Length
+                | PrimaryRange _ -> true))
         |> Option.iter (fun group ->
+            let width = group.Indices.Length
             let encode (table: Table) values =
                 primaryLockKeyPrefix + encodeEqualityValues table.Columns group.Indices values
             let collations = group.Indices |> List.map (fun column -> observed.Columns.[column].Collation)
             let compare = compareIndexedKeys collations group.Directions
+            let compareToPrefix (prefix: Value list) candidate =
+                let length = prefix.Length
+                compareIndexedKeys (List.take length collations) (List.take length group.Directions)
+                    (List.take length candidate) prefix
             let contains (table: Table) (key: string) =
                 table.UniqueIndex |> Map.tryFind "PRIMARY"
                 |> Option.exists (Map.containsKey (key.Substring(primaryLockKeyPrefix.Length)))
             let current () =
                 tableAt live database tableKey |> Option.filter (fun table -> table.SchemaRevision = observed.SchemaRevision)
             let cache = keyLockCache live (lockNamespaceKey database tableKey)
-            let probe, lower, upper, includeEdges =
+            let probe, lower, upper =
                 match read with
-                | PrimaryPoint values -> encode observed values, Some values, Some values, false
+                | PrimaryPoint values -> encode observed values, Some(values, false), Some(values, false)
                 | PrimaryRange(lower, upper) ->
                     let identity = function
-                        | Some(value, inclusive) -> encode observed [ value ] + (if inclusive then "i" else "e")
+                        | Some(values: Value list, inclusive) ->
+                            encodeEqualityValues observed.Columns (List.take values.Length group.Indices) values
+                            + (if inclusive then "i" else "e")
                         | None -> "-"
-                    "range:" + identity lower + ":" + identity upper,
-                    Option.map (fst >> List.singleton) lower, Option.map (fst >> List.singleton) upper, true
-            let needsGap table = includeEdges || not (contains table probe)
+                    let anchor (values: Value list, inclusive) = values, values.Length = width || not inclusive
+                    "range:" + identity lower + ":" + identity upper, Option.map anchor lower, Option.map anchor upper
+            let needsGap table =
+                match read with
+                | PrimaryRange _ -> true
+                | PrimaryPoint _ -> not (contains table probe)
             let readTables () =
                 live.ConsistentReadViews
                 |> Seq.choose (fun (KeyValue(_, catalog)) ->
@@ -6471,12 +6492,13 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                         | false, false -> after
                     if index >= 0 && index < entries.Count then Some entries.[index].Values else None)
 
-            let nearest lower inclusive pivot table =
+            let nearest lower (pivot, inclusive) table =
                 let improves candidate bound =
                     let order = compare candidate bound
                     if lower then order > 0 else order < 0
                 let qualifies candidate =
-                    (inclusive && compare pivot candidate = 0) || improves pivot candidate
+                    let order = compareToPrefix pivot candidate
+                    (inclusive && order = 0) || (if lower then order < 0 else order > 0)
                 seq {
                     yield! neighbor lower inclusive pivot table |> Option.toList
                     yield! readTables () |> Seq.choose (neighbor lower inclusive pivot)
@@ -6498,8 +6520,15 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             alreadyHeld <- true)
                     if not alreadyHeld then
                         let boundary key = { Values = key; LockKey = encode observed key }
-                        let mutable lower = lower |> Option.bind (fun pivot -> nearest true includeEdges pivot table) |> Option.map boundary
-                        let mutable upper = upper |> Option.bind (fun pivot -> nearest false includeEdges pivot table) |> Option.map boundary
+                        let mutable lower = lower |> Option.bind (fun edge -> nearest true edge table) |> Option.map boundary
+                        let upperAnchor =
+                            match read with
+                            // An inclusive descending scan can reach the end of the index.
+                            | PrimaryRange(_, Some(stoppingKey, true))
+                                when group.Directions = [ Desc ] && (nearest false (stoppingKey, false) table).IsNone ->
+                                None
+                            | _ -> upper |> Option.bind (fun edge -> nearest false edge table)
+                        let mutable upper = upperAnchor |> Option.map boundary
 
                         // A key can bound the gap while an active writer owns it
                         // or an older consistent read still sees its deleted row.
@@ -6507,7 +6536,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             match current with
                             | Some bound when not (isVisibleInAnyReadView table bound.LockKey)
                                               && (exactKeyOwner cache bound.LockKey).IsNone ->
-                                nearest lower false bound.Values table |> Option.map boundary
+                                nearest lower (bound.Values, false) table |> Option.map boundary
                             | _ -> current
 
                         let blocks key =
@@ -6539,12 +6568,10 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                     | PrimaryRange(lower, upper) ->
                         let within direction bound value =
                             bound |> Option.forall (fun (limit, inclusive) ->
-                                let order = compareIntegerPrimaryValues value limit
+                                let order = compareToPrefix limit value
                                 order * direction > 0 || (inclusive && order = 0))
                         for owner, values in pending () do
-                            match values with
-                            | [ value ] when within 1 lower value && within -1 upper value -> add owner
-                            | _ -> ()
+                            if within 1 lower values && within -1 upper values then add owner
                     owners
                 let available () =
                     match read with
@@ -6569,13 +6596,13 @@ let private primaryRangeRowIds (table: Table) lower upper =
     | None -> []
     | Some entries ->
         let start =
-            lower |> Option.map (fun (value, inclusive) ->
-                let first, after = orderedPrefixBounds entries [ value ]
+            lower |> Option.map (fun (values, inclusive) ->
+                let first, after = orderedPrefixBounds entries values
                 if inclusive then first else after)
             |> Option.defaultValue 0
         let finish =
-            upper |> Option.map (fun (value, inclusive) ->
-                let first, after = orderedPrefixBounds entries [ value ]
+            upper |> Option.map (fun (values, inclusive) ->
+                let first, after = orderedPrefixBounds entries values
                 if inclusive then after else first)
             |> Option.defaultValue entries.Count
         [ for index in start .. finish - 1 do entries.[index].RowId ]

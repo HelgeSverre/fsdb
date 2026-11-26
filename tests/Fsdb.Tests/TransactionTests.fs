@@ -816,6 +816,55 @@ let tests =
                   run reader "ROLLBACK" (Affected 0UL) |> ignore
               Expect.equal (attempt "INSERT INTO gate VALUES (15,0)") (Affected 1UL) "rollback releases the range"
 
+          testCase "serializable primary ranges follow descending and composite index order"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              run setup "CREATE TABLE descending_key (id INT, PRIMARY KEY(id DESC))" (Affected 0UL) |> ignore
+              run setup "INSERT INTO descending_key VALUES (10),(20),(30),(40)" (Affected 4UL) |> ignore
+              run setup "CREATE TABLE composite_key (tenant INT,id INT,PRIMARY KEY(tenant,id DESC))" (Affected 0UL) |> ignore
+              run setup "INSERT INTO composite_key VALUES (1,40),(2,10),(2,20),(2,30),(2,40),(4,10)" (Affected 6UL) |> ignore
+              let probe = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let attempt sql =
+                  let tx = run probe "BEGIN" (Affected 0UL)
+                  let tx, result = handle tx sql
+                  run tx "ROLLBACK" (Affected 0UL) |> ignore
+                  result
+
+              let reader = run (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+              let reader = run reader "BEGIN" (Affected 0UL)
+              let read reader sql count =
+                  let _, result = handle reader sql
+                  match result with
+                  | ResultSet(_, rows) -> Expect.equal rows.Length count sql
+                  | actual -> failtestf "expected a range result for %s, got %A" sql actual
+              try
+                  read reader "SELECT id FROM descending_key FORCE INDEX (PRIMARY) WHERE id BETWEEN 10 AND 30" 3
+                  read reader "SELECT id FROM composite_key FORCE INDEX (PRIMARY) WHERE tenant=2" 4
+                  for sql in [ "INSERT INTO descending_key VALUES (5)"; "INSERT INTO composite_key VALUES (3,10)" ] do
+                      match attempt sql with
+                      | Err(1205, _) -> ()
+                      | actual -> failtestf "expected an index gap to block %s, got %A" sql actual
+                  Expect.equal (attempt "INSERT INTO descending_key VALUES (35)") (Affected 1UL) "the gap above the first key is free"
+                  Expect.equal (attempt "INSERT INTO composite_key VALUES (1,45)") (Affected 1UL) "the gap outside the composite prefix is free"
+              finally
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+              Expect.equal (attempt "INSERT INTO composite_key VALUES (3,10)") (Affected 1UL) "rollback frees the composite gap"
+
+              run setup "INSERT INTO descending_key VALUES (5)" (Affected 1UL) |> ignore
+              let reader = run (create 4 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+              let reader = run reader "BEGIN" (Affected 0UL)
+              try
+                  read reader "SELECT id FROM descending_key FORCE INDEX (PRIMARY) WHERE id BETWEEN 10 AND 30" 3
+                  Expect.equal (attempt "INSERT INTO descending_key VALUES (7)") (Affected 1UL) "a following index record stops the scan before the end gap"
+              finally
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "SERIALIZABLE read-only snapshots do not conflict with later writes"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

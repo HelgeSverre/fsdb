@@ -34715,38 +34715,35 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                 Storage.tryPrimaryWriteLockTargets store table values
                 |> Option.map (fun _ -> Storage.PrimaryPoint values)
 
-            let exact () =
-                let equality = function
-                    | BinOp(Eq, expression, LiteralValue((VInt _ | VUInt _) as value))
-                    | BinOp(Eq, LiteralValue((VInt _ | VUInt _) as value), expression) ->
-                        columnName expression |> Option.map (fun column -> column, value)
-                    | _ -> None
+            let integer = function
+                | LiteralValue((VInt _ | VUInt _) as value) -> Some value
+                | _ -> None
 
+            let equality = function
+                | BinOp(Eq, left, right) ->
+                    let bound column literal = Option.map2 (fun name value -> name, value) (columnName column) (integer literal)
+                    bound left right |> Option.orElseWith (fun () -> bound right left)
+                | _ -> None
+
+            let equalities = List.choose equality conditions
+            let boundFor key =
+                equalities
+                |> List.tryPick (fun (column, value) -> if equalsIgnoreCase key column then Some value else None)
+
+            let exact () =
                 if keys.Length <> conditions.Length then None
                 else
-                    conditions
-                    |> List.map equality
-                    |> tryAllSome
-                    |> Option.bind (fun equalities ->
-                        keys
-                        |> List.map (fun key ->
-                            equalities
-                            |> List.tryPick (fun (column, value) -> if equalsIgnoreCase key column then Some value else None))
-                        |> tryAllSome
-                        |> Option.bind point)
+                    keys |> List.map boundFor |> tryAllSome |> Option.bind point
 
             let range () =
-                let ascending =
-                    table.Indexes
-                    |> List.tryFind (fun index -> equalsIgnoreCase "PRIMARY" index.Name)
-                    |> Option.forall (fun index -> index.KeyColumns |> List.forall (fun column -> column.Direction = Asc))
-                match keys with
-                | [ key ] when ascending ->
+                let prefix =
+                    keys |> Seq.map boundFor |> Seq.takeWhile Option.isSome |> Seq.choose id |> List.ofSeq
+                match List.skip prefix.Length keys with
+                | key :: remaining when prefix.Length = equalities.Length ->
                     let keyColumn = columnName >> Option.filter (equalsIgnoreCase key)
-                    let integer = function
-                        | LiteralValue((VInt _ | VUInt _) as value) -> Some value
-                        | _ -> None
-                    let predicates = conditions |> List.map (rangePredicatesFor keyColumn integer)
+                    let predicates =
+                        conditions |> List.filter (equality >> Option.isNone)
+                        |> List.map (rangePredicatesFor keyColumn integer)
                     if List.exists List.isEmpty predicates then None
                     else
                         let bounds = List.concat predicates
@@ -34761,14 +34758,27 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                                 | None -> Some candidate) None
                         let lower = bounds |> List.choose _.Lower |> strongest 1
                         let upper = bounds |> List.choose _.Upper |> strongest -1
-                        let exactBound = Option.forall (fun (value, _) -> (point [ value ]).IsSome)
-                        if not (exactBound lower && exactBound upper) then None
+                        let edge = function
+                            | Some(value, inclusive) -> Some(prefix @ [ value ], inclusive)
+                            | None when not prefix.IsEmpty -> Some(prefix, true)
+                            | None -> None
+                        let exactBound = Option.forall (fun (values, _) -> Storage.isExactPrimaryKeyPrefix store table values)
+                        let physicalLower, physicalUpper =
+                            let direction =
+                                table.Indexes
+                                |> List.tryFind (fun index -> equalsIgnoreCase "PRIMARY" index.Name)
+                                |> Option.bind (fun index -> index.KeyColumns |> List.tryFind (fun column -> equalsIgnoreCase key column.Name))
+                                |> Option.map _.Direction
+                            if direction = Some Desc then edge upper, edge lower else edge lower, edge upper
+                        if not (exactBound physicalLower && exactBound physicalUpper) then None
                         else
                             match lower, upper with
                             | Some(low, includeLow), Some(high, includeHigh) when compare low high = 0 ->
-                                if includeLow && includeHigh then point [ low ] else None
+                                if not (includeLow && includeHigh) then None
+                                elif remaining.IsEmpty then point (prefix @ [ low ])
+                                else Some(Storage.PrimaryRange(physicalLower, physicalUpper))
                             | Some(low, _), Some(high, _) when compare low high > 0 -> None
-                            | _ -> Some(Storage.PrimaryRange(lower, upper))
+                            | _ -> Some(Storage.PrimaryRange(physicalLower, physicalUpper))
                 | _ -> None
 
             if keys.IsEmpty || conditions.IsEmpty || not (List.forall isIntegerColumn keys)
