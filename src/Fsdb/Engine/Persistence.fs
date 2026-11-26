@@ -46,7 +46,8 @@ let private indexCardinalitySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x51uy |]
 let private documentOrderSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x52uy |] // "FSNR" (format 27)
 let private fullTextFlushSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x53uy |] // "FSNS" (format 28)
 let private fullTextCacheSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x54uy |] // "FSNT" (format 29)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x55uy |] // "FSNU" (format 30)
+let private fullTextDeletedSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x55uy |] // "FSNU" (format 30)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x56uy |] // "FSNV" (format 31)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -73,6 +74,7 @@ type private SnapshotFormat =
       FullTextFlushPosition: bool
       FullTextCacheTerms: bool
       FullTextDeletedPostings: bool
+      FullTextCacheBudget: bool
       FullTextStopwordSources: bool
       TableStatistics: bool
       IndexCardinality: bool }
@@ -102,6 +104,7 @@ let private legacySnapshotFormat =
       FullTextFlushPosition = false
       FullTextCacheTerms = false
       FullTextDeletedPostings = false
+      FullTextCacheBudget = false
       FullTextStopwordSources = false
       TableStatistics = false
       IndexCardinality = false }
@@ -178,8 +181,11 @@ let private fullTextFlushSnapshotFormat =
 let private fullTextCacheSnapshotFormat =
     { fullTextFlushSnapshotFormat with FullTextCacheTerms = true }
 
-let private currentSnapshotFormat =
+let private fullTextDeletedSnapshotFormat =
     { fullTextCacheSnapshotFormat with FullTextDeletedPostings = true }
+
+let private currentSnapshotFormat =
+    { fullTextDeletedSnapshotFormat with FullTextCacheBudget = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -188,6 +194,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = fullTextDeletedSnapshotMagic then
+        Some fullTextDeletedSnapshotFormat
     elif header = fullTextCacheSnapshotMagic then
         Some fullTextCacheSnapshotFormat
     elif header = fullTextFlushSnapshotMagic then
@@ -1347,6 +1355,7 @@ let private KindWithDdlAllowInvalidDates = 0x2Buy
 let private KindTableStatisticsRefreshed = 0x2Cuy
 let private KindTableStatisticsRefreshedWithCardinality = 0x2Duy
 let private KindFullTextPostingsFlushed = 0x2Euy
+let private KindFullTextCacheSynced = 0x2Fuy
 
 let private encodeWordLengths (w: Writer) (lengths: StorageOptions.WordLengths) =
     if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"
@@ -1536,6 +1545,10 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteByte KindFullTextPostingsFlushed
         writeStr w db
         writeStr w table
+    | FullTextCacheSynced(db, table) ->
+        w.WriteByte KindFullTextCacheSynced
+        writeStr w db
+        writeStr w table
     | SchemaChanged(db, stmt) ->
         w.WriteByte KindSchemaChangedV13
         w.WriteLenEncString db
@@ -1664,6 +1677,7 @@ let rec private decodeEventAt
               IndexCardinality = decodeIndexCardinality r }
         )
     | k when k = KindFullTextPostingsFlushed -> FullTextPostingsFlushed(str (), str ())
+    | k when k = KindFullTextCacheSynced -> FullTextCacheSynced(str (), str ())
     | k when k = KindSchemaChanged ->
         let db = str ()
         SchemaChanged(db, decodeStatement legacyFormat (columnsForTable db) r)
@@ -1884,6 +1898,8 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         setTableStatisticsForReplay store db table statistics (Log.diagnostic "fsdb: WAL replay warning: %s")
     | FullTextPostingsFlushed(db, table) ->
         flushFullTextForReplay store db table (Log.diagnostic "fsdb: WAL replay warning: %s")
+    | FullTextCacheSynced(db, table) ->
+        syncFullTextForReplay store db table (Log.diagnostic "fsdb: WAL replay warning: %s")
     | SchemaChanged(db, stmt) -> applyDdl store db stmt
     | SchemaChangedAt(db, stmt, createTime) ->
         applyDdl store db stmt
@@ -2092,7 +2108,14 @@ let private writeStore (s: FileStream) (store: Store) : unit =
                     w.WriteLenEncInt(uint64 terms.Length)
                     for term in terms do
                         writeStr w term
+                        match FullText.cachedPostingTail term index with
+                        | None -> w.WriteInt64LE 0L
+                        | Some tail ->
+                            w.WriteInt64LE tail.LastDocument
+                            w.WriteInt64LE tail.UsedBytes
+                            w.WriteInt64LE tail.Capacity
                         if w.Count >= (1 <<< 20) then flush ()
+                    w.WriteInt64LE((FullText.cacheBudget index).Bytes)
                     let deleted = FullText.deletedPostings index
                     w.WriteLenEncInt(uint64 deleted.Count)
                     for KeyValue(order, grams) in deleted do
@@ -2211,10 +2234,30 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
             fullTextNames |> List.map (fun name ->
                 let through = r.ReadInt64LE()
                 if through < -1L then failwith "Persistence: invalid full-text flush position"
-                let terms =
+                let terms, budget =
                     if format.FullTextCacheTerms then
-                        Some(List.init (readCount "cache term") (fun _ -> readStr r))
-                    else None
+                        let entries = List.init (readCount "cache term") (fun _ ->
+                            let spelling = readStr r
+                            let tail: FullTextCache.PostingTail option =
+                                if not format.FullTextCacheBudget then None
+                                else
+                                    let order = r.ReadInt64LE()
+                                    if order = 0L then None
+                                    else
+                                        let used = r.ReadInt64LE()
+                                        let capacity = r.ReadInt64LE()
+                                        if order < 0L || used <= 0L || capacity < used then
+                                            failwith "Persistence: invalid full-text posting tail"
+                                        Some { LastDocument = order; UsedBytes = used; Capacity = capacity }
+                            spelling, tail)
+                        let budget =
+                            if not format.FullTextCacheBudget then None
+                            else
+                                let bytes = r.ReadInt64LE()
+                                if bytes < 0L then failwith "Persistence: invalid full-text cache budget"
+                                Some(bytes, entries |> List.choose (fun (spelling, tail) -> tail |> Option.map (fun tail -> spelling, tail)))
+                        Some(List.map fst entries), budget
+                    else None, None
                 let deleted =
                     if format.FullTextDeletedPostings then
                         let count = readCount "deleted document"
@@ -2231,7 +2274,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
                         }
                         |> Map.ofSeq
                     else Map.empty
-                name, ((if through >= 0L then Some through else None), terms, deleted))
+                name, ((if through >= 0L then Some through else None), terms, budget, deleted))
             |> Map.ofList
         else Map.empty
     let mutable documents = Map.empty
@@ -2292,11 +2335,11 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
         |> Map.map (fun name index ->
             let index = index |> FullText.restoreDocumentOrder (Map.tryFind name documentOrders |> Option.defaultValue Map.empty)
             (match Map.tryFind name postingStates with
-             | Some(through, terms, deleted) ->
+             | Some(through, terms, budget, deleted) ->
                  index
                  |> FullText.restoreDeletedPostings deleted
                  |> FullText.restoreFlushedThrough through
-                 |> FullText.restoreCachedTerms terms
+                 |> FullText.restoreCache terms budget
              | None -> FullText.flushPostings index)
             |> FullText.withStopwordSource (sources |> Map.tryFind name |> Option.flatten))
     reindexTableWithFullTextIndexes fullTextIndexes table

@@ -391,6 +391,20 @@ let tests =
               let updated = addDocument 1 "서울역 서울역" original
               Expect.equal (booleanScores updated query |> ids) [ 1; 2 ] "the updated document extends the posting across the bounds"
 
+          testCase "ngram cache charges posting list growth and segment rollover"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_bin" |> Option.get
+              let index = buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation [] |> flushPostings
+              let dense = String.replicate 2048 "日"
+              let one = addDocument 1 dense index
+              let firstSegment = (one, [ 2..32 ]) ||> List.fold (fun current id -> addDocument id dense current)
+              let secondSegment = addDocument 33 dense firstSegment
+              Expect.equal (cacheBudget one).Bytes 2872L "one dense document"
+              Expect.equal (cacheBudget firstSegment).Bytes 89830L "posting list reallocations"
+              Expect.equal (cacheBudget secondSegment).Bytes 92360L "new segment after the 64 KiB boundary"
+              Expect.equal (secondSegment |> removeDocument 33 |> cacheBudget).Bytes 92360L "deletion retains charged postings"
+              Expect.equal (secondSegment |> syncCachedPostings |> cacheBudget).Bytes 0L "sync clears the cache charge"
+
           testCase "ngram relevance retains deleted gram frequencies until optimize"
           <| fun _ ->
               let collation = tryFind "utf8mb4_bin" |> Option.get

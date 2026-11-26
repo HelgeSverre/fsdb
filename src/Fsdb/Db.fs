@@ -45,6 +45,7 @@ let private attachDataDir attach (dataDir: string) (db: Db) : Db =
     store.VirtualTables <- db.Store.VirtualTables
     Storage.configureNgramTokenSize db.Store.NgramTokenSize store
     Storage.configureFullTextWordLengths db.Store.FullTextWordLengths store
+    store.FullTextCacheSize <- db.Store.FullTextCacheSize
     let stopwordsEnabled = Session.tryGlobalVariable db.Store "innodb_ft_enable_stopword" <> Some(Some "OFF")
     configureFullTextStopwords stopwordsEnabled store
     configureFullTextStopwordTables
@@ -83,6 +84,11 @@ let withFullTextWordLengths (lengths: StorageOptions.WordLengths) (db: Db) : Db 
 /// Existing postings retain their original tokenizer until the index is rebuilt.
 let withNgramTokenSize (size: int) (db: Db) : Db =
     Storage.configureNgramTokenSize (StorageOptions.normalizeNgramTokenSize (int64 size)) db.Store
+    db
+
+/// Sets the startup limit for each table's full-text posting cache.
+let withFullTextCacheSize (size: int) (db: Db) : Db =
+    db.Store.FullTextCacheSize <- StorageOptions.normalizeFullTextCacheSize (int64 size)
     db
 
 /// Selects the initial full-text stopword setting before opening sessions.
@@ -258,6 +264,7 @@ type Connection internal (db: Db) =
         { (Session.create (System.Threading.Interlocked.Decrement connectionCounter) db.Store
            |> Session.withServerOptions db.Transport) with
             CustomFunctions = db.Functions }
+    let fullTextSync = Storage.acquireFullTextSync db.Store
 
     member private _.Run(action: Session.Session -> Session.Session * QueryHandler.QueryResult) =
         lock gate (fun () ->
@@ -327,7 +334,8 @@ type Connection internal (db: Db) =
             lock gate (fun () ->
                 if not disposed then
                     disposed <- true
-                    QueryHandler.closeSession session)
+                    try QueryHandler.closeSession session
+                    finally fullTextSync.Dispose())
 
 /// Opens an in-process connection to `db` — the sanctioned way for a host
 /// to run SQL against its own embedded instance without a socket.

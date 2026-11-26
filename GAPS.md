@@ -1758,10 +1758,12 @@ preserve the cached state. Boolean, compound natural-language, and
 query-expansion ranks use retained deleted posting counts across
 checkpoints and shutdown. Single-term natural-language ranks use the
 live frequency. Full-text-only optimize purges the retained counts.
-Automatic flushing and multiple disk segments per gram remain open.
-The same oracle's pressure probe reproduces the missing membership
-changes across two automatic flushes while checking that rollback
-leaves the cache alone.
+Per-table ngram cache pressure now publishes automatic syncs while
+preserving deleted postings. The pressure probe matches membership
+across two syncs and after rollback. Checkpoints preserve the active
+cache budget, and WAL replay applies the recorded sync boundaries.
+Server-wide cache pressure and scoring across multiple disk segments
+per gram remain open.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.

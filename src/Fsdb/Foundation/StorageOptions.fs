@@ -13,6 +13,7 @@ type StopwordTables =
 type Settings =
     { FullTextQueryExpansionLimit: int
       FullTextWordLengths: WordLengths
+      FullTextCacheSize: int
       NgramTokenSize: int
       FullTextStopwordsEnabled: bool
       FullTextStopwordTables: StopwordTables }
@@ -20,6 +21,7 @@ type Settings =
 let defaults =
     { FullTextQueryExpansionLimit = 20
       FullTextWordLengths = defaultWordLengths
+      FullTextCacheSize = 8_000_000
       NgramTokenSize = 2
       FullTextStopwordsEnabled = true
       FullTextStopwordTables = { UserTable = None; ServerTable = None } }
@@ -33,6 +35,8 @@ let internal validWordLengths lengths =
     lengths.Minimum >= 0 && lengths.Minimum <= 16 && lengths.Maximum >= 10 && lengths.Maximum <= 84
 
 let internal normalizeNgramTokenSize size = int (max 1L (min 10L size))
+
+let internal normalizeFullTextCacheSize size = int (max 1_600_000L (min 80_000_000L size))
 
 /// Consumes storage settings, leaving other server options for their owners.
 let fromEntries (entries: OptionFile.Entry list) =
@@ -56,6 +60,13 @@ let fromEntries (entries: OptionFile.Entry list) =
             { settings with FullTextStopwordTables = { settings.FullTextStopwordTables with UserTable = entry.Value } }, remaining, errors
         | "innodb_ft_server_stopword_table" ->
             { settings with FullTextStopwordTables = { settings.FullTextStopwordTables with ServerTable = entry.Value } }, remaining, errors
+        | "innodb_ft_cache_size" ->
+            match entry.Value |> Option.bind OptionFile.tryParseUnsignedSize with
+            | Some size ->
+                { settings with FullTextCacheSize = normalizeFullTextCacheSize (int64 (min 80_000_000UL size)) }, remaining, errors
+            | None ->
+                let error = sprintf "%s:%d: %s requires an unsigned size with an optional K, M, G, T, P or E suffix" entry.Source entry.Line name
+                settings, remaining, error :: errors
         | "innodb_ft_min_token_size" | "innodb_ft_max_token_size" ->
             match entry.Value |> Option.bind OptionFile.tryParseUnsignedSize with
             | Some size ->

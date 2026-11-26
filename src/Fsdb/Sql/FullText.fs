@@ -109,16 +109,23 @@ let private rawTokensBy isWord keepApostrophes (text: string) : string[] =
 
 let private rawTokens = rawTokensBy isWordChar true
 
-let private ngrams size (text: string) =
+let private positionedNgrams size (text: string) =
     let boundary (rune: Text.Rune) =
         rune.IsAscii && not (Text.Rune.IsLetterOrDigit rune || rune.Value = int '_')
 
-    text.EnumerateRunes()
-    |> Seq.toArray
+    let mutable offset = 0L
+    [| for rune in text.EnumerateRunes() do
+           yield struct (rune, offset)
+           offset <- offset + int64 rune.Utf8SequenceLength |]
     |> Array.windowed size
     |> Array.choose (fun runes ->
-        if Array.exists boundary runes then None
-        else runes |> Array.map string |> String.concat "" |> Some)
+        if runes |> Array.exists (fun struct (rune, _) -> boundary rune) then None
+        else
+            let struct (_, first) = runes.[0]
+            let gram = runes |> Array.map (fun struct (rune, _) -> string rune) |> String.concat ""
+            Some(gram, first))
+
+let private ngrams size text = positionedNgrams size text |> Array.map fst
 
 let tokenize (text: string) : string[] = rawTokens text |> Array.map _.ToLowerInvariant()
 
@@ -128,7 +135,8 @@ let tokenize (text: string) : string[] = rawTokens text |> Array.map _.ToLowerIn
 
 type private Token =
     { Text: string
-      Key: string }
+      Key: string
+      ByteOffset: int64 }
 
 type private Document =
     { Fields: Token[][]
@@ -163,6 +171,7 @@ type Index<'id when 'id: comparison> =
           NextDocumentOrder: int64
           FlushedThrough: int64 option
           CachedTerms: FullTextCache.Terms
+          CacheBudget: FullTextCache.Budget
           Deleted: DeletedPostings
           DocumentOrderFollowsIds: bool
           HasDocumentOrder: bool }
@@ -252,7 +261,8 @@ let private foldFullText (collation: Collation) text =
 
 let private tokenOfFolded (collation: Collation) text =
     { Text = text
-      Key = collation.FullTextKeyOf text }
+      Key = collation.FullTextKeyOf text
+      ByteOffset = 0L }
 
 let private tokenWith collation text =
     // InnoDB folds full-text case even for nonbinary case-sensitive collations.
@@ -330,6 +340,17 @@ let private cacheDocumentTerms (words: (string * Token[])[]) terms =
     (terms, Array.sortBy fst words)
     ||> Array.fold (fun terms (key, grams) -> FullTextCache.add key grams.[0].Text terms)
 
+let private chargeDocument order (words: (string * Token[])[]) budget =
+    let postings =
+        words |> Array.map (fun (key, grams) ->
+            let mutable previous = 0L
+            let mutable bytes = 0L
+            for gram in grams do
+                bytes <- bytes + FullTextCache.encodedLength (gram.ByteOffset - previous)
+                previous <- gram.ByteOffset
+            key, Text.Encoding.UTF8.GetByteCount grams.[0].Text, bytes)
+    FullTextCache.addDocument order postings budget
+
 let private prefixKeys (collation: Collation) (token: Token) =
     let mutable length = 0
     [| for rune in token.Text.EnumerateRunes() do
@@ -382,7 +403,7 @@ let private addDeletedDocument order (tokens: Token[]) words prefixes (history: 
           Prefixes = prefixes |> Array.fold (fun rows (key, (_, count)) -> add rows (key, count)) history.Prefixes }
 
 let private deletedTokens (collation: Collation) texts =
-    texts |> Array.map (fun text -> { Text = text; Key = collation.FullTextKeyOf text })
+    texts |> Array.map (tokenOfFolded collation)
 
 let private removeDeletedDocument collation order texts (history: DeletedPostings) =
     let tokens = deletedTokens collation texts
@@ -403,6 +424,7 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       NextDocumentOrder = 1L
       FlushedThrough = None
       CachedTerms = FullTextCache.empty
+      CacheBudget = FullTextCache.emptyBudget
       Deleted = emptyDeletedPostings
       DocumentOrderFollowsIds = true
       HasDocumentOrder = true }
@@ -510,6 +532,9 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
         CachedTerms =
             if index.FlushedThrough.IsSome then cacheDocumentTerms words index.CachedTerms
             else index.CachedTerms
+        CacheBudget =
+            if index.FlushedThrough.IsSome then chargeDocument index.NextDocumentOrder words index.CacheBudget
+            else index.CacheBudget
         HasDocumentOrder = index.HasDocumentOrder || index.Documents.IsEmpty
         DocumentOrderFollowsIds =
             index.Documents.IsEmpty
@@ -517,7 +542,15 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
 
 let internal addDocumentFieldsWithRules rules id texts (index: Index<'id>) =
     // Phrase positions retain tokens omitted from ngram postings.
-    let fields = texts |> List.map (tokensWith rules.Tokenizer index.Collation) |> List.toArray
+    let fields =
+        match rules.Tokenizer with
+        | Words _ -> texts |> List.map (tokensWith rules.Tokenizer index.Collation) |> List.toArray
+        | Ngrams size ->
+            let mutable start = 0L
+            [| for text in texts do
+                   yield positionedNgrams size text |> Array.map (fun (gram, offset) ->
+                       { tokenWith index.Collation gram with ByteOffset = start + offset })
+                   if text.Length > 0 then start <- start + int64 (Text.Encoding.UTF8.GetByteCount text) + 1L |]
     addDocumentData id { Fields = fields; Rules = rules } index
 
 let internal sameDocument id (left: Index<'id>) (right: Index<'id>) =
@@ -586,20 +619,35 @@ let internal withDocumentOrderFrom (source: Index<'id>) (target: Index<'id>) =
         NextDocumentOrder = source.NextDocumentOrder
         FlushedThrough = source.FlushedThrough
         CachedTerms = source.CachedTerms
+        CacheBudget = source.CacheBudget
         Deleted = source.Deleted
         DocumentOrderFollowsIds = source.DocumentOrderFollowsIds
         HasDocumentOrder = source.HasDocumentOrder }
 
-let internal flushPostingsForShutdown (index: Index<'id>) =
+let internal syncCachedPostings (index: Index<'id>) =
     match index.Rules.Tokenizer with
     | Words _ -> index
+    | Ngrams _ when index.FlushedThrough = Some(index.NextDocumentOrder - 1L) -> index
     | Ngrams _ ->
         { index with
             FlushedThrough = Some(index.NextDocumentOrder - 1L)
-            CachedTerms = FullTextCache.empty }
+            CachedTerms = FullTextCache.empty
+            CacheBudget = FullTextCache.emptyBudget }
+
+let internal onlyCacheSynced (before: Index<'id>) (after: Index<'id>) =
+    obj.ReferenceEquals(before, after)
+    || (before.FlushedThrough <> after.FlushedThrough
+        && after.FlushedThrough = Some(after.NextDocumentOrder - 1L)
+        && before.NextDocumentOrder = after.NextDocumentOrder
+        && obj.ReferenceEquals(before.Documents, after.Documents)
+        && obj.ReferenceEquals(before.Deleted, after.Deleted)
+        && obj.ReferenceEquals(before.Postings, after.Postings)
+        && obj.ReferenceEquals(before.PrefixPostings, after.PrefixPostings)
+        && before.Rules = after.Rules && before.StopwordSource = after.StopwordSource
+        && obj.ReferenceEquals(before.StopwordReload, after.StopwordReload))
 
 let internal flushPostings index =
-    let flushed = flushPostingsForShutdown index
+    let flushed = syncCachedPostings index
     if flushed.Deleted.Documents.IsEmpty then flushed
     else { flushed with Deleted = emptyDeletedPostings }
 
@@ -610,6 +658,11 @@ let internal restoreFlushedThrough through (index: Index<'id>) =
 
 let internal cachedTermsInInsertionOrder (index: Index<'id>) =
     FullTextCache.inInsertionOrder index.CachedTerms
+
+let internal cacheBudget (index: Index<'id>) = index.CacheBudget
+
+let internal cachedPostingTail spelling (index: Index<'id>) =
+    Map.tryFind (index.Collation.FullTextKeyOf spelling) index.CacheBudget.Tails
 
 let internal deletedPostings (index: Index<'id>) = index.Deleted.Documents
 
@@ -634,42 +687,53 @@ let private cacheDocumentsAfter through (index: Index<'id>) initial =
     |> Map.values
     |> Seq.filter (fun document -> document.Order > through)
     |> Seq.sortBy _.Order
-    |> Seq.fold (fun terms document ->
+    |> Seq.fold (fun (terms, budget) document ->
         let words = indexedTokens document.Content |> Array.groupBy _.Key
-        cacheDocumentTerms words terms) initial
+        cacheDocumentTerms words terms, chargeDocument document.Order words budget) initial
 
-let internal restoreCachedTerms saved (index: Index<'id>) =
+let internal restoreCache saved savedBudget (index: Index<'id>) =
     match index.FlushedThrough with
     | None -> index
     | Some through ->
+        let rebuilt = lazy (cacheDocumentsAfter through index (FullTextCache.empty, FullTextCache.emptyBudget))
         let terms =
             match saved with
             | Some spellings ->
                 spellings |> Seq.fold (fun terms text -> FullTextCache.add (index.Collation.FullTextKeyOf text) text terms) FullTextCache.empty
             | None ->
                 // Older snapshots can reproduce the insertion order of live documents.
-                cacheDocumentsAfter through index FullTextCache.empty
-        { index with CachedTerms = terms }
+                fst rebuilt.Value
+        let budget: FullTextCache.Budget =
+            match savedBudget with
+            | None -> snd rebuilt.Value
+            | Some (bytes, tails) ->
+                let tails = tails |> List.map (fun (spelling, tail: FullTextCache.PostingTail) ->
+                    if tail.LastDocument <= through || tail.LastDocument >= index.NextDocumentOrder then
+                        invalidOp "Persistence: full-text posting tail outside the cache"
+                    index.Collation.FullTextKeyOf spelling, tail) |> Map.ofList
+                { Bytes = bytes; Tails = tails }
+        { index with CachedTerms = terms; CacheBudget = budget }
 
 let internal publishCachedTerms (baseline: Index<'id>) (index: Index<'id>) =
     if index.FlushedThrough.IsNone
        || index.FlushedThrough <> baseline.FlushedThrough
        || index.NextDocumentOrder < baseline.NextDocumentOrder
        || (obj.ReferenceEquals(index.CachedTerms, baseline.CachedTerms)
+           && obj.ReferenceEquals(index.CacheBudget, baseline.CacheBudget)
            && obj.ReferenceEquals(index.Deleted, baseline.Deleted)) then
         index
     else
         // Only final documents are indexed by a committing transaction.
-        let terms =
-            if obj.ReferenceEquals(index.CachedTerms, baseline.CachedTerms) then index.CachedTerms
-            else cacheDocumentsAfter (baseline.NextDocumentOrder - 1L) index baseline.CachedTerms
+        let terms, budget =
+            if obj.ReferenceEquals(index.CacheBudget, baseline.CacheBudget) then index.CachedTerms, index.CacheBudget
+            else cacheDocumentsAfter (baseline.NextDocumentOrder - 1L) index (baseline.CachedTerms, baseline.CacheBudget)
         let deleted =
             if index.Deleted.Documents.IsEmpty || fst (Map.maxKeyValue index.Deleted.Documents) < baseline.NextDocumentOrder then index.Deleted
             else
                 index.Deleted.Documents |> Map.fold (fun history order texts ->
                     if order < baseline.NextDocumentOrder then history
                     else removeDeletedDocument index.Collation order texts history) index.Deleted
-        { index with CachedTerms = terms; Deleted = deleted }
+        { index with CachedTerms = terms; CacheBudget = budget; Deleted = deleted }
 
 let internal rulesInUse (index: Index<'id>) =
     seq {
@@ -1376,7 +1440,7 @@ let private prefixRowsWithCacheOrder candidateIds key (view: ReadView<'id>) (row
     match view.FlushedThrough with
     | Some through when not rows.IsEmpty ->
         let comparePrefix gramKey text =
-            if prefixKeys view.Collation { Key = gramKey; Text = text } |> Array.contains key then 0
+            if prefixKeys view.Collation { Key = gramKey; Text = text; ByteOffset = 0L } |> Array.contains key then 0
             else String.CompareOrdinal(key, gramKey)
 
         match FullTextCache.prefixOrder comparePrefix view.CachedTerms with

@@ -2838,16 +2838,17 @@ let private serveLoop
                 return! loop ()
         }
 
-    match clients with
-    | None -> loop ()
-    | Some clients ->
-        async {
-            do! loop ()
+    async {
+        use _fullTextSync = Storage.acquireFullTextSync store
+        do! loop ()
+        match clients with
+        | None -> ()
+        | Some clients ->
             let connected = clients.Values |> Seq.toArray
             for client, _ in connected do
                 client.Dispose()
             do! Task.WhenAll(connected |> Array.map snd) |> Async.AwaitTask |> Async.Ignore
-        }
+    }
 
 let serveWithOptions options listener store customFunctions =
     serveLoop false options listener store customFunctions

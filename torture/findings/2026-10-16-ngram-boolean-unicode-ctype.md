@@ -431,22 +431,21 @@ in both modes matched with mixed binary bigrams, mixed binary
 trigrams, and cached and mixed `utf8mb4_0900_ai_ci` bigrams.
 [InnoDB's single-term optimization](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3327).
 
-Automatic cache flushing remains open. A MySQL 8.4.11 probe starts
+The automatic-cache-flush probe on MySQL 8.4.11 starts
 with `東京`, `東海`, and `大阪`. It adds rows containing
 `REPEAT('日', 2048)` in batches. At the 1,600,000-byte cache setting,
 the two `東*` postings had moved to disk by the 64-row observation.
 At the default 8,000,000-byte setting, they were still cached at
 256 rows and had moved by 384. `東京 東*` began returning both
-matching rows after the move. Fsdb still returned one row after
-512 inserts. The observation points bound the flush and can vary
-with the background worker's scheduling.
+matching rows after the move. The observation points bound the flush
+and can vary with the background worker's scheduling.
 [InnoDB full-text cache](https://dev.mysql.com/doc/refman/8.4/en/innodb-fulltext-index.html#innodb-fulltext-index-cache).
 
 The `--cache-pressure` oracle tests two automatic flushes. The query
 returns ID 1 before pressure, after a small batch, and after a large
 batch rolls back. After a large batch commits, it returns IDs 1 and 2
-on MySQL. A new `東南` row stays cached until a second flush, when it
-joins the result as ID 4. Fsdb returns ID 1 in all three later stages.
+on both engines. A new `東南` row stays cached until a second flush,
+when it joins the result as ID 4.
 MySQL's index metadata confirms that the deleted `東京` posting stays
 on disk and that `日日` occupies more disk segments after the second
 flush. The oracle compares the deleted posting's inferred frequency
@@ -468,6 +467,17 @@ adds the new capacity minus the old used length. The logged sync
 size can exceed the request threshold while writes continue.
 [InnoDB posting-list allocation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0fts.cc#L982).
 [Sync trigger](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0fts.cc#L3444).
+
+Fsdb's wire and embedded connections share a cache worker per store.
+It checks committed per-table ngram allocation charges against
+`innodb_ft_cache_size` and syncs an eligible table under its publication
+lock. The worker checks periodically, so the exact sync point can differ
+from MySQL's. The WAL records each automatic sync, and a checkpoint
+preserves the active posting tails and allocation charge. A sync
+preserves deleted postings and can coexist with a serializable writer.
+Snapshots from earlier formats rebuild the charge from live cached rows.
+Server-wide pressure, budget contributions from word-parser indexes,
+and scoring across multiple segments of one disk gram remain open.
 
 Fsdb's orderly CLI shutdown now closes accepted clients, waits for
 their work to finish, and flushes the ngram cache in the final

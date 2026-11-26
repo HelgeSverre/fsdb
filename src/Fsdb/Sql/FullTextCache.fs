@@ -57,6 +57,45 @@ let add key text terms =
 
 let inInsertionOrder terms = List.rev terms.LastInserted
 
+[<Struct>]
+type PostingTail =
+    { LastDocument: int64
+      UsedBytes: int64
+      Capacity: int64 }
+
+type Budget =
+    { Bytes: int64
+      Tails: Map<string, PostingTail> }
+
+let emptyBudget = { Bytes = 0L; Tails = Map.empty }
+
+let private emptyTail = { LastDocument = 0L; UsedBytes = 0L; Capacity = 0L }
+
+let rec encodedLength delta =
+    if delta < 128L then 1L else 1L + encodedLength (delta >>> 7)
+
+let addDocument order (words: (string * int * int64)[]) (budget: Budget) =
+    if words.Length = 0 then budget
+    else
+        // InnoDB accounts for each document's statistics and each new term's
+        // tree entry and initial node vector on the 64-bit server.
+        ({ budget with Bytes = budget.Bytes + 16L }, words)
+        ||> Array.fold (fun current (key, spellingBytes, positionBytes) ->
+            let tail, overhead =
+                match Map.tryFind key current.Tails with
+                | None -> emptyTail, 336L + int64 spellingBytes + 56L
+                | Some tail when tail.UsedBytes > 65536L -> emptyTail, 56L
+                | Some tail -> tail, 0L
+            let size = encodedLength (order - tail.LastDocument) + positionBytes + 1L
+            let used = tail.UsedBytes + size
+            let capacity, growth =
+                if used <= tail.Capacity then tail.Capacity, 0L
+                else
+                    let allocated = if used < 48L then (used / 16L + 1L) * 16L else used * 6L / 5L
+                    allocated, allocated - tail.UsedBytes
+            { Bytes = current.Bytes + overhead + growth
+              Tails = Map.add key { LastDocument = order; UsedBytes = used; Capacity = capacity } current.Tails })
+
 let prefixOrder comparePrefix terms =
     let rec pivot = function
         | Empty -> None

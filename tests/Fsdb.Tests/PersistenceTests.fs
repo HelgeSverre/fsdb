@@ -2569,6 +2569,48 @@ let tests =
               execute reopened "INSERT INTO docs VALUES(4,'東北'),(5,'東京 東海 東海')" |> ignore
               Expect.equal (read reopened) [ [ Some "1" ]; [ Some "2" ]; [ Some "5" ] ] "new writes enter the cache again"
 
+          testCase "automatic ngram sync survives WAL replay and preserves serializable writes"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              store.FullTextCacheSize <- 5000
+              attach dir store
+              let execute session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+              let session = Fsdb.Session.create 1 store
+              let session = execute session "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin"
+              let session = execute session "CREATE TABLE notes(id INT PRIMARY KEY,n INT)"
+              let session = execute session "INSERT INTO notes VALUES(1,0)"
+              let session = execute session "INSERT INTO docs VALUES(1,'東京'),(2,'東海'),(3,'大阪'),(99,'東京 東北')"
+              let session = execute session "DELETE FROM docs WHERE id=99"
+              let index (current: Store) = current.Catalog.[defaultDatabase].["docs"].FullTextIndexes.["ft"]
+              let read current =
+                  handle (Fsdb.Session.create 2 current) "SELECT id FROM docs WHERE MATCH(body) AGAINST('東京 東*' IN BOOLEAN MODE) ORDER BY id"
+                  |> snd
+              let cached = ResultSet([ "id" ], [ [ Some "1" ] ])
+              let flushed = ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])
+              Expect.equal (read store) cached "the compound search skips the cached prefix"
+              snapshotNow dir store
+              let checkpoint = load dir
+              Expect.equal (Fsdb.FullText.cacheBudget (index checkpoint)) (Fsdb.FullText.cacheBudget (index store)) "checkpoint restores the charge and active posting tails"
+
+              let session = execute session "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+              let session = execute session "START TRANSACTION"
+              let session = execute session "UPDATE notes SET n=1 WHERE id=1"
+              syncFullTextCachesUnderPressure store
+              Expect.equal (read store) flushed "sync publishes committed cache contents"
+              execute session "COMMIT" |> ignore
+              Expect.equal (read store) flushed "the serializable commit preserves the sync boundary"
+
+              let recovered = load dir
+              Expect.equal (read recovered) flushed "WAL replay preserves the sync boundary"
+              Expect.equal (Fsdb.FullText.cacheBudget (index recovered)).Bytes 0L "the synced cache is empty"
+              Expect.equal (Fsdb.FullText.deletedPostings (index recovered)) (Fsdb.FullText.deletedPostings (index checkpoint)) "sync preserves deleted postings"
+              let notes = handle (Fsdb.Session.create 3 recovered) "SELECT n FROM notes WHERE id=1" |> snd
+              Expect.equal notes (ResultSet([ "n" ], [ [ Some "1" ] ])) "the serializable write survives recovery"
+
           testCase "committed deleted ngram frequencies survive replay and clean close until optimize"
           <| fun _ ->
               let dir = tempDataDir ()

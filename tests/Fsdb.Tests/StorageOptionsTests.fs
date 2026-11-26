@@ -630,7 +630,7 @@ let tests =
               Persistence.snapshotNow dir store
               let path = System.IO.Path.Combine(dir, "snapshot.fsdb")
               let bytes = System.IO.File.ReadAllBytes path
-              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNU" "rule references use the current snapshot format"
+              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNV" "rule references use the current snapshot format"
               let trailerSize, preparedCountSize = 12, 4
               let documentOrderSize = 1 // One length-encoded position for the single row.
               let lastRuleReference = bytes.Length - trailerSize - preparedCountSize - documentOrderSize - 1
@@ -655,6 +655,23 @@ let tests =
                   (TestSupport.Sql.executeDefault recovered "SELECT body FROM legacy_fts WHERE MATCH(body) AGAINST('生日' IN BOOLEAN MODE)" |> rows)
                   [ [ Some "生日快乐" ] ]
                   "historical tokenizer data still decodes"
+
+          testCase "full-text cache startup size is bounded and read only"
+          <| fun _ ->
+              for value, expected in [ "1", 1600000; "8M", 8388608; "80M", 80000000 ] do
+                  Expect.equal (StorageOptions.fromEntries [ entry "innodb-ft-cache-size" (Some value) ])
+                      (Ok({ StorageOptions.defaults with FullTextCacheSize = expected }, [])) value
+              Expect.equal ((Program.parseArguments [| "--innodb-ft-cache-size=1600000" |]).GetResult Program.Innodb_Ft_Cache_Size)
+                  "1600000" "CLI accepts the option"
+              let dir = TestSupport.directory "fulltext-cache-size"
+              let db = Db.create () |> Db.withFullTextCacheSize 1600000 |> Db.withDataDir dir
+              use connection = Db.connect db
+              Expect.equal (connection.Query "SELECT @@innodb_ft_cache_size,@@GLOBAL.innodb_ft_cache_size" |> rows)
+                  [ [ Some "1600000"; Some "1600000" ] ] "durable attachment retains the startup limit"
+              for sql in [ "SELECT @@SESSION.innodb_ft_cache_size"; "SET innodb_ft_cache_size=8000000"; "SET GLOBAL innodb_ft_cache_size=8000000" ] do
+                  match connection.Query sql |> errorInfo with
+                  | Some error -> Expect.equal (error.Code, error.State) (1238, "HY000") sql
+                  | None -> failtestf "accepted %s" sql
 
           testCase "expansion limit startup follows MySQL bounds and precedence"
           <| fun _ ->

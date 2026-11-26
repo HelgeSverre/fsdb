@@ -12,6 +12,7 @@ type Arguments =
     | Defaults_File of path: string
     | [<EqualsAssignmentOrSpaced>] Innodb_Ft_Min_Token_Size of size: string
     | [<EqualsAssignmentOrSpaced>] Innodb_Ft_Max_Token_Size of size: string
+    | [<EqualsAssignmentOrSpaced>] Innodb_Ft_Cache_Size of size: string
     | [<EqualsAssignmentOrSpaced>] Ft_Query_Expansion_Limit of limit: string
     | Ngram_Token_Size of size: string
     | [<EqualsAssignment>] Innodb_Ft_Enable_Stopword of enabled: string option
@@ -40,6 +41,7 @@ type Arguments =
             | Defaults_File _ -> "read server settings from a my.cnf-style file's [mysqld] section"
             | Innodb_Ft_Min_Token_Size _ -> "minimum indexed word length, clamped to 0–16 (default 3)"
             | Innodb_Ft_Max_Token_Size _ -> "maximum indexed word length, clamped to 10–84 (default 84)"
+            | Innodb_Ft_Cache_Size _ -> "full-text cache bytes per table (default 8000000)"
             | Ft_Query_Expansion_Limit _ -> "reported expansion limit, clamped to 0–1000 (default 20); InnoDB search ignores it"
             | Ngram_Token_Size _ -> "ngram token size, clamped to 1–10 (default 2)"
             | Innodb_Ft_Enable_Stopword _ -> "initial full-text stopword filtering (default ON); accepts =ON or =OFF"
@@ -116,6 +118,7 @@ let main argv =
                       | Ft_Query_Expansion_Limit value -> yield commandLineEntry "ft_query_expansion_limit" (Some value)
                       | Innodb_Ft_Min_Token_Size value -> yield commandLineEntry "innodb_ft_min_token_size" (Some value)
                       | Innodb_Ft_Max_Token_Size value -> yield commandLineEntry "innodb_ft_max_token_size" (Some value)
+                      | Innodb_Ft_Cache_Size value -> yield commandLineEntry "innodb_ft_cache_size" (Some value)
                       | Innodb_Ft_User_Stopword_Table value -> yield commandLineEntry "innodb_ft_user_stopword_table" value
                       | Innodb_Ft_Server_Stopword_Table value -> yield commandLineEntry "innodb_ft_server_stopword_table" value
                       | Innodb_Ft_Enable_Stopword value -> yield commandLineEntry "innodb_ft_enable_stopword" value
@@ -177,6 +180,7 @@ let main argv =
             let db =
                 Db.create ()
                 |> Db.withNgramTokenSize storageOptions.NgramTokenSize
+                |> Db.withFullTextCacheSize storageOptions.FullTextCacheSize
                 |> Db.withFullTextQueryExpansionLimit storageOptions.FullTextQueryExpansionLimit
                 |> Db.withFullTextWordLengths storageOptions.FullTextWordLengths
                 |> Db.withFullTextStopwords storageOptions.FullTextStopwordsEnabled

@@ -384,6 +384,7 @@ type CommitEvent =
     | AutoIncrementAdvanced of db: string * table: string * nextId: int64
     | TableStatisticsRefreshed of db: string * table: string * statistics: TableStatistics
     | FullTextPostingsFlushed of db: string * table: string
+    | FullTextCacheSynced of db: string * table: string
     | SchemaChanged of db: string * Statement
     | SchemaChangedAt of db: string * statement: Statement * createTime: DateTime
     | TransactionCommitted of CommitEvent list
@@ -542,6 +543,7 @@ type Store =
       /// Re-derived from session variables before each statement.
       mutable ExecutionSettings: ExecutionSettings
       mutable FullTextWordLengths: StorageOptions.WordLengths
+      mutable FullTextCacheSize: int
       mutable NgramTokenSize: int
       mutable FullTextStopwordsEnabled: bool
       /// Resolved once if a statement builds full-text postings.
@@ -690,6 +692,7 @@ let rec private eventRollbackWork = function
     | AutoIncrementAdvanced _
     | TableStatisticsRefreshed _
     | FullTextPostingsFlushed _
+    | FullTextCacheSynced _
     | SchemaChanged _
     | SchemaChangedAt _
     | XaRolledBack _ -> 0L
@@ -839,6 +842,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
     { Databases = databases
       ForeignKeyChecks = store.ForeignKeyChecks
       FullTextWordLengths = store.FullTextWordLengths
+      FullTextCacheSize = store.FullTextCacheSize
       NgramTokenSize = store.NgramTokenSize
       FullTextStopwordsEnabled = store.FullTextStopwordsEnabled
       FullTextStopwordSettings = store.FullTextStopwordSettings
@@ -3673,7 +3677,9 @@ let private mergeFullTextDocuments sourceRowIds (baseline: Table) (source: Table
     let indexes =
         target.FullTextIndexes
         |> Map.map (fun name index ->
-            FullText.mergeDocuments targetRowIds baseline.FullTextIndexes.[name] source.FullTextIndexes.[name] live.FullTextIndexes.[name] index)
+            let original = live.FullTextIndexes.[name]
+            FullText.mergeDocuments targetRowIds baseline.FullTextIndexes.[name] source.FullTextIndexes.[name] original index
+            |> FullText.publishCachedTerms original)
     { target with FullTextIndexes = indexes }
 
 let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (liveTable: Table) : Table =
@@ -5474,6 +5480,7 @@ let create () : Store =
       ForeignKeyChecks = true
       ExecutionSettings = ExecutionSettings.defaults
       FullTextWordLengths = StorageOptions.defaultWordLengths
+      FullTextCacheSize = StorageOptions.defaults.FullTextCacheSize
       NgramTokenSize = FullText.ngramTokenSize
       FullTextStopwordsEnabled = true
       FullTextStopwordSettings = lazy { Source = None; Policy = FullText.StopwordPolicy.BuiltIn }
@@ -7091,6 +7098,63 @@ let internal flushFullText (store: Store) dbName tableName =
         (fun database ->
             tryGetTable dbName database tableName
             |> Result.map (fun table -> Map.add (normalizeTableName tableName) (flushTableFullText FullText.flushPostings table) database, ()))
+
+let internal syncFullTextCachesUnderPressure (store: Store) =
+    let needsSync (table: Table) =
+        not table.FullTextIndexes.IsEmpty
+        && (table.FullTextIndexes |> Seq.sumBy (fun (KeyValue(_, index)) -> (FullText.cacheBudget index).Bytes))
+           > int64 store.FullTextCacheSize / 10L
+
+    for KeyValue(dbName, slot) in store.Databases do
+        for KeyValue(tableName, table) in slot.Value do
+            if needsSync table then
+                withDatabasePublishing store dbName
+                    (fun synced -> if synced then [ FullTextCacheSynced(dbName, tableName) ] else [])
+                    (fun database ->
+                        match Map.tryFind tableName database with
+                        | Some current when needsSync current ->
+                            let synced = flushTableFullText FullText.syncCachedPostings current
+                            Ok(Map.add tableName synced database, true)
+                        | _ -> Ok(database, false))
+                |> ignore
+
+type private FullTextSyncWorker =
+    { Timer: Threading.Timer
+      mutable Owners: int }
+
+let private fullTextSyncWorkers = Runtime.CompilerServices.ConditionalWeakTable<obj, FullTextSyncWorker>()
+
+let internal acquireFullTextSync (store: Store) : IDisposable =
+    let worker =
+        lock fullTextSyncWorkers (fun () ->
+            let worker = fullTextSyncWorkers.GetValue(store.Lock, fun _ ->
+                let owner = WeakReference<Store>(store)
+                let mutable timer: Threading.Timer = null
+                let mutable running = 0
+                let tick _ =
+                    if Threading.Interlocked.CompareExchange(&running, 1, 0) = 0 then
+                        try
+                            match owner.TryGetTarget() with
+                            | true, current ->
+                                try syncFullTextCachesUnderPressure current
+                                with error -> Log.diagnostic "fsdb: full-text cache sync: %s" error.Message
+                            | false, _ -> timer.Dispose()
+                        finally
+                            Threading.Volatile.Write(&running, 0)
+                timer <- new Threading.Timer(tick, null, 200, 200)
+                { Timer = timer; Owners = 0 })
+            worker.Owners <- worker.Owners + 1
+            worker)
+
+    let mutable disposed = 0
+    { new IDisposable with
+        member _.Dispose() =
+            if Threading.Interlocked.Exchange(&disposed, 1) = 0 then
+                let stop =
+                    lock fullTextSyncWorkers (fun () ->
+                        worker.Owners <- worker.Owners - 1
+                        if worker.Owners = 0 then fullTextSyncWorkers.Remove store.Lock else false)
+                if stop then worker.Timer.DisposeAsync().AsTask().GetAwaiter().GetResult() }
 
 /// Materializes missing or expired metadata estimates on the first read.
 /// The refreshed roots and their WAL events are published together, so later
@@ -11480,6 +11544,19 @@ let private onlyCountersAdvanced (baseTable: Table) (liveTable: Table) =
     && baseTable.CreateTime = liveTable.CreateTime
     && baseTable.Statistics = liveTable.Statistics
 
+let private onlyFullTextCacheSynced (baseDb: Database) (liveDb: Database) =
+    baseDb.Count = liveDb.Count
+    && (baseDb |> Map.forall (fun name before ->
+        match Map.tryFind name liveDb with
+        | None -> false
+        | Some after when obj.ReferenceEquals(before, after) -> true
+        | Some after ->
+            before.NextAutoId = after.NextAutoId
+            && before.FullTextIndexes.Count = after.FullTextIndexes.Count
+            && onlyCountersAdvanced before { after with FullTextIndexes = before.FullTextIndexes }
+            && (before.FullTextIndexes |> Map.forall (fun indexName index ->
+                after.FullTextIndexes |> Map.tryFind indexName |> Option.exists (FullText.onlyCacheSynced index)))))
+
 let private mergeDatabase dbName (baseDb: Database) (batchDb: Database) (liveDb: Database) =
     if obj.ReferenceEquals(liveDb, baseDb) then
         batchDb
@@ -11685,7 +11762,8 @@ let private commitCatalogIntoWith
                 if validateWholeSnapshot then
                     for dbName, slot in databases do
                         match Map.tryFind dbName baseCatalog with
-                        | Some baseDb when not (obj.ReferenceEquals(slot.Value, baseDb)) -> raise (LockWaitTimeout dbName)
+                        | Some baseDb when not (obj.ReferenceEquals(slot.Value, baseDb) || onlyFullTextCacheSynced baseDb slot.Value) ->
+                            raise (LockWaitTimeout dbName)
                         | _ -> ()
 
                     if store.ForeignKeyChecks then
@@ -11699,7 +11777,6 @@ let private commitCatalogIntoWith
                             match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
                             | Some baseDb, None when obj.ReferenceEquals(slot.Value, baseDb) -> None
                             | None, Some batchDb when not (store.Databases.ContainsKey dbName) -> Some batchDb
-                            | Some _, Some batchDb when validateWholeSnapshot -> Some batchDb
                             | Some baseDb, Some batchDb -> Some(mergeDatabase dbName baseDb batchDb slot.Value)
                             | _ -> raise (LockWaitTimeout dbName)
                         let database =
@@ -12504,11 +12581,14 @@ let setTableStatisticsForReplay (store: Store) dbName tableName statistics (onMi
 let internal flushFullTextForReplay store dbName tableName onMissing =
     changeTableForReplay store dbName tableName (flushTableFullText FullText.flushPostings) onMissing
 
+let internal syncFullTextForReplay store dbName tableName onMissing =
+    changeTableForReplay store dbName tableName (flushTableFullText FullText.syncCachedPostings) onMissing
+
 /// Applies the final cache flush to the checkpoint replica after its queued
 /// writes have landed. Prepared XA catalogs still describe their own snapshots.
 let internal flushFullTextForShutdown (replica: Store) =
     for KeyValue(_, slot) in replica.Databases do
-        slot.Value <- slot.Value |> Map.map (fun _ -> flushTableFullText FullText.flushPostingsForShutdown)
+        slot.Value <- slot.Value |> Map.map (fun _ -> flushTableFullText FullText.syncCachedPostings)
 
 /// Puts already-committed rows back exactly as they were, for WAL replay.
 /// Deliberately not `insertRows`: these rows passed validation when committed,

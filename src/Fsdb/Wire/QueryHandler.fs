@@ -309,6 +309,7 @@ let private globalScopeOnlyVariables =
           "slow_query_log"
           "log_output"
           "ft_query_expansion_limit"
+          "innodb_ft_cache_size"
           "innodb_ft_server_stopword_table"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
@@ -321,6 +322,7 @@ let private globalScopeOnlyVariables =
 let private readOnlySystemVariables =
     Set.ofList
         [ "ft_query_expansion_limit"
+          "innodb_ft_cache_size"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
           "ngram_token_size"
@@ -393,6 +395,7 @@ let private numericSystemVariables =
           "interactive_timeout"
           "information_schema_stats_expiry"
           "innodb_buffer_pool_size"
+          "innodb_ft_cache_size"
           "innodb_ft_enable_stopword"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
@@ -2005,7 +2008,8 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
             )
         )
     | SetVarAction(name, _, isGlobal)
-        when readOnlySystemVariables.Contains name && (isGlobal || name = "ngram_token_size" || name = "ft_query_expansion_limit") ->
+        when readOnlySystemVariables.Contains name
+             && (isGlobal || name = "ngram_token_size" || name = "ft_query_expansion_limit" || name = "innodb_ft_cache_size") ->
         Error(Err(1238, sprintf "Variable '%s' is a read only variable" name))
     | SetVarAction("session_track_system_variables", Some value, _)
         when Limits.trackedSystemVariablesExceedLimit value ->
