@@ -500,6 +500,35 @@ let private geographicAzimuthSide azimuth baseline =
 let private longitudeDistanceRadians first second = normalizedLongitudeRadians (second - first)
 let private longitudeEqualRadians first second = boostGeoEqual (longitudeDistanceRadians first second) 0.0
 
+let internal geographicVertexDistance referenceSystem firstPoint secondPoint =
+    let (firstLatitude, firstLongitude) as first = geographicPointRadians firstPoint
+    let (secondLatitude, secondLongitude) as second = geographicPointRadians secondPoint
+
+    if equalGeographicCoordinates first second then
+        0.0
+    else
+        let south, north = min firstLatitude secondLatitude, max firstLatitude secondLatitude
+        let longitudeDelta = longitudeDistanceRadians firstLongitude secondLongitude
+        let pole = Math.PI / 2.0
+        let sameMeridian =
+            boostGeoEqual longitudeDelta 0.0 || (boostGeoEqual south (-pole) && boostGeoEqual north pole)
+
+        match referenceSystem.SemiMajorAxis, referenceSystem.InverseFlattening with
+        | Some semiMajorAxis, Some inverseFlattening when sameMeridian || boostGeoEqual (abs longitudeDelta) Math.PI ->
+            // Boost's geographic point strategy uses a first-order meridian
+            // arc here. The cross-track solver uses the Andoyer inverse.
+            let flattening = 1.0 / inverseFlattening
+            let thirdFlattening = flattening / (2.0 - flattening)
+            let scale = semiMajorAxis / (1.0 + thirdFlattening)
+            let arc latitude = scale * (latitude - 1.5 * thirdFlattening * sin (2.0 * latitude))
+
+            if sameMeridian then
+                arc north - arc south
+            else
+                let poleArc = if south + north < 0.0 then -(arc pole) else arc pole
+                abs (2.0 * poleArc - arc south - arc north)
+        | _ -> geographicPointDistanceRadians referenceSystem first second
+
 // MySQL corrects WKB geographic rings with Boost's ellipsoidal area strategy.
 // This retains its Andoyer spherical term and prime-meridian correction for
 // ring direction; the ellipsoidal series correction is not needed for the
@@ -1605,6 +1634,33 @@ let internal geographicPolygonPolygonTopology referenceSystem firstPolygons seco
       Overlaps = overlaps
       FirstContainsSecond = firstContainsSecond
       SecondContainsFirst = secondContainsFirst }
+
+let internal discreteFrechetDistance
+    (pointDistance: float * float -> float * float -> float)
+    (first: (float * float) list)
+    (second: (float * float) list)
+    =
+    let rows, columns = if first.Length >= second.Length then first, second else second, first
+    let columns = List.toArray columns
+    let costs = Array.create columns.Length Double.PositiveInfinity
+    let mutable firstRow = true
+
+    for point in rows do
+        let mutable left = Double.PositiveInfinity
+        let mutable diagonal = if firstRow then 0.0 else Double.PositiveInfinity
+
+        // A traversal can advance either line or both. Keep the least
+        // possible maximum separation for each pair of current vertices.
+        for index in 0 .. columns.Length - 1 do
+            let above = costs.[index]
+            let cost = max (pointDistance point columns.[index]) (min diagonal (min left above))
+            costs.[index] <- cost
+            diagonal <- above
+            left <- cost
+
+        firstRow <- false
+
+    costs.[columns.Length - 1]
 
 let internal lineworkLength (segmentDistance: float * float -> float * float -> float) =
     let length (points: (float * float) list) =

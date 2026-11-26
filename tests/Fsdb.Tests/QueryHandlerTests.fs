@@ -5205,6 +5205,93 @@ let tests =
                       "composed results"
               | other -> failtestf "expected planar geometry result, got %A" other
 
+          testCase "discrete Frechet distance follows vertex order and permits unequal line lengths"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "USE fsdb"
+                        "SET @a=ST_GeomFromText('LINESTRING(0 0,2 0,4 0)'), @b=ST_GeomFromText('LINESTRING(0 0,1 1,4 0)'), @r=ST_GeomFromText('LINESTRING(4 0,2 0,0 0)')"
+                        "SET @s=ST_GeomFromText('LINESTRING(0 0,4 0)'), @d=ST_GeomFromText('LINESTRING(0 0,0 0,2 0,4 0)')" ]
+
+              match run "SELECT ST_FrechetDistance(@a,@b), ST_FrechetDistance(@a,@r), ST_FrechetDistance(@a,@s), ST_FrechetDistance(@a,@d), ST_FrechetDistance(@s,@a)" with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "1.4142135623730951"; Some "4"; Some "2"; Some "0"; Some "2" ] "ordered vertex distances"
+              | other -> failtestf "expected discrete Frechet distances, got %A" other
+
+          testCase "discrete Frechet distance supports geographic and projected units"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "USE fsdb"
+                        "SET @g=ST_GeomFromText('LINESTRING(0 0,0 1)',4326), @h=ST_GeomFromText('LINESTRING(0 0,1 1)',4326)"
+                        "SET @x=ST_GeomFromText('LINESTRING(0 0,0 1000)',3857), @y=ST_GeomFromText('LINESTRING(0 0,1000 1000)',3857)" ]
+
+              match run "SELECT ROUND(ST_FrechetDistance(@g,@h),6), ROUND(ST_FrechetDistance(@g,@h,'kilometre'),6), ST_FrechetDistance(@x,@y), ST_FrechetDistance(@x,@y,'kilometre')" with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "110573.138128"; Some "110.573138"; Some "1000"; Some "1" ] "distance units"
+              | other -> failtestf "expected geographic and projected distances, got %A" other
+
+          testCase "discrete Frechet distance accepts MySQL's SRID-prefixed geometry bytes"
+          <| fun _ ->
+              let run = queryFixture []
+              let bytes = "X'E61000000102000000020000000000000000005E4000000000000044400000000000405E400000000000804440'"
+              let line = "ST_GeomFromText('LINESTRING(40 120,41 121)',4326)"
+
+              match run $"SELECT ST_FrechetDistance({bytes}, {line})" with
+              | ResultSet(_, [ row ]) -> Expect.equal row [ Some "0" ] "geographic binary coordinates are longitude first"
+              | other -> failtestf "expected distance from binary geometry, got %A" other
+
+          testCase "discrete Frechet distance returns zero for coincident geographic vertices"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "SET @line=ST_GeomFromText('LINESTRING(-89 120,40 120)',4326)"
+                        "SET @p=ST_GeomFromText('POINT(-89 120)',4326)"
+                        "SET @a=ST_GeomFromText('LINESTRING(0 0,0 0)',4326), @b=ST_GeomFromText('LINESTRING(0 0,0.00000001 0)',4326)" ]
+
+              match run "SELECT ST_FrechetDistance(@line,@line), ST_Distance(@p,@p), ROUND(ST_FrechetDistance(@a,@b),12)" with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "0"; Some "0"; Some "0.001105730244" ] "coincident vertices and the short meridian"
+              | other -> failtestf "expected geographic distance, got %A" other
+
+          testCase "discrete Frechet distance validates geometry before interpreting the unit"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "USE fsdb"
+                        "SET @l=ST_GeomFromText('LINESTRING(0 0,2 0)'), @p=ST_GeomFromText('POINT(0 0)'), @empty=ST_GeomFromText('GEOMETRYCOLLECTION(GEOMETRYCOLLECTION EMPTY)')"
+                        "SET @g=ST_GeomFromText('LINESTRING(0 0,0 1)',4326), @gp=ST_GeomFromText('POINT(0 0)',4326), @ge=ST_GeomFromText('GEOMETRYCOLLECTION EMPTY',4326)" ]
+
+              for expression, code in
+                  [ "ST_FrechetDistance(@l,@p,NULL)", 3704
+                    "ST_FrechetDistance(@gp,@g,'bogus')", 3618
+                    "ST_FrechetDistance(@ge,@l)", 3033
+                    "ST_FrechetDistance(@l,@l,'bogus')", 3882
+                    "ST_FrechetDistance(@g,@g,'bogus')", 3902
+                    "ST_FrechetDistance('x',@l,NULL)", 3037
+                    "ST_FrechetDistance(@l,ST_GeomFromText('LINESTRING(0 0,1e200 0)'),'bogus')", 1690
+                    "ST_FrechetDistance(@l)", 1582 ] do
+                  TestSupport.Sql.expectError code (run ("SELECT " + expression)) expression
+
+              match run "SELECT ST_FrechetDistance(@empty,@p,'bogus'), ST_FrechetDistance('x',NULL), ST_FrechetDistance(@l,@l,NULL)" with
+              | ResultSet(_, [ row ]) -> Expect.equal row [ None; None; None ] "empty geometry and NULL inputs"
+              | other -> failtestf "expected NULL distances, got %A" other
+
+          testCase "discrete Frechet distance reports geometry parameters and DOUBLE results"
+          <| fun _ ->
+              let session, _ = handle (create 1 (Fsdb.Storage.create ())) "USE fsdb"
+              match prepareStatementForSession session "SELECT ST_FrechetDistance(?, ?, ?) AS distance" with
+              | Ok(statement, parameterCount) ->
+                  let parameters, columns = preparedMetadata session statement parameterCount
+                  Expect.equal (parameters |> List.map _.TypeId) [ TypeGeometry; TypeGeometry; TypeGeometry ] "prepared parameters"
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId, column.Metadata.Flags))
+                      [ TypeDouble, BinaryFlag ] "result metadata"
+              | Error error -> failtestf "expected distance to prepare, got %A" error
+
+              match prepareStatementForSession session "SELECT ST_FrechetDistance(?)" with
+              | Error(1582, _) -> ()
+              | other -> failtestf "expected the invalid argument count to fail at prepare time, got %A" other
+
           testCase "planar geometry functions retain result metadata without rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -635,6 +635,13 @@ when the final distance overflows; the native oracle covers the numeric edge.
 A deterministic 319-case WGS 84 sweep and twelve SRID 0/4030/4258/4269
 polar and near-antipodal cases also match the audited precision tolerance.
 
+[`ST_FrechetDistance`](torture/findings/2026-11-26-frechet-distance.md)
+compares ordered vertices of two lines in Cartesian, projected, and geographic
+reference systems. The audited MySQL cases cover binary geometry arguments,
+unit conversion, NULL and error precedence, and prepared metadata. Geographic
+point distances now return zero for coincident coordinates and use the
+meridian arc when applicable. Small geographic rounding differences remain.
+
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 (`Use_leap_seconds = Y`) remain unsupported.

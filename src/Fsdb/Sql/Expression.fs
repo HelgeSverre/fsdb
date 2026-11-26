@@ -538,6 +538,10 @@ let tryLiteralNodeDiagnostic = function
                 Some(1253, sprintf "COLLATION '%s' is not valid for CHARACTER SET '%s'" name charset))
     | FuncCall(name, [ Lit Fsdb.Value.VNull; _ ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) ->
         Some(1382, "The 'NAME_CONST' syntax is reserved for purposes internal to the MySQL server")
+    | FuncCall(name, arguments) when name.Equals("ST_FRECHETDISTANCE", System.StringComparison.OrdinalIgnoreCase) ->
+        match arguments with
+        | [ _; _ ] | [ _; _; _ ] -> None
+        | _ -> Some(1582, "Incorrect parameter count in the call to native function 'ST_FrechetDistance'")
     | _ -> None
 
 // Diagnostics depend only on immutable syntax. Weak keys release standalone
