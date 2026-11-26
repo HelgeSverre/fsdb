@@ -40,10 +40,44 @@ and exclusive existing-row locks above the signed 64-bit limit.
 `LOCK IN SHARE MODE` protected the same gap, and an invalid
 `OF` target still returned error 3568.
 
-A timed-out range can retain locks in MySQL. With row 30 held by
-another transaction, a forward read over 12–38 times out at row 30.
-MySQL keeps the lock on row 20 and its preceding gap. Fsdb releases
-those claims on the failed statement. This difference was reproduced
-before and after the change for the audited explicit and implicit
-locking reads. Gap handling for `NOWAIT` and `SKIP LOCKED`, secondary
-indexes, and other read shapes remains open.
+## Timeouts on existing rows
+
+When a qualifying row is held by another transaction, MySQL can keep
+the locks acquired before the wait timed out. Fsdb previously released
+them on error 1205. The uncontended range still claims rows in a batch.
+A contended batch retries in index order. On timeout, the read keeps
+the visited row locks and their gaps and releases the provisional
+broader gap. The reverse cursor's initial seek gap can survive a
+timeout before it acquires any row.
+
+With rows 10, 20, 30, and 40, the reader scanned 12–38 while another
+session held row 20 or 30. After error 1205, the blocker rolled back
+and a third session tried row locks and inserts while the reader's
+transaction remained open. Fsdb matched the pinned MySQL image on
+all nine schedules, covering explicit shared and exclusive locks,
+implicit SERIALIZABLE reads, and forward and reverse limits.
+
+| Scan | Blocked row | Retained row | Inserts still waiting |
+| --- | --- | --- | --- |
+| Forward | 20 | none | none |
+| Forward | 30 | 20 | 11 |
+| Reverse | 30 | none | 35 |
+| Reverse | 20 | 30 | 25, 35 |
+
+Two further schedules with a row lock and a gap already held by the
+reader confirmed that those earlier claims remain until rollback.
+In an uncontended in-memory Debug control over IPv4 loopback, a
+2,000-row locking range took 16.91, 16.29, and 16.34 ms median in
+baseline, candidate, and baseline order. Each pass timed 60 runs,
+including BEGIN, result consumption, and ROLLBACK.
+
+When the initial gap check times out on a pending insert, Fsdb can
+still release progress that MySQL keeps. For example, an uncommitted
+key 25 inside the range leaves MySQL holding row 20 after a forward
+timeout. A provisional read gap can also block an unvisited insert
+while the range is waiting. In the forward scan blocked at row 30,
+MySQL accepted an insert at 35 during the wait and fsdb returned
+1205. Reselection after a completed row-lock batch still rolls back
+the statement's claims if it subsequently times out. Gap handling
+for `NOWAIT` and `SKIP LOCKED`, secondary indexes, and other read
+shapes remains open.

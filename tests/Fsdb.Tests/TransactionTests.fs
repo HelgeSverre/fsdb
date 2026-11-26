@@ -834,6 +834,55 @@ let tests =
                   for key in Option.toList blockedGap do
                       Expect.equal (insert key) (Affected 1UL) "rollback releases the gap"
 
+          testCase "timed-out primary locking reads retain only the visited rows and gaps"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate (id INT PRIMARY KEY,n INT)" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES (30,3),(40,4),(20,2),(10,1)" (Affected 4UL) |> ignore
+              let reader = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let probe = run (create 3 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let attempt sql =
+                  let transaction = run probe "BEGIN" (Affected 0UL)
+                  let transaction, result = handle transaction sql
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  result
+
+              for isolation, suffix, blockedRow, retainedRow, retainedGaps in
+                  [ "REPEATABLE READ", "FOR UPDATE", 30, Some 20, [ 11 ]
+                    "SERIALIZABLE", "", 30, Some 20, [ 11 ]
+                    "REPEATABLE READ", "ORDER BY id LIMIT 2 FOR SHARE", 20, None, []
+                    "REPEATABLE READ", "ORDER BY id DESC LIMIT 2 FOR UPDATE", 30, None, [ 35 ]
+                    "REPEATABLE READ", "ORDER BY id DESC LIMIT 2 FOR UPDATE", 20, Some 30, [ 25; 35 ] ] do
+                  let reader = run reader $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let owner = run (create 4 store) "BEGIN" (Affected 0UL)
+                  let owner = run owner $"UPDATE gate SET n=0 WHERE id={blockedRow}" (Affected 1UL)
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let transaction, timedOut = handle transaction ("SELECT id FROM gate WHERE id BETWEEN 12 AND 38 " + suffix)
+                  run owner "ROLLBACK" (Affected 0UL) |> ignore
+                  try
+                      match timedOut with
+                      | Err(1205, _) -> ()
+                      | result -> failtestf "%s: the blocking row should cause a timeout, got %A" suffix result
+                      for key in [ 20; 30 ] do
+                          match attempt $"SELECT id FROM gate WHERE id={key} FOR UPDATE NOWAIT", retainedRow = Some key with
+                          | Err(3572, _), true -> ()
+                          | result, false -> Expect.equal result (ResultSet([ "id" ], [ [ Some(string key) ] ])) suffix
+                          | result, true -> failtestf "%s: row %d should remain locked, got %A" suffix key result
+                      for key in [ 11; 25; 35 ] do
+                          match attempt $"INSERT INTO gate VALUES ({key},0)", List.contains key retainedGaps with
+                          | Err(1205, _), true -> ()
+                          | result, false -> Expect.equal result (Affected 1UL) suffix
+                          | result, true -> failtestf "%s: gap for %d should remain locked, got %A" suffix key result
+                  finally
+                      run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  for key in retainedGaps do
+                      Expect.equal (attempt $"INSERT INTO gate VALUES ({key},0)") (Affected 1UL) "rollback releases retained gaps"
+
           testCase "serializable limited primary-key reads lock only when they seek the key"
           <| fun _ ->
               let run session sql expected =
