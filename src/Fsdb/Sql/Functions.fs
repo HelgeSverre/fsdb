@@ -6830,31 +6830,27 @@ let private geometryPredicateFn functionName predicate =
         |> Option.defaultValue VNull
     | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
 
-let private planarMbrContains outer inner =
-    let contains minimum maximum innerMinimum innerMaximum =
-        if minimum = maximum then
-            innerMinimum = innerMaximum && minimum = innerMinimum
-        elif innerMinimum = innerMaximum then
-            minimum < innerMinimum && innerMinimum < maximum
-        else
-            minimum <= innerMinimum && innerMaximum <= maximum
-
-    contains outer.MinX outer.MaxX inner.MinX inner.MaxX
-    && contains outer.MinY outer.MaxY inner.MinY inner.MaxY
-
-let private planarMbrIntersects first second =
-    first.MinX <= second.MaxX
-    && second.MinX <= first.MaxX
-    && first.MinY <= second.MaxY
-    && second.MinY <= first.MaxY
-
-let private mbrPredicateFn functionName planar geographic =
+let private mbrPredicateFn functionName relation =
     binaryGeometryWithSameSridFn functionName (fun first second ->
         let referenceSystem = spatialReferenceSystem functionName first.Srid
-        let result =
-            if referenceSystem.SemiMajorAxis.IsSome then geographic referenceSystem first.Shape second.Shape
-            else Option.map2 planar (geometryBounds first) (geometryBounds second)
-        result |> Option.map (fun value -> VInt(if value then 1L else 0L)) |> Option.defaultValue VNull)
+        relateMbr referenceSystem relation first second
+        |> Option.map (fun value -> VInt(if value then 1L else 0L))
+        |> Option.defaultValue VNull)
+
+let private registerMbrPredicates registry =
+    let geometry = ColumnWire.parameterMetadataOfType(TGeometry Geometry)
+    let result = { columnMetadata TypeLongLong with ColumnLength = 1u; Flags = BinaryFlag }
+    [ "MBRCONTAINS", MbrRelation.Contains
+      "MBRWITHIN", MbrRelation.Within
+      "MBRCOVERS", MbrRelation.Covers
+      "MBRCOVEREDBY", MbrRelation.CoveredBy
+      "MBRINTERSECTS", MbrRelation.Intersects
+      "MBRDISJOINT", MbrRelation.Disjoint
+      "MBREQUALS", MbrRelation.Equals
+      "MBROVERLAPS", MbrRelation.Overlaps
+      "MBRTOUCHES", MbrRelation.Touches ]
+    |> List.fold (fun registry (name, relation) ->
+        registerScalarWithSignature name [ geometry; geometry ] result (mbrPredicateFn name relation) registry) registry
 
 let private registerJsonBuiltins registry =
     registry
@@ -6957,12 +6953,7 @@ let private registerSpatialBuiltins registry =
     |> registerScalarResult "ST_SYMDIFFERENCE" binaryResult (geometryOverlayFn "ST_SYMDIFFERENCE" OverlayKind.SymmetricDifference)
     |> registerScalarResult "ST_CONVEXHULL" binaryResult geometryConvexHullFn
     |> registerScalarResult "ST_ENVELOPE" binaryResult geometryEnvelopeFn
-    |> registerScalar "MBRCONTAINS" (mbrPredicateFn "MBRCONTAINS" planarMbrContains geographicMbrContains)
-    |> registerScalar "MBRWITHIN"
-        (mbrPredicateFn "MBRWITHIN"
-            (fun first second -> planarMbrContains second first)
-            (fun referenceSystem first second -> geographicMbrContains referenceSystem second first))
-    |> registerScalar "MBRINTERSECTS" (mbrPredicateFn "MBRINTERSECTS" planarMbrIntersects geographicMbrIntersects)
+    |> registerMbrPredicates
 
 let private everyArgument _ = true
 let private firstArgument index = index = 0

@@ -765,6 +765,7 @@ let tests =
                           "LINESTRING(2 0,2 4)", "POINT(2 2)", 1L, 0L, 1L
                           "LINESTRING(2 0,2 4)", "POINT(2 0)", 0L, 0L, 1L
                           "LINESTRING(175 0,-175 0)", "LINESTRING(177 0,-177 0)", 1L, 0L, 1L
+                          "LINESTRING(175 0,-175 0)", "POINT(-175 0)", 0L, 0L, 0L
                           parallelPoints, "POINT(0 10)", 0L, 0L, 1L
                           parallelPoints, parallelPoints, 1L, 1L, 1L
                           "POLYGON((0 80,120 80,-120 80,0 80))", "POINT(0 90)", 1L, 0L, 1L
@@ -776,6 +777,49 @@ let tests =
 
                     let empty = geometry "GEOMETRYCOLLECTION EMPTY"
                     Expect.equal (call "MBRIntersects" [ empty; geometry seam ]) VNull "empty bounds give NULL"
+
+                testCase "MBR predicates distinguish coverage, equality, overlap and touch"
+                <| fun _ ->
+                    let geometry srid wkt =
+                        if srid = 0L then call "ST_GeomFromText" [ VString wkt ]
+                        else call "ST_GeomFromText" [ VString wkt; VInt srid; VString "axis-order=long-lat" ]
+
+                    let area = "POLYGON((0 0,4 0,4 4,0 4,0 0))"
+                    let meridian = "LINESTRING(2 0,2 4)"
+                    let seam = "POLYGON((170 -5,-170 -5,-170 5,170 5,170 -5))"
+                    let southwest = "157.0925678126514 0.7882827492430806"
+                    let southeast = "-169.92014348926023 0.7882827492430806"
+                    let northeast = "-169.92014348926023 4.928553130477667"
+                    let northwest = "157.0925678126514 4.928553130477667"
+                    let etrsSeam = $"POLYGON(({southwest},{southeast},{northeast},{northwest},{southwest}))"
+                    let rotatedEtrsSeam = $"POLYGON(({southeast},{northeast},{northwest},{southwest},{southeast}))"
+                    let predicates = [ "MBRCovers"; "MBRCoveredBy"; "MBRDisjoint"; "MBREquals"; "MBROverlaps"; "MBRTouches" ]
+                    for srid, first, second, expected in
+                        [ 0L, area, "POINT(0 2)", [ 1L; 0L; 0L; 0L; 0L; 1L ]
+                          0L, "POINT(0 2)", area, [ 0L; 1L; 0L; 0L; 0L; 1L ]
+                          0L, area, "POINT(5 2)", [ 0L; 0L; 1L; 0L; 0L; 0L ]
+                          0L, area, "LINESTRING(0 0,4 4)", [ 1L; 1L; 0L; 1L; 0L; 0L ]
+                          0L, "POINT(4 2)", "POINT(4.000000000000001 2)", [ 0L; 0L; 1L; 1L; 0L; 0L ]
+                          0L, meridian, "LINESTRING(0 0,4 0)", [ 0L; 0L; 0L; 0L; 0L; 1L ]
+                          0L, meridian, "LINESTRING(1 2,3 2)", [ 0L; 0L; 0L; 0L; 1L; 0L ]
+                          0L, area, "LINESTRING(0 1,0 3)", [ 1L; 0L; 0L; 0L; 0L; 1L ]
+                          4326L, meridian, "LINESTRING(2 2,2 6)", [ 0L; 0L; 0L; 0L; 1L; 0L ]
+                          4326L, seam, "POINT(-179 0)", [ 1L; 0L; 0L; 0L; 0L; 0L ]
+                          4326L, seam, "POLYGON((-170 5,170 5,170 -5,-170 -5,-170 5))", [ 1L; 0L; 0L; 1L; 0L; 0L ]
+                          4258L, etrsSeam, rotatedEtrsSeam, [ 0L; 1L; 0L; 1L; 0L; 0L ]
+                          4326L, seam, "POLYGON((-175 0,-155 0,-155 2,-175 2,-175 0))", [ 0L; 0L; 0L; 0L; 0L; 0L ]
+                          4326L, "POINT(50 90)", "POINT(-50 90)", [ 0L; 0L; 1L; 0L; 0L; 0L ] ] do
+                        let args = [ geometry srid first; geometry srid second ]
+                        Expect.equal (List.map (fun name -> call name args) predicates) (List.map VInt expected) $"{first} and {second}"
+
+                    for srid in [ 0L; 4326L ] do
+                        let empty = geometry srid "GEOMETRYCOLLECTION(GEOMETRYCOLLECTION EMPTY)"
+                        let point = geometry srid "POINT(2 2)"
+                        for name in predicates do
+                            let equality = name = "MBREquals"
+                            Expect.equal (call name [ VNull; point ]) VNull name
+                            Expect.equal (call name [ empty; point ]) (if equality then VInt 0L else VNull) name
+                            Expect.equal (call name [ empty; empty ]) (if equality then VInt 1L else VNull) name
 
                 testCase "geographic area overlays preserve the computed longitude of antimeridian cuts"
                 <| fun _ ->

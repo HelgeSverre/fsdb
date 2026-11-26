@@ -1987,7 +1987,7 @@ type private GeographicBounds =
       South: float
       North: float }
 
-let private encloseGeographicBounds largerGap first rest =
+let private encloseGeographicBounds largerGap mergeIntervalEnd first rest =
     let half = Math.PI
     let period = 2.0 * half
     let intervals box =
@@ -2017,15 +2017,16 @@ let private encloseGeographicBounds largerGap first rest =
             | (west, firstEast) :: rest ->
                 let east, gap, left, right =
                     rest |> List.fold (fun (east, gap, left, right) (start, finish) ->
-                        if largerGap (start - east) gap then max east finish, start - east, east, start
-                        else max east finish, gap, left, right) (firstEast, 0.0, west, west)
+                        let nextEast = mergeIntervalEnd east finish
+                        if largerGap (start - east) gap then nextEast, start - east, east, start
+                        else nextEast, gap, left, right) (firstEast, 0.0, west, west)
                 let wrapGap = period + west - east
                 if gap > wrapGap && not (boostGeoEqual gap wrapGap) then right, left + period
                 else west, east
     { combined with West = west; East = east }
 
 let private mergeGeographicBounds first second =
-    encloseGeographicBounds (>) first [ second ]
+    encloseGeographicBounds (>) max first [ second ]
 
 let private geographicEdgeBounds flattening (first, second) =
     let half = Math.PI
@@ -2067,19 +2068,21 @@ let private geographicSectionBounds flattening edges =
 
 let private geographicPartitionThreshold = 16
 
-let private geographicBoundsLongitudeOffset first second =
+let private normalizeSpheroidalLongitude longitude =
     let halfTurn = Math.PI
     let period = 2.0 * halfTurn
-    let delta = second - first
     // Box strategies normalize the signed difference around the antimeridian
     // before translating it. The evaluation order affects rounded edge ties.
-    let signed =
-        if boostGeoEqual (abs delta) halfTurn then halfTurn
-        elif delta > halfTurn then
-            let normalized = (delta + halfTurn) % period - halfTurn
-            if boostGeoEqual normalized (-halfTurn) then halfTurn else normalized
-        elif delta < -halfTurn then (delta - halfTurn) % period + halfTurn
-        else delta
+    if boostGeoEqual (abs longitude) halfTurn then halfTurn
+    elif longitude > halfTurn then
+        let normalized = (longitude + halfTurn) % period - halfTurn
+        if boostGeoEqual normalized (-halfTurn) then halfTurn else normalized
+    elif longitude < -halfTurn then (longitude - halfTurn) % period + halfTurn
+    else longitude
+
+let private geographicBoundsLongitudeOffset first second =
+    let period = 2.0 * Math.PI
+    let signed = normalizeSpheroidalLongitude (second - first)
     if signed < 0.0 then signed + period else signed
 
 let private geographicBoundsIntersect a b =
@@ -2285,13 +2288,33 @@ let private geographicMbr referenceSystem shape =
         let longitude = if boostGeoEqual (abs latitude) pole then 0.0 else normalizedLongitudeRadians longitude
         { West = longitude; East = longitude; South = latitude; North = latitude }
 
+    let normalizeBox box =
+        if boostGeoEqual (box.East - box.West) (2.0 * half) then
+            { box with West = -half; East = half }
+        else
+            let west = normalizeSpheroidalLongitude box.West
+            let east = normalizeSpheroidalLongitude box.East
+            { box with West = west; East = if east < west then east + 2.0 * half else east }
+
+    let extendLineBox first second =
+        // The new edge is already normalized. The sweep visits a meridian's
+        // end after a wrapped interval's, and a new wrapped edge ends last
+        // when the two intervals start at the same seam.
+        let first = normalizeBox first
+        let bothWrap = first.East > half && second.East > half
+        let mergeEnd a b =
+            if not (boostGeoEqual a b) then max a b
+            elif bothWrap then a
+            else b
+        encloseGeographicBounds (>) mergeEnd second [ first ]
+
     let lineBounds points =
         match points with
         | [] -> None
         | [ point ] -> Some(pointBounds point)
         | _ ->
             points |> List.pairwise |> List.map (geographicEdgeBounds flattening)
-            |> List.reduce mergeGeographicBounds |> Some
+            |> List.reduce extendLineBox |> Some
 
     let union largerGap = function
         | [] -> None
@@ -2303,7 +2326,7 @@ let private geographicMbr referenceSystem shape =
                 match longitudes with
                 | [] -> 0.0, 0.0
                 | box :: remaining ->
-                    let bounds = encloseGeographicBounds largerGap box remaining
+                    let bounds = encloseGeographicBounds largerGap max box remaining
                     bounds.West, bounds.East
             let south, north = rest |> List.fold (fun (south, north) box -> min south box.South, max north box.North) (first.South, first.North)
             Some { West = west; East = east; South = south; North = north }
@@ -2338,6 +2361,25 @@ let private geographicMbr referenceSystem shape =
 
     envelope shape
 
+let private mbrBoundsEqual first second =
+    boostGeoEqual first.MinX second.MinX && boostGeoEqual first.MaxX second.MaxX
+    && boostGeoEqual first.MinY second.MinY && boostGeoEqual first.MaxY second.MaxY
+
+let private geographicBoundsAsMbr box =
+    { MinX = box.West; MaxX = box.East; MinY = box.South; MaxY = box.North }
+
+let private geographicLongitudeCovers outer inner =
+    let period = 2.0 * Math.PI
+    let outerWidth = outer.East - outer.West
+    let innerWidth = inner.East - inner.West
+    (outer.West <= inner.West && inner.East <= outer.East)
+    || outerWidth >= period
+    || (innerWidth <= outerWidth
+        && outer.West + geographicBoundsLongitudeOffset outer.West inner.West + innerWidth <= outer.East)
+
+let private geographicBoundsCovers outer inner =
+    outer.South <= inner.South && inner.North <= outer.North && geographicLongitudeCovers outer inner
+
 let private geographicBoundsContains outer inner =
     let period = 2.0 * Math.PI
     let longitudeWidth box = box.East - box.West
@@ -2345,10 +2387,6 @@ let private geographicBoundsContains outer inner =
 
     let point box = box.South, box.West
     let farCorner box = box.North, box.East
-    let equalBounds =
-        boostGeoEqual outer.West inner.West && boostGeoEqual outer.East inner.East
-        && boostGeoEqual outer.South inner.South && boostGeoEqual outer.North inner.North
-
     let longitudeInside isInside longitude =
         longitudeWidth outer >= period
         || isInside outer.West longitude outer.East
@@ -2361,13 +2399,15 @@ let private geographicBoundsContains outer inner =
     let isLine box = (box.West = box.East) <> (box.South = box.North)
     let onOuterLine = geographicSegmentCoversPoint defaultGeographicFlattening (point outer, farCorner outer)
 
-    if equalBounds then true
+    if mbrBoundsEqual (geographicBoundsAsMbr outer) (geographicBoundsAsMbr inner) then true
     elif isPoint outer then false
     elif isLine outer then
         if isPoint inner then
-            let query = point inner
-            not (equalGeographicCoordinates (point outer) query || equalGeographicCoordinates (farCorner outer) query)
-            && onOuterLine query
+            let latitude, longitude = point inner
+            let isEndpoint (endpointLatitude, endpointLongitude) =
+                boostGeoEqual latitude endpointLatitude
+                && boostGeoEqual longitude (normalizedLongitudeRadians endpointLongitude)
+            not (isEndpoint (point outer) || isEndpoint (farCorner outer)) && onOuterLine (latitude, longitude)
         else isLine inner && onOuterLine (point inner) && onOuterLine (farCorner inner)
     elif isPoint inner then inBox within (point inner)
     elif isLine inner then
@@ -2376,18 +2416,126 @@ let private geographicBoundsContains outer inner =
             (inner.West = inner.East && (inner.West = outer.West || inner.West = outer.East))
             || (inner.South = inner.North && (inner.South = outer.South || inner.South = outer.North))
         not alongEdge && inBox covered (point inner) && inBox covered (farCorner inner)
+    else geographicBoundsCovers outer inner
+
+[<RequireQualifiedAccess>]
+type internal MbrRelation =
+    | Contains
+    | Within
+    | Covers
+    | CoveredBy
+    | Intersects
+    | Disjoint
+    | Equals
+    | Overlaps
+    | Touches
+
+let private planarMbrContains outer inner =
+    let contains minimum maximum innerMinimum innerMaximum =
+        if minimum = maximum then
+            innerMinimum = innerMaximum && minimum = innerMinimum
+        elif innerMinimum = innerMaximum then
+            minimum < innerMinimum && innerMinimum < maximum
+        else
+            minimum <= innerMinimum && innerMaximum <= maximum
+
+    mbrBoundsEqual outer inner
+    || (contains outer.MinX outer.MaxX inner.MinX inner.MaxX
+        && contains outer.MinY outer.MaxY inner.MinY inner.MaxY)
+
+let private planarMbrCovers outer inner =
+    outer.MinX <= inner.MinX && inner.MaxX <= outer.MaxX
+    && outer.MinY <= inner.MinY && inner.MaxY <= outer.MaxY
+
+let private planarMbrIntersects first second =
+    first.MinX <= second.MaxX && second.MinX <= first.MaxX
+    && first.MinY <= second.MaxY && second.MinY <= first.MaxY
+
+let private mbrIsPoint box = box.MinX = box.MaxX && box.MinY = box.MaxY
+let private mbrIsLine box = (box.MinX = box.MaxX) <> (box.MinY = box.MaxY)
+
+let private planarLineMbrInteriorsMeet first second =
+    let interiorsMeet low high otherLow otherHigh =
+        (low = high && otherLow = otherHigh && low = otherLow)
+        || (low < otherHigh && otherLow < high)
+    interiorsMeet first.MinX first.MaxX second.MinX second.MaxX
+    && interiorsMeet first.MinY first.MaxY second.MinY second.MaxY
+
+let private mbrOverlaps lineOverlaps first second =
+    if mbrIsPoint first || mbrIsPoint second then false
+    elif mbrIsLine first && mbrIsLine second then lineOverlaps first second
     else
-        outer.South <= inner.South && inner.North <= outer.North
-        && (longitudeWidth outer >= period
-            || (outer.West <= inner.West && inner.East <= outer.East)
-            || (longitudeWidth inner <= longitudeWidth outer
-                && outer.West + longitudeOffset inner.West + longitudeWidth inner <= outer.East))
+        first.MinX < second.MaxX && second.MinX < first.MaxX
+        && first.MinY < second.MaxY && second.MinY < first.MaxY
+        && not (planarMbrCovers first second || planarMbrCovers second first)
 
-let internal geographicMbrContains referenceSystem first second =
-    Option.map2 geographicBoundsContains (geographicMbr referenceSystem first) (geographicMbr referenceSystem second)
+let private mbrTouches lineTouches first second =
+    let atEndpoint point line =
+        (point.MinX = line.MinX && point.MinY = line.MinY)
+        || (point.MinX = line.MaxX && point.MinY = line.MaxY)
 
-let internal geographicMbrIntersects referenceSystem first second =
-    Option.map2 geographicBoundsIntersect (geographicMbr referenceSystem first) (geographicMbr referenceSystem second)
+    if mbrIsPoint first && mbrIsPoint second then false
+    elif mbrIsPoint first && mbrIsLine second then atEndpoint first second
+    elif mbrIsLine first && mbrIsPoint second then atEndpoint second first
+    elif mbrIsLine first && mbrIsLine second then lineTouches first second
+    else
+        planarMbrIntersects first second
+        && (first.MaxX = second.MinX || second.MaxX = first.MinX
+            || first.MaxY = second.MinY || second.MaxY = first.MinY)
+
+let private planarMbrRelation relation first second =
+    match relation with
+    | MbrRelation.Contains -> planarMbrContains first second
+    | MbrRelation.Within -> planarMbrContains second first
+    | MbrRelation.Covers -> planarMbrCovers first second
+    | MbrRelation.CoveredBy -> planarMbrCovers second first
+    | MbrRelation.Intersects -> planarMbrIntersects first second
+    | MbrRelation.Disjoint -> not (planarMbrIntersects first second)
+    | MbrRelation.Equals -> mbrBoundsEqual first second
+    | MbrRelation.Overlaps ->
+        mbrOverlaps (fun a b -> planarLineMbrInteriorsMeet a b && not (planarMbrCovers a b || planarMbrCovers b a)) first second
+    | MbrRelation.Touches ->
+        mbrTouches (fun a b -> planarMbrIntersects a b && not (planarLineMbrInteriorsMeet a b)) first second
+
+let private defaultMbrSpheroid = SpatialReferenceSystems.tryFind 4326 |> Option.get
+
+let private geographicMbrRelation referenceSystem relation first second =
+    let lineTopology referenceSystem a b =
+        let line box =
+            [ [ box.MinY / geographicRadiansPerDegree, box.MinX / geographicRadiansPerDegree
+                box.MaxY / geographicRadiansPerDegree, box.MaxX / geographicRadiansPerDegree ] ]
+        geographicLineLineTopology referenceSystem (line a) (line b)
+
+    match relation with
+    | MbrRelation.Contains -> geographicBoundsContains first second
+    | MbrRelation.Within -> geographicBoundsContains second first
+    | MbrRelation.Covers -> geographicBoundsCovers first second
+    | MbrRelation.CoveredBy -> geographicBoundsCovers second first
+    | MbrRelation.Intersects -> geographicBoundsIntersect first second
+    | MbrRelation.Disjoint -> not (geographicBoundsIntersect first second)
+    | MbrRelation.Equals -> mbrBoundsEqual (geographicBoundsAsMbr first) (geographicBoundsAsMbr second)
+    // MySQL's box overlap and touch strategies compare the stored intervals,
+    // while their line special cases compare actual geodesic segments.
+    | MbrRelation.Overlaps ->
+        let overlaps a b =
+            let topology = lineTopology defaultMbrSpheroid a b
+            topology.Overlaps || topology.Crosses
+        mbrOverlaps overlaps (geographicBoundsAsMbr first) (geographicBoundsAsMbr second)
+    | MbrRelation.Touches ->
+        mbrTouches (fun a b -> (lineTopology referenceSystem a b).Touches) (geographicBoundsAsMbr first) (geographicBoundsAsMbr second)
+
+let internal relateMbr referenceSystem relation first second =
+    let compare envelope predicate =
+        match envelope first, envelope second with
+        | Some a, Some b -> Some(predicate relation a b)
+        | None, None when relation = MbrRelation.Equals -> Some true
+        | _ when relation = MbrRelation.Equals -> Some false
+        | _ -> None
+
+    if referenceSystem.SemiMajorAxis.IsSome then
+        compare (fun geometry -> geographicMbr referenceSystem geometry.Shape) (geographicMbrRelation referenceSystem)
+    else
+        compare geometryBounds planarMbrRelation
 
 let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygons area =
     let sources = List.map List.pairwise lines

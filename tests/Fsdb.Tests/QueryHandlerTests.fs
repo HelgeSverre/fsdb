@@ -5094,6 +5094,19 @@ let tests =
                       "constructor result families"
               | Error error -> failtestf "expected typed constructors to prepare, got %A" error
 
+          testCase "MBR predicates expose geometry parameters and boolean result metadata"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              for predicate in [ "MBRCovers"; "MBRCoveredBy"; "MBRDisjoint"; "MBREquals"; "MBROverlaps"; "MBRTouches" ] do
+                  match prepareStatementForSession session $"SELECT {predicate}(?, ?) AS relation" with
+                  | Ok(statement, parameterCount) ->
+                      let parameters, columns = preparedMetadata session statement parameterCount
+                      Expect.equal (parameters |> List.map _.TypeId) [ TypeGeometry; TypeGeometry ] predicate
+                      Expect.equal
+                          (columns |> List.map (fun column -> column.Metadata.TypeId, column.Metadata.ColumnLength))
+                          [ TypeLongLong, 1u ] predicate
+                  | Error error -> failtestf "expected %s to prepare, got %A" predicate error
+
           testCase "JSON Schema references return MySQL's unsupported-feature error"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

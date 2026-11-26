@@ -651,3 +651,65 @@ latitude extrema, polar lines and areas, point and line boxes,
 multipart and nested collections, and empty members. This adds
 scalar evaluation for geographic bounds. Geographic index planning
 remains open.
+
+### Coverage, equality, overlap, disjointness, and touch
+
+`MBRCovers`, `MBRCoveredBy`, `MBRDisjoint`, `MBREquals`, `MBROverlaps`,
+and `MBRTouches` use the same scalar envelopes as the existing predicates.
+`MBREquals` treats two empty geometries as equal and an empty geometry as
+unequal to a nonempty one. It returns NULL for a SQL NULL operand.
+Geographic coverage and disjointness compare wrapped longitude ranges.
+Geographic box overlap and touch compare the stored intervals directly.
+For two line bounds, MySQL evaluates the line relation, and an interior
+crossing counts as overlap. A ring's starting vertex can affect the final
+wrapped envelope by one representable coordinate, which matters for
+inclusive coverage. [MySQL MBR reference](https://dev.mysql.com/doc/refman/8.4/en/spatial-relation-functions-mbr.html)
+· [MySQL box overlap](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/overlaps.cc)
+· [MySQL box touch](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/touches.cc).
+
+All 19,710 results matched native MySQL 8.4.11 across SRID 0 and the five
+supported geographic SRIDs. This includes 1,390 pairs of structured and
+seeded shapes and a holdout of 800 ring rotations, wrapped meridians, and
+seam corners. The previous 3,720 results for containment and intersection
+also matched. The six added functions matched MySQL's codes and SQLSTATEs
+for arity, mixed SRIDs, invalid GIS data, and invalid latitude. The
+latitude errors also matched message text. The other messages follow
+Fsdb's shared spatial error formatting.
+
+#### Scalar scan timing
+
+The native Release CLI with a data directory and native MySQL 8.4.11
+with default InnoDB settings ran on the same arm64 Mac over loopback TCP.
+Each query summed the predicate results over 2,000 stored geometry pairs.
+The planar table used SRID 0. The geographic table mixed the five supported
+geographic SRIDs. Both tables repeated the seeded pairs from the comparison
+above. Each query had three warmups and nine timed runs per engine, with
+engine order reversed on alternating runs. Row counts and every sum matched.
+
+| Workload | MySQL median (ms) | Fsdb median (ms) | Fsdb / MySQL latency |
+| --- | ---: | ---: | ---: |
+| Planar, existing three predicates | 9.38 | 11.20 | 1.19× |
+| Planar, six added predicates | 16.21 | 19.17 | 1.18× |
+| Geographic, existing three predicates | 27.48 | 13.21 | 0.48× |
+| Geographic, six added predicates | 52.95 | 27.89 | 0.53× |
+
+The timings cover warm read-only scans with scalar evaluation. They do not
+measure index selectivity, write throughput, or durability costs.
+
+#### SRID-restricted spatial indexes
+
+MySQL 8.4.11 accepts `GEOMETRY NOT NULL SRID 4326` with or without a
+`SPATIAL INDEX`. Fsdb returns `3548 / SR001` for both declarations
+and for `SRID 3857`. An indexed `SRID 0` column works on both engines.
+The declaration check in Fsdb currently rejects every nonzero SRID, even
+when the scalar spatial catalog supports it.
+
+On a 404-row geographic table, native MySQL chose a forced spatial range
+for all seven MBR predicates other than `MBRCovers` and `MBRCoveredBy`.
+Forced and ignored index queries returned the same IDs in all ten checks,
+including a point within the latitude extremum of a geodesic and a box
+crossing the antimeridian. Fsdb's spatial tree stores planar bounds and
+the planner filters geographic probes. Geographic indexing needs
+candidate bounds that account for geodesic latitude extrema and the
+antimeridian before the scalar predicate can recheck candidates.
+[MySQL spatial index optimization](https://dev.mysql.com/doc/refman/8.4/en/spatial-index-optimization.html).
