@@ -19,8 +19,21 @@ tabular output, including headers, and six errors against pinned MySQL
 8.4.11 in both Fsdb storage modes. It covers grouped operands, empty inputs,
 alias shadowing, a CJK ngram full-text filter, SQL prepared execution, a
 read-only view, and final table contents after joined UPDATE and DELETE.
-A binary-protocol probe verified the prepared result names, order, and
-integer types. Two executions with different integer bindings matched
-MySQL's rows, including the NULL bitmap. Result flags still differ. Fsdb
-sets the non-NULL flag on the null-extended projection at execution, and
-the inferred parameter type for `a.id<>?` inside the lateral body differs.
+
+## Result nullability and parameter definitions
+
+Fsdb now clears `NOT_NULL` for direct columns from the optional side using
+their joined column positions, including derived columns without a physical
+origin. Both storage modes matched MySQL's rows, column names, and
+`NOT_NULL` flags for 13 direct and prepared query shapes. The cases include
+empty results, wildcard and named projections, merged keys, a literal
+derived table, and a `COALESCE` control that stays non-null. Two binary
+executions also matched MySQL's rows, NULL bitmaps, and result nullability.
+
+Parameter inference now follows the same lateral scope as the join binder.
+The binary definitions matched MySQL for signed and unsigned BIGINT markers
+across grouped and consecutive joins, including an alias that shadows an
+enclosing source. A VARCHAR comparison matched with `utf8mb4_general_ci`
+and still reports collation 45 where MySQL reports 255 for
+`utf8mb4_0900_ai_ci`. Other result flag bits and source lineage still differ
+in the probe. [MySQL PREPARE rules](https://dev.mysql.com/doc/refman/8.4/en/prepare.html)

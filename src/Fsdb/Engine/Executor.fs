@@ -9267,6 +9267,18 @@ and private outputColumnWireOverridesFor
     (select: SelectStmt)
     : ColumnMetadata option list =
     let projections = select.Projections
+    let nullable = nullableJoinQualifiers select
+
+    // A derived column can lack a physical origin and still be null-extended.
+    let nullablePositions =
+        nullable |> Seq.collect (fun qualifier ->
+            match Map.tryFind qualifier ctx.Qualifiers with
+            | Some(columns, offset) -> seq { offset .. offset + columns.Length - 1 }
+            | None -> Seq.empty) |> Set.ofSeq
+
+    let clearNotNull optional metadata =
+        if optional then { metadata with Flags = metadata.Flags &&& ~~~NotNullFlag }
+        else metadata
 
     let overrideOf (c: ColumnDef) =
         match c.Type with
@@ -9278,19 +9290,25 @@ and private outputColumnWireOverridesFor
         | TEnum _ when rollup -> Some { ColumnWire.metadataOfColumn c with TypeId = TypeVarString; Flags = 0us }
         | _ -> ColumnWire.resultMetadataOf c
 
+    let projectedColumn optional column = overrideOf column |> Option.map (clearNotNull optional)
+
     let overrides =
         projections
         |> List.collect (fun proj ->
             match proj with
-            | { Expression = Star None } -> columns |> List.map overrideOf
-            | { Expression = Star(Some qualifier) } -> columnsForQualifier ctx qualifier |> List.map overrideOf
+            | { Expression = Star None } -> columns |> List.mapi (fun position -> projectedColumn (nullablePositions.Contains position))
+            | { Expression = Star(Some qualifier) } ->
+                columnsForQualifier ctx qualifier |> List.map (projectedColumn (nullable.Contains (qualifier.ToLowerInvariant())))
             | { Expression = expr } ->
                 [ match tryColumnDefForExpr ctx expr |> Option.bind overrideOf with
-                  | Some ty -> Some ty
+                  | Some ty ->
+                      let optional =
+                          not nullablePositions.IsEmpty
+                          && (tryDirectColumnForExpr ctx expr |> Option.exists (fst >> nullablePositions.Contains))
+                      Some(clearNotNull optional ty)
                   | None -> metadataOfExpr ctx expr ])
 
     let sources = outputColumnSources ctx.Store ctx.DbName ctx.Qualifiers select
-    let nullable = nullableJoinQualifiers select
 
     if sameLength sources overrides then
         List.map2

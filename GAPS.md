@@ -103,7 +103,8 @@ still reach earlier comma operands where MySQL permits the dependency.
 [Left-hand lateral sources in right joins](torture/findings/2026-11-26-left-lateral-right-join.md)
 can read the preserved operand in the audited SELECT and joined-write forms.
 The join retains MySQL's NULL padding and column order, including `USING`
-and `NATURAL RIGHT JOIN`.
+and `NATURAL RIGHT JOIN`. Prepared parameter types follow the preserved
+operands, and result nullability follows the joined column's scope.
 
 DDL covers databases, tables, indexes, views, triggers, users, grants,
 `CREATE TABLE ... AS SELECT`, temporary tables, `TRUNCATE`, and `RENAME TABLE`.

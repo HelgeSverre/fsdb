@@ -1529,6 +1529,48 @@ let tests =
               Expect.equal (rolledUp.LastResultColumnMetadata |> List.map (fun column -> column.Flags &&& sourceMask)) [ 0us; 0us ]
                   "ROLLUP temporary results do not inherit physical source flags"
 
+          testCase "outer join metadata clears NOT NULL for derived columns without a physical origin"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              handle session "CREATE TABLE a(id INT PRIMARY KEY,n INT NOT NULL)" |> ignore
+              handle session "INSERT INTO a VALUES(1,10),(2,20)" |> ignore
+              let flags metadata = metadata |> List.map (hasMetadataFlag NotNullFlag)
+              for sql, expected in
+                  [ "SELECT * FROM LATERAL (SELECT a.id AS x WHERE a.id<>2) d RIGHT JOIN a ON d.x=a.id", [ false; true; true ]
+                    "SELECT d.*,x,a.id FROM LATERAL (SELECT a.id AS x WHERE a.id<>2) d RIGHT JOIN a ON d.x=a.id", [ false; false; true ]
+                    "SELECT * FROM LATERAL (SELECT a.id,a.n AS x WHERE a.id<>2) d RIGHT JOIN a USING(id)", [ true; true; false ]
+                    "SELECT d.id,id,d.x,a.n FROM LATERAL (SELECT a.id,a.n AS x WHERE a.id<>2) d NATURAL RIGHT JOIN a", [ false; true; false; true ]
+                    "SELECT * FROM LATERAL (SELECT a.id AS x) d RIGHT JOIN a ON TRUE WHERE a.id>100", [ false; true; true ]
+                    "SELECT d.*,a.id FROM a LEFT JOIN (SELECT 1 AS x,'x' AS y) d ON a.id=1", [ false; false; true ]
+                    "SELECT d.*,a.id FROM a JOIN (SELECT 1 AS x,'x' AS y) d ON a.id=1", [ true; true; true ]
+                    "SELECT d.x,COALESCE(d.x,0) AS definite FROM LATERAL (SELECT a.id AS x WHERE a.id<>2) d RIGHT JOIN a ON TRUE", [ false; true ] ] do
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let _, columns = preparedMetadata session ast count
+                  Expect.equal (flags (columns |> List.map _.Metadata)) expected ("prepared: " + sql)
+                  let direct, result = handle session sql
+                  match result with
+                  | ResultSet _ -> Expect.equal (flags direct.LastResultColumnMetadata) expected ("direct: " + sql)
+                  | other -> failtestf "%s: %A" sql other
+                  let statement = createPreparedStatement session sql ast count
+                  let executed, result = executePrepared session statement []
+                  match result with
+                  | ResultSet _ -> Expect.equal (flags executed.LastResultColumnMetadata) expected ("executed: " + sql)
+                  | other -> failtestf "%s: %A" sql other
+
+          testCase "right lateral parameter definitions follow the dependency scope"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              handle session "CREATE TABLE a(id INT PRIMARY KEY,label VARCHAR(20))" |> ignore
+              handle session "CREATE TABLE b(id BIGINT UNSIGNED PRIMARY KEY)" |> ignore
+              for sql, expected in
+                  [ "SELECT d.x FROM LATERAL (SELECT a.id AS x WHERE a.id<>? AND a.label<>?) d RIGHT JOIN a ON TRUE", [ TypeLongLong, BinaryFlag; TypeVarString, 0us ]
+                    "SELECT d.x FROM LATERAL (SELECT a.id+b.id AS x WHERE a.id<>? AND b.id<>?) d RIGHT JOIN a ON TRUE RIGHT JOIN b ON TRUE", [ TypeLongLong, BinaryFlag; TypeLongLong, BinaryFlag ||| UnsignedFlag ]
+                    "SELECT r.id,(SELECT d.x FROM LATERAL (SELECT r.id AS x WHERE r.id<>?) d RIGHT JOIN a r ON TRUE LIMIT 1) FROM b r", [ TypeLongLong, BinaryFlag ]
+                    "SELECT d.x FROM b, (LATERAL (SELECT a.id+b.id AS x WHERE a.id<>? AND b.id<>?) d RIGHT JOIN a ON TRUE)", [ TypeLongLong, BinaryFlag; TypeLongLong, BinaryFlag ||| UnsignedFlag ] ] do
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let parameters, _ = preparedMetadata session ast count
+                  Expect.equal (parameters |> List.map (fun m -> m.TypeId, m.Flags)) expected sql
+
           testCase "outer join metadata clears nullability on optional grouped sources"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

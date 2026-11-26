@@ -196,8 +196,8 @@ let private inferParameters
     let bindings = Array.create parameterCount None
     let mutable projectedParameters = Set.empty
 
-    let tryColumn scope expression =
-        let matches =
+    let tryColumn scopes expression =
+        let matches scope =
             match expression with
             | Col name -> scope |> List.filter (fun bound -> sameName bound.Column.Name name)
             | QualifiedCol(qualifier, name) ->
@@ -205,8 +205,8 @@ let private inferParameters
                 |> List.filter (fun bound -> sameName bound.Qualifier qualifier && sameName bound.Column.Name name)
             | _ -> []
 
-        match matches with
-        | [ bound ] -> Some bound.Column
+        match scopes |> List.tryPick (fun scope -> match matches scope with [] -> None | found -> Some found) with
+        | Some [ bound ] -> Some bound.Column
         | _ -> None
 
     let metadataOfExpression scope =
@@ -364,7 +364,7 @@ let private inferParameters
         Fsdb.Sql.Expression.subqueries expression |> List.iter (inferSelect scope)
 
     and inferScope
-        (outerScope: BoundColumn list)
+        (outerScopes: BoundColumn list list)
         (ctes: CommonTableExpr list)
         (from: FromItem option)
         (joins: Join list)
@@ -372,7 +372,7 @@ let private inferParameters
         let cteColumns =
             ctes
             |> List.map (fun cte ->
-                inferBody outerScope cte.Body
+                inferBody outerScopes cte.Body
                 let columns = describeBody cte.Body
 
                 let columns =
@@ -385,15 +385,9 @@ let private inferParameters
 
                 cte.CteName, columns)
 
-        let rec columnsOfItem scope =
+        let rec columnsOfItem preceding =
             function
-            | FromJoinGroup(source, joins) ->
-                let initial = columnsOfItem outerScope source
-                joins
-                |> List.fold (fun columns join ->
-                    let combined = columns @ columnsOfItem (outerScope @ columns) join.Table
-                    inferExpression (outerScope @ combined) None DescribeOnly join.On
-                    combined) initial
+            | FromJoinGroup(source, joins) -> columnsOfChain preceding source joins
             | FromTable table ->
                 let columns =
                     cteColumns
@@ -403,25 +397,40 @@ let private inferParameters
 
                 withQualifier (table.Alias |> Option.defaultValue table.Table) columns
             | FromSubquery(body, alias) ->
-                inferBody outerScope body
+                inferBody outerScopes body
                 describeBody body |> withQualifier alias
             | FromLateral(body, alias) ->
-                inferBody scope body
+                inferBody (preceding :: outerScopes) body
                 describeBody body |> withQualifier alias
             | FromJsonTable(source, _, _, _) ->
-                inferExpression scope None DescribeOnly source
+                inferExpression (preceding :: outerScopes) None DescribeOnly source
                 []
 
-        let mutable scope = outerScope
+        and columnsOfChain preceding source joins =
+            let bindJoin (join: Join) left right =
+                let local = left @ right
+                inferExpression (local :: outerScopes) None DescribeOnly join.On
+                local
 
-        from
-        |> Option.iter (fun item -> scope <- scope @ columnsOfItem scope item)
+            let initial, remaining =
+                match FromItem.tryLateralRightJoin source joins with
+                | Some(left, join, remaining) ->
+                    let right = columnsOfItem preceding join.Table
+                    let left = columnsOfItem (preceding @ right) left
+                    bindJoin join left right, remaining
+                | None -> columnsOfItem preceding source, joins
 
-        for join in joins do
-            scope <- scope @ columnsOfItem scope join.Table
-            inferExpression scope None DescribeOnly join.On
+            remaining
+            |> List.fold (fun left join ->
+                let lateral =
+                    match join.Kind with
+                    | RightJoin | NaturalRightJoin -> preceding
+                    | _ -> preceding @ left
+                bindJoin join left (columnsOfItem lateral join.Table)) initial
 
-        scope
+        match from with
+        | Some source -> columnsOfChain [] source joins :: outerScopes
+        | None -> outerScopes
 
     and inferSelect outerScope select =
         let scope = inferScope outerScope select.Ctes select.From select.Joins
@@ -484,7 +493,7 @@ let private inferParameters
                 |> List.tryFind (fun column -> sameName column.Name name)
                 |> Option.map (fun column -> ColumnWire.parameterMetadataOfType column.Type)
 
-            inferExpression (withQualifier table columns) expected AssignToColumn expression)
+            inferExpression [ withQualifier table columns ] expected AssignToColumn expression)
 
     match statement with
     | Select select -> inferSelect [] select
