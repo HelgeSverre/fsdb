@@ -1394,10 +1394,14 @@ let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segmen
     let edges =
         orientGeographicPolygonRings referenceSystem rings
         |> List.collect (List.rev >> List.pairwise)
+    let rejectsRoundedTurn = geographicTurnRejectsRoundedEndpoint referenceSystem segment
+
     let crossings =
         edges
         |> Seq.choose (fun edge ->
             tryGeographicSegmentCrossing referenceSystem segment edge
+            // A solved intersection can still be rejected by the relation's endpoint rule.
+            |> Option.filter (fun _ -> not (rejectsRoundedTurn edge))
             |> Option.map (fun point -> edge, point))
         |> Seq.truncate 2
         |> Seq.toList
@@ -1407,7 +1411,7 @@ let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segmen
 
     match crossings with
     | [] when sampled.Crosses
-              && (edges |> List.exists (geographicTurnRejectsRoundedEndpoint referenceSystem segment))
+              && List.exists rejectsRoundedTurn edges
               && not (List.exists sharesEndpoint edges) ->
         // A line without turns takes the area position of its first point.
         match geographicPointPolygonPosition referenceSystem start [ rings ] with

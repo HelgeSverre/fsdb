@@ -3221,8 +3221,11 @@ implementation effort:
    [Rounded contact pairs](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#rounded-contact-pairs-along-one-edge)
    close five cases in each direction of a wider EPSG 4326 set.
    [Directed mixed turns](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#proper-turn-paired-with-a-rounded-endpoint)
-   close the remaining cases in the 70-case offset sweep. Other
-   near-endpoint precision differences remain open.
+   close the remaining cases in the 70-case offset sweep.
+   [Reduced-latitude tangent and rounded turn rejection](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#reduced-latitude-tangent-and-rounded-turn-rejection)
+   close the dense offset sweep and the wider forward and reverse WGS 84
+   sweeps. Seven forward and six reverse differences remain in the
+   independent holdout.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
 

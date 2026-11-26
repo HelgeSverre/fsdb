@@ -532,6 +532,45 @@ do the wider 5,000-case runs in both directions. A separate 6,000-case
 holdout with `--seed 311041 --seeded-polygons 3000` fell from 17 to 15
 differences. The remaining differences also occurred in the baseline.
 
+## Reduced-latitude tangent and rounded turn rejection
+
+The last disagreement in the dense sweep was a crossing that Fsdb called
+a touch. The Sjöberg solver reconstructed the reduced-latitude tangent
+from its angle when calculating the starting arc. Reusing the original
+tangent matched Boost's cut coordinates and incoming azimuth in that case.
+[Boost Sjöberg solver](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/formulas/sjoberg_intersection.hpp).
+
+The tangent correction alone exposed a second problem. The line relation
+accepted some calculated cuts where a rounded source endpoint lay behind
+the ordered boundary segment. Boost checks rounded endpoint contact before
+solving a proper turn. Fsdb now applies its rounded endpoint rejection to
+calculated relation turns as well. With no accepted turn, the line relation
+uses the area position at the start of the source, as MySQL does in these
+fixtures. The overlay can still report a point in those cases.
+[Boost geographic segment intersection](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
+
+Native MySQL 8.4.11 supplied the expected line relations.
+
+| Corpus | Before | After |
+| --- | ---: | ---: |
+| Dense WGS 84 offsets | 1/810 | 0/810 |
+| Wider WGS 84, forward | 8/5,000 | 0/5,000 |
+| Wider WGS 84, reverse | 9/5,000 | 0/5,000 |
+| Independent WGS 84 holdout | 15/6,000 | 7/6,000 |
+| ETRS89 seeded lines | 2/1,000 | 0/1,000 |
+| NAD27 seeded lines | 2/1,000 | 0/1,000 |
+
+The full mismatch signatures introduced by the tangent-only trial
+disappeared with the endpoint rule. All the after-state holdout differences
+were present before the change. The structured and original seeded WGS 84
+sets still match in both directions. Reversing the independent holdout
+produced six differences in 6,000 cases.
+
+In the forward holdout, MySQL reports a crossing in all seven residuals.
+Fsdb reports containment for five, a touch for one, and disjointness for
+one. The disjoint case already yields two proper candidate cuts. The
+single-turn refinement leaves its sampled result in place.
+
 ## Current-head overlay check
 
 A current-head rerun still finds 11/448 geographic line/polygon relation

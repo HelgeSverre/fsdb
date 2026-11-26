@@ -98,7 +98,10 @@ type private Geodesic =
             |> Option.map (fun (before, _) -> g.Direction * asin (bounded (tangent / g.VertexTangent)) + before)
 
 let private geodesic flattening (latitude, longitude) azimuth =
-    let beta = atan ((1.0 - flattening) * tan latitude)
+    let oneMinusFlattening = 1.0 - flattening
+    // Retain the reduced-latitude tangent for the starting arc near a geodesic vertex.
+    let tanBeta = oneMinusFlattening * tan latitude
+    let beta = atan tanBeta
     let sign =
         if (halfPi < azimuth && azimuth < Math.PI) || (-halfPi < azimuth && azimuth < 0.0) then -1.0
         else 1.0
@@ -106,7 +109,7 @@ let private geodesic flattening (latitude, longitude) azimuth =
     let squared = clairaut * clairaut
     let maximum = sqrt (1.0 - squared)
     { Longitude = longitude
-      OneMinusFlattening = 1.0 - flattening
+      OneMinusFlattening = oneMinusFlattening
       EccentricitySquared = flattening * (2.0 - flattening)
       Clairaut = clairaut
       ClairautSquared = squared
@@ -114,7 +117,7 @@ let private geodesic flattening (latitude, longitude) azimuth =
       SinBetaStart = sin beta
       Direction = if azimuth >= 0.0 then 1.0 else -1.0
       VertexTangent = if equal clairaut 0.0 then 0.0 else maximum / clairaut
-      StartArc = if equal maximum 0.0 then 0.0 else asin (tan beta * clairaut / maximum) }
+      StartArc = if equal maximum 0.0 then 0.0 else asin (tanBeta * clairaut / maximum) }
 
 let private longitudeInRange (g: Geodesic) (_, start) (_, endpoint) longitude =
     if g.IsMeridian then true
