@@ -630,5 +630,24 @@ message in all 37 range-error cases. The fixtures use an unwrapped
 overlay cut and an invalid latitude created by `ST_SwapXY`.
 Normalized controls and all 1,048 prior intersection outputs were
 unchanged. Some geographic operations still differ in availability or
-unsupported-SRS error codes, including MBR operations on valid geographic
-inputs and `ST_IsClosed`.
+unsupported-SRS error codes, including `ST_IsClosed`.
+
+### Geographic MBR predicates
+
+`MBRContains`, `MBRWithin`, and `MBRIntersects` use geodesic
+edge envelopes on geographic SRIDs. An edge can extend past either
+endpoint latitude. Enclosing longitudes can cross the antimeridian,
+and a polar polygon can extend its envelope to a pole. Empty operands
+return NULL. For containment, a bound collapsed to a line uses
+geographic line membership. A line along a rectangle's edge has no
+interior point inside that rectangle. [MySQL envelope construction](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/mbr_utils.cc)
+· [MySQL geographic box containment](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/within.cc).
+
+The MySQL 8.4.11 comparison matched all 3,720 results over 1,240 pairs.
+It used 44 structured cases across the five supported geographic
+SRIDs, another 400 seeded cases, and both operand orders. The
+structured cases cover wrapped boundary rounding, geodesic
+latitude extrema, polar lines and areas, point and line boxes,
+multipart and nested collections, and empty members. This adds
+scalar evaluation for geographic bounds. Geographic index planning
+remains open.

@@ -5902,9 +5902,6 @@ let private binaryGeometryWithSameSridFn functionName operation: Scalar =
         operation first second
     | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
 
-let private binaryGeometryFn functionName operation =
-    binaryGeometryWithSameSridFn functionName (fun first second -> operation (requirePlanar functionName first) second)
-
 let private geometryFromTextFn requiredKind functionName: Scalar =
     let construct value sridValue axisOrder =
         let srid = geometrySrid functionName sridValue
@@ -6833,36 +6830,31 @@ let private geometryPredicateFn functionName predicate =
         |> Option.defaultValue VNull
     | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
 
-let private mbrContains first second =
-    match geometryBounds first, geometryBounds second with
-    | Some outer, Some inner ->
-        let contains minimum maximum innerMinimum innerMaximum =
-            if minimum = maximum then
-                innerMinimum = innerMaximum && minimum = innerMinimum
-            elif innerMinimum = innerMaximum then
-                minimum < innerMinimum && innerMinimum < maximum
-            else
-                minimum <= innerMinimum && innerMaximum <= maximum
+let private planarMbrContains outer inner =
+    let contains minimum maximum innerMinimum innerMaximum =
+        if minimum = maximum then
+            innerMinimum = innerMaximum && minimum = innerMinimum
+        elif innerMinimum = innerMaximum then
+            minimum < innerMinimum && innerMinimum < maximum
+        else
+            minimum <= innerMinimum && innerMaximum <= maximum
 
-        contains outer.MinX outer.MaxX inner.MinX inner.MaxX
-        && contains outer.MinY outer.MaxY inner.MinY inner.MaxY
-    | _ -> false
+    contains outer.MinX outer.MaxX inner.MinX inner.MaxX
+    && contains outer.MinY outer.MaxY inner.MinY inner.MaxY
 
-let private mbrIntersects first second =
-    match geometryBounds first, geometryBounds second with
-    | Some first, Some second ->
-        first.MinX <= second.MaxX
-        && second.MinX <= first.MaxX
-        && first.MinY <= second.MaxY
-        && second.MinY <= first.MaxY
-    | _ -> false
+let private planarMbrIntersects first second =
+    first.MinX <= second.MaxX
+    && second.MinX <= first.MaxX
+    && first.MinY <= second.MaxY
+    && second.MinY <= first.MaxY
 
-let private mbrPredicateFn functionName predicate =
-    binaryGeometryFn functionName (fun first second ->
-        match geometryBounds first, geometryBounds second with
-        | None, _
-        | _, None -> VNull
-        | Some _, Some _ -> VInt(if predicate first second then 1L else 0L))
+let private mbrPredicateFn functionName planar geographic =
+    binaryGeometryWithSameSridFn functionName (fun first second ->
+        let referenceSystem = spatialReferenceSystem functionName first.Srid
+        let result =
+            if referenceSystem.SemiMajorAxis.IsSome then geographic referenceSystem first.Shape second.Shape
+            else Option.map2 planar (geometryBounds first) (geometryBounds second)
+        result |> Option.map (fun value -> VInt(if value then 1L else 0L)) |> Option.defaultValue VNull)
 
 let private registerJsonBuiltins registry =
     registry
@@ -6965,9 +6957,12 @@ let private registerSpatialBuiltins registry =
     |> registerScalarResult "ST_SYMDIFFERENCE" binaryResult (geometryOverlayFn "ST_SYMDIFFERENCE" OverlayKind.SymmetricDifference)
     |> registerScalarResult "ST_CONVEXHULL" binaryResult geometryConvexHullFn
     |> registerScalarResult "ST_ENVELOPE" binaryResult geometryEnvelopeFn
-    |> registerScalar "MBRCONTAINS" (mbrPredicateFn "MBRCONTAINS" mbrContains)
-    |> registerScalar "MBRWITHIN" (mbrPredicateFn "MBRWITHIN" (fun first second -> mbrContains second first))
-    |> registerScalar "MBRINTERSECTS" (mbrPredicateFn "MBRINTERSECTS" mbrIntersects)
+    |> registerScalar "MBRCONTAINS" (mbrPredicateFn "MBRCONTAINS" planarMbrContains geographicMbrContains)
+    |> registerScalar "MBRWITHIN"
+        (mbrPredicateFn "MBRWITHIN"
+            (fun first second -> planarMbrContains second first)
+            (fun referenceSystem first second -> geographicMbrContains referenceSystem second first))
+    |> registerScalar "MBRINTERSECTS" (mbrPredicateFn "MBRINTERSECTS" planarMbrIntersects geographicMbrIntersects)
 
 let private everyArgument _ = true
 let private firstArgument index = index = 0

@@ -1981,13 +1981,13 @@ let private geographicOverlaySections segments =
     | first :: rest -> collect (direction first) 10 [ first ] [] rest
 
 [<Struct>]
-type private GeographicSectionBounds =
+type private GeographicBounds =
     { West: float
       East: float
       South: float
       North: float }
 
-let private mergeGeographicSectionBounds first second =
+let private encloseGeographicBounds largerGap first rest =
     let half = Math.PI
     let period = 2.0 * half
     let intervals box =
@@ -2000,59 +2000,65 @@ let private mergeGeographicSectionBounds first second =
         elif east > half then [ west, half; -half, east - period ]
         else [ west, east ]
 
+    let combined =
+        rest |> List.fold (fun bounds next ->
+            { West = min bounds.West next.West
+              East = max bounds.East next.East
+              South = min bounds.South next.South
+              North = max bounds.North next.North }) first
+
     // The enclosing arc excludes the largest uncovered longitude gap.
     let west, east =
-        let west = min first.West second.West
-        let east = max first.East second.East
+        let west, east = combined.West, combined.East
         if -half <= west && east <= half && east - west <= half then west, east
         else
-            match List.sortBy fst (intervals first @ intervals second) with
+            match first :: rest |> List.collect intervals |> List.sortBy fst with
             | [] -> west, east
             | (west, firstEast) :: rest ->
                 let east, gap, left, right =
                     rest |> List.fold (fun (east, gap, left, right) (start, finish) ->
-                        if start - east > gap then max east finish, start - east, east, start
+                        if largerGap (start - east) gap then max east finish, start - east, east, start
                         else max east finish, gap, left, right) (firstEast, 0.0, west, west)
                 let wrapGap = period + west - east
                 if gap > wrapGap && not (boostGeoEqual gap wrapGap) then right, left + period
                 else west, east
-    { West = west
-      East = east
-      South = min first.South second.South
-      North = max first.North second.North }
+    { combined with West = west; East = east }
 
-let private geographicSectionBounds flattening edges =
+let private mergeGeographicBounds first second =
+    encloseGeographicBounds (>) first [ second ]
+
+let private geographicEdgeBounds flattening (first, second) =
     let half = Math.PI
     let quarter = half / 2.0
     let period = 2.0 * half
-    let edgeBounds (first, second) =
-        let first = geographicPointRadians first
-        let second = geographicPointRadians second
-        let (latitude1, west), (latitude2, east) =
-            if snd first <= snd second then first, second else second, first
-        let (latitude1, west), (latitude2, east) =
-            if east - west > half then (latitude2, east), (latitude1, west + period)
-            else (latitude1, west), (latitude2, east)
+    let first = geographicPointRadians first
+    let second = geographicPointRadians second
+    let (latitude1, west), (latitude2, east) =
+        if snd first <= snd second then first, second else second, first
+    let (latitude1, west), (latitude2, east) =
+        if east - west > half then (latitude2, east), (latitude1, west + period)
+        else (latitude1, west), (latitude2, east)
 
-        let south, north = min latitude1 latitude2, max latitude1 latitude2
-        let south, north =
-            if west = east then south, north
-            else
-                let firstAzimuth, lastAzimuth =
-                    geographicSegmentAzimuthsRadians flattening (latitude1, west) (latitude2, east)
-                if min firstAzimuth lastAzimuth < quarter && quarter < max firstAzimuth lastAzimuth then
-                    // Clairaut's relation gives the latitude of the geodesic vertex.
-                    let azimuth = if latitude1 <= latitude2 then firstAzimuth else lastAzimuth
-                    let axisRatio = 1.0 - flattening
-                    let reducedLatitude = atan (axisRatio * tan south)
-                    let reducedVertex = acos (min 1.0 (abs (cos reducedLatitude * sin azimuth)))
-                    let vertex = atan (tan reducedVertex / axisRatio)
-                    if south + north < 0.0 then min south (-vertex), north
-                    else south, max north vertex
-                else south, north
-        { West = west; East = east; South = south; North = north }
+    let south, north = min latitude1 latitude2, max latitude1 latitude2
+    let south, north =
+        if west = east then south, north
+        else
+            let firstAzimuth, lastAzimuth =
+                geographicSegmentAzimuthsRadians flattening (latitude1, west) (latitude2, east)
+            if min firstAzimuth lastAzimuth < quarter && quarter < max firstAzimuth lastAzimuth then
+                // Clairaut's relation gives the latitude of the geodesic vertex.
+                let azimuth = if latitude1 <= latitude2 then firstAzimuth else lastAzimuth
+                let axisRatio = 1.0 - flattening
+                let reducedLatitude = atan (axisRatio * tan south)
+                let reducedVertex = acos (min 1.0 (abs (cos reducedLatitude * sin azimuth)))
+                let vertex = atan (tan reducedVertex / axisRatio)
+                if south + north < 0.0 then min south (-vertex), north
+                else south, max north vertex
+            else south, north
+    { West = west; East = east; South = south; North = north }
 
-    let bounds = edges |> List.map edgeBounds |> List.reduce mergeGeographicSectionBounds
+let private geographicSectionBounds flattening edges =
+    let bounds = edges |> List.map (geographicEdgeBounds flattening) |> List.reduce mergeGeographicBounds
     let margin value = 1000.0 * (Math.BitIncrement 1.0 - 1.0) * max 1.0 (abs value)
     { West = bounds.West - margin bounds.West
       East = bounds.East + margin bounds.East
@@ -2061,23 +2067,37 @@ let private geographicSectionBounds flattening edges =
 
 let private geographicPartitionThreshold = 16
 
-let private visitGeographicSectionPairs visit first second =
-    let overlaps a b =
-        let period = 2.0 * Math.PI
-        let width = a.East - a.West
-        let otherWidth = b.East - b.West
-        let delta = longitudeDistanceRadians a.West b.West
-        let shifted = a.West + (if delta < 0.0 then delta + period else delta)
-        let wrappedEnd = shifted - period + otherWidth
-        let westEnd = if abs (wrappedEnd - b.East) < Math.PI then b.East else wrappedEnd
-        b.South <= a.North && a.South <= b.North
-        && (width >= period || otherWidth >= period || shifted <= a.East || a.West <= westEnd)
+let private geographicBoundsLongitudeOffset first second =
+    let halfTurn = Math.PI
+    let period = 2.0 * halfTurn
+    let delta = second - first
+    // Box strategies normalize the signed difference around the antimeridian
+    // before translating it. The evaluation order affects rounded edge ties.
+    let signed =
+        if boostGeoEqual (abs delta) halfTurn then halfTurn
+        elif delta > halfTurn then
+            let normalized = (delta + halfTurn) % period - halfTurn
+            if boostGeoEqual normalized (-halfTurn) then halfTurn else normalized
+        elif delta < -halfTurn then (delta - halfTurn) % period + halfTurn
+        else delta
+    if signed < 0.0 then signed + period else signed
 
-    let bounds sections = sections |> List.map snd |> List.reduce mergeGeographicSectionBounds
+let private geographicBoundsIntersect a b =
+    let period = 2.0 * Math.PI
+    let width = a.East - a.West
+    let otherWidth = b.East - b.West
+    let shifted = a.West + geographicBoundsLongitudeOffset a.West b.West
+    let wrappedEnd = shifted - period + otherWidth
+    let westEnd = if abs (wrappedEnd - b.East) < Math.PI then b.East else wrappedEnd
+    b.South <= a.North && a.South <= b.North
+    && (width >= period || otherWidth >= period || shifted <= a.East || a.West <= westEnd)
+
+let private visitGeographicSectionPairs visit first second =
+    let bounds sections = sections |> List.map snd |> List.reduce mergeGeographicBounds
     let divide lower upper sections =
-        let lowerHits, remaining = List.partition (snd >> overlaps lower) sections
-        let spanning, lowerOnly = List.partition (snd >> overlaps upper) lowerHits
-        lowerOnly, List.filter (snd >> overlaps upper) remaining, spanning
+        let lowerHits, remaining = List.partition (snd >> geographicBoundsIntersect lower) sections
+        let spanning, lowerOnly = List.partition (snd >> geographicBoundsIntersect upper) lowerHits
+        lowerOnly, List.filter (snd >> geographicBoundsIntersect upper) remaining, spanning
     let visitPairs a b =
         for firstIndex, _ in a do
             for secondIndex, _ in b do
@@ -2227,31 +2247,147 @@ let private geographicAreaLineFragments retainCovered pieces =
 
     finish current finished |> List.rev
 
-let private geographicOverlayLineCoverage lines =
-    // MySQL subtracts the clipped linework from the point result using
-    // Boost's default spheroid, independent of the overlay's ellipsoid.
-    let flattening = 1.0 - 6356752.3142451793 / 6378137.0
-    let segments =
-        lines
-        |> List.collect (List.map geographicPointRadians >> List.pairwise)
+let private defaultGeographicFlattening = 1.0 - 6356752.3142451793 / 6378137.0
 
+let private geographicSegmentCoversPoint flattening
+    (((latitude1, longitude1) as start), ((latitude2, longitude2) as endpoint))
+    ((latitude, longitude) as query) =
+    let length = longitudeDistanceRadians longitude1 longitude2
+    let offset = longitudeDistanceRadians longitude1 longitude
+    let sameStart = boostGeoEqual offset 0.0
+    let sameEnd = boostGeoEqual (longitudeDistanceRadians longitude2 longitude) 0.0
+    match sameStart, sameEnd with
+    | true, true -> min latitude1 latitude2 <= latitude && latitude <= max latitude1 latitude2
+    | true, false -> boostGeoEqual latitude latitude1
+    | false, true -> boostGeoEqual latitude latitude2
+    | false, false when offset * length > 0.0 && abs offset < abs length ->
+        let azimuth point = geographicSegmentAzimuthsRadians flattening start point |> fst
+        let delta = normalizedLongitudeRadians (azimuth query - azimuth endpoint)
+        boostGeoEqual delta 0.0 || boostGeoEqual (abs delta) Math.PI
+    | _ -> false
+
+let private geographicOverlayLineCoverage lines =
+    // MySQL subtracts the clipped linework using Boost's default spheroid.
+    let segments = lines |> List.collect (List.map geographicPointRadians >> List.pairwise)
     fun point ->
-        let (latitude, longitude) as query = geographicPointRadians point
-        segments
-        |> List.exists (fun (((latitude1, longitude1) as start), ((latitude2, longitude2) as endpoint)) ->
-            let length = longitudeDistanceRadians longitude1 longitude2
-            let offset = longitudeDistanceRadians longitude1 longitude
-            let sameStart = boostGeoEqual offset 0.0
-            let sameEnd = boostGeoEqual (longitudeDistanceRadians longitude2 longitude) 0.0
-            match sameStart, sameEnd with
-            | true, true -> min latitude1 latitude2 <= latitude && latitude <= max latitude1 latitude2
-            | true, false -> boostGeoEqual latitude latitude1
-            | false, true -> boostGeoEqual latitude latitude2
-            | false, false when offset * length > 0.0 && abs offset < abs length ->
-                let azimuth point = geographicSegmentAzimuthsRadians flattening start point |> fst
-                let delta = normalizedLongitudeRadians (azimuth query - azimuth endpoint)
-                boostGeoEqual delta 0.0 || boostGeoEqual (abs delta) Math.PI
-            | _ -> false)
+        let query = geographicPointRadians point
+        segments |> List.exists (fun segment -> geographicSegmentCoversPoint defaultGeographicFlattening segment query)
+
+let private geographicMbr referenceSystem shape =
+    let half = Math.PI
+    let pole = half / 2.0
+    let major = referenceSystem.SemiMajorAxis.Value
+    let minor = major * (1.0 - 1.0 / referenceSystem.InverseFlattening.Value)
+    let flattening = (major - minor) / major
+
+    let pointBounds point =
+        let latitude, longitude = geographicPointRadians point
+        let longitude = if boostGeoEqual (abs latitude) pole then 0.0 else normalizedLongitudeRadians longitude
+        { West = longitude; East = longitude; South = latitude; North = latitude }
+
+    let lineBounds points =
+        match points with
+        | [] -> None
+        | [ point ] -> Some(pointBounds point)
+        | _ ->
+            points |> List.pairwise |> List.map (geographicEdgeBounds flattening)
+            |> List.reduce mergeGeographicBounds |> Some
+
+    let union largerGap = function
+        | [] -> None
+        | first :: rest as boxes ->
+            let longitudes =
+                boxes |> List.filter (fun box ->
+                    not (boostGeoEqual box.South pole || boostGeoEqual box.North (-pole)))
+            let west, east =
+                match longitudes with
+                | [] -> 0.0, 0.0
+                | box :: remaining ->
+                    let bounds = encloseGeographicBounds largerGap box remaining
+                    bounds.West, bounds.East
+            let south, north = rest |> List.fold (fun (south, north) box -> min south box.South, max north box.North) (first.South, first.North)
+            Some { West = west; East = east; South = south; North = north }
+
+    let polygonBounds rings =
+        match rings with
+        | ring :: _ when not (List.isEmpty ring) ->
+            lineBounds ring |> Option.map (fun bounds ->
+                if bounds.East - bounds.West < 2.0 * half then bounds
+                else
+                    // A full-longitude exterior can also enclose a pole.
+                    let exterior = orientGeographicPolygonRings referenceSystem [ ring ] |> List.head
+                    let sweep =
+                        exterior |> List.pairwise
+                        |> List.sumBy (fun ((_, first), (_, second)) -> longitudeDistance first second)
+                    if sweep > 180.0 then { bounds with North = pole }
+                    elif sweep < -180.0 then { bounds with South = -pole }
+                    else bounds)
+        | _ -> rings |> List.choose lineBounds |> union (>)
+
+    let rec envelope = function
+        | GEmpty -> None
+        | GPoint(latitude, longitude) -> Some(pointBounds (latitude, longitude))
+        | GMultiPoint points ->
+            let largerGap first second = first > second && not (boostGeoEqual first second)
+            points |> List.map pointBounds |> union largerGap
+        | GLineString points -> lineBounds points
+        | GMultiLineString lines -> lines |> List.choose lineBounds |> union (>)
+        | GPolygon rings -> polygonBounds rings
+        | GMultiPolygon polygons -> polygons |> List.choose polygonBounds |> union (>)
+        | GGeometryCollection members -> members |> List.choose (fun geometry -> envelope geometry.Shape) |> union (>)
+
+    envelope shape
+
+let private geographicBoundsContains outer inner =
+    let period = 2.0 * Math.PI
+    let longitudeWidth box = box.East - box.West
+    let longitudeOffset = geographicBoundsLongitudeOffset outer.West
+
+    let point box = box.South, box.West
+    let farCorner box = box.North, box.East
+    let equalBounds =
+        boostGeoEqual outer.West inner.West && boostGeoEqual outer.East inner.East
+        && boostGeoEqual outer.South inner.South && boostGeoEqual outer.North inner.North
+
+    let longitudeInside isInside longitude =
+        longitudeWidth outer >= period
+        || isInside outer.West longitude outer.East
+        || isInside outer.West (outer.West + longitudeOffset longitude) outer.East
+    let within lower value upper = lower < value && value < upper
+    let covered lower value upper = lower <= value && value <= upper
+    let inBox isInside (latitude, longitude) =
+        isInside outer.South latitude outer.North && longitudeInside isInside longitude
+    let isPoint box = point box = farCorner box
+    let isLine box = (box.West = box.East) <> (box.South = box.North)
+    let onOuterLine = geographicSegmentCoversPoint defaultGeographicFlattening (point outer, farCorner outer)
+
+    if equalBounds then true
+    elif isPoint outer then false
+    elif isLine outer then
+        if isPoint inner then
+            let query = point inner
+            not (equalGeographicCoordinates (point outer) query || equalGeographicCoordinates (farCorner outer) query)
+            && onOuterLine query
+        else isLine inner && onOuterLine (point inner) && onOuterLine (farCorner inner)
+    elif isPoint inner then inBox within (point inner)
+    elif isLine inner then
+        // A line along the edge has no point in the box's interior.
+        let alongEdge =
+            (inner.West = inner.East && (inner.West = outer.West || inner.West = outer.East))
+            || (inner.South = inner.North && (inner.South = outer.South || inner.South = outer.North))
+        not alongEdge && inBox covered (point inner) && inBox covered (farCorner inner)
+    else
+        outer.South <= inner.South && inner.North <= outer.North
+        && (longitudeWidth outer >= period
+            || (outer.West <= inner.West && inner.East <= outer.East)
+            || (longitudeWidth inner <= longitudeWidth outer
+                && outer.West + longitudeOffset inner.West + longitudeWidth inner <= outer.East))
+
+let internal geographicMbrContains referenceSystem first second =
+    Option.map2 geographicBoundsContains (geographicMbr referenceSystem first) (geographicMbr referenceSystem second)
+
+let internal geographicMbrIntersects referenceSystem first second =
+    Option.map2 geographicBoundsIntersect (geographicMbr referenceSystem first) (geographicMbr referenceSystem second)
 
 let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygons area =
     let sources = List.map List.pairwise lines

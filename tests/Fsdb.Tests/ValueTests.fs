@@ -747,6 +747,36 @@ let tests =
                         Expect.isLessThan (abs (contactLatitude - 41.00000008675716)) 1e-10 "the separate point lies beside the short fragment"
                     | actual -> failtestf "expected the tiny clipped line and point, got %A" actual
 
+                testCase "geographic MBR predicates use geodesic, circular and degenerate bounds"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let seam = "POLYGON((170 -5,-170 -5,-170 5,170 5,170 -5))"
+                    let parallelPoints = "MULTIPOINT(-10 10,10 10)"
+                    for first, second, contains, within, intersects in
+                        [ seam, "POINT(-179 0)", 1L, 0L, 1L
+                          seam, "POINT(0 0)", 0L, 0L, 0L
+                          seam, "POINT(170 0)", 0L, 0L, 1L
+                          seam, "POINT(-170 5)", 0L, 0L, 0L
+                          seam, "POLYGON((-170 -1,-160 -1,-160 1,-170 1,-170 -1))", 0L, 0L, 0L
+                          "POINT(179 0)", seam, 0L, 1L, 1L
+                          "LINESTRING(-60 70,60 70)", "POINT(0 75)", 1L, 0L, 1L
+                          "LINESTRING(-60 -70,60 -70)", "POINT(0 -75)", 1L, 0L, 1L
+                          "LINESTRING(2 0,2 4)", "POINT(2 2)", 1L, 0L, 1L
+                          "LINESTRING(2 0,2 4)", "POINT(2 0)", 0L, 0L, 1L
+                          "LINESTRING(175 0,-175 0)", "LINESTRING(177 0,-177 0)", 1L, 0L, 1L
+                          parallelPoints, "POINT(0 10)", 0L, 0L, 1L
+                          parallelPoints, parallelPoints, 1L, 1L, 1L
+                          "POLYGON((0 80,120 80,-120 80,0 80))", "POINT(0 90)", 1L, 0L, 1L
+                          "MULTIPOINT(-175 -1,-65 1,45 -1,125 1)", "POINT(0 0)", 1L, 0L, 1L
+                          "GEOMETRYCOLLECTION(POINT(-175 -1),POINT(-65 1),POINT(45 -1),POINT(125 1))", "POINT(0 0)", 0L, 0L, 0L ] do
+                        let args = [ geometry first; geometry second ]
+                        for name, expected in [ "MBRContains", contains; "MBRWithin", within; "MBRIntersects", intersects ] do
+                            Expect.equal (call name args) (VInt expected) $"{name} of {first} and {second}"
+
+                    let empty = geometry "GEOMETRYCOLLECTION EMPTY"
+                    Expect.equal (call "MBRIntersects" [ empty; geometry seam ]) VNull "empty bounds give NULL"
+
                 testCase "geographic area overlays preserve the computed longitude of antimeridian cuts"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"
