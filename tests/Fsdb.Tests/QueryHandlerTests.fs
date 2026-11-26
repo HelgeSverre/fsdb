@@ -8758,6 +8758,94 @@ let tests =
               let _, _ = handle holder "UNLOCK TABLES"
               ()
 
+          testCase "queued LOCK TABLES reopens names after DDL and releases the list on failure"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY)" (Affected 0UL)
+              let setup = run setup "CREATE TABLE sibling(id INT PRIMARY KEY)" (Affected 0UL)
+              run setup "INSERT INTO sibling VALUES (1)" (Affected 1UL) |> ignore
+              let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+              let holder = run holder "SELECT id FROM gate" (ResultSet([ "id" ], []))
+              let ddl = run (create 3 store) "SET SESSION lock_wait_timeout=6" (Affected 0UL)
+              let ddl = Threading.Tasks.Task.Run(fun () -> handle ddl "DROP TABLE gate")
+              let observer = run (create 4 store) "SET SESSION lock_wait_timeout=1" (Affected 0UL)
+              let contender = run (create 5 store) "SET SESSION lock_wait_timeout=6" (Affected 0UL)
+              let mutable waiting = None
+              try
+                  Expect.isFalse (ddl.Wait(TimeSpan.FromMilliseconds 100.0)) "the drop waits on the transaction"
+                  match handle observer "SELECT id FROM gate" |> snd with
+                  | Err(1205, _) -> ()
+                  | other -> failtestf "the later reader should be behind the drop, got %A" other
+
+                  let locking = Threading.Tasks.Task.Run(fun () -> handle contender "LOCK TABLES gate WRITE, sibling READ")
+                  waiting <- Some locking
+                  Expect.isTrue
+                      (Threading.SpinWait.SpinUntil(
+                          (fun () -> Fsdb.TableLocks.waitingWriterCount store Fsdb.Storage.defaultDatabase "gate" = 1),
+                          TimeSpan.FromSeconds 2.0))
+                      "the explicit lock request enters the table queue"
+              finally
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+
+              Expect.equal (ddl.GetAwaiter().GetResult() |> snd) (Affected 0UL) "the drop completed"
+              let locked, result = (Option.get waiting).GetAwaiter().GetResult()
+              try
+                  match result with
+                  | Err(1146, _) -> ()
+                  | other -> failtestf "LOCK TABLES should report the dropped table, got %A" other
+                  run observer "DELETE FROM sibling WHERE id=1" (Affected 1UL) |> ignore
+              finally
+                  Fsdb.QueryHandler.closeSession locked
+
+          testCase "queued LOCK TABLES follows a replaced view while its old source is still held"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE old_source(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let setup = run setup "CREATE TABLE new_source(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let setup = run setup "INSERT INTO old_source VALUES (1,10)" (Affected 1UL)
+              let setup = run setup "INSERT INTO new_source VALUES (1,20)" (Affected 1UL)
+              run setup "CREATE VIEW visible AS SELECT id,v FROM old_source" (Affected 0UL) |> ignore
+              let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+              let holder = run holder "SELECT v FROM visible" (ResultSet([ "v" ], [ [ Some "10" ] ]))
+              let writer = run (create 3 store) "BEGIN" (Affected 0UL)
+              let writer = run writer "UPDATE old_source SET v=11 WHERE id=1" (Affected 1UL)
+              let ddl = run (create 4 store) "SET SESSION lock_wait_timeout=6" (Affected 0UL)
+              let ddl = Threading.Tasks.Task.Run(fun () -> handle ddl "CREATE OR REPLACE VIEW visible AS SELECT id,v FROM new_source")
+              let contender = run (create 5 store) "SET SESSION lock_wait_timeout=6" (Affected 0UL)
+              let mutable waiting = None
+              try
+                  try
+                      Expect.isFalse (ddl.Wait(TimeSpan.FromMilliseconds 150.0)) "the old view reader blocks the replacement"
+                      let locking = Threading.Tasks.Task.Run(fun () -> handle contender "LOCK TABLES visible WRITE")
+                      waiting <- Some locking
+                      Expect.isTrue
+                          (Threading.SpinWait.SpinUntil(
+                              (fun () -> Fsdb.TableLocks.waitingWriterCount store Fsdb.Storage.defaultDatabase "visible" = 1),
+                              TimeSpan.FromSeconds 2.0))
+                          "the explicit lock list entered the queue"
+                  finally
+                      run holder "ROLLBACK" (Affected 0UL) |> ignore
+
+                  Expect.equal (ddl.GetAwaiter().GetResult() |> snd) (Affected 0UL) "the replacement completed"
+                  let locked, result = (Option.get waiting).GetAwaiter().GetResult()
+                  try
+                      Expect.equal result (Affected 0UL) "the explicit lock skips the obsolete source"
+                      run locked "SELECT v FROM visible" (ResultSet([ "v" ], [ [ Some "20" ] ])) |> ignore
+                  finally
+                      Fsdb.QueryHandler.closeSession locked
+              finally
+                  run writer "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "a valid replacement lock list releases prior locks before resolution"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -8892,6 +8980,12 @@ let tests =
               match handle holder "FLUSH TABLES missing_flush_lock WITH READ LOCK" |> snd with
               | Err(1146, _) -> ()
               | other -> failtestf "expected the missing FLUSH table to fail, got %A" other
+
+              let holder, _ = handle holder "CREATE VIEW flushed_view AS SELECT id FROM flushed_lock_target"
+
+              match handle holder "FLUSH TABLES flushed_view WITH READ LOCK" |> snd with
+              | Err(1347, _) -> ()
+              | other -> failtestf "expected named FLUSH to require a base table, got %A" other
 
               let holder, _ = handle holder "CREATE TEMPORARY TABLE temporary_flush_lock (id INT)"
 

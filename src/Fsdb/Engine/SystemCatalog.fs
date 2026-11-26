@@ -125,6 +125,9 @@ module Trigger =
     let withActionOrder order row = withValue 8 (VInt order) row
 
 module View =
+    let internal invalidError schema name =
+        1356, sprintf "View '%s.%s' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them" schema name
+
     type Entry =
         { Name: string
           Schema: string

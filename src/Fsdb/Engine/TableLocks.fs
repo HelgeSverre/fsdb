@@ -51,6 +51,8 @@ type private MetadataWait =
 
 type private MetadataWaitResult = Granted | TimedOut | Deadlocked
 
+type internal ExplicitAcquireResult = ExplicitAcquired | ExplicitPlanChanged
+
 type private Manager =
     { SyncRoot: obj
       Tables: Dictionary<string, TableState>
@@ -340,7 +342,7 @@ let private waitForStatement policy timeout metadataTimeout owner (manager: Mana
     let waited = not (ready ())
     waitForMetadata timeout metadataTimeout owner false manager ready blockers, waited
 
-let private waitForExplicit timeout owner (manager: Manager) physical =
+let private waitForExplicit timeout owner (manager: Manager) physical planIsCurrent =
     let targets = physical |> Map.toList |> List.map (fun (key, mode) -> key, mode, stateFor manager key)
     let blockers () =
         seq {
@@ -360,10 +362,11 @@ let private waitForExplicit timeout owner (manager: Manager) physical =
         |> Seq.map int64
 
     let ready () =
-        (targets |> List.forall (fun (_, mode, state) ->
-            if writesRows mode then state.PreparedReaders = 0
-            else state.PreparedWriters = 0))
-        && (blockers () |> Seq.isEmpty)
+        not (planIsCurrent ())
+        || ((targets |> List.forall (fun (_, mode, state) ->
+                if writesRows mode then state.PreparedReaders = 0
+                else state.PreparedWriters = 0))
+            && (blockers () |> Seq.isEmpty))
 
     for _, mode, state in targets do
         state.WaitingExplicit.Add(owner, mode)
@@ -422,7 +425,7 @@ let private releaseExplicitUnderLock owner (manager: Manager) =
         manager.Explicit.Remove owner |> ignore
         true
 
-let acquireExplicit timeout store owner accesses =
+let internal acquireExplicitRechecking timeout store owner accesses planIsCurrent =
     let manager = managerFor store
 
     match buildNames accesses with
@@ -447,14 +450,18 @@ let acquireExplicit timeout store owner accesses =
                         TimedOut
                     else
                         trackWaitingWriter owner manager physical (fun () ->
-                            waitForExplicit (max TimeSpan.Zero (deadline - DateTime.UtcNow)) owner manager physical)
+                            waitForExplicit (max TimeSpan.Zero (deadline - DateTime.UtcNow)) owner manager physical planIsCurrent)
 
                 match acquired with
+                | Granted when not (planIsCurrent ()) -> Ok ExplicitPlanChanged
                 | Granted ->
                     acquirePhysical owner manager physical
                     manager.Explicit.[owner] <- { Names = names; Physical = physical }
-                    Ok()
+                    Ok ExplicitAcquired
                 | failure -> Error(metadataWaitError failure))
+
+let acquireExplicit timeout store owner accesses =
+    acquireExplicitRechecking timeout store owner accesses (fun () -> true) |> Result.map ignore
 
 let releaseExplicit store owner =
     let manager = managerFor store
@@ -1060,6 +1067,10 @@ let private isTemporary (catalog: Catalog) access =
     |> Map.tryFind (normalize access.Database)
     |> Option.exists (Map.containsKey (normalizeTableName access.Table))
 
+let private viewSources (view: SystemCatalog.View.Entry) =
+    Parser.parseViewDefinition view.Definition
+    |> Result.map (fun definition -> directStatementAccesses view.Schema definition.Statement)
+
 let private expandDependencies store temporaryCatalog accesses =
     // A physical table cannot share its name with a view. Most statements
     // only touch physical tables, so avoid scanning the view catalog for them.
@@ -1084,10 +1095,10 @@ let private expandDependencies store temporaryCatalog accesses =
                 match view with
                 | None -> []
                 | Some view ->
-                    match Parser.parseViewDefinition view.Definition with
+                    match viewSources view with
                     | Error _ -> []
-                    | Ok definition ->
-                        directStatementAccesses view.Schema definition.Statement
+                    | Ok sources ->
+                        sources
                         |> List.collect (fun dependency ->
                             { dependency with
                                 ReferenceName = None
@@ -1140,7 +1151,18 @@ let dependenciesForStatement store temporaryCatalog defaultDb statement =
     |> expandDependencies store temporaryCatalog
 
 let accessesForStatement store temporaryCatalog defaultDb statement =
-    statementDependencies store defaultDb statement
+    let dependencies =
+        // View DDL reserves its target name separately and opens only the new definition's sources.
+        match statement with
+        | CreateView view ->
+            let schema, _ = splitName defaultDb view.Name
+            match Parser.parseViewDefinition view.Definition with
+            | Ok definition -> statementDependencies store schema definition.Statement
+            | Error _ -> []
+        | DropView _ -> []
+        | _ -> statementDependencies store defaultDb statement
+
+    dependencies
     |> List.filter (requiresOwnership temporaryCatalog)
     |> mergeAccesses
     |> expandDependencies store temporaryCatalog
@@ -1158,8 +1180,42 @@ let internal retainOpenedStatementAccess live snapshot owner accesses =
             let manager = managerFor live
             lock manager.SyncRoot (fun () -> retainTransactionAccess owner manager (physicalAccesses accesses))
 
-let private resolveExplicitAccesses ignoreTemporary store temporaryCatalog defaultDb locks =
+type internal ExplicitLockKind = LockList | FlushList
+
+type private ExplicitOpenPhase = BeforeWaiting | AfterWaiting
+
+let internal explicitDependenciesUnchanged kind store =
+    match kind with
+    | FlushList -> fun () -> true
+    | LockList ->
+        let snapshot name =
+            match tableSnapshot store "mysql" name with
+            | Ok table -> box table
+            | Error _ -> null
+
+        // These immutable catalog roots describe the dependencies expanded into a lock list.
+        let definitions = [ for name in [ "views"; "triggers"; "routines" ] -> name, snapshot name ]
+        fun () -> definitions |> List.forall (fun (name, previous) -> obj.ReferenceEquals(previous, snapshot name))
+
+let private resolveExplicitAccesses kind phase store temporaryCatalog defaultDb locks =
     let views = lazy (viewEntries store)
+
+    let rec viewTablesExist opened (view: SystemCatalog.View.Entry) =
+        let key = tableKey view.Schema view.Name
+        if Set.contains key opened then false
+        else
+            let opened = Set.add key opened
+            match viewSources view with
+            | Error _ -> false
+            | Ok sources ->
+                sources |> List.forall (fun source ->
+                    if not (requiresOwnership Map.empty source) then true
+                    else
+                        match tableSnapshot store source.Database source.Table with
+                        | Ok _ -> true
+                        | Error _ ->
+                            Map.tryFind (tableKey source.Database source.Table) views.Value
+                            |> Option.exists (viewTablesExist opened))
 
     let rec resolve resolved =
         function
@@ -1174,19 +1230,29 @@ let private resolveExplicitAccesses ignoreTemporary store temporaryCatalog defau
             let current =
                 access database table (Some(requested.Alias |> Option.defaultValue table)) mode
 
-            if isTemporary temporaryCatalog current && ignoreTemporary then
+            if kind = LockList && isTemporary temporaryCatalog current then
                 resolve resolved rest
             else
                 match tableSnapshot store database table with
                 | Ok _ -> resolve (current :: resolved) rest
-                | Error _ when Map.containsKey (tableKey database table) views.Value ->
-                    resolve (current :: resolved) rest
-                | Error _ -> Error(1146, sprintf "Table '%s.%s' doesn't exist" database table)
+                | Error _ ->
+                    match Map.tryFind (tableKey database table) views.Value with
+                    | None -> Error(1146, sprintf "Table '%s.%s' doesn't exist" database table)
+                    | Some _ when phase = AfterWaiting && kind = FlushList ->
+                        Error(1347, sprintf "'%s.%s' is not BASE TABLE" database table)
+                    | Some view when phase = AfterWaiting && not (viewTablesExist Set.empty view) ->
+                        Error(SystemCatalog.View.invalidError database table)
+                    | Some _ -> resolve (current :: resolved) rest
 
-    resolve [] locks |> Result.map (expandDependencies store temporaryCatalog)
+    match kind with
+    | FlushList -> resolve [] locks
+    | LockList -> resolve [] locks |> Result.map (expandDependencies store temporaryCatalog)
 
 let explicitAccesses store temporaryCatalog defaultDb locks =
-    resolveExplicitAccesses true store temporaryCatalog defaultDb locks
+    resolveExplicitAccesses LockList BeforeWaiting store temporaryCatalog defaultDb locks
 
 let flushAccesses store temporaryCatalog defaultDb locks =
-    resolveExplicitAccesses false store temporaryCatalog defaultDb locks
+    resolveExplicitAccesses FlushList BeforeWaiting store temporaryCatalog defaultDb locks
+
+let internal reopenExplicitAccesses kind store temporaryCatalog defaultDb locks =
+    resolveExplicitAccesses kind AfterWaiting store temporaryCatalog defaultDb locks

@@ -1583,6 +1583,130 @@ def check(port, mysql):
             )
         execute(lock, "UNLOCK TABLES")
 
+    reopen_setup = (
+        "CREATE TABLE gate(id INT PRIMARY KEY,v INT)",
+        "INSERT INTO gate VALUES(1,10)",
+        "CREATE TABLE replacement(id INT PRIMARY KEY,v INT)",
+        "INSERT INTO replacement VALUES(1,20)",
+        "CREATE TABLE sibling(id INT PRIMARY KEY,v INT)",
+        "INSERT INTO sibling VALUES(1,30)",
+        "CREATE VIEW visible AS SELECT id,v FROM gate",
+    )
+    for lock_sql, target, ddl_sql, code in (
+        ("LOCK TABLES gate WRITE, sibling READ", "gate", "DROP TABLE gate", 1146),
+        (
+            "LOCK TABLES gate READ, sibling READ",
+            "gate",
+            "RENAME TABLE gate TO moved",
+            1146,
+        ),
+        (
+            "LOCK TABLES gate READ, sibling READ",
+            "gate",
+            "RENAME TABLE gate TO moved, replacement TO gate",
+            0,
+        ),
+        ("LOCK TABLES visible READ, sibling READ", "visible", "DROP TABLE gate", 1356),
+        ("FLUSH TABLES gate,sibling WITH READ LOCK", "gate", "DROP TABLE gate", 1146),
+        (
+            "FLUSH TABLES gate,sibling WITH READ LOCK",
+            "gate",
+            "RENAME TABLE gate TO moved, replacement TO gate",
+            0,
+        ),
+        (
+            "FLUSH TABLES visible,sibling WITH READ LOCK",
+            "visible",
+            "CREATE OR REPLACE VIEW visible AS SELECT id,v FROM replacement",
+            1347,
+        ),
+    ):
+        with fixture(port, schema, mysql, reopen_setup) as (
+            _,
+            admin,
+            holder,
+            ddl,
+            locker,
+        ):
+            for connection in (ddl, locker):
+                execute(connection, "SET SESSION lock_wait_timeout=5")
+            execute(admin, "SET SESSION lock_wait_timeout=1")
+            execute(holder, "BEGIN")
+            execute(holder, f"SELECT v FROM {target}")
+            with ThreadPoolExecutor(2) as pool:
+                changed = pending_statement(pool, ddl, ddl_sql)
+                try:
+                    expect(
+                        f"{ddl_sql} queues behind the holder", blocked(changed), True
+                    )
+                    locked = pending_statement(pool, locker, lock_sql)
+                    expect(f"{lock_sql} queues behind {ddl_sql}", blocked(locked), True)
+                finally:
+                    execute(holder, "ROLLBACK")
+                expect(ddl_sql, changed.result(5), 0)
+                expect(f"{lock_sql} after {ddl_sql}", locked.result(5), code)
+            try:
+                if code == 0:
+                    expect(
+                        "reopened lock sees replacement row",
+                        scalar(locker, "SELECT v FROM gate"),
+                        20,
+                    )
+                else:
+                    expect(
+                        "failed reopen leaves sibling unlocked",
+                        outcome(admin, "UPDATE sibling SET v=v+1 WHERE id=1"),
+                        1,
+                    )
+            finally:
+                execute(locker, "UNLOCK TABLES")
+
+    with fixture(port, schema, mysql, reopen_setup) as (_, writer, holder, ddl, locker):
+        execute(writer, "SET SESSION lock_wait_timeout=1")
+        for connection in (ddl, locker):
+            execute(connection, "SET SESSION lock_wait_timeout=5")
+        execute(holder, "BEGIN")
+        execute(holder, "SELECT v FROM visible")
+        execute(writer, "BEGIN")
+        execute(writer, "UPDATE gate SET v=11 WHERE id=1")
+        try:
+            with ThreadPoolExecutor(2) as pool:
+                changed = pending_statement(
+                    pool,
+                    ddl,
+                    "CREATE OR REPLACE VIEW visible AS SELECT id,v FROM replacement",
+                )
+                try:
+                    expect(
+                        "replacement waits on the old view reader",
+                        blocked(changed),
+                        True,
+                    )
+                    locked = pending_statement(pool, locker, "LOCK TABLES visible READ")
+                    expect("view lock waits for the replacement", blocked(locked), True)
+                finally:
+                    execute(holder, "ROLLBACK")
+                expect("view replacement finishes", changed.result(5), 0)
+                expect("view lock can skip its obsolete source", locked.result(6), 0)
+            expect(
+                "view lock sees the new source",
+                scalar(locker, "SELECT v FROM visible"),
+                20,
+            )
+            expect(
+                "view lock leaves the obsolete source writable",
+                outcome(writer, "UPDATE gate SET v=12 WHERE id=1"),
+                1,
+            )
+            expect(
+                "view lock protects the new source",
+                outcome(writer, "UPDATE replacement SET v=21 WHERE id=1"),
+                TIMEOUT,
+            )
+        finally:
+            execute(locker, "UNLOCK TABLES")
+            execute(writer, "ROLLBACK")
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 

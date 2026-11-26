@@ -502,10 +502,18 @@ leaves `FOR SHARE OF` sources in read mode. A joined `UPDATE` opens the
 audited physical source with write intent even when that source supplies
 only values. `EXPLAIN SELECT ... FOR UPDATE` holds read metadata.
 
-A competing `DROP TABLE` can still expose a difference. With both
-requests queued behind a transaction, MySQL completes the drop and
-returns 1146 to the explicit lock request. Fsdb can grant the request
-using the table name it resolved before waiting, even after the drop.
+When concurrent DDL wins, both engines reopen queued explicit locks
+against the resulting catalog. A drop or rename away from the requested
+name returns 1146 and releases the entire list. A replacement that takes
+the same name yields the replacement's rows. An explicit lock on a view
+whose base table disappears returns 1356. Named `FLUSH TABLES ... WITH
+READ LOCK` also reopens its names and returns 1347 for a view.
+
+If a queued `LOCK TABLES` request opens a replaced view, it locks the
+new source even while a different transaction still writes the old one.
+`CREATE OR REPLACE VIEW` reserves the view name and opens the new
+definition's sources. Fsdb rebuilds a queued dependency list when the
+stored definitions change and keeps the original wait budget.
 
 #### Metadata queue order
 

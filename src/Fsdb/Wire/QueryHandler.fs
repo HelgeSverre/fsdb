@@ -4887,34 +4887,71 @@ let private tryProbe (parserOptions: Parser.ParserOptions) (sql: string) : Probe
         Some(ShowIndex(capture 1 matched, tryCapture 3 matched))
     | _ -> None
 
-let private acquireResolvedTableAccesses (session: Session) (accesses: TableLocks.Access list) =
-    let privileges =
-        accesses
-        |> List.choose (fun table ->
-            table.ReferenceName
-            |> Option.map (fun _ ->
-                [ "LOCK TABLES", Auth.OnTable(table.Database, table.Table)
-                  "SELECT", Auth.OnTable(table.Database, table.Table) ]))
-        |> List.collect id
+let private acquireTableLockList kind (session: Session) requested =
+    let database = session.Database |> Option.defaultValue defaultDatabase
+    let initialAccesses =
+        match kind with
+        | TableLocks.LockList -> TableLocks.explicitAccesses
+        | TableLocks.FlushList -> TableLocks.flushAccesses
 
-    match checkSessionAccess session session.Store privileges with
-    | Error(code, message) -> session, Err(code, message)
-    | Ok() ->
-        match TableLocks.acquireExplicit (metadataLockWaitTimeout session) session.Store session.ConnectionId accesses with
-        | Ok() ->
-            let readTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.ReadAccess)
-            let wroteTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.WriteAccess)
-            Session.trackExplicitTableLocks readTransactional wroteTransactional session, Affected 0UL
+    let timeout = metadataLockWaitTimeout session
+    let started = Stopwatch.GetTimestamp()
+    let remaining () = max TimeSpan.Zero (timeout - Stopwatch.GetElapsedTime started)
+    let release () = TableLocks.releaseExplicit session.Store session.ConnectionId
+
+    let rec acquire () =
+        let retry () =
+            if remaining () = TimeSpan.Zero then
+                session, Err(1205, "Lock wait timeout exceeded; try restarting transaction")
+            else
+                acquire ()
+
+        let planIsCurrent = TableLocks.explicitDependenciesUnchanged kind session.Store
+        match initialAccesses session.Store session.TemporaryCatalog database requested with
         | Error(code, message) -> session, Err(code, message)
+        | Ok accesses ->
+            let privileges =
+                accesses
+                |> List.collect (fun table ->
+                    match table.ReferenceName with
+                    | None -> []
+                    | Some _ ->
+                        [ "LOCK TABLES", Auth.OnTable(table.Database, table.Table)
+                          "SELECT", Auth.OnTable(table.Database, table.Table) ])
+
+            match checkSessionAccess session session.Store privileges with
+            | Error(code, message) -> session, Err(code, message)
+            | Ok() ->
+                match TableLocks.acquireExplicitRechecking (remaining ()) session.Store session.ConnectionId accesses planIsCurrent with
+                | Error(code, message) -> session, Err(code, message)
+                | Ok TableLocks.ExplicitPlanChanged -> retry ()
+                | Ok TableLocks.ExplicitAcquired ->
+                    // The granted locks pin these names while they are reopened against the live catalog.
+                    let reopened =
+                        try
+                            TableLocks.reopenExplicitAccesses kind session.Store session.TemporaryCatalog database requested
+                        with _ ->
+                            release ()
+                            reraise ()
+
+                    match reopened with
+                    | Ok current when current = accesses ->
+                        let readTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.ReadAccess)
+                        let wroteTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.WriteAccess)
+                        Session.trackExplicitTableLocks readTransactional wroteTransactional session, Affected 0UL
+                    | Ok _ ->
+                        release ()
+                        retry ()
+                    | Error(code, message) ->
+                        release ()
+                        session, Err(code, message)
+
+    acquire ()
 
 let private acquireExplicitTableAccesses session requested =
     let session = commitSession session
     TableLocks.releaseExplicit session.Store session.ConnectionId
-    let database = session.Database |> Option.defaultValue defaultDatabase
-
-    match TableLocks.explicitAccesses session.Store session.TemporaryCatalog database requested with
-    | Error(code, message) -> session, Err(code, message)
-    | Ok accesses -> acquireResolvedTableAccesses session accesses
+    acquireTableLockList TableLocks.LockList session requested
 
 let private acquireExplicitTableLocks session sql =
     match Parser.parseTableLocksWithOptions (parserOptionsForSession session) sql with
@@ -4924,12 +4961,7 @@ let private acquireExplicitTableLocks session sql =
 let private acquireFlushTableLocks session sql =
     match Parser.parseFlushTableLocksWithOptions (parserOptionsForSession session) sql with
     | Error detail -> session, parserError sql detail
-    | Ok requested ->
-        let database = session.Database |> Option.defaultValue defaultDatabase
-
-        match TableLocks.flushAccesses session.Store session.TemporaryCatalog database requested with
-        | Error(code, message) -> session, Err(code, message)
-        | Ok accesses -> acquireResolvedTableAccesses session accesses
+    | Ok requested -> acquireTableLockList TableLocks.FlushList session requested
 
 let private acquireGlobalFlushReadLock session =
     match

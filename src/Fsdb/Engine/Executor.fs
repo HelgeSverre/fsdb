@@ -1428,8 +1428,7 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) =
     else
         tryStoredViewDefinition store dbName viewName
 
-let internal invalidViewError schema name =
-    1356, sprintf "View '%s.%s' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them" schema name
+let internal invalidViewError = SystemCatalog.View.invalidError
 
 /// A stored view binds its dependencies to the permanent catalog. Session
 /// temporary tables may shadow those names for direct queries, but cannot
