@@ -2663,6 +2663,44 @@ let tests =
               let notes = handle (Fsdb.Session.create 3 recovered) "SELECT n FROM notes WHERE id=1" |> snd
               Expect.equal notes (ResultSet([ "n" ], [ [ Some "1" ] ])) "the serializable write survives recovery"
 
+          testCase "word cache checkpoints preserve byte offsets and deleted document order"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let execute current sql =
+                  let _, result = handle (Fsdb.Session.create 1 current) sql
+                  TestSupport.Sql.expectOk result sql
+              let index (current: Store) = current.Catalog.[defaultDatabase].["docs"].FullTextIndexes.["ft"]
+              let budget = index >> Fsdb.FullText.cacheBudget
+              let tail spelling current = index current |> Fsdb.FullText.cachedPostingTail spelling |> Option.get
+              let read current =
+                  handle (Fsdb.Session.create 2 current) "SELECT id FROM docs WHERE MATCH(title,body) AGAINST('réseau' IN BOOLEAN MODE) ORDER BY id"
+                  |> snd
+
+              execute store "CREATE TABLE docs(id INT PRIMARY KEY,title TEXT,body TEXT,FULLTEXT KEY ft(title,body)) COLLATE=utf8mb4_bin"
+              execute store "INSERT INTO docs VALUES(1,'réseau',CONCAT(REPEAT(' ',121),'réseau')),(2,'archived',''),(3,'x','')"
+              execute store "DELETE FROM docs WHERE id IN (2,3)"
+              Expect.equal (tail "réseau" store).UsedBytes 5L "the UTF-8 field gap needs a two-byte position delta"
+              Expect.equal (tail "archived" store).LastDocument 2L "the removed term still occupies cache space"
+              snapshotNow dir store
+              let checkpoint = load dir
+              Expect.equal (budget checkpoint) (budget store) "checkpoint restores the word posting tails"
+
+              for current in [ store; checkpoint ] do
+                  execute current "INSERT INTO docs VALUES(4,'réseau','archived')"
+                  Expect.equal (tail "réseau" current).LastDocument 4L "even a deleted row without words consumed a document ID"
+              Expect.equal (budget (load dir)) (budget checkpoint) "WAL replay appends at the checkpoint's next document ID"
+
+              let expected = ResultSet([ "id" ], [ [ Some "1" ]; [ Some "4" ] ])
+              Expect.equal (read store) expected "the word query sees both rows before sync"
+              store.FullTextCacheSize <- 100
+              syncFullTextCachesUnderPressure store
+              Expect.equal (budget store).Bytes 0L "word postings clear on automatic sync"
+              let recovered = load dir
+              Expect.equal (budget recovered).Bytes 0L "WAL replay clears the same cache"
+              Expect.equal (read recovered) expected "the word query sees both rows after replay"
+
           testCase "committed deleted ngram frequencies survive replay and clean close until optimize"
           <| fun _ ->
               let dir = tempDataDir ()

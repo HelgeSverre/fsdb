@@ -89,23 +89,30 @@ let private isWordChar (c: char) =
         | Globalization.UnicodeCategory.EnclosingMark -> true
         | _ -> false)
 
-let private rawTokensBy isWord keepApostrophes (text: string) : string[] =
-    let tokens = ResizeArray<string>()
+let private collectRawTokens isWord keepApostrophes makeToken (text: string) =
+    let tokens = ResizeArray<_>()
     let current = Text.StringBuilder()
+    let mutable start = 0
 
     let flush () =
         let text = current.ToString()
         let t = if keepApostrophes then text.Trim('\'') else text
-        if t.Length > 0 then tokens.Add t
+        if t.Length > 0 then tokens.Add(makeToken t start)
         current.Clear() |> ignore
 
-    for c in text do
-        if isWord c then current.Append c |> ignore
+    for offset = 0 to text.Length - 1 do
+        let c = text.[offset]
+        if isWord c then
+            if current.Length = 0 then start <- offset
+            current.Append c |> ignore
         elif keepApostrophes && c = '\'' && current.Length > 0 then current.Append c |> ignore
         else flush ()
 
     flush ()
     tokens.ToArray()
+
+let private rawTokensBy isWord keepApostrophes =
+    collectRawTokens isWord keepApostrophes (fun word _ -> word)
 
 let private rawTokens = rawTokensBy isWordChar true
 
@@ -212,6 +219,11 @@ type internal ReadView<'id when 'id: comparison> =
           DocumentOrderFollowsIds: bool
           HasDocumentOrder: bool }
 
+let private tracksNgramPostingSources (index: Index<'id>) =
+    match index.Rules.Tokenizer with
+    | Ngrams _ -> true
+    | Words _ -> false
+
 let internal readView (index: Index<'id>) : ReadView<'id> =
     { Documents = index.Documents
       Postings = index.Postings
@@ -220,7 +232,10 @@ let internal readView (index: Index<'id>) : ReadView<'id> =
       Rules = activeRules index
       DocumentCount = index.Documents.Count
       VisibleDocumentIds = None
-      FlushedThrough = index.FlushedThrough |> Option.filter (fun through -> through < index.NextDocumentOrder - 1L)
+      FlushedThrough =
+          if tracksNgramPostingSources index then
+              index.FlushedThrough |> Option.filter (fun through -> through < index.NextDocumentOrder - 1L)
+          else None
       CachedTerms = index.CachedTerms
       Deleted = index.Deleted
       DocumentOrderFollowsIds = index.DocumentOrderFollowsIds
@@ -269,10 +284,13 @@ let private tokenWith collation text =
     // InnoDB folds full-text case even for nonbinary case-sensitive collations.
     foldFullText collation text |> tokenOfFolded collation
 
+let private collectWordTokens tokenizer collation makeToken =
+    if usesUtf8WordParser tokenizer collation then collectRawTokens BooleanWordChars.contains false makeToken
+    else collectRawTokens isWordChar true makeToken
+
 let private rawTokensWith tokenizer collation text =
     match tokenizer with
-    | Words _ when usesUtf8WordParser tokenizer collation -> rawTokensBy BooleanWordChars.contains false text
-    | Words _ -> rawTokens text
+    | Words _ -> collectWordTokens tokenizer collation (fun word _ -> word) text
     | Ngrams size -> ngrams size text
 
 let private tokensWith tokenizer collation text =
@@ -341,7 +359,17 @@ let private cacheDocumentTerms (words: (string * Token[])[]) terms =
     (terms, Array.sortBy fst words)
     ||> Array.fold (fun terms (key, grams) -> FullTextCache.add key grams.[0].Text terms)
 
-let private chargeDocument order (words: (string * Token[])[]) budget =
+let private postingByteCount tokenizer (collation: Collation) =
+    let utf8 (text: string) start length = Text.Encoding.UTF8.GetByteCount(text.AsSpan(start, length))
+    match tokenizer with
+    | Ngrams _ -> utf8
+    | Words _ when usesUtf8WordParser tokenizer collation -> utf8
+    | Words _ ->
+        let charset = Collation.charsetOfCollation collation.Name
+        fun text start length -> (Charset.encode charset (text.Substring(start, length))).Length
+
+let private chargeDocument tokenizer collation order (words: (string * Token[])[]) budget =
+    let byteCount = postingByteCount tokenizer collation
     let postings =
         words |> Array.map (fun (key, grams) ->
             let mutable previous = 0L
@@ -349,7 +377,8 @@ let private chargeDocument order (words: (string * Token[])[]) budget =
             for gram in grams do
                 bytes <- bytes + FullTextCache.encodedLength (gram.ByteOffset - previous)
                 previous <- gram.ByteOffset
-            key, Text.Encoding.UTF8.GetByteCount grams.[0].Text, bytes)
+            let spelling = grams.[0].Text
+            key, byteCount spelling 0 spelling.Length, bytes)
     FullTextCache.addDocument order postings budget
 
 let private prefixKeys (collation: Collation) (token: Token) =
@@ -496,7 +525,7 @@ let private removeDocumentCore retainPosting (id: 'id) (index: Index<'id>) : Ind
             Postings = postings
             PrefixPostings = prefixPostings
             Deleted =
-                if retainPosting && index.FlushedThrough.IsSome then
+                if retainPosting && index.FlushedThrough.IsSome && tracksNgramPostingSources index then
                     addDeletedDocument indexed.Order tokens words prefixes index.Deleted
                 else index.Deleted }
 
@@ -535,7 +564,8 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
             if index.FlushedThrough.IsSome then cacheDocumentTerms words index.CachedTerms
             else index.CachedTerms
         CacheBudget =
-            if index.FlushedThrough.IsSome then chargeDocument index.NextDocumentOrder words index.CacheBudget
+            if index.FlushedThrough.IsSome then
+                chargeDocument document.Rules.Tokenizer index.Collation index.NextDocumentOrder words index.CacheBudget
             else index.CacheBudget
         HasDocumentOrder = index.HasDocumentOrder || index.Documents.IsEmpty
         DocumentOrderFollowsIds =
@@ -544,15 +574,25 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
 
 let internal addDocumentFieldsWithRules rules id texts (index: Index<'id>) =
     // Phrase positions retain tokens omitted from ngram postings.
-    let fields =
+    let byteCount = postingByteCount rules.Tokenizer index.Collation
+    let tokensAt start (text: string) =
         match rules.Tokenizer with
-        | Words _ -> texts |> List.map (tokensWith rules.Tokenizer index.Collation) |> List.toArray
         | Ngrams size ->
-            let mutable start = 0L
-            [| for text in texts do
-                   yield positionedNgrams size text |> Array.map (fun (gram, offset) ->
-                       { tokenWith index.Collation gram with ByteOffset = start + offset })
-                   if text.Length > 0 then start <- start + int64 (Text.Encoding.UTF8.GetByteCount text) + 1L |]
+            positionedNgrams size text |> Array.map (fun (gram, offset) ->
+                { tokenWith index.Collation gram with ByteOffset = start + offset })
+        | Words _ ->
+            let mutable previous = 0
+            let mutable position = start
+            collectWordTokens rules.Tokenizer index.Collation (fun word offset ->
+                position <- position + int64 (byteCount text previous (offset - previous))
+                previous <- offset
+                { tokenWith index.Collation word with ByteOffset = position }) text
+
+    let mutable start = 0L
+    let fields =
+        [| for text in texts do
+               yield tokensAt start text
+               if text.Length > 0 then start <- start + int64 (byteCount text 0 text.Length) + 1L |]
     addDocumentData id { Fields = fields; Rules = rules } index
 
 let internal sameDocument id (left: Index<'id>) (right: Index<'id>) =
@@ -628,12 +668,11 @@ let internal withDocumentOrderFrom (source: Index<'id>) (target: Index<'id>) =
         HasDocumentOrder = source.HasDocumentOrder }
 
 let internal syncCachedPostings (index: Index<'id>) =
-    match index.Rules.Tokenizer with
-    | Words _ -> index
-    | Ngrams _ when index.FlushedThrough = Some(index.NextDocumentOrder - 1L) -> index
-    | Ngrams _ ->
+    let through = Some(index.NextDocumentOrder - 1L)
+    if index.FlushedThrough = through then index
+    else
         { index with
-            FlushedThrough = Some(index.NextDocumentOrder - 1L)
+            FlushedThrough = through
             CachedTerms = FullTextCache.empty
             CacheBudget = FullTextCache.emptyBudget
             CacheCycle = obj () }
@@ -657,8 +696,7 @@ let internal flushPostings index =
 
 let internal flushedThrough (index: Index<'id>) = index.FlushedThrough
 
-let internal restoreFlushedThrough through (index: Index<'id>) =
-    { index with FlushedThrough = through |> Option.map (min (index.NextDocumentOrder - 1L)) }
+let internal nextDocumentOrder (index: Index<'id>) = index.NextDocumentOrder
 
 let internal cachedTermsInInsertionOrder (index: Index<'id>) =
     FullTextCache.inInsertionOrder index.CachedTerms
@@ -705,9 +743,18 @@ let private cacheDocumentsAfter through (index: Index<'id>) initial =
     |> Seq.sortBy _.Order
     |> Seq.fold (fun (terms, budget) document ->
         let words = indexedTokens document.Content |> Array.groupBy _.Key
-        cacheDocumentTerms words terms, chargeDocument document.Order words budget) initial
+        cacheDocumentTerms words terms, chargeDocument document.Content.Rules.Tokenizer index.Collation document.Order words budget) initial
 
-let internal restoreCache saved savedBudget (index: Index<'id>) =
+let internal restoreCache nextOrder through saved savedBudget (index: Index<'id>) =
+    let next = nextOrder |> Option.defaultValue index.NextDocumentOrder
+    if next < index.NextDocumentOrder then
+        invalidOp "Persistence: full-text high-water mark precedes a document"
+    let flushed =
+        match through with
+        | Some through -> Some(min through (next - 1L))
+        | None when tracksNgramPostingSources index -> None
+        | None -> Some(next - 1L)
+    let index = { index with FlushedThrough = flushed; NextDocumentOrder = next }
     match index.FlushedThrough with
     | None -> index
     | Some through ->

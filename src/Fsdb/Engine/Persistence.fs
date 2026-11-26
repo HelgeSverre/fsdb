@@ -47,7 +47,8 @@ let private documentOrderSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x52uy |] //
 let private fullTextFlushSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x53uy |] // "FSNS" (format 28)
 let private fullTextCacheSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x54uy |] // "FSNT" (format 29)
 let private fullTextDeletedSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x55uy |] // "FSNU" (format 30)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x56uy |] // "FSNV" (format 31)
+let private fullTextCacheBudgetSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x56uy |] // "FSNV" (format 31)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x57uy |] // "FSNW" (format 32)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -75,6 +76,7 @@ type private SnapshotFormat =
       FullTextCacheTerms: bool
       FullTextDeletedPostings: bool
       FullTextCacheBudget: bool
+      FullTextOrderHighWatermark: bool
       FullTextStopwordSources: bool
       TableStatistics: bool
       IndexCardinality: bool }
@@ -105,6 +107,7 @@ let private legacySnapshotFormat =
       FullTextCacheTerms = false
       FullTextDeletedPostings = false
       FullTextCacheBudget = false
+      FullTextOrderHighWatermark = false
       FullTextStopwordSources = false
       TableStatistics = false
       IndexCardinality = false }
@@ -184,8 +187,11 @@ let private fullTextCacheSnapshotFormat =
 let private fullTextDeletedSnapshotFormat =
     { fullTextCacheSnapshotFormat with FullTextDeletedPostings = true }
 
-let private currentSnapshotFormat =
+let private fullTextCacheBudgetSnapshotFormat =
     { fullTextDeletedSnapshotFormat with FullTextCacheBudget = true }
+
+let private currentSnapshotFormat =
+    { fullTextCacheBudgetSnapshotFormat with FullTextOrderHighWatermark = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -194,6 +200,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = fullTextCacheBudgetSnapshotMagic then
+        Some fullTextCacheBudgetSnapshotFormat
     elif header = fullTextDeletedSnapshotMagic then
         Some fullTextDeletedSnapshotFormat
     elif header = fullTextCacheSnapshotMagic then
@@ -2103,6 +2111,7 @@ let private writeStore (s: FileStream) (store: Store) : unit =
                     |> List.map (fun index -> table.FullTextIndexes.[index.Name])
                 let ruleTables = encodeRuleTables w fullTextIndexes
                 for index in fullTextIndexes do
+                    w.WriteInt64LE(FullText.nextDocumentOrder index)
                     w.WriteInt64LE(FullText.flushedThrough index |> Option.defaultValue -1L)
                     let terms = FullText.cachedTermsInInsertionOrder index
                     w.WriteLenEncInt(uint64 terms.Length)
@@ -2232,8 +2241,14 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
                 | Some length when length <= uint64 Int32.MaxValue -> int length
                 | _ -> failwithf "Persistence: invalid full-text %s count" name
             fullTextNames |> List.map (fun name ->
+                let nextOrder =
+                    if format.FullTextOrderHighWatermark then
+                        let next = r.ReadInt64LE()
+                        if next < 1L then failwith "Persistence: invalid full-text document high-water mark"
+                        Some next
+                    else None
                 let through = r.ReadInt64LE()
-                if through < -1L then failwith "Persistence: invalid full-text flush position"
+                if through < -1L || through = Int64.MaxValue then failwith "Persistence: invalid full-text flush position"
                 let terms, budget =
                     if format.FullTextCacheTerms then
                         let entries = List.init (readCount "cache term") (fun _ ->
@@ -2246,7 +2261,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
                                     else
                                         let used = r.ReadInt64LE()
                                         let capacity = r.ReadInt64LE()
-                                        if order < 0L || used <= 0L || capacity < used then
+                                        if order < 0L || order = Int64.MaxValue || used <= 0L || capacity < used then
                                             failwith "Persistence: invalid full-text posting tail"
                                         Some { LastDocument = order; UsedBytes = used; Capacity = capacity }
                             spelling, tail)
@@ -2274,7 +2289,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
                         }
                         |> Map.ofSeq
                     else Map.empty
-                name, ((if through >= 0L then Some through else None), terms, budget, deleted))
+                name, (nextOrder, (if through >= 0L then Some through else None), terms, budget, deleted))
             |> Map.ofList
         else Map.empty
     let mutable documents = Map.empty
@@ -2335,11 +2350,10 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
         |> Map.map (fun name index ->
             let index = index |> FullText.restoreDocumentOrder (Map.tryFind name documentOrders |> Option.defaultValue Map.empty)
             (match Map.tryFind name postingStates with
-             | Some(through, terms, budget, deleted) ->
+             | Some(nextOrder, through, terms, budget, deleted) ->
                  index
                  |> FullText.restoreDeletedPostings deleted
-                 |> FullText.restoreFlushedThrough through
-                 |> FullText.restoreCache terms budget
+                 |> FullText.restoreCache nextOrder through terms budget
              | None -> FullText.flushPostings index)
             |> FullText.withStopwordSource (sources |> Map.tryFind name |> Option.flatten))
     reindexTableWithFullTextIndexes fullTextIndexes table

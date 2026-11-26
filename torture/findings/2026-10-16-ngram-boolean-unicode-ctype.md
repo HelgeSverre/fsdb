@@ -469,13 +469,14 @@ size can exceed the request threshold while writes continue.
 [Sync trigger](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0fts.cc#L3444).
 
 Fsdb's wire and embedded connections share a cache worker per store.
-It checks committed per-table ngram allocation charges against
+It checks committed per-table full-text allocation charges against
 `innodb_ft_cache_size` and syncs an eligible table under its publication
 lock. The worker checks periodically, so the exact sync point can differ
 from MySQL's. The WAL records each automatic sync, and a checkpoint
 preserves the active posting tails and allocation charge. A sync
 preserves deleted postings and can coexist with a serializable writer.
-Snapshots from earlier formats rebuild the charge from live cached rows.
+Snapshots that predate the saved budget rebuild ngram charges from live
+cached rows.
 
 `innodb_ft_total_cache_size` also drives the ngram cache worker. The
 server-wide probe loads six tables across two databases. Each cache
@@ -491,10 +492,23 @@ After SIGKILL and WAL replay, the selected table stayed synced
 and the other five tables stayed cached.
 [InnoDB global cache sampling](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0opt.cc#L2561).
 
-Budget contributions from word-parser indexes remain open. With five
-word-parser tables and one ngram table in the same pressure fixture,
-MySQL synced the ngram table on its next indexed write. Fsdb kept it
-cached. Scoring across multiple segments of one disk gram remains open.
+The mixed probe uses four word-parser tables and two ngram tables.
+The word postings push the combined cache past the server-wide limit.
+Both engines sync the first ngram table on its next indexed write and
+leave the second cached after the budget drops below the limit. Fsdb
+charges built-in word postings using their encoded byte positions and
+keeps the next document order in checkpoints, including after deleting
+the most recent row. Scoring across multiple segments of one disk gram
+remains open.
+[InnoDB word positions](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0fts.cc#L4335).
+
+A 120-row control gave `日日` four cache segments by repeating `日`
+2,048 times per row. Both engines agreed on the cached Boolean scores.
+After full-text optimize and then analyze, MySQL's uncached table row
+estimate was 2 and then 61. Its two scores for the single gram follow
+`2047 × log10(estimated rows / 120)²`. Use the MySQL row estimate
+when comparing scores from this fixture.
+[InnoDB inverse document frequency](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L2977).
 
 Fsdb's orderly CLI shutdown now closes accepted clients, waits for
 their work to finish, and flushes the ngram cache in the final
