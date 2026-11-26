@@ -2477,13 +2477,17 @@ let private geographicRoundedOverlayContacts referenceSystem ((start, endpoint) 
     let distance = geographicInverseDistanceRadians false spheroid
     let azimuth first last = geographicSegmentAzimuthsRadians flattening first last |> fst
     let sourceStart, sourceEnd = geographicLatitudeOrderedSegment source
+    let sourceBounds = lazy (geographicSectionBounds flattening [ source ])
     let forward origin destination point =
         let delta = azimuth origin point - azimuth origin destination
         abs (normalizedLongitudeRadians delta) <= Math.PI / 2.0
 
     let boundaryVertex ((first, last) as boundary) =
         let edgeStart, edgeEnd = geographicLatitudeOrderedSegment boundary
-        if not (boostGeoEqual (distance sourceStart edgeEnd) 0.0) then None
+        // The inverse can round to zero even when the turn search would
+        // skip the arcs because their expanded bounds are disjoint.
+        if not (boostGeoEqual (distance sourceStart edgeEnd) 0.0)
+           || not (geographicBoundsIntersect sourceBounds.Value (geographicSectionBounds flattening [ boundary ])) then None
         else
             let edgeAzimuth = azimuth edgeStart edgeEnd
             let sourceSide point =

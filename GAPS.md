@@ -3218,9 +3218,13 @@ implementation effort:
    closes the remaining difference, union, and symmetric difference cases
    in the wider polar sweep. [Rounded source endpoints](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#rounded-source-endpoints-in-the-point-pass)
    contribute isolated intersection points. [Coverage in solver radians](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#coverage-in-solver-radians)
-   closes the remaining seeded polar results across WGS 84, GRS 1980,
-   and Clarke 1866. Mixed-latitude and multipart overlay differences and
-   spatial cost estimates remain open.
+   closes the remaining seeded polar results against native macOS MySQL
+   across WGS 84, GRS 1980, and Clarke 1866. [Geodesic bounds on rounded
+   vertices](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#rounded-vertices-beyond-geodesic-bounds)
+   fix 72 mixed-latitude overlay results against both MySQL 8.4.11 builds.
+   The digest-pinned Linux image still differs on mixed-latitude and polar
+   fixtures. Multipart overlay differences and spatial cost estimates remain
+   open.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
    [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)

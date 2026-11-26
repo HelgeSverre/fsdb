@@ -835,6 +835,17 @@ let tests =
                         Expect.isLessThan (abs (longitude - (-22.155048334107008))) 1e-10 "the contact longitude matches"
                     | actual -> failtestf "expected the full line and a point, got %A" actual
 
+                testCase "geographic overlays retain a line beyond a rounded hole corner"
+                <| fun _ ->
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]
+                    let area = geometry "POLYGON((-9 -2,-9 1,-6 1,-6 -2,-9 -2),(-8 -1,-7 -1,-7 0,-8 0,-8 -1))"
+                    for first, last in [ -7, -8; -8, -7 ] do
+                        let line = geometry $"LINESTRING({first} 0.0000001,{last} 0.0000001)"
+                        Expect.equal (call "ST_Intersection" [ line; area ]) line "intersection retains the whole line"
+                        Expect.equal (call "ST_Intersection" [ area; line ]) line "operand order preserves the line"
+                        let difference = call "ST_Difference" [ line; area ]
+                        Expect.equal (call "ST_IsEmpty" [ difference ]) (VInt 1L) "the polygon covers the whole line"
+
                 testCase "geographic intersections report rounded source endpoints as isolated points"
                 <| fun _ ->
                     let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]

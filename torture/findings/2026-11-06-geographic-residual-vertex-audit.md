@@ -1158,3 +1158,40 @@ equal and incorrectly removes the point.
 The six mixed-latitude fixes were intersections. Every previously
 matching result still matches. The same seeded polar sweep runs on
 the alternate ellipsoids with `--srid 4258` and `--srid 4267`.
+
+### Rounded vertices beyond geodesic bounds
+
+A normalized inverse distance can round to zero for a line endpoint just
+beyond a hole corner. When their expanded geodesic bounds are disjoint, that
+corner contributes no turn. Fsdb now checks the bounds before using a
+rounded polygon vertex as a cut or contact. In the regression, both MySQL
+builds return the whole source line for intersection and an empty geometry
+collection for difference. [Boost overlay section visitor](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/get_turns.hpp#L472-L487).
+
+Fsdb ran in Release on .NET 10.0.12 on macOS ARM64 and Ubuntu 24.04
+ARM64. Both runs used the digest-pinned MySQL 8.4.11 Linux ARM64 image
+as a reference. The macOS run also used native MySQL 8.4.11. Each
+comparison used both line directions and operand orders, checked
+geometry type and member order, and allowed a coordinate tolerance of
+10⁻⁸ degrees. The mixed-latitude sweep used seed `615801` and 400 polygons.
+The polar sweeps used seed `261184` and 48 polygons per reference system.
+
+The cells show differences before and after the change.
+
+| Overlay sweep | Results | macOS Fsdb vs native MySQL | macOS Fsdb vs pinned MySQL | Linux Fsdb vs pinned MySQL |
+| --- | ---: | ---: | ---: | ---: |
+| WGS 84 structured | 7,168 | 0 → 0 | 8 → 8 | 6 → 6 |
+| WGS 84 mixed latitudes | 12,800 | 72 → 0 | 144 → 72 | 115 → 47 |
+| WGS 84 polar | 3,072 | 0 → 0 | 150 → 150 | 102 → 102 |
+| GRS 1980 polar (EPSG 4258) | 3,072 | 0 → 0 | 130 → 130 | 112 → 112 |
+| Clarke 1866 polar (EPSG 4267) | 3,072 | 0 → 0 | 122 → 122 | 110 → 110 |
+
+Both MySQL builds confirm the same 72 mixed-latitude fixes in macOS
+Fsdb. Linux Fsdb fixes 68 comparisons against the pinned image. The
+fixes cover intersection, difference, union, and symmetric difference.
+Every previously matching result still matches its reference build.
+The remaining pinned-image differences include isolated intersection
+points and short line fragments. The regression test passes on both
+platforms. The Linux geography test filter still reproduces three
+existing failures around solver-coordinate subtraction, partitioned
+contact order, and line/polygon boundary classification.
