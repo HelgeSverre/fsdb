@@ -269,6 +269,8 @@ comparison.
 The [native peer benchmark at `cc2cb5f6`](results/cc2cb5f6-peer-comparison.md)
 records checked point reads, durable updates, joined views, correlated
 aggregates, geographic turns, and CJK phrase and operator searches. The
+[later SQL refresh](results/2026-11-26-spatial-cjk-refresh.md) reruns
+the correlated, view, spatial, and CJK fixtures against MySQL. The
 [previous native run](results/d11c7f65-peer-comparison.md) includes the
 same load fixtures. The
 [local TiDB comparison](results/eeced6b1-peer-refresh.md#other-topologies) and
