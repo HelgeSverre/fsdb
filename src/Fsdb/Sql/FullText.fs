@@ -153,6 +153,7 @@ type Index<'id when 'id: comparison> =
           StopwordSource: string option
           StopwordReload: Lazy<StopwordPolicy> option
           NextDocumentOrder: int64
+          FlushedThrough: int64 option
           DocumentOrderFollowsIds: bool
           HasDocumentOrder: bool }
 
@@ -185,6 +186,7 @@ type internal ReadView<'id when 'id: comparison> =
           Rules: IndexingRules
           DocumentCount: int
           VisibleDocumentIds: Set<'id> option
+          FlushedThrough: int64 option
           DocumentOrderFollowsIds: bool
           HasDocumentOrder: bool }
 
@@ -196,6 +198,7 @@ let internal readView (index: Index<'id>) : ReadView<'id> =
       Rules = activeRules index
       DocumentCount = index.Documents.Count
       VisibleDocumentIds = None
+      FlushedThrough = index.FlushedThrough |> Option.filter (fun through -> through < index.NextDocumentOrder - 1L)
       DocumentOrderFollowsIds = index.DocumentOrderFollowsIds
       HasDocumentOrder = index.HasDocumentOrder }
 
@@ -357,6 +360,7 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       StopwordSource = None
       StopwordReload = None
       NextDocumentOrder = 1L
+      FlushedThrough = None
       DocumentOrderFollowsIds = true
       HasDocumentOrder = true }
 
@@ -525,8 +529,19 @@ let internal withDocumentOrderFrom (source: Index<'id>) (target: Index<'id>) =
     { target with
         Documents = target.Documents |> Map.map (fun id document -> { document with Order = source.Documents.[id].Order })
         NextDocumentOrder = source.NextDocumentOrder
+        FlushedThrough = source.FlushedThrough
         DocumentOrderFollowsIds = source.DocumentOrderFollowsIds
         HasDocumentOrder = source.HasDocumentOrder }
+
+let internal flushPostings (index: Index<'id>) =
+    match index.Rules.Tokenizer with
+    | Words _ -> index
+    | Ngrams _ -> { index with FlushedThrough = Some(index.NextDocumentOrder - 1L) }
+
+let internal flushedThrough (index: Index<'id>) = index.FlushedThrough
+
+let internal restoreFlushedThrough through (index: Index<'id>) =
+    { index with FlushedThrough = through |> Option.map (min (index.NextDocumentOrder - 1L)) }
 
 let internal rulesInUse (index: Index<'id>) =
     seq {
@@ -1190,12 +1205,15 @@ let private proximityMatches (doc: Token[]) (words: Token[]) distance =
 
         matched
 
+let private ngramPrefixWeight documentCount frequency =
+    let documents = float documentCount
+    if frequency = documents then idfFloor else log10 (documents / frequency)
+
 let private prefixWeight (view: ReadView<'id>) occurrences (posting: PrefixPosting<'id>) =
     match view.Rules.Tokenizer with
     | Ngrams _ when posting.GramDocumentCount > 0L ->
         let frequency = float posting.GramDocumentCount * float occurrences
-        let documents = float view.DocumentCount
-        if frequency = documents then idfFloor else log10 (documents / frequency)
+        ngramPrefixWeight view.DocumentCount frequency
     | _ -> idf view posting.Rows.Count
 
 let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'value>) =
@@ -1381,6 +1399,11 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 | _, BGroup children -> hasRankAdjustments children
                 | _ -> false)
 
+        let isPhrase = function
+            // A one-gram phrase is represented as an exact word lookup.
+            | BPhrase _ | BWord(_, false) -> true
+            | _ -> false
+
         let frequencies = leaves nodes |> Seq.collect (snd >> keys) |> Seq.countBy id |> Map.ofSeq
 
         let tracksPostingBounds =
@@ -1390,8 +1413,12 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
 
         let weighted = hasRankAdjustments nodes
         let repeated = frequencies |> Map.exists (fun _ count -> count > 1)
+        let cacheSensitive =
+            view.FlushedThrough.IsSome
+            && (frequencies |> Map.exists (fun key _ -> match key with NgramPrefix _ -> true | _ -> false))
+            && (leaves nodes |> Seq.exists (snd >> isPhrase))
 
-        if not tracksPostingBounds && not repeated && not weighted then
+        if not tracksPostingBounds && not repeated && not weighted && not cacheSensitive then
             None
         else
             // A wildcard exclusion visits postings only if its group has matches.
@@ -1405,13 +1432,41 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             // In a weighted query, a repeated gram can get its first position
             // from a document outside the SQL candidates.
             let needsCorpusOrder = weighted && repeated && frequencies.Count > 1
+            let needsVisibleCorpus = tracksPostingBounds || needsCorpusOrder || cacheSensitive
             let scope =
-                if tracksPostingBounds || needsCorpusOrder then view.VisibleDocumentIds
+                if needsVisibleCorpus then view.VisibleDocumentIds
                 elif fullScope then None
                 else candidateIds
-            let visits = Collections.Generic.Dictionary<NgramScoringKey, int>()
+            let exactVisits = Collections.Generic.Dictionary<string, int>()
+            let prefixCounts = Collections.Generic.Dictionary<string, int64>()
+            let diskPrefixes = Collections.Generic.Dictionary<string, PrefixPosting<'id> option>()
             let contributionOrder = Collections.Generic.Dictionary<NgramScoringKey, int>()
             let mutable postingBounds = None
+            let mutable inPhraseMode = false
+
+            let prefixPosting diskOnly key =
+                let all = Map.tryFind key view.PrefixPostings
+                match diskOnly, view.FlushedThrough with
+                | true, Some through when through = 0L -> None
+                | true, Some through ->
+                    match diskPrefixes.TryGetValue key with
+                    | true, posting -> posting
+                    | _ ->
+                        let posting =
+                            all |> Option.map (fun posting ->
+                                let rows = posting.Rows |> Map.filter (fun id _ -> view.Documents.[id].Order <= through)
+                                let frequency =
+                                    rows |> Map.fold (fun count id _ ->
+                                        let document = view.Documents.[id].Content
+                                        let grams =
+                                            indexedTokens document
+                                            |> Array.filter (fun gram -> prefixKeys view.Collation gram |> Array.contains key)
+                                            |> Array.distinctBy _.Key
+                                        count + int64 grams.Length) 0L
+                                { Rows = rows; GramDocumentCount = frequency })
+                        diskPrefixes.Add(key, posting)
+                        posting
+                | _ -> all
 
             let documentBounds rows =
                 let order id = view.Documents.[id].Order
@@ -1449,6 +1504,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             let rec matchTerm isRequired contributes = function
                 | BGroup children -> matchNodes children
                 | term ->
+                    if isPhrase term then inPhraseMode <- true
                     let found = keys term
                     let firstOutside =
                         match isRequired, postingBounds with
@@ -1458,13 +1514,25 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                     // its posting bounds, then stops at that gram.
                     let visited = firstOutside |> Option.map (fun index -> Array.take (index + 1) found) |> Option.defaultValue found
                     for key in visited do
-                        match visits.TryGetValue key with
-                        | true, count -> visits.[key] <- count + 1
-                        | false, _ -> visits.Add(key, 1)
+                        match key with
+                        | ExactNgram word ->
+                            let _, count = exactVisits.TryGetValue word
+                            exactVisits.[word] <- count + 1
+                        | NgramPrefix _ -> ()
 
                     if firstOutside.IsSome then Map.empty
                     else
-                        let matches = evalTerm scope view term
+                        let matches =
+                            match term with
+                            | BWord(word, true) ->
+                                // Required prefixes use the cache even after visiting a phrase.
+                                match prefixPosting (inPhraseMode && not isRequired) word.Key with
+                                | None -> Map.empty
+                                | Some posting ->
+                                    let _, count = prefixCounts.TryGetValue word.Key
+                                    prefixCounts.[word.Key] <- count + posting.GramDocumentCount
+                                    posting.Rows |> restrictScores scope |> Map.map (fun _ _ -> 0.0)
+                            | _ -> evalTerm scope view term
                         match contributes with
                         | Some accepts when
                             (found |> Array.exists (contributionOrder.ContainsKey >> not))
@@ -1537,20 +1605,19 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                     | _ -> matchTerm false None term |> Map.fold (fun matches id _ -> Map.remove id matches) matches)
 
             let scoreTerm id term =
-                let count = visits.[term]
                 let rows, weight =
                     match term with
                     | NgramPrefix key ->
                         let posting = view.PrefixPostings.[key]
-                        posting.Rows, prefixWeight view count posting
+                        posting.Rows, ngramPrefixWeight view.DocumentCount (float prefixCounts.[key])
                     | ExactNgram key ->
                         let rows = view.Postings.[key]
-                        rows, queryOccurrenceWeight view rows.Count count
+                        rows, queryOccurrenceWeight view rows.Count exactVisits.[key]
 
                 float rows.[id] * weight * weight
 
             matchNodes nodes
-            |> (if fullScope || tracksPostingBounds || needsCorpusOrder then restrictScores candidateIds else id)
+            |> (if fullScope || needsVisibleCorpus then restrictScores candidateIds else id)
             |> Map.map (fun id matched ->
                 matched.Terms
                 |> Seq.sortBy (fun term -> contributionOrder.[term])

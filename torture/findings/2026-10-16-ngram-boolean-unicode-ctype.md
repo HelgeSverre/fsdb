@@ -347,11 +347,23 @@ are identical, but the first row's `東*` score changes from
 from deleted documents as well as live rows.
 
 The differential oracle refreshes MySQL's estimated document count
-after a full-text flush to isolate its effect on relevance. It verifies
-the cache and disk counts, then
-compares Boolean membership and relevance at each stage. Fsdb matches
-the fully flushed stages and diverges in fresh and mixed states. It
-also rejects `innodb_optimize_fulltext_only` with error 1193.
+after a full-text flush to isolate the effect of posting lookup on
+relevance. It verifies the cache and disk counts, then compares
+Boolean membership and relevance at each stage.
+
+Fsdb now separates flushed and newly written ngram postings by
+their document order. Full-text-only optimize publishes a flush
+position, and Fsdb preserves it through metadata-only ALTER,
+checkpoints, and WAL replay. The lifecycle fixture now matches all
+221 membership checks, with five relevance differences in the
+cached-frequency case. On the 3,856-query fresh binary bigram holdout,
+membership differences fell from 606 to zero and relevance differences
+fell from 944 to 168. Both the term order within the cache and the
+history retained for deleted postings still affect relevance in MySQL.
+Clean-shutdown flushing and automatic cache flushing also remain open.
+The same holdout matches on fresh and flushed binary trigrams and on
+flushed binary bigrams. The maintained two-column corpus matches all
+3,870 searches at token sizes 1–10.
 
 ```sh
 dotnet build src/Fsdb.Cli -c Release

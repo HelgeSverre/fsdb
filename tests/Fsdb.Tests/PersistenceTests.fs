@@ -2488,6 +2488,35 @@ let tests =
               verify replayed
               Expect.equal replayed.Catalog.[defaultDatabase].["docs"].RowsArray.Length 4 "WAL tail survives recovery"
 
+          testCase "ngram posting flush positions survive checkpoints and WAL replay"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+              let execute sql = handle session sql |> snd
+              execute "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin" |> ignore
+              execute "INSERT INTO docs VALUES(1,'東京'),(2,'東海'),(3,'大阪')" |> ignore
+              let check expected (current: Store) =
+                  let table = current.Catalog.[defaultDatabase].["docs"]
+                  let ids =
+                      Fsdb.FullText.booleanScores table.FullTextIndexes.["ft"] "東京 東*"
+                      |> Map.keys
+                      |> Seq.map (fun rowId -> (table.RowsArray.TryFind rowId |> Option.get).[0])
+                      |> Seq.toList
+                  Expect.equal ids (List.map VInt expected) "phrase sees only the flushed prefix postings"
+              check [ 1L ] store
+              snapshotNow dir store
+              load dir |> check [ 1L ]
+              execute "SET GLOBAL innodb_optimize_fulltext_only=ON" |> ignore
+              execute "OPTIMIZE TABLE docs" |> ignore
+              execute "INSERT INTO docs VALUES(4,'東北'),(5,'東京 東海 東海')" |> ignore
+              check [ 1L; 2L; 5L ] store
+              let replayed = load dir
+              check [ 1L; 2L; 5L ] replayed
+              snapshotNow dir replayed
+              load dir |> check [ 1L; 2L; 5L ]
+
           testCase "ngram posting bounds survive indexed updates and recovery"
           <| fun _ ->
               let dir = tempDataDir ()

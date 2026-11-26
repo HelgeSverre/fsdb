@@ -383,6 +383,7 @@ type CommitEvent =
     | RowsDeletedById of db: string * table: string * rows: RowRemoval list
     | AutoIncrementAdvanced of db: string * table: string * nextId: int64
     | TableStatisticsRefreshed of db: string * table: string * statistics: TableStatistics
+    | FullTextPostingsFlushed of db: string * table: string
     | SchemaChanged of db: string * Statement
     | SchemaChangedAt of db: string * statement: Statement * createTime: DateTime
     | TransactionCommitted of CommitEvent list
@@ -687,6 +688,7 @@ let rec private eventRollbackWork = function
     | XaCommitted(_, events) -> events |> List.sumBy eventRollbackWork
     | AutoIncrementAdvanced _
     | TableStatisticsRefreshed _
+    | FullTextPostingsFlushed _
     | SchemaChanged _
     | SchemaChangedAt _
     | XaRolledBack _ -> 0L
@@ -3376,6 +3378,7 @@ let private buildFullTextIndexesWithStopwords stopwordsFor rulesFor (table: Tabl
              let documentRules = rulesFor group.Name rowId rules
              rowId, documentRules, fullTextFields group.Indices row)
          |> FullText.buildIndexWithDocumentSettings rules group.CollationSpec
+         |> FullText.flushPostings
          |> FullText.withStopwordSource (table.FullTextIndexes |> Map.tryFind group.Name |> Option.bind FullText.stopwordSource)))
     |> Map.ofList
 
@@ -7076,6 +7079,16 @@ let analyzeTable (store: Store) (dbName: string) (tableName: string) : Result<un
                 let key = normalizeTableName tableName
                 Map.add key { table with Statistics = Some statistics } database, statistics))
     |> Result.map ignore
+
+let private flushTableFullText table =
+    { table with FullTextIndexes = table.FullTextIndexes |> Map.map (fun _ index -> FullText.flushPostings index) }
+
+let internal flushFullText (store: Store) dbName tableName =
+    withDatabasePublishing store dbName
+        (fun () -> [ FullTextPostingsFlushed(dbName, tableName) ])
+        (fun database ->
+            tryGetTable dbName database tableName
+            |> Result.map (fun table -> Map.add (normalizeTableName tableName) (flushTableFullText table) database, ()))
 
 /// Materializes missing or expired metadata estimates on the first read.
 /// The refreshed roots and their WAL events are published together, so later
@@ -12452,6 +12465,9 @@ let setTableCreateTimeForReplay
 
 let setTableStatisticsForReplay (store: Store) dbName tableName statistics (onMissing: string -> unit) =
     changeTableForReplay store dbName tableName (fun table -> { table with Statistics = Some statistics }) onMissing
+
+let internal flushFullTextForReplay store dbName tableName onMissing =
+    changeTableForReplay store dbName tableName flushTableFullText onMissing
 
 /// Puts already-committed rows back exactly as they were, for WAL replay.
 /// Deliberately not `insertRows`: these rows passed validation when committed,

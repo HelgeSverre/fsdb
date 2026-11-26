@@ -294,6 +294,24 @@ let tests =
                       let expected = if restoreOriginal then [ "1" ] else [ "1"; "2" ]
                       Expect.equal (ids (run store ($"SELECT id FROM docs WHERE MATCH(body) AGAINST('{term}' IN BOOLEAN MODE) ORDER BY id"))) expected "published postings match the merged rows"
 
+          testCase "ngram prefixes after a phrase skip cached postings until flushed"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE docs(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin" |> ignore
+              run store "INSERT INTO docs VALUES(1,'東京'),(2,'東海'),(3,'大阪')" |> ignore
+              let search terms = run store ($"SELECT id FROM docs WHERE MATCH(body) AGAINST('{terms}' IN BOOLEAN MODE) ORDER BY id") |> ids
+              Expect.equal (search "東京 東*") [ "1" ] "an optional prefix skips the cache"
+              Expect.equal (search "東* 東京") [ "1"; "2" ] "a prefix before the phrase reads the cache"
+              Expect.equal (search "東京 +東*") [ "1"; "2" ] "a required prefix reads the cache"
+              Expect.equal (search "東京 -東*") [ "1" ] "an exclusion after the phrase skips the cache"
+              let session = Fsdb.Session.create 1 store
+              Fsdb.QueryHandler.handle session "SET GLOBAL innodb_optimize_fulltext_only=ON" |> ignore
+              Fsdb.QueryHandler.handle session "OPTIMIZE TABLE docs" |> ignore
+              Expect.equal (search "東京 東*") [ "1"; "2" ] "the prefix reaches flushed postings"
+              run store "INSERT INTO docs VALUES(4,'東北'),(5,'東京 東海 東海')" |> ignore
+              Expect.equal (search "東京 東*") [ "1"; "2"; "5" ] "the phrase sees its cached match but the prefix uses disk"
+              Expect.equal (search "東京 -東*") [ "5" ] "the exclusion visits only disk postings"
+
           testCase "ngram fulltext indexes distinguish natural unions and boolean phrases"
           <| fun _ ->
               let store = create ()

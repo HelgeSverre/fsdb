@@ -43,7 +43,8 @@ let private generatedForeignKeySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Euy
 let private previousSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Fuy |] // "FSNO" (format 24)
 let private tableStatisticsSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x50uy |] // "FSNP" (format 25)
 let private indexCardinalitySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x51uy |] // "FSNQ" (format 26)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x52uy |] // "FSNR" (format 27)
+let private documentOrderSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x52uy |] // "FSNR" (format 27)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x53uy |] // "FSNS" (format 28)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -67,6 +68,7 @@ type private SnapshotFormat =
       FullTextStopwords: bool
       FullTextDocumentRules: bool
       FullTextDocumentOrder: bool
+      FullTextFlushPosition: bool
       FullTextStopwordSources: bool
       TableStatistics: bool
       IndexCardinality: bool }
@@ -93,6 +95,7 @@ let private legacySnapshotFormat =
       FullTextStopwords = false
       FullTextDocumentRules = false
       FullTextDocumentOrder = false
+      FullTextFlushPosition = false
       FullTextStopwordSources = false
       TableStatistics = false
       IndexCardinality = false }
@@ -160,8 +163,11 @@ let private generatedForeignKeySnapshotFormat =
 let private indexCardinalitySnapshotFormat =
     { generatedForeignKeySnapshotFormat with PreparedXaCatalogRefs = true; TableStatistics = true; IndexCardinality = true }
 
-let private currentSnapshotFormat =
+let private documentOrderSnapshotFormat =
     { indexCardinalitySnapshotFormat with FullTextDocumentOrder = true }
+
+let private currentSnapshotFormat =
+    { documentOrderSnapshotFormat with FullTextFlushPosition = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -170,6 +176,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = documentOrderSnapshotMagic then
+        Some documentOrderSnapshotFormat
     elif header = indexCardinalitySnapshotMagic then
         Some indexCardinalitySnapshotFormat
     elif header = tableStatisticsSnapshotMagic then
@@ -1322,6 +1330,7 @@ let private KindSchemaChangedAtV13 = 0x2Auy
 let private KindWithDdlAllowInvalidDates = 0x2Buy
 let private KindTableStatisticsRefreshed = 0x2Cuy
 let private KindTableStatisticsRefreshedWithCardinality = 0x2Duy
+let private KindFullTextPostingsFlushed = 0x2Euy
 
 let private encodeWordLengths (w: Writer) (lengths: StorageOptions.WordLengths) =
     if not (StorageOptions.validWordLengths lengths) then invalidArg "lengths" "Invalid full-text word lengths"
@@ -1507,6 +1516,10 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteInt32LE statistics.RowEstimate
         w.WriteInt64LE statistics.RefreshedAt.Ticks
         encodeIndexCardinality w statistics.IndexCardinality
+    | FullTextPostingsFlushed(db, table) ->
+        w.WriteByte KindFullTextPostingsFlushed
+        writeStr w db
+        writeStr w table
     | SchemaChanged(db, stmt) ->
         w.WriteByte KindSchemaChangedV13
         w.WriteLenEncString db
@@ -1634,6 +1647,7 @@ let rec private decodeEventAt
               RefreshedAt = DateTime(r.ReadInt64LE(), DateTimeKind.Utc)
               IndexCardinality = decodeIndexCardinality r }
         )
+    | k when k = KindFullTextPostingsFlushed -> FullTextPostingsFlushed(str (), str ())
     | k when k = KindSchemaChanged ->
         let db = str ()
         SchemaChanged(db, decodeStatement legacyFormat (columnsForTable db) r)
@@ -1852,6 +1866,8 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         advanceAutoIncrementForReplay store db table nextId (Log.diagnostic "fsdb: WAL replay warning: %s")
     | TableStatisticsRefreshed(db, table, statistics) ->
         setTableStatisticsForReplay store db table statistics (Log.diagnostic "fsdb: WAL replay warning: %s")
+    | FullTextPostingsFlushed(db, table) ->
+        flushFullTextForReplay store db table (Log.diagnostic "fsdb: WAL replay warning: %s")
     | SchemaChanged(db, stmt) -> applyDdl store db stmt
     | SchemaChangedAt(db, stmt, createTime) ->
         applyDdl store db stmt
@@ -2049,6 +2065,8 @@ let private writeStore (s: FileStream) (store: Store) : unit =
                     table.Indexes |> List.filter (fun index -> index.Kind.IsFullText)
                     |> List.map (fun index -> table.FullTextIndexes.[index.Name])
                 let ruleTables = encodeRuleTables w fullTextIndexes
+                for index in fullTextIndexes do
+                    w.WriteInt64LE(FullText.flushedThrough index |> Option.defaultValue -1L)
                 let indexesWithRules = List.zip fullTextIndexes ruleTables
 
                 for rowId, row in table.RowsArray.Indexed do
@@ -2150,6 +2168,14 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
         if format.FullTextDocumentRules then
             fullTextNames |> List.map (fun name -> name, decodeRuleTable rowCount r)
         else []
+    let flushPositions =
+        if format.FullTextFlushPosition then
+            fullTextNames |> List.map (fun name ->
+                let through = r.ReadInt64LE()
+                if through < -1L then failwith "Persistence: invalid full-text flush position"
+                name, (if through >= 0L then Some through else None))
+            |> Map.ofList
+        else Map.empty
     let mutable documents = Map.empty
     let mutable documentOrders = Map.empty
     let readRow rowId =
@@ -2206,8 +2232,10 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
     let fullTextIndexes =
         restoreFullTextIndexesWithRules stopwords documents table
         |> Map.map (fun name index ->
-            index
-            |> FullText.restoreDocumentOrder (Map.tryFind name documentOrders |> Option.defaultValue Map.empty)
+            let index = index |> FullText.restoreDocumentOrder (Map.tryFind name documentOrders |> Option.defaultValue Map.empty)
+            (match Map.tryFind name flushPositions with
+             | Some through -> FullText.restoreFlushedThrough through index
+             | None -> FullText.flushPostings index)
             |> FullText.withStopwordSource (sources |> Map.tryFind name |> Option.flatten))
     reindexTableWithFullTextIndexes fullTextIndexes table
 

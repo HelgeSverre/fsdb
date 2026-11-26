@@ -111,6 +111,7 @@ let defaultVariables: Map<string, string option> =
           "innodb_ft_enable_stopword", "ON"
           "innodb_ft_max_token_size", "84"
           "innodb_ft_min_token_size", "3"
+          "innodb_optimize_fulltext_only", "OFF"
           "ngram_token_size", string FullText.ngramTokenSize
           "ft_query_expansion_limit", string StorageOptions.defaults.FullTextQueryExpansionLimit
           "read_only", "OFF"

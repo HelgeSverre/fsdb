@@ -312,6 +312,7 @@ let private globalScopeOnlyVariables =
           "innodb_ft_server_stopword_table"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
+          "innodb_optimize_fulltext_only"
           "ngram_token_size"
           "mandatory_roles"
           "protocol_compression_algorithms"
@@ -395,6 +396,7 @@ let private numericSystemVariables =
           "innodb_ft_enable_stopword"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
+          "innodb_optimize_fulltext_only"
           "ngram_token_size"
           "local_infile"
           "lower_case_table_names"
@@ -1814,7 +1816,7 @@ let private systemSetAction
             Ok(SetVarAction(name, Some source, isGlobal), sideEffects)
         | VString source -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of '%s'" name source))
         | _ -> Error(Err(1232, sprintf "Incorrect argument type to variable '%s'" name))
-    | Ok(value, sideEffects) when name = "event_scheduler" || name = "activate_all_roles_on_login" || name = "innodb_ft_enable_stopword" ->
+    | Ok(value, sideEffects) when name = "event_scheduler" || name = "activate_all_roles_on_login" || name = "innodb_ft_enable_stopword" || name = "innodb_optimize_fulltext_only" ->
         normalizeOnOff name value
         |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
     | Ok(value, sideEffects) when name = "session_track_transaction_info" ->
@@ -5083,6 +5085,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let store = Session.currentStore session
         let resolved = tables |> List.map (fun tableRef -> splitQualified sessionDb tableRef)
+        let fullTextOnly = Session.tryGlobalVariable session.Store "innodb_optimize_fulltext_only" = Some(Some "ON")
 
         match
             resolved
@@ -5103,6 +5106,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                         match Storage.analyzeTable store dbName tableName with
                         | Ok() -> [ maintenanceRow qualified operation "status" "OK" ]
                         | Error _ -> [ maintenanceRow qualified operation "Error" (sprintf "Table '%s.%s' couldn't be analyzed" dbName tableName) ]
+                    | Ok _ when operation = "optimize" && fullTextOnly ->
+                        match Storage.flushFullText store dbName tableName with
+                        | Ok() -> [ maintenanceRow qualified operation "status" "OK" ]
+                        | Error _ -> [ maintenanceRow qualified operation "Error" (sprintf "Table '%s.%s' couldn't be optimized" dbName tableName) ]
                     | Ok _ when operation = "optimize" ->
                         [ maintenanceRow qualified operation "note" "Table does not support optimize, doing recreate + analyze instead"
                           maintenanceRow qualified operation "status" "OK" ]
