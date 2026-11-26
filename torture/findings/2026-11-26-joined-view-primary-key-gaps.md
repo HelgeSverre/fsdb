@@ -115,7 +115,7 @@ Storage reads both signed and unsigned components from the existing
 numeric lock-key encoding before comparing the ordered key.
 [MySQL integer ranges](https://dev.mysql.com/doc/refman/8.4/en/integer-types.html).
 
-The maintained oracle matches all 99 schedules with Fsdb WAL enabled,
+The maintained oracle matches all 99 schedules in both Fsdb modes,
 including the original 75 signed-key checks.
 
 At REPEATABLE READ and SERIALIZABLE, an insert or key move into the
@@ -140,10 +140,25 @@ neighbors and allowed inserts outside that interval.
 
 A branch with only the zero-row update allows gap inserts after
 `XA PREPARE`. A branch that also changes `parent.id=3` retains
-the gap until `XA ROLLBACK` in MySQL and WAL-backed Fsdb. In-memory
-Fsdb releases the gap at `XA PREPARE` for the writing branch too.
-The signed-key control reproduces this in-memory difference before
-and after unsigned probes were enabled.
+the gap until the branch commits or rolls back in MySQL and Fsdb.
+In-memory Fsdb now uses the transaction's recorded row rollback work
+to detect surviving writes when no event stream has been buffered.
+A matched no-op update or rollback to a savepoint before the only
+write still lets prepare release the locks.
+[MySQL XA transaction states](https://dev.mysql.com/doc/refman/8.4/en/xa-states.html).
+
+In-memory Fsdb and MySQL also keep row locks for writing branches at
+READ UNCOMMITTED and READ COMMITTED, with the gap free at both levels.
+At REPEATABLE READ and SERIALIZABLE, a writing branch keeps the row
+and gap locks. An in-memory SERIALIZABLE branch can still commit
+after another connection updates a disjoint row in the same table.
+The WAL-backed SERIALIZABLE branch currently returns 1205 in that
+separate control because its commit validates the full snapshot.
+
+A two-row CJK ngram control also agrees with MySQL in memory mode.
+The prepared row and its posting stay invisible to other sessions
+while a duplicate-key insert waits. Commit publishes both the row and
+posting. Rollback leaves the original row and posting visible.
 
 Separate row-lock checks at REPEATABLE READ and SERIALIZABLE matched
 on MySQL and Fsdb. A locking read and a matched no-op update both
@@ -164,9 +179,8 @@ Fsdb matched both restart checks. The recovered branch retains its
 written-row protection. The gap from the read probe has process
 lifetime in this fixture.
 
-Run the live schedules against disposable servers. Start Fsdb with
-`--data-dir` to include the WAL-backed XA comparison. Omit
-`FSDB_PORT` for the MySQL reference alone.
+Run the live schedules against disposable servers. Use `--data-dir`
+to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.
 
 ```sh
 MYSQL_PORT=3316 FSDB_PORT=3307 uv run --with pymysql python torture/scripts/joined-view-primary-gap-oracle.py

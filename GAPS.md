@@ -3129,8 +3129,7 @@ implementation effort:
    [schedule oracle](torture/findings/2026-11-26-joined-view-primary-key-gaps.md)
    covers insertions, key moves, shared holders, open-ended intervals,
    changes to neighboring keys, savepoints, and the lifetime of live
-   prepared XA claims with WAL enabled. In-memory Fsdb releases the
-   tested writing branch's gap when it prepares. Both boundaries widen
+   prepared XA claims with and without WAL. Both boundaries widen
    once no writer or consistent read view retains a deleted key. Direct updates and
    `ON UPDATE CASCADE` across databases also wait on the destination
    gap. Broader scans, noninteger key types, and other join access paths

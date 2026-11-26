@@ -12161,8 +12161,10 @@ let prepareXa
     (snapshot: Store)
     : bool =
     let events = transactionEvents snapshot
+    // In-memory transactions can have row rollback work without a buffered event stream.
+    let retainsLocks = not events.IsEmpty || transactionRollbackWork snapshot > 0L
     let transactionLocks =
-        if events.IsEmpty then None else snapshot.TransactionLocks
+        if retainsLocks then snapshot.TransactionLocks else None
 
     let lockClaims =
         transactionLocks
@@ -12186,7 +12188,7 @@ let prepareXa
                 raise error
 
             // The prepared XID stays recoverable even when there is no work left to lock.
-            if events.IsEmpty then releaseTransactionLocks snapshot
+            if not retainsLocks then releaseTransactionLocks snapshot
             else
                 transactionLocks |> Option.iter (fun context ->
                     store.ConsistentReadViews.TryRemove context.Owner |> ignore)

@@ -5872,6 +5872,84 @@ let tests =
                       | actual -> failtestf "%s should retain the published row lock (replacing=%b), got %A" isolation replacesExisting actual
                       run setup "UPDATE gate SET delta=7 WHERE id=1" (Affected 1UL) |> ignore
 
+          testCase "prepared in-memory XA retains locks for surviving writes"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result (Affected expected) sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql, count in
+                  [ "CREATE TABLE parent (id INT PRIMARY KEY,n INT)", 0UL
+                    "CREATE TABLE partner (id INT,seq INT,PRIMARY KEY(id,seq))", 0UL
+                    "CREATE TABLE gate (id INT PRIMARY KEY,delta INT)", 0UL
+                    "INSERT INTO parent VALUES (3,10),(4,10)", 2UL
+                    "INSERT INTO partner VALUES (3,20)", 1UL
+                    "INSERT INTO gate VALUES (1,7),(5,13)", 2UL
+                    "CREATE VIEW active AS SELECT p.id,p.n,s.seq FROM parent p JOIN partner s ON p.id=s.id", 0UL ] do
+                  run setup sql count |> ignore
+
+              let probe = run (create 3 store) "SET SESSION innodb_lock_wait_timeout=1" 0UL
+              let update =
+                  "UPDATE active a JOIN gate g ON g.id=a.id SET a.n=a.n+g.delta WHERE a.id=3 AND a.seq BETWEEN 20 AND 22"
+
+              for isolation, change, retainRow, retainGap, completion in
+                  [ "REPEATABLE READ", "write", true, true, "COMMIT"
+                    "READ COMMITTED", "write", true, false, "COMMIT"
+                    "READ UNCOMMITTED", "write", true, false, "ROLLBACK"
+                    "SERIALIZABLE", "write", true, true, "COMMIT"
+                    "REPEATABLE READ", "no-op", false, false, "COMMIT"
+                    "REPEATABLE READ", "savepoint", false, false, "COMMIT" ] do
+                  let writer = run (create 2 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" 0UL
+                  let writer = run writer "XA START 'branch'" 0UL
+                  let writer = run writer "SAVEPOINT before_write" 0UL
+                  let writer =
+                      if change = "no-op" then run writer "UPDATE parent SET n=n WHERE id=3" 0UL
+                      else run writer "UPDATE parent SET n=20 WHERE id=3" 1UL
+                  let writer =
+                      if change = "savepoint" then run writer "ROLLBACK TO SAVEPOINT before_write" 0UL
+                      else writer
+                  let writer = run writer update 0UL
+                  let writer = run writer "XA END 'branch'" 0UL
+                  run writer "XA PREPARE 'branch'" 0UL |> ignore
+
+                  let attempt sql =
+                      let transaction = run probe "START TRANSACTION" 0UL
+                      let transaction, result = handle transaction sql
+                      run transaction "ROLLBACK" 0UL |> ignore
+                      result
+
+                  let expectParent expected =
+                      match handle probe "SELECT n FROM parent WHERE id=3" |> snd with
+                      | ResultSet(_, [ [ Some n ] ]) -> Expect.equal n expected "the visible parent value"
+                      | actual -> failtestf "expected one parent row, got %A" actual
+
+                  try
+                      expectParent "10"
+                      match attempt "SELECT id FROM parent WHERE id=3 FOR UPDATE NOWAIT", retainRow with
+                      | Err(3572, _), true | ResultSet(_, [ [ Some "3" ] ]), false -> ()
+                      | actual, _ -> failtestf "%s %s: unexpected row lock result %A" isolation change actual
+
+                      match attempt "INSERT INTO gate VALUES (3,0)", retainGap with
+                      | Err(1205, _), true | Affected 1UL, false -> ()
+                      | actual, _ -> failtestf "%s %s: unexpected gap lock result %A" isolation change actual
+
+                      if isolation = "SERIALIZABLE" then
+                          run probe "UPDATE parent SET n=99 WHERE id=4" 1UL |> ignore
+                  finally
+                      run probe $"XA {completion} 'branch'" 0UL |> ignore
+
+                  let n = if retainRow && completion = "COMMIT" then "20" else "10"
+                  expectParent n
+                  if isolation = "SERIALIZABLE" then
+                      match handle probe "SELECT n FROM parent WHERE id=4" |> snd with
+                      | ResultSet(_, [ [ Some "99" ] ]) -> ()
+                      | actual -> failtestf "the XA commit should preserve the disjoint write, got %A" actual
+                  Expect.equal (attempt "INSERT INTO gate VALUES (3,0)") (Affected 1UL) "completion releases the gap"
+                  if n = "20" then run setup "UPDATE parent SET n=10 WHERE id=3" 1UL |> ignore
+
           testCase "joined updates protect gaps in unsigned primary keys"
           <| fun _ ->
               let run session sql expected =
