@@ -19866,6 +19866,20 @@ let tests =
                         | ResultSet(_, [ row ]) when row = ([ intersects; disjoint; intersects; disjoint ] |> List.map Some) -> ()
                         | result -> failtestf "expected MySQL geographic line-polygon intersections for %s and %s, got %A" lineText polygonText result
 
+                testCase "geographic line with a rejected turn follows its first point"
+                <| fun _ ->
+                    let store = newStore ()
+                    let area = "ST_GeomFromText('POLYGON((-32.60622459143572 -70.64931959803101,-32.60622459143572 -69.27294751829946,-31.11347435337578 -69.27294751829946,-31.11347435337578 -70.64931959803101,-32.60622459143572 -70.64931959803101),(-32.23303703192074 -70.30522657809813,-31.48666191289076 -70.30522657809813,-31.48666191289076 -69.61704053823235,-32.23303703192074 -69.61704053823235,-32.23303703192074 -70.30522657809813))',4326)"
+                    let outside = "-32.23303703192074 -69.61704067586956"
+                    let inside = "-31.48666191289076 -69.61704067586956"
+                    for start, endpoint, expected in [ outside, inside, "0"; inside, outside, "1" ] do
+                        let line = $"ST_GeomFromText('LINESTRING({start},{endpoint})',4326)"
+                        let sql = $"SELECT ST_Intersects({line},{area}),ST_Crosses({line},{area}),ST_Touches({line},{area}),ST_Within({line},{area})"
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some intersects; Some "0"; Some "0"; Some within ] ])
+                            when intersects = expected && within = expected -> ()
+                        | result -> failtestf "unexpected line topology for {start} to {endpoint}: %A" result
+
                 testCase "geographic line-polygon topology distinguishes crossing and boundaries"
                 <| fun _ ->
                     let store = newStore ()
@@ -19874,8 +19888,11 @@ let tests =
                     let nearHole = "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,3 1,3 3,1 3,1 1))"
                     let descendingArea =
                         "POLYGON((-31.92243653708054 98.06618357864312,-31.92243653708054 100.45115776347663,-30.21909824610001 100.45115776347663,-30.21909824610001 98.06618357864312,-31.92243653708054 98.06618357864312),(-31.49660196433541 98.66242712485150,-30.64493281884515 98.66242712485150,-30.64493281884515 99.85491421726826,-31.49660196433541 99.85491421726826,-31.49660196433541 98.66242712485150))"
+                    let descendingTouchArea =
+                        "POLYGON((-42.67722317635643 116.51358091574440,-42.67722317635643 118.93273045624422,-40.87428409825452 118.93273045624422,-40.87428409825452 116.51358091574440,-42.67722317635643 116.51358091574440),(-42.22648840683095 117.11836830086935,-41.32501886778000 117.11836830086935,-41.32501886778000 118.32794307111926,-42.22648840683095 118.32794307111926,-42.22648840683095 117.11836830086935))"
                     let cases =
-                        [ "LINESTRING(3 2.999,1 2.999)", nearHole, [ Some "1"; Some "0"; Some "0"; Some "0" ]
+                        [ "LINESTRING(-41.32501886778000 117.11836854278431,-42.22648840683095 117.11836854278431)", descendingTouchArea, [ Some "0"; Some "1"; Some "0"; Some "0" ]
+                          "LINESTRING(3 2.999,1 2.999)", nearHole, [ Some "1"; Some "0"; Some "0"; Some "0" ]
                           "LINESTRING(0.100001 -0.1,-0.1 0.100001)", "POLYGON((0 0,0 4,4 4,4 0,0 0))", [ Some "1"; Some "0"; Some "0"; Some "0" ]
                           "LINESTRING(-30.64493281884515 98.66242736334891,-31.49660196433541 98.66242736334891)", descendingArea, [ Some "1"; Some "0"; Some "0"; Some "0" ]
                           "LINESTRING(1 2.999,3 2.999)", nearHole, [ Some "0"; Some "1"; Some "0"; Some "0" ]

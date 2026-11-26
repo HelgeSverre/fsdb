@@ -136,13 +136,7 @@ let internal geographicPointDistance referenceSystem (firstLatitude, firstLongit
         (mysqlRadians firstLatitude, mysqlRadians firstLongitude)
         (mysqlRadians secondLatitude, mysqlRadians secondLongitude)
 
-/// Boost's default geographic line interpolation uses Andoyer for the initial
-/// azimuth and first-order Thomas for the direct point. Keep this paired with
-/// geographicPointDistance, which supplies the distance along each segment.
-let private geographicSegmentAzimuthsFromRadians flattening latitude1 latitude2 longitudeDelta =
-    let sin1, cos1 = sin latitude1, cos latitude1
-    let sin2, cos2 = sin latitude2, cos latitude2
-    let sinLongitude, cosLongitude = sin longitudeDelta, cos longitudeDelta
+let private geographicAzimuths flattening (struct (sin1, cos1)) (struct (sin2, cos2)) (struct (sinLongitude, cosLongitude)) =
     // Boost's optimized Andoyer inverse contracts this sum. Near a polar
     // vertex the extra bit keeps a short, nonzero segment's azimuth intact.
     let cosineDistance = max -1.0 (min 1.0 (Math.FusedMultiplyAdd(sin1, sin2, cos1 * cos2 * cosLongitude)))
@@ -186,6 +180,24 @@ let private geographicSegmentAzimuthsFromRadians flattening latitude1 latitude2 
             - reverseCorrection
             |> clamp secondAngle reverseCorrection
         forward, reverse
+
+/// Boost's default geographic line interpolation uses Andoyer for the initial
+/// azimuth and first-order Thomas for the direct point. Keep this paired with
+/// geographicPointDistance, which supplies the distance along each segment.
+let private geographicSegmentAzimuthsFromRadians flattening latitude1 latitude2 longitudeDelta =
+    geographicAzimuths flattening
+        (struct (sin latitude1, cos latitude1))
+        (struct (sin latitude2, cos latitude2))
+        (struct (sin longitudeDelta, cos longitudeDelta))
+
+let private geographicTurnAzimuth flattening (latitude1, longitude1) (latitude2, longitude2) =
+    // Paired trigonometry matches the native side strategy's rounding.
+    // A single bit can keep a short, nonzero segment's azimuth intact.
+    geographicAzimuths flattening
+        (Math.SinCos latitude1)
+        (Math.SinCos latitude2)
+        (Math.SinCos(longitude2 - longitude1))
+    |> fst
 
 let private geographicSegmentAzimuthsRadians flattening (latitude1, firstLongitude) (latitude2, secondLongitude) =
     geographicSegmentAzimuthsFromRadians flattening latitude1 latitude2 (secondLongitude - firstLongitude)
@@ -744,17 +756,18 @@ let private geographicIntersectionSpheroid referenceSystem =
     let flattening = 1.0 - minor / major
     { referenceSystem with SemiMajorAxis = Some 1.0; InverseFlattening = Some(1.0 / flattening) }, flattening
 
+let private geographicLatitudeOrderedSegment (start, endpoint) =
+    let start, endpoint = if fst start > fst endpoint then endpoint, start else start, endpoint
+    geographicPointRadians start, geographicPointRadians endpoint
+
 let private tryGeographicSegmentCrossing referenceSystem first second =
     let firstStart, firstEnd = first
     let secondStart, secondEnd = second
     if geographicSegmentsShareEndpoint first second then None
     else
         let normalized, flattening = geographicIntersectionSpheroid referenceSystem
-        let endpoints start endpoint =
-            let start, endpoint = if fst start > fst endpoint then endpoint, start else start, endpoint
-            geographicPointRadians start, geographicPointRadians endpoint
-        let a, b = endpoints firstStart firstEnd
-        let c, d = endpoints secondStart secondEnd
+        let a, b = geographicLatitudeOrderedSegment first
+        let c, d = geographicLatitudeOrderedSegment second
         let azimuth start endpoint = geographicSegmentAzimuthsRadians flattening start endpoint |> fst
         let firstAzimuth, secondAzimuth = azimuth a b, azimuth c d
         let side baseline start point = geographicAzimuthSide (azimuth start point) baseline
@@ -1243,6 +1256,29 @@ let private sampleGeographicLinePolygonTopology referenceSystem lines polygons =
           Touches = intersects && not hasInterior
           LineWithinPolygon = hasInterior && not hasOutside }
 
+let private geographicTurnRejectsRoundedEndpoint referenceSystem source boundary =
+    let spheroid, flattening = geographicIntersectionSpheroid referenceSystem
+    let distance = geographicInverseDistanceRadians false spheroid
+    let azimuth first last = geographicSegmentAzimuthsRadians flattening first last |> fst
+    let a, b = geographicLatitudeOrderedSegment source
+    let c, d = geographicLatitudeOrderedSegment boundary
+    // A rounded coincidence is handled before the proper-intersection
+    // solver. Reject it when its azimuth falls behind the ordered segment.
+    let behind first last contact =
+        abs (normalizedLongitudeRadians (azimuth first contact - azimuth first last)) > Math.PI / 2.0
+    let rejected =
+        if boostGeoEqual (distance c a) 0.0 then behind c d a
+        elif boostGeoEqual (distance c b) 0.0 then behind c d b
+        elif boostGeoEqual (distance a c) 0.0 then behind a b c
+        elif boostGeoEqual (distance a d) 0.0 then behind a b d
+        else false
+    let straddles first last p q =
+        let baseline = azimuth first last
+        geographicAzimuthSide (azimuth first p) baseline
+        * geographicAzimuthSide (azimuth first q) baseline < 0
+
+    rejected && straddles a b c d && straddles c d a b
+
 let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segment) rings sampled =
     let flattening = 1.0 / referenceSystem.InverseFlattening.Value
     let side first last query =
@@ -1250,7 +1286,7 @@ let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segmen
            || equalGeographicCoordinates first query
            || equalGeographicCoordinates last query then 0
         else
-            let azimuth point = geographicSegmentAzimuthsRadians flattening first point |> fst
+            let azimuth = geographicTurnAzimuth flattening first
             geographicAzimuthSide (azimuth query) (azimuth last)
 
     let edges =
@@ -1264,13 +1300,24 @@ let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segmen
         |> Seq.truncate 2
         |> Seq.toList
 
+    let sharesEndpoint edge =
+        geographicSharedSegmentEndpoints referenceSystem segment edge |> List.isEmpty |> not
+
     match crossings with
+    | [] when sampled.Crosses
+              && (edges |> List.exists (geographicTurnRejectsRoundedEndpoint referenceSystem segment))
+              && not (List.exists sharesEndpoint edges) ->
+        // A line without turns takes the area position of its first point.
+        match geographicPointPolygonPosition referenceSystem start [ rings ] with
+        | GeographicPointPolygonPosition.Interior ->
+            Some { Intersects = true; Crosses = false; Touches = false; LineWithinPolygon = true }
+        | GeographicPointPolygonPosition.Outside _ ->
+            Some { Intersects = false; Crosses = false; Touches = false; LineWithinPolygon = false }
+        | _ -> None
     | [ ((first, last) as edge), point ] ->
         let a, b = geographicPointRadians first, geographicPointRadians last
         let sourceStart, sourceEnd = geographicPointRadians start, geographicPointRadians endpoint
-        let endpointContact =
-            edges |> List.exists (fun other ->
-                other <> edge && not (List.isEmpty (geographicSharedSegmentEndpoints referenceSystem segment other)))
+        let endpointContact = edges |> List.exists (fun other -> other <> edge && sharesEndpoint other)
         if endpointContact || equalGeographicCoordinates point a || equalGeographicCoordinates point b then None
         else
             // The incoming interval uses two sub-arcs of the directed ring edge.
@@ -1280,26 +1327,23 @@ let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segmen
             let fromInside =
                 if incoming * onward = -1 then incoming = -1
                 else side point b sourceStart = -1
-            let spheroid, _ = geographicIntersectionSpheroid referenceSystem
-            let distance = geographicInverseDistanceRadians false spheroid
-            // The intersection strategy orders segments by latitude. For a
-            // reversed segment it subtracts the cut distance from the total.
-            let startDistance =
-                if fst sourceStart > fst sourceEnd then distance sourceEnd sourceStart - distance sourceEnd point
-                else distance sourceStart point
-
             match side a b sourceEnd with
-            // An exit at a rounded start does not establish an interior
-            // interval. An interior entry establishes one even if sampling
-            // skips it beside a vertex.
-            | 1 when sampled.Crosses && startDistance = 0.0 && not fromInside ->
+            // An exit reached from outside establishes boundary contact.
+            | 1 when sampled.Crosses && not fromInside ->
                 Some { sampled with Crosses = false; Touches = true }
-            | -1 when not sampled.Intersects && startDistance > 0.0 && not fromInside ->
-                Some
-                    { Intersects = true
-                      Crosses = true
-                      Touches = false
-                      LineWithinPolygon = false }
+            // An entry can expose an interior interval missed by sampling.
+            | -1 when not sampled.Intersects && not fromInside ->
+                let spheroid, _ = geographicIntersectionSpheroid referenceSystem
+                let distance = geographicInverseDistanceRadians false spheroid
+                // For a descending segment, the ordered intersection strategy
+                // subtracts the cut distance from the total.
+                let startDistance =
+                    if fst sourceStart > fst sourceEnd then distance sourceEnd sourceStart - distance sourceEnd point
+                    else distance sourceStart point
+
+                if startDistance > 0.0 then
+                    Some { Intersects = true; Crosses = true; Touches = false; LineWithinPolygon = false }
+                else None
             | _ -> None
     | _ -> None
 

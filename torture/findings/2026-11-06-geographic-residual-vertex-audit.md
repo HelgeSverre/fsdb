@@ -458,6 +458,35 @@ The structured reverse and seeded checks use `--reverse-lines` and
 and `--srid 4267` with the seeded mode.
 [Geographic edge oracle](../scripts/geographic-edge-oracle.py).
 
+## Rounded endpoints that reject a turn
+
+The geographic segment strategy can round the normalized inverse
+distance between nearby endpoints to zero. It then checks the
+endpoint's azimuth against the latitude-ordered segment before accepting
+a turn. If the endpoint faces away from the segment, no turn is
+generated. For a simple line with this rejected contact and no other
+turn or shared endpoint, the line/area relation follows the first
+point's area position. Reversing the line can change the result from
+disjoint to within even when the overlay returns a contact geometry.
+[Boost geographic segment intersection](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp)
+· [Boost line/area relation](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/relate/linear_areal.hpp).
+
+For a real turn, the incoming-side calculation uses paired sine and
+cosine evaluations on the SRS radians. At one audited exit, separate
+evaluations rounded the angular cosine to one and erased the short
+arc's azimuth. The paired evaluation retained the one-bit difference
+and correctly classified that line as a crossing. A sole exit reached
+from outside is a touch even when its directed fraction is nonzero.
+
+Native MySQL 8.4.11 and Release Fsdb still agree on all 448 structured
+fixtures in both directions. Of the 1,000 seeded cases per lane, the
+differences fell from 13 to 0 in forward EPSG 4326 and from 9 to 0
+in reverse. The EPSG 4258 and 4267 forward sets each fell from 14 to 2.
+A separate 5,000-case run using seed `615801` fell from 64 to 13.
+Every remaining difference also occurred in the previous build.
+Five of the 13 wider residuals produce two touch-interior turns in
+the native probe. Those paired contacts reach the sampled classifier.
+
 ## Current-head overlay check
 
 A current-head rerun still finds 11/448 geographic line/polygon relation
