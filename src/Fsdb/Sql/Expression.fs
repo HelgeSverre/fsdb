@@ -561,6 +561,9 @@ let tryLiteralNodeDiagnostic = function
     | FuncCall(name, [ Lit Fsdb.Value.VNull; _ ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) ->
         Some(1382, "The 'NAME_CONST' syntax is reserved for purposes internal to the MySQL server")
     | FuncCall(name, arguments)
+        when name.Equals("ST_SIMPLIFY", System.StringComparison.OrdinalIgnoreCase) && arguments.Length <> 2 ->
+        Some(1582, "Incorrect parameter count in the call to native function 'ST_Simplify'")
+    | FuncCall(name, arguments)
         when name.Equals("ST_FRECHETDISTANCE", System.StringComparison.OrdinalIgnoreCase)
              || name.Equals("ST_HAUSDORFFDISTANCE", System.StringComparison.OrdinalIgnoreCase) ->
         match arguments with

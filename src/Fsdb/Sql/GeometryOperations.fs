@@ -42,9 +42,120 @@ let private mysqlRadians degrees = degrees * geographicRadiansPerDegree
 let private geographicPointRadians (latitude, longitude) =
     mysqlRadians latitude, mysqlRadians longitude
 
-let internal planarPointDistance (firstX: float, firstY: float) (secondX: float, secondY: float) =
+let private squaredPlanarDistance (firstX: float, firstY: float) (secondX: float, secondY: float) =
     let deltaX, deltaY = secondX - firstX, secondY - firstY
-    sqrt (deltaX * deltaX + deltaY * deltaY)
+    deltaX * deltaX + deltaY * deltaY
+
+let internal planarPointDistance first second = sqrt (squaredPlanarDistance first second)
+
+let private doubleRelativeEpsilon = Math.BitIncrement(1.0) - 1.0
+
+let private furthestVertex first last distance =
+    let mutable candidate = first
+    let mutable maximum = -1.0
+    for index in first .. last do
+        Limits.checkQueryCancellation index
+        let measured = distance index
+        if measured > maximum then
+            candidate <- index
+            maximum <- measured
+    candidate, maximum
+
+let private simplifyPath squaredTolerance (points: (float * float) array) =
+    let squaredDistanceToSegment ((x, y) as point) ((firstX, firstY) as first) ((lastX, lastY) as last) =
+        let dx, dy = lastX - firstX, lastY - firstY
+        let projection = (x - firstX) * dx + (y - firstY) * dy
+        let length = dx * dx + dy * dy
+        if projection <= 0.0 then squaredPlanarDistance point first
+        elif length <= projection then squaredPlanarDistance point last
+        else
+            let fraction = projection / length
+            squaredPlanarDistance point (firstX + fraction * dx, firstY + fraction * dy)
+
+    let last = points.Length - 1
+    if last < 1 then Array.toList points
+    else
+        let retained = Array.zeroCreate<bool> points.Length
+        retained.[0] <- true
+        retained.[last] <- true
+        let pending = System.Collections.Generic.Stack<int * int>()
+        pending.Push((0, last))
+        while pending.Count > 0 do
+            let first, last = pending.Pop()
+            let split, distance =
+                furthestVertex (first + 1) (last - 1) (fun index ->
+                    squaredDistanceToSegment points.[index] points.[first] points.[last])
+            if distance > squaredTolerance then
+                retained.[split] <- true
+                pending.Push((split, last))
+                pending.Push((first, split))
+
+        match [ for index in 0 .. last do if retained.[index] then points.[index] ] with
+        | [ ((x, y) as first); ((u, v) as second) ] ->
+            let approximatelyEqual left right =
+                left = right || abs (left - right) <= doubleRelativeEpsilon * max 1.0 (max (abs left) (abs right))
+            if approximatelyEqual x u && approximatelyEqual y v then [ first ]
+            else [ first; second ]
+        | simplified -> simplified
+
+let internal simplifyPlanar tolerance (geometry: Geometry) =
+    let squaredTolerance = tolerance * tolerance
+    let ringAreaSign ring =
+        // The trapezoidal sum is positive for counter-clockwise rings.
+        let area = ring |> List.pairwise |> List.sumBy (fun ((x, y), (u, v)) -> (x + u) * (v - y))
+        if area > 0.0 then 1 elif area < 0.0 then -1 else 0
+
+    let simplifyRing expectedSign ring =
+        let sign = ringAreaSign ring
+        let source = (if sign = -expectedSign then List.rev ring else ring) |> List.toArray
+        let sign = if sign = 0 then 0 else expectedSign
+        let size = source.Length
+        if size < 2 then None
+        else
+            let contourSize = size - 1
+            let rec tryAnchors previous visited = function
+                | [] -> None
+                | step :: rest ->
+                    // Use the opposite vertex as the start. If the ring
+                    // collapses or flips, try other parts of the contour.
+                    let pivot = (previous + step) % size
+                    let anchor, _ = furthestVertex 0 (size - 1) (fun index -> squaredPlanarDistance source.[pivot] source.[index])
+                    if Set.contains anchor visited then tryAnchors anchor visited rest
+                    else
+                        let rotated = Array.init size (fun index -> source.[(anchor + index) % contourSize])
+                        let reduced = simplifyPath squaredTolerance rotated
+                        if ringAreaSign reduced = sign then Some reduced
+                        elif visited.IsEmpty && (ring |> List.pairwise |> List.sumBy (fun (a, b) -> planarPointDistance a b)) < 3.0 * tolerance then None
+                        else tryAnchors anchor (Set.add anchor visited) rest
+
+            tryAnchors 0 Set.empty [ 0; size / 4; size / 8; size / 4 ]
+
+    let line points =
+        match simplifyPath squaredTolerance (List.toArray points) with
+        | _ :: _ :: _ as simplified -> Some simplified
+        | _ -> None
+
+    let polygon = function
+        | exterior :: holes ->
+            simplifyRing 1 exterior
+            |> Option.filter (fun ring -> ring.Length >= 4)
+            |> Option.map (fun ring -> ring :: List.choose (simplifyRing -1) holes)
+        | [] -> None
+
+    let collection wrap = function [] -> None | members -> Some(wrap members)
+    let rec simplify (geometry: Geometry) =
+        let shape =
+            match geometry.Shape with
+            | GEmpty -> None
+            | GPoint _ | GMultiPoint _ -> Some geometry.Shape
+            | GLineString points -> line points |> Option.map GLineString
+            | GPolygon rings -> polygon rings |> Option.map GPolygon
+            | GMultiLineString lines -> List.choose line lines |> collection GMultiLineString
+            | GMultiPolygon polygons -> List.choose polygon polygons |> collection GMultiPolygon
+            | GGeometryCollection members -> List.choose simplify members |> collection GGeometryCollection
+        shape |> Option.map (fun shape -> { geometry with Shape = shape })
+
+    simplify geometry
 
 let private sphericalPointDistance radius toRadians (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
     let firstLatitude, secondLatitude = toRadians firstLatitude, toRadians secondLatitude

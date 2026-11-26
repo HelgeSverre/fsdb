@@ -5340,6 +5340,45 @@ let tests =
               | Error(1582, _) -> ()
               | other -> failtestf "expected the invalid argument count to fail at prepare time, got %A" other
 
+          testCase "ST_Simplify retains ordered vertices and drops collapsed components"
+          <| fun _ ->
+              let run = queryFixture [ "USE fsdb" ]
+              for input, tolerance, expected in
+                  [ "LINESTRING(0 0,0 1,1 1,1 2,2 2,2 3,3 3)", "0.5", Some "LINESTRING(0 0,0 1,1 1,2 3,3 3)"
+                    "POLYGON((0 0,0 10,10 10,10 0,0 0),(1 1,4 1,4 4,1 4,1 1))", "0.1",
+                        Some "POLYGON((10 10,0 10,0 0,10 0,10 10),(4 4,4 1,1 1,1 4,4 4))"
+                    "POLYGON((0 0,10 0,10 10,0 10,0 0),(1 1,1 4,4 4,4 1,1 1))", "2.2",
+                        Some "POLYGON((10 10,0 10,0 0,10 0,10 10))"
+                    "POLYGON((0 0,2 0,2 2,0 2,0 0))", "2", None
+                    "LINESTRING(1 1,1.0000000000000002 1)", "1", None
+                    "MULTILINESTRING((2 3,2 3),(0 0,1 1,2 2))", "1", Some "MULTILINESTRING((0 0,2 2))"
+                    "GEOMETRYCOLLECTION(LINESTRING(2 3,2 3),GEOMETRYCOLLECTION(POINT(0 0)))", "1",
+                        Some "GEOMETRYCOLLECTION(GEOMETRYCOLLECTION(POINT(0 0)))" ] do
+                  let sql = $"SELECT ST_AsText(ST_Simplify(ST_GeomFromText('{input}'),{tolerance}))"
+                  match run sql with
+                  | ResultSet(_, [ [ value ] ]) -> Expect.equal value expected sql
+                  | other -> failtestf "expected simplified geometry, got %A" other
+
+              for expression, code in
+                  [ "ST_Simplify(ST_GeomFromText('POINT(1 2)',4326),1)", 3618
+                    "ST_Simplify(ST_GeomFromText('POINT(1 2)',4326),0)", 1210
+                    "ST_Simplify('bad',0)", 3037
+                    "ST_Simplify(ST_Simplify(ST_GeomFromText('POLYGON((0 0,100 0,100 100,0 100,0 0),(1 1,2 2,3 3,1 1))'),5),5)", 3037 ] do
+                  TestSupport.Sql.expectError code (run ("SELECT " + expression)) expression
+
+              let session, _ = handle (create 1 (Fsdb.Storage.create ())) "USE fsdb"
+              match prepareStatementForSession session "SELECT ST_Simplify(?, ?) AS shape" with
+              | Ok(statement, count) ->
+                  let parameters, columns = preparedMetadata session statement count
+                  Expect.equal (parameters |> List.map _.TypeId) [ TypeGeometry; TypeDouble ] "prepared parameters"
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId, column.Metadata.Flags))
+                      [ TypeGeometry, BinaryFlag ] "prepared geometry result"
+              | Error error -> failtestf "expected simplification to prepare, got %A" error
+
+              match prepareStatementForSession session "SELECT ST_Simplify(?)" with
+              | Error(1582, _) -> ()
+              | other -> failtestf "expected invalid arity at prepare time, got %A" other
+
           testCase "planar geometry functions retain result metadata without rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

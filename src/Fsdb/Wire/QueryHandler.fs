@@ -6195,14 +6195,14 @@ let private preparedMetadataCore
                 |> Option.filter (fun values -> sameLength values columns)
                 |> Option.defaultValue (List.replicate columns.Length None)
 
-            let numericDescriptors =
-                Executor.statementNumericMetadata store registry schema statement
+            let expressionDescriptors =
+                Executor.statementPreparedMetadata store registry schema statement
                 |> Option.filter (fun metadata -> sameLength metadata columns)
                 |> Option.defaultValue (List.replicate columns.Length None)
 
             let resultColumns =
                 List.map3
-                    (fun (column: ColumnDef) (source: Executor.ColumnSource option) numericMetadata ->
+                    (fun (column: ColumnDef) (source: Executor.ColumnSource option) expressionMetadata ->
                         let origin = source |> Option.map _.Origin
                         let metadata =
                             origin
@@ -6215,7 +6215,7 @@ let private preparedMetadataCore
                                     |> Option.map (fun physical ->
                                         ColumnWire.metadataOfColumn column
                                         |> ColumnWire.withSourceColumnFlags table.Indexes physical)))
-                            |> Option.orElse numericMetadata
+                            |> Option.orElse expressionMetadata
                             |> Option.defaultWith (fun () -> ColumnWire.metadataOfColumn column)
 
                         let metadata =
@@ -6231,7 +6231,7 @@ let private preparedMetadataCore
                         : Fsdb.Protocol.ColumnDef)
                     columns
                     sources
-                    numericDescriptors
+                    expressionDescriptors
 
             parameters, resultColumns
 

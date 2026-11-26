@@ -657,6 +657,11 @@ multiline comparisons for the supported point and line types. The audited
 cases cover units, spatial diagnostics, and prepared metadata. Small
 geographic rounding differences remain.
 
+[`ST_Simplify`](torture/findings/2026-11-27-spatial-simplify.md) uses
+Douglas–Peucker simplification for SRID 0 and projected geometries.
+It preserves the audited ring and component order, drops collapsed
+components, and reports MySQL's geographic-SRS and argument errors.
+
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 (`Use_leap_seconds = Y`) remain unsupported.

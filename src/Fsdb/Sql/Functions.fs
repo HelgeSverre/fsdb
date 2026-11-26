@@ -6292,28 +6292,32 @@ let private geometryDistanceFn: Scalar =
     | [ first; second; unit ] -> distance first second (Some unit)
     | _ -> nativeParameterCountError "st_distance"
 
+let private gisGeometryArgument functionName value =
+    let geometry =
+        match value with
+        | VGeometry geometry -> Some geometry
+        | VBytes bytes
+        | VBinaryLiteral bytes ->
+            tryGeometryFromMySqlBinary bytes
+            |> Option.map (fun geometry ->
+                // MySQL's stored geographic WKB writes longitude first.
+                match SpatialReferenceSystems.tryFind geometry.Srid with
+                | Some referenceSystem when referenceSystem.SemiMajorAxis.IsSome ->
+                    SpatialReferenceSystems.withAxisOrder LongitudeLatitude geometry
+                | _ -> geometry)
+        | _ -> None
+
+    geometry
+    |> Option.defaultWith (fun () -> raise (SqlError(3037, $"Invalid GIS data provided to function {functionName}.")))
+    |> validateGeometryParameter functionName
+
+let private gisGeometryTypeName shape =
+    match geometryKind shape with
+    | GeometryCollection -> "GEOMCOLLECTION"
+    | kind -> geometryTypeName kind
+
 let private geometryVertexDistanceFn (name: string) quantity measure : Scalar =
     let functionName = name.ToLowerInvariant()
-
-    let geometryAndReferenceSystem value =
-        let input =
-            match value with
-            | VGeometry geometry -> Some geometry
-            | VBytes bytes
-            | VBinaryLiteral bytes ->
-                tryGeometryFromMySqlBinary bytes
-                |> Option.map (fun geometry ->
-                    // MySQL's stored geographic WKB writes longitude first.
-                    match SpatialReferenceSystems.tryFind geometry.Srid with
-                    | Some referenceSystem when referenceSystem.SemiMajorAxis.IsSome ->
-                        SpatialReferenceSystems.withAxisOrder LongitudeLatitude geometry
-                    | _ -> geometry)
-            | _ -> None
-        let geometry =
-            input
-            |> Option.defaultWith (fun () -> raise (SqlError(3037, $"Invalid GIS data provided to function {functionName}.")))
-
-        validateGeometryParameter functionName geometry, spatialReferenceSystem functionName geometry.Srid
 
     let rec isEmpty = function
         | GEmpty -> true
@@ -6321,8 +6325,10 @@ let private geometryVertexDistanceFn (name: string) quantity measure : Scalar =
         | _ -> false
 
     let distance firstValue secondValue unit =
-        let first, referenceSystem = geometryAndReferenceSystem firstValue
-        let second, _ = geometryAndReferenceSystem secondValue
+        let first = gisGeometryArgument functionName firstValue
+        let referenceSystem = spatialReferenceSystem functionName first.Srid
+        let second = gisGeometryArgument functionName secondValue
+        spatialReferenceSystem functionName second.Srid |> ignore
         if first.Srid <> second.Srid then
             raise (SqlError(3033, $"Binary geometry function {functionName} given two geometries of different srids: {first.Srid} and {second.Srid}, which should have been identical."))
 
@@ -6346,11 +6352,7 @@ let private geometryVertexDistanceFn (name: string) quantity measure : Scalar =
                     let coordinateUnit = referenceSystem.LinearUnitInMetres |> Option.defaultValue 1.0
                     VDouble(measured * coordinateUnit / linearUnitMetres unit)
             | None ->
-                let typeName shape =
-                    match geometryKind shape with
-                    | GeometryCollection -> "GEOMCOLLECTION"
-                    | kind -> geometryTypeName kind
-                let firstType, secondType = typeName first.Shape, typeName second.Shape
+                let firstType, secondType = gisGeometryTypeName first.Shape, gisGeometryTypeName second.Shape
                 let code, system =
                     if referenceSystem.SemiMajorAxis.IsSome then 3618, "geographic" else 3704, "Cartesian"
                 raise (SqlError(code, $"{functionName}({firstType}, {secondType}) has not been implemented for {system} spatial reference systems."))
@@ -6579,6 +6581,33 @@ let private geometryConvexHullFn: Scalar =
     | [ VNull ] -> VNull
     | [ value ] -> geometryArgument "ST_CONVEXHULL" value |> requirePlanar "ST_CONVEXHULL" |> geometryConvexHullPlanar |> VGeometry
     | _ -> nativeParameterCountError "st_convexhull"
+
+let private geometrySimplifyFn: Scalar =
+    function
+    | [ value; toleranceValue ] ->
+        let tolerance =
+            match toleranceValue with
+            | VString _ | VBytes _ | VEncodedString _ ->
+                let text = toText toleranceValue |> Option.defaultValue ""
+                let number, truncated = Value.coerceLeadingDouble text
+                if truncated then Diagnostics.numericConversion "DOUBLE" text
+                number
+            | _ -> toDouble toleranceValue
+
+        if value = VNull || toleranceValue = VNull then VNull
+        else
+            let geometry = gisGeometryArgument "st_simplify" value
+            let referenceSystem = spatialReferenceSystem "st_simplify" geometry.Srid
+            if not (geometryShapeIsWellFormed geometry.Shape) || SpatialReferenceSystems.hasNonFiniteCoordinates geometry then
+                raise (SqlError(3037, "Invalid GIS data provided to function st_simplify."))
+            if tolerance <= 0.0 || Double.IsNaN tolerance then
+                raise (SqlError(1210, "Incorrect arguments to st_simplify"))
+            if referenceSystem.SemiMajorAxis.IsSome then
+                let kind = gisGeometryTypeName geometry.Shape
+                raise (SqlError(3618, $"st_simplify({kind}, ...) has not been implemented for geographic spatial reference systems."))
+
+            GeometryOperations.simplifyPlanar tolerance geometry |> Option.map VGeometry |> Option.defaultValue VNull
+    | _ -> nativeParameterCountError "ST_Simplify"
 
 let private geometryOverlayFn functionName operation =
     binaryGeometryWithSameSridFn functionName (fun first second ->
@@ -6974,7 +7003,7 @@ let private registerGeometryConstructors construct constructors registry =
 
 let private registerSpatialBuiltins registry =
     let geometry = ColumnWire.parameterMetadataOfType(TGeometry Geometry)
-    let vertexDistanceResult =
+    let spatialDouble =
         { ColumnWire.parameterMetadataOfType(TDouble false) with CollationId = Some Collation.binaryId }
 
     registry
@@ -7013,8 +7042,10 @@ let private registerSpatialBuiltins registry =
     |> registerScalar "ST_GEOMETRYN" geometryNFn
     |> registerScalar "ST_DISTANCE" geometryDistanceFn
     // MySQL also describes the optional unit placeholder as GEOMETRY at prepare time.
-    |> registerScalarWithSignature "ST_FRECHETDISTANCE" [ geometry; geometry; geometry ] vertexDistanceResult geometryFrechetDistanceFn
-    |> registerScalarWithSignature "ST_HAUSDORFFDISTANCE" [ geometry; geometry; geometry ] vertexDistanceResult geometryHausdorffDistanceFn
+    |> registerScalarWithSignature "ST_FRECHETDISTANCE" [ geometry; geometry; geometry ] spatialDouble geometryFrechetDistanceFn
+    |> registerScalarWithSignature "ST_HAUSDORFFDISTANCE" [ geometry; geometry; geometry ] spatialDouble geometryHausdorffDistanceFn
+    |> registerScalarWithSignature "ST_SIMPLIFY" [ geometry; spatialDouble ]
+        { geometry with ColumnLength = UInt32.MaxValue; Decimals = 0uy } geometrySimplifyFn
     |> registerScalar "ST_DISTANCE_SPHERE" geometryDistanceSphereFn
     |> registerScalar "ST_LENGTH" geometryLengthFn
     |> registerScalar "ST_LINEINTERPOLATEPOINT" (geometryLineInterpolateFn "ST_LineInterpolatePoint" FractionPoint)

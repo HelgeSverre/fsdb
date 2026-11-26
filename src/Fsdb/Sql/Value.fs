@@ -145,21 +145,21 @@ let private isClosedRing =
     | first :: _ :: _ :: _ :: _ as ring -> first = List.last ring
     | _ -> false
 
-let tryGeometryFromText (srid: int) (text: string) : Geometry option =
+let rec internal geometryShapeIsWellFormed shape =
     let validPolygon rings =
         not (List.isEmpty rings)
         && rings |> List.forall isClosedRing
 
-    let rec isValidWktShape = function
-        | GEmpty -> true
-        | GPoint _ -> true
-        | GLineString points -> hasLineExtent points
-        | GPolygon rings -> validPolygon rings
-        | GMultiPoint points -> not (List.isEmpty points)
-        | GMultiLineString lines -> not (List.isEmpty lines) && lines |> List.forall hasLineExtent
-        | GMultiPolygon polygons -> not (List.isEmpty polygons) && polygons |> List.forall validPolygon
-        | GGeometryCollection geometries -> geometries |> List.forall (fun geometry -> isValidWktShape geometry.Shape)
+    match shape with
+    | GEmpty | GPoint _ -> true
+    | GLineString points -> hasLineExtent points
+    | GPolygon rings -> validPolygon rings
+    | GMultiPoint points -> not (List.isEmpty points)
+    | GMultiLineString lines -> not (List.isEmpty lines) && lines |> List.forall hasLineExtent
+    | GMultiPolygon polygons -> not (List.isEmpty polygons) && polygons |> List.forall validPolygon
+    | GGeometryCollection geometries -> geometries |> List.forall (fun geometry -> geometryShapeIsWellFormed geometry.Shape)
 
+let tryGeometryFromText (srid: int) (text: string) : Geometry option =
     let rec parseShape (tokens: WktToken array) depth index : (GeometryShape * int) option =
         let readPair index =
             if index + 1 < tokens.Length then
@@ -229,7 +229,7 @@ let tryGeometryFromText (srid: int) (text: string) : Geometry option =
         let tokens = List.toArray tokens
 
         match parseShape tokens 0 0 with
-        | Some(shape, next) when next = tokens.Length && isValidWktShape shape -> Some { Srid = srid; Shape = shape }
+        | Some(shape, next) when next = tokens.Length && geometryShapeIsWellFormed shape -> Some { Srid = srid; Shape = shape }
         | _ -> None)
 
 let geometryToWkb (geometry: Geometry) : byte[] =

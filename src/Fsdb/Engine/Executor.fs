@@ -29643,7 +29643,7 @@ let private statementSources store schema (select: SelectStmt) =
 
 /// Expression descriptors can exceed stored-column precision, so PREPARE must
 /// retain their wire shape independently of its ColumnDef fallback.
-let statementNumericMetadata store registry schema statement =
+let private statementExpressionMetadata includeGeometry store registry schema statement =
     let describeSelect (select: SelectStmt) =
         if SelectStmt.hasDestination select then None
         elif not select.Ctes.IsEmpty then
@@ -29667,7 +29667,9 @@ let statementNumericMetadata store registry schema statement =
         describeSelect select
         |> Option.map (List.map (Option.filter (fun metadata ->
             metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat || metadata.TypeId = TypeLongLong
-            || (isIntegerMetadata metadata && hasMetadataFlag BinaryFlag metadata))))
+            || (isIntegerMetadata metadata && hasMetadataFlag BinaryFlag metadata)
+            // Explicit GEOMETRY function descriptors can omit the stored-column BLOB flag.
+            || (includeGeometry && metadata.TypeId = TypeGeometry && metadata.Flags = BinaryFlag))))
     | Union(first, rest, _, _, _) ->
         first :: (rest |> List.map snd)
         |> List.map (fun select ->
@@ -29688,6 +29690,12 @@ let statementNumericMetadata store registry schema statement =
                 |> Some
             | _ -> None)
     | _ -> None
+
+let statementNumericMetadata store registry schema statement =
+    statementExpressionMetadata false store registry schema statement
+
+let internal statementPreparedMetadata store registry schema statement =
+    statementExpressionMetadata true store registry schema statement
 
 /// PREPARE must expose the same physical source fields as later execution
 /// without evaluating the statement to recover them.
