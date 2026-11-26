@@ -101,10 +101,35 @@ and left the blocked row 30 and the new row 37 unlocked.
 Two additional schedules using `PRIMARY KEY (tenant,id DESC)`
 matched MySQL with both requested order directions on a fixed tenant.
 
-When the initial gap check times out on a pending insert, Fsdb still
-releases claims that MySQL can keep. For example, an uncommitted key
-25 inside the range leaves MySQL holding row 20 after a forward
-timeout. Reselection after a completed row-lock batch still rolls
-back the statement's claims if it subsequently times out. Gap
-handling for `NOWAIT` and `SKIP LOCKED`, secondary indexes, and
-other read shapes remains open.
+## Waits on pending inserts
+
+The range admission step now identifies the first pending primary
+key in scan order. It protects the range up to that key and claims
+the earlier committed rows before waiting. If the pending key is
+published, the reader reopens the range. On timeout it retains the
+locks acquired before reaching that key, including the initial seek
+gap in the audited reverse scans.
+
+Six timeout schedules matched MySQL 8.4.11 on the same table and
+12–38 range. These included explicit and implicit SERIALIZABLE reads,
+forward and reverse limits, and a pending key before the first
+committed row. In the forward read waiting at an uncommitted key 25,
+the reader retained row 20 and its preceding gap after the timeout.
+The reverse read retained row 30 and the gaps probed at 25 and 35.
+
+Three schedules with a committing insert at 25 matched during and after
+the wait. The forward cursor blocked an insert at 23 and allowed one
+at 27 in the ordered case. The reverse cursor blocked an insert at 35
+and allowed one at 15. The resumed forward read locked the new row at
+27. The reverse read stopped before row 15 and left it writable.
+Two further schedules used a second pending key. Once the first
+writer committed, both forward and reverse reads reached their
+`LIMIT 3` without waiting on the later pending key. In a mixed
+schedule, the forward read waited first on row 20 and then on the
+pending key 25. It kept row 20 locked during the second wait and
+returned both inserts after their transactions committed.
+
+Reselection after a completed row-lock batch still rolls back the
+statement's claims if it subsequently times out. Gap handling for
+`NOWAIT` and `SKIP LOCKED`, secondary indexes, and other read shapes
+remains open.

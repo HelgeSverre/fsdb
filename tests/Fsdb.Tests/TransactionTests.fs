@@ -931,6 +931,47 @@ let tests =
                   for key in retainedGaps do
                       Expect.equal (attempt $"INSERT INTO gate VALUES ({key},0)") (Affected 1UL) "rollback releases retained gaps"
 
+          testCase "primary locking read timeouts at pending keys keep earlier scan locks"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate (id INT PRIMARY KEY,n INT)" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES (10,1),(20,2),(30,3),(40,4)" (Affected 4UL) |> ignore
+              let reader = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let probe = run (create 3 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let attempt sql =
+                  let transaction = run probe "BEGIN" (Affected 0UL)
+                  let transaction, result = handle transaction sql
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  result
+
+              for suffix, pending, retainedRow, retainedGap, freeGap in
+                  [ "FOR UPDATE", 25, 20, 11, 27
+                    "ORDER BY id LIMIT 2 FOR UPDATE", 25, 20, 11, 27
+                    "ORDER BY id DESC LIMIT 2 FOR UPDATE", 25, 30, 35, 11 ] do
+                  let writer = run (create 4 store) "BEGIN" (Affected 0UL)
+                  let writer = run writer $"INSERT INTO gate VALUES ({pending},0)" (Affected 1UL)
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let transaction, timeout = handle transaction ("SELECT id FROM gate WHERE id BETWEEN 12 AND 38 " + suffix)
+                  run writer "ROLLBACK" (Affected 0UL) |> ignore
+                  try
+                      match timeout with
+                      | Err(1205, _) -> ()
+                      | actual -> failtestf "%s: expected a timeout at the pending key, got %A" suffix actual
+                      match attempt $"SELECT id FROM gate WHERE id={retainedRow} FOR UPDATE NOWAIT" with
+                      | Err(3572, _) -> ()
+                      | actual -> failtestf "%s: the earlier row must stay locked, got %A" suffix actual
+                      match attempt $"INSERT INTO gate VALUES ({retainedGap},0)" with
+                      | Err(1205, _) -> ()
+                      | actual -> failtestf "%s: the earlier gap must stay locked, got %A" suffix actual
+                      Expect.equal (attempt $"INSERT INTO gate VALUES ({freeGap},0)") (Affected 1UL) "the later gap stays writable"
+                  finally
+                      run transaction "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "serializable limited primary-key reads lock only when they seek the key"
           <| fun _ ->
               let run session sql expected =

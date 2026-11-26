@@ -6476,14 +6476,22 @@ type private PrimaryRangeLockResult =
     | RangeRowsLocked
     | ReopenRange
 
+type private PendingPrimaryKey =
+    { Values: Value list
+      CompareKey: Value list -> int
+      Wait: TimeSpan -> unit }
+
+type private PrimaryGapAdmission =
+    | GapProtected
+    | GapNeedsRefresh
+    | GapHasPendingKey of PendingPrimaryKey
+
 let private isEqualityPrefix lower upper =
     match lower, upper with
     | Some(first, true), Some(last, true) -> first = last
     | _ -> false
 
-// A limited scan returns false after waiting for one key so its caller can
-// reselect the stopping row before claiming a gap or waiting for another key.
-let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (database: string) tableName scan read =
+let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (database: string) tableName scan deferPending read =
     match snapshot.TransactionLocks, tableAt snapshot database tableName with
     | Some context, Some observed ->
         let tableKey = normalizeTableName tableName
@@ -6663,7 +6671,12 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                 |> Seq.filter (fun (owner, _, values) ->
                     owner <> context.Owner && within 1 lower values && within -1 upper values)
 
-            if not (needsGap observed) then true
+            let oneKeyAtATime =
+                match scan with
+                | LimitedGap _ | EmptyReversePrefixGap -> true
+                | _ -> deferPending
+
+            if not (needsGap observed) then GapProtected
             else
                 match scan, read with
                 | (RetainedRangeGap _ | RetainedReverseSeekGap), PrimaryRange _ ->
@@ -6671,8 +6684,8 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                     // its provisional scan gap. Keep the narrower claim
                     // before releasing the provisional one.
                     lock cache.SyncRoot install
-                    true
-                | (LimitedGap _ | EmptyReversePrefixGap), PrimaryRange(lower, upper) ->
+                    GapProtected
+                | _, PrimaryRange(lower, upper) when oneKeyAtATime ->
                     let firstBlocker =
                         lock cache.SyncRoot (fun () ->
                             let blocker =
@@ -6685,13 +6698,21 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             if blocker.IsNone then install ()
                             blocker)
                     match firstBlocker with
-                    | None -> true
-                    | Some(owner, key, _) ->
+                    | None -> GapProtected
+                    | Some(owner, key, values) ->
                         let available () = exactKeyOwner cache key <> Some owner
                         let blockers = HashSet([ owner ])
-                        awaitLock (DateTime.UtcNow + timeout) live.LockWaits database context
-                            queryCancellation.Value cache.SyncRoot available (fun () -> blockers) ignore
-                        false
+                        let wait budget =
+                            awaitLock (DateTime.UtcNow + budget) live.LockWaits database context
+                                queryCancellation.Value cache.SyncRoot available (fun () -> blockers) ignore
+                        if deferPending then
+                            GapHasPendingKey
+                                { Values = values
+                                  CompareKey = fun candidate -> compare candidate values
+                                  Wait = wait }
+                        else
+                            wait timeout
+                            GapNeedsRefresh
                 | _ ->
                     let blockers () =
                         let owners = HashSet<int64>()
@@ -6714,12 +6735,12 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                     if not installed then
                         awaitLock (DateTime.UtcNow + timeout) live.LockWaits database context
                             queryCancellation.Value cache.SyncRoot available blockers install
-                    true)
-        |> Option.defaultValue true
-    | _ -> true
+                    GapProtected)
+        |> Option.defaultValue GapProtected
+    | _ -> GapProtected
 
 let internal acquireMissingPrimaryGap timeout live snapshot database tableName values =
-    acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap (PrimaryPoint values) |> ignore
+    acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap false (PrimaryPoint values) |> ignore
 
 let private primaryRangeRows (table: Table) lower upper limit =
     match Map.tryFind "PRIMARY" table.SecondaryOrder with
@@ -6777,7 +6798,7 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
     let narrowScanGap snapshot savedGaps gap =
         let provisional = transactionGapLocks snapshot
         gap |> Option.iter (fun (scan, range) ->
-            acquirePrimaryReadGap TimeSpan.Zero live snapshot database tableName scan range |> ignore)
+            acquirePrimaryReadGap TimeSpan.Zero live snapshot database tableName scan false range |> ignore)
         let visitedGaps =
             transactionGapLocks snapshot
             |> List.filter (fun gap -> not (provisional |> List.exists (fun saved -> obj.ReferenceEquals(saved, gap))))
@@ -6791,7 +6812,14 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
             | ReverseScan -> PrimaryRange(edge, upper)
         Some(RetainedRangeGap direction, range)
 
-    let lockRangeRows snapshot savedGaps direction lower upper canRetain ((selected, _) as selection) =
+    let retainScanProgress snapshot savedGaps direction lower upper visited blocked =
+        let visitedGap =
+            if direction = ReverseScan && Option.isNone visited then
+                Some(RetainedReverseSeekGap, PrimaryRange(Some(blocked, true), upper))
+            else visited |> Option.bind (gapThrough direction lower upper)
+        narrowScanGap snapshot savedGaps visitedGap
+
+    let lockRangeRows snapshot savedGaps direction lower upper canRetain selected isCurrent =
         let rowIds = List.map fst selected
         if not canRetain then
             lockRows WaitForLocks snapshot rowIds
@@ -6823,17 +6851,50 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
                             lockRows WaitForLocks snapshot [ id ]
                             Ok ReopenRange
                         with LockWaitTimeout _ as error ->
-                            let visitedGap =
-                                if direction = ReverseScan && visited.IsNone then
-                                    Some(RetainedReverseSeekGap, PrimaryRange(Some(key, true), upper))
-                                else visited |> Option.bind (gapThrough direction lower upper)
-                            narrowScanGap snapshot savedGaps visitedGap
+                            retainScanProgress snapshot savedGaps direction lower upper visited key
                             Error error
             if not contended then Ok RangeRowsLocked
-            elif rows (refresh ()) = Some selection then visit None selected
+            elif isCurrent (refresh ()) then visit None selected
             else
                 releaseLaterGapLocks snapshot savedGaps
                 Ok ReopenRange
+
+    let rec lockBeforePending snapshot savedGaps direction lower upper (pending: PendingPrimaryKey) =
+        // Exclude the pending record from admission. The installed gap
+        // still protects the scan through the boundary of that record.
+        let edge = Some(pending.Values, false)
+        let prefix =
+            match direction with
+            | ForwardScan -> PrimaryRange(lower, edge)
+            | ReverseScan -> PrimaryRange(edge, upper)
+        match acquirePrimaryReadGap (remaining ()) live snapshot database tableName (LimitedGap(direction, true)) true prefix with
+        | GapHasPendingKey earlier -> lockBeforePending snapshot savedGaps direction lower upper earlier
+        | GapNeedsRefresh -> Ok ReopenRange
+        | GapProtected ->
+            let precedes key =
+                let order = pending.CompareKey key
+                match direction with
+                | ForwardScan -> order < 0
+                | ReverseScan -> order > 0
+            let prefixRows current =
+                rows current
+                |> Option.map (fun (selected, _) -> List.filter (snd >> precedes) selected)
+            let current = refresh ()
+            match prefixRows current with
+            | None -> Ok ReopenRange
+            | Some selected ->
+                lockRangeRows current savedGaps direction lower upper true selected
+                    (fun snapshot -> prefixRows snapshot = Some selected)
+                |> Result.bind (function
+                    | ReopenRange -> Ok ReopenRange
+                    | RangeRowsLocked ->
+                        try
+                            pending.Wait(remaining ())
+                            Ok ReopenRange
+                        with LockWaitTimeout _ as error ->
+                            let visited = selected |> List.tryLast |> Option.map snd
+                            retainScanProgress current savedGaps direction lower upper visited pending.Values
+                            Error error)
 
     let nextSelection outcome selection current =
         match rows current with
@@ -6849,13 +6910,17 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
             match plan.ReadAccess with
             | PrimaryPoint _ ->
                 if List.isEmpty selected then
-                    acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap plan.ReadAccess |> ignore
+                    acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap false plan.ReadAccess |> ignore
                 lockRows WaitForLocks snapshot (List.map fst selected)
                 Ok RangeRowsLocked
             | PrimaryRange(lower, upper) ->
                 let savedGaps = transactionGapLocks snapshot
-                acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap plan.ReadAccess |> ignore
-                lockRangeRows snapshot savedGaps ForwardScan lower upper canRetain selection
+                match acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap canRetain plan.ReadAccess with
+                | GapHasPendingKey pending -> lockBeforePending snapshot savedGaps ForwardScan lower upper pending
+                | GapNeedsRefresh -> Ok ReopenRange
+                | GapProtected ->
+                    lockRangeRows snapshot savedGaps ForwardScan lower upper canRetain selected
+                        (fun current -> rows current = Some selection)
         acquired |> Result.bind (fun outcome ->
             // A writer can publish a new row identity for the key while the read waits.
             let current = refresh ()
@@ -6863,7 +6928,7 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
             | Some(retain, next) -> acquire retain current next
             | None -> Ok current)
 
-    let rec acquireLimited direction lower upper canRetain snapshot ((_, stop) as selection) =
+    let rec acquireLimited direction lower upper canRetain snapshot ((selected, stop) as selection) =
         let retained = transactionGapLocks snapshot
         let stoppingEdge = stop |> Option.map (fun key -> key, true)
         let scan, read =
@@ -6871,22 +6936,30 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
             | ReverseScan when stop.IsNone && isEqualityPrefix lower upper -> EmptyReversePrefixGap, PrimaryRange(lower, upper)
             | ReverseScan -> LimitedGap(ReverseScan, stop.IsSome), PrimaryRange(stoppingEdge, upper)
             | ForwardScan -> LimitedGap(ForwardScan, stop.IsSome), PrimaryRange(lower, stoppingEdge |> Option.orElse upper)
-        let installed = acquirePrimaryReadGap (remaining ()) live snapshot database tableName scan read
-        let current = refresh ()
-        match rows current with
-        | None ->
-            releaseLaterGapLocks snapshot retained
-            Ok current
-        | Some next when not installed || next <> selection ->
-            releaseLaterGapLocks snapshot retained
-            acquireLimited direction lower upper canRetain current next
-        | Some _ ->
-            lockRangeRows current retained direction lower upper canRetain selection
-            |> Result.bind (fun outcome ->
-                let current = refresh ()
-                match nextSelection outcome selection current with
-                | Some(retain, next) -> acquireLimited direction lower upper retain current next
-                | None -> Ok current)
+        let admission = acquirePrimaryReadGap (remaining ()) live snapshot database tableName scan canRetain read
+        let finish outcome =
+            let current = refresh ()
+            match nextSelection outcome selection current with
+            | Some(retain, next) -> acquireLimited direction lower upper retain current next
+            | None -> Ok current
+        match admission with
+        | GapHasPendingKey pending ->
+            lockBeforePending snapshot retained direction lower upper pending |> Result.bind finish
+        | GapProtected | GapNeedsRefresh ->
+            let current = refresh ()
+            match admission, rows current with
+            | _, None ->
+                releaseLaterGapLocks snapshot retained
+                Ok current
+            | GapNeedsRefresh, Some next ->
+                acquireLimited direction lower upper canRetain current next
+            | _, Some next when next <> selection ->
+                releaseLaterGapLocks snapshot retained
+                acquireLimited direction lower upper canRetain current next
+            | _, Some _ ->
+                lockRangeRows current retained direction lower upper canRetain selected
+                    (fun snapshot -> rows snapshot = Some selection)
+                |> Result.bind finish
 
     let initial = refresh ()
     match rows initial with
