@@ -440,3 +440,18 @@ on the warmed run were 3.19 ms and 3.40 ms in the candidate.
 | Nested derived `SUM(sequence_no)` | 442.70 | 14.82 | 1.83 |
 | CTE `COUNT(*)` | 401.05 | 3.62 | 1.76 |
 | Derived `COUNT(*)` with a source null test | 387.27 | 3.85 | 2.17 |
+
+### Projected aggregate wire metadata
+
+Scalar `SUM`, `AVG`, `MIN`, and `MAX` over a single projected source can
+derive their result types from the source columns before reading any rows.
+This also handles a CTE that shadows a table name. A merged integer
+expression retains its display width, while a materialized integer
+column uses the width of its declared type. Empty results retain their
+declared type and text averages use the declared scale.
+
+A native MySQL 8.4.11 rerun matched all 1,604 ordered rows and all 401
+scalar field descriptors in text results across the projection matrix
+above. The scalar field name, type, width, scale, and flags also matched
+in all 1,203 `COM_STMT_PREPARE` descriptors at session division precision
+increments 0, 4, and 12. [MySQL column definition packets](https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset_column_definition.html).

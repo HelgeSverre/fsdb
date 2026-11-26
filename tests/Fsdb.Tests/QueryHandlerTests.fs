@@ -4642,6 +4642,50 @@ let tests =
                       "SELECT (SELECT AVG(c.n) FROM child c WHERE c.pid=p.id) AS pos,(SELECT AVG(-c.n) FROM child c WHERE c.pid=p.id) AS neg FROM parent p WHERE p.id=4"
               Expect.equal midpoint (ResultSet([ "pos"; "neg" ], [ [ Some "0.0313"; Some "-0.0313" ] ])) "exact half-way values round away from zero"
 
+          testCase "projected scalar aggregates declare numeric wire types before rows exist"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE parent(id INT PRIMARY KEY)"
+              let session, _ = handle session "CREATE TABLE child(id MEDIUMINT PRIMARY KEY,pid INT,n INT,d DECIMAL(8,2))"
+              let session, _ = handle session "CREATE TABLE projected(k BIGINT,parent_key INT,payload DOUBLE,amount DOUBLE)"
+              let session, _ = handle session "INSERT INTO parent VALUES (1),(2)"
+              let session, _ = handle session "INSERT INTO child VALUES (1,1,0,0.00),(2,1,1,0.01),(3,1,1,0.01)"
+              let shapes (columns: ColumnMetadata list) =
+                  columns |> List.map (fun column -> column.TypeId, column.ColumnLength, column.Decimals, column.Flags)
+              let check sql expectedRows expectedMetadata =
+                  let resultSession, result = handle session sql
+                  match result with
+                  | ResultSet(_, rows) -> Expect.equal rows expectedRows sql
+                  | other -> failtestf "expected scalar aggregate rows, got %A" other
+                  Expect.equal (shapes resultSession.LastResultColumnMetadata) expectedMetadata "text descriptors"
+                  match prepareStatementForSession session sql with
+                  | Ok(statement, parameterCount) ->
+                      let _, columns = preparedMetadata session statement parameterCount
+                      Expect.equal (columns |> List.map _.Metadata |> shapes) expectedMetadata "prepared descriptors"
+                  | Error error -> failtestf "expected projected aggregate to prepare, got %A" error
+              let derived = "(SELECT id AS k,pid AS parent_key,n AS payload,d AS amount FROM child)"
+              let withCte = "WITH projected(k,parent_key,payload,amount) AS (SELECT id,pid,n,d FROM child) "
+              let expected =
+                  [ TypeInt24, 9u, 0uy, BinaryFlag
+                    TypeNewDecimal, 16u, 4uy, BinaryFlag
+                    TypeNewDecimal, 32u, 2uy, BinaryFlag ]
+              for prefix, source in [ "", derived; withCte, "projected" ] do
+                  let scalar argument = $"(SELECT {argument} FROM {source} c WHERE c.parent_key=p.id)"
+                  let minimum = scalar "MIN(c.k)"
+                  let average = scalar "AVG(c.payload)"
+                  let sum = scalar "SUM(c.amount)"
+                  let sql = $"{prefix}SELECT {minimum} AS m,{average} AS a,{sum} AS s FROM parent p"
+                  check (sql + " ORDER BY p.id") [ [ Some "1"; Some "0.6667"; Some "0.02" ]; [ None; None; None ] ] expected
+                  check (sql + " WHERE 0") [] expected
+              check
+                  "SELECT (SELECT MAX(c.k) FROM (SELECT id+0 AS k,pid FROM child LIMIT 3) c WHERE c.pid=p.id) AS x FROM parent p ORDER BY p.id"
+                  [ [ Some "3" ]; [ None ] ]
+                  [ TypeLongLong, 20u, 0uy, BinaryFlag ]
+              check
+                  "SELECT (SELECT MIN(c.k) FROM (SELECT id+0 AS k,pid FROM child) c WHERE c.pid=p.id) AS x,(SELECT SUM(c.k) FROM (SELECT id+0 AS k,pid FROM child) c WHERE c.pid=p.id) AS s FROM parent p ORDER BY p.id"
+                  [ [ Some "1"; Some "6" ]; [ None; None ] ]
+                  [ TypeLongLong, 10u, 0uy, BinaryFlag; TypeNewDecimal, 32u, 0uy, BinaryFlag ]
+
           testCase "correlated integer predicates warn once for each truncated literal"
           <| fun _ ->
               let run =

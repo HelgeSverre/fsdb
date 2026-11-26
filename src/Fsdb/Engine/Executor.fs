@@ -1263,7 +1263,8 @@ type private StoredCheck = SystemCatalog.Check.Entry
 
 type private ViewColumnDescriptor =
     { Column: ColumnDef
-      NumericParts: (int * int) option }
+      NumericParts: (int * int) option
+      WireMetadata: ColumnMetadata option }
 
 type private DescribedJoinScope =
     { Sources: (string * ViewColumnDescriptor list) list
@@ -1277,6 +1278,10 @@ type private ColumnDescriptionError =
 type private ColumnDescriptionSource =
     | StoredRelation of string
     | QueryBody of SelectOrUnion
+    | SourceBody of FromItem
+
+let private describedCteScope =
+    System.Threading.AsyncLocal<Map<string, Lazy<Result<ViewColumnDescriptor list, ColumnDescriptionError>>>>()
 
 let private currentViewStack () = DynamicScope.valueOrDefault Set.empty viewStack
 
@@ -8011,24 +8016,49 @@ and private tryScalarNumericAggregateMetadata (ctx: EvalContext) (select: Select
             && (select.Where |> Option.forall (fun predicate ->
                 possibleConditionTruths ctx predicate = Set.singleton (Some true)))
         Some(if unconditionallyPresent then countResultMetadata else { countResultMetadata with Flags = BinaryFlag })
-    | Some(FromTable tableRef), [ { Expression = FuncCall(name, [ _ ]) as projection } ]
+    | Some source, [ { Expression = FuncCall(name, [ _ ]) as projection } ]
         when (equalsIgnoreCase name "SUM" || equalsIgnoreCase name "AVG" || equalsIgnoreCase name "MIN" || equalsIgnoreCase name "MAX")
              && Functions.isUnmodifiedBuiltinAggregate name ctx.Registry
              && select.Joins.IsEmpty
-             && select.Ctes.IsEmpty
-             && not (tableRef.Database.IsNone && (currentCteScope () |> Map.containsKey (tableRef.Table.ToLowerInvariant()))) ->
-        let database = tableRef.Database |> Option.defaultValue ctx.DbName
-        let virtualSource = equalsIgnoreCase database "fsdb" && ctx.Store.VirtualTables.ContainsKey(tableRef.Table.ToLowerInvariant())
-        if virtualSource then None
-        else
-            InformationSchema.findTable ctx.Store.Catalog database tableRef.Table
+             && select.Ctes.IsEmpty ->
+        let describeSource () =
+            let merged =
+                match source with
+                | FromSubquery(PlainSelect body, _) -> not (selectRequiresMaterialization body)
+                | _ -> false
+            describeQueryColumnDescriptorsInScope ctx.Store ctx.Registry ctx.DbName (SourceBody source) (Some ctx) (fun _ -> Ok())
             |> Result.toOption
-            |> Option.bind (fun table ->
-                // Scalar aggregates derive integer precision from the type,
-                // independent of a stored display width or ZEROFILL.
-                let columns =
-                    table.Columns |> List.map (fun column ->
-                        let width =
+            |> Option.map (List.map (fun descriptor ->
+                descriptor.Column, if merged then descriptor.WireMetadata else None))
+        let sourceColumns =
+            match source with
+            | FromTable tableRef ->
+                let name = tableRef.Table.ToLowerInvariant()
+                let describedCtes = DynamicScope.valueOrDefault Map.empty describedCteScope
+                if tableRef.Database.IsNone
+                   && (Map.containsKey name describedCtes || Map.containsKey name (currentCteScope ())) then
+                    describeSource ()
+                else
+                    let database = tableRef.Database |> Option.defaultValue ctx.DbName
+                    if equalsIgnoreCase database "fsdb" && ctx.Store.VirtualTables.ContainsKey(name) then None
+                    else
+                        InformationSchema.findTable ctx.Store.Catalog database tableRef.Table
+                        |> Result.toOption
+                        |> Option.map (fun table -> table.Columns |> List.map (fun column -> column, None))
+            | FromSubquery _ -> describeSource ()
+            | _ -> None
+
+        Option.map2 (fun qualifier columns -> qualifier, columns) (FromItem.tryQualifier source) sourceColumns
+        |> Option.bind (fun (qualifier, columns) ->
+            // Stored integers use their type's precision. A merged
+            // expression retains the width of the expression itself.
+            let columns =
+                columns |> List.map (fun (column, expressionMetadata) ->
+                    let width =
+                        match expressionMetadata with
+                        | Some metadata when isIntegerMetadata metadata && metadata.ColumnLength > 0u ->
+                            Some(int metadata.ColumnLength)
+                        | _ ->
                             match column.Type with
                             | TTinyInt unsigned -> Some(if unsigned then 3 else 4)
                             | TSmallInt unsigned -> Some(if unsigned then 5 else 6)
@@ -8037,20 +8067,19 @@ and private tryScalarNumericAggregateMetadata (ctx: EvalContext) (select: Select
                             | TBigInt _ -> Some 20
                             | TBool -> Some 4
                             | _ -> None
-                        match width with
-                        | Some width ->
-                            { column with NumericDisplay = Some { Width = Some width; Decimals = None; ZeroFill = false } }
-                        | None -> column)
-                let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
-                let inner =
-                    contextFactory ctx.Store ctx.Registry ctx.DbName (columnIndexOf columns)
-                        (singleQualifier qualifier columns) (Some ctx) (probeRow columns)
-                metadataOfExpr inner projection)
-            |> Option.filter (fun metadata ->
-                isIntegerMetadata metadata || metadata.TypeId = TypeNewDecimal
-                || metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat)
-            |> Option.map (fun metadata ->
-                { metadata with Flags = BinaryFlag ||| (metadata.Flags &&& UnsignedFlag) })
+                    match width with
+                    | Some width ->
+                        { column with NumericDisplay = Some { Width = Some width; Decimals = None; ZeroFill = false } }
+                    | None -> column)
+            let inner =
+                contextFactory ctx.Store ctx.Registry ctx.DbName (columnIndexOf columns)
+                    (singleQualifier qualifier columns) (Some ctx) (probeRow columns)
+            metadataOfExpr inner projection)
+        |> Option.filter (fun metadata ->
+            isIntegerMetadata metadata || metadata.TypeId = TypeNewDecimal
+            || metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat)
+        |> Option.map (fun metadata ->
+            { metadata with Flags = BinaryFlag ||| (metadata.Flags &&& UnsignedFlag) })
     | _ -> None
 
 and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
@@ -10552,14 +10581,14 @@ and private resolveTableRef
 
 /// Derives query columns from schema and expression metadata without reading
 /// rows or invoking extension functions.
-and private describeQueryColumnsInScope
+and private describeQueryColumnDescriptorsInScope
     (store: Store)
     (registry: Registry)
     (schema: string)
     (source: ColumnDescriptionSource)
     (outer: EvalContext option)
     (validateCall: string -> Result<unit, ColumnDescriptionError>)
-    : Result<ColumnDef list, ColumnDescriptionError> =
+    : Result<ViewColumnDescriptor list, ColumnDescriptionError> =
     let requireDescription = function
         | Some value -> Ok value
         | None -> Error DescriptionUnavailable
@@ -10599,11 +10628,13 @@ and private describeQueryColumnsInScope
 
     let describeColumn column =
         { Column = column
-          NumericParts = decimalParts column.Type }
+          NumericParts = decimalParts column.Type
+          WireMetadata = None }
 
     let describeLiteral column value =
         { Column = column
-          NumericParts = literalDecimalParts value |> Option.orElseWith (fun () -> decimalParts column.Type) }
+          NumericParts = literalDecimalParts value |> Option.orElseWith (fun () -> decimalParts column.Type)
+          WireMetadata = None }
 
     let renameColumns names (columns: ViewColumnDescriptor list) =
         renameRelationColumns names (fun (descriptor: ViewColumnDescriptor) -> descriptor.Column.Name)
@@ -11160,7 +11191,8 @@ and private describeQueryColumnsInScope
                         | _, _, _, Some column, _, _ -> describeColumn column
                         | _, _, _, _, Some column, _ -> describeColumn column
                         | _, _, _, _, _, Some metadata ->
-                            deriveColumns [ name ] [ keyCollation context expression ] [ metadata ] |> List.head |> describeColumn
+                            let column = deriveColumns [ name ] [ keyCollation context expression ] [ metadata ] |> List.head
+                            { describeColumn column with WireMetadata = Some metadata }
                         | _ -> computedColumn name TText true None (Some "utf8mb4_0900_ai_ci") |> describeColumn
 
                 select.Projections
@@ -11173,7 +11205,9 @@ and private describeQueryColumnsInScope
                         |> Option.map (fst >> List.map describeColumn)
                         |> Option.defaultValue []
                     | _ ->
-                        let descriptor = columnForExpression (projectionLabel projection) expression
+                        let descriptor =
+                            DynamicScope.withValue describedCteScope cteMap (fun () ->
+                                columnForExpression (projectionLabel projection) expression)
                         let collation =
                             expressionCollation context expression
                             |> Result.toOption
@@ -11193,9 +11227,19 @@ and private describeQueryColumnsInScope
                     ProjectionAliases = context.ProjectionAliases |> Map.map (fun _ binding -> binding |> Result.map fst) }
             scope :: enclosingScopes context.Outer
 
-    (match source with
-     | StoredRelation name -> sourceColumns Set.empty schema Map.empty [] emptyScope (FromTable { Database = None; Table = name; Alias = None; Partitions = []; IndexHints = [] })
-     | QueryBody body -> describeBody Set.empty schema Map.empty (enclosingScopes outer) body)
+    match source with
+    | StoredRelation name -> sourceColumns Set.empty schema Map.empty [] emptyScope (FromTable { Database = None; Table = name; Alias = None; Partitions = []; IndexHints = [] })
+    | QueryBody body -> describeBody Set.empty schema Map.empty (enclosingScopes outer) body
+    | SourceBody item ->
+        let ctes =
+            currentCteScope ()
+            |> Map.map (fun _ binding -> lazy (Ok(List.map describeColumn binding.Columns)))
+        let lexical = DynamicScope.valueOrDefault Map.empty describedCteScope
+        let scope = lexical |> Map.fold (fun scope name columns -> Map.add name columns scope) ctes
+        sourceColumns Set.empty schema scope (enclosingScopes outer) emptyScope item
+
+and private describeQueryColumnsInScope store registry schema source outer validateCall =
+    describeQueryColumnDescriptorsInScope store registry schema source outer validateCall
     |> Result.map (List.map _.Column)
 
 and private describeQueryColumnsChecked store registry schema source =
@@ -28352,7 +28396,11 @@ let private statementSources store schema (select: SelectStmt) =
 /// retain their wire shape independently of its ColumnDef fallback.
 let statementNumericMetadata store registry schema statement =
     let describeSelect (select: SelectStmt) =
-        if SelectStmt.hasDestination select || not select.Ctes.IsEmpty then None
+        if SelectStmt.hasDestination select then None
+        elif not select.Ctes.IsEmpty then
+            describeQueryColumnDescriptorsInScope store registry schema (QueryBody(PlainSelect select)) None (fun _ -> Ok())
+            |> Result.toOption
+            |> Option.map (List.map _.WireMetadata)
         else
             let sources = statementSources store schema select
             let rewritten =
