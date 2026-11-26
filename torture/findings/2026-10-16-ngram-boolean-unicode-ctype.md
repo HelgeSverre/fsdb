@@ -269,3 +269,31 @@ order. Fsdb uses one posting per gram. InnoDB can split a gram across
 multiple on-disk nodes and keep separate in-memory postings, so the
 document bounds verified here do not establish parity across those
 storage states.
+
+## Single-precision rank accumulation
+
+In an optimized ten-document binary trigram index, five rows have
+`東京駅` and one of those rows also has `京都駅`.
+For `+(京* 東京*) <東京*`, MySQL 8.4.11 gives the row with both
+terms a rank of zero, and the other Tokyo rows rank −1. Its accumulator
+starts at −1, rounds the tiny Tokyo contribution away in single
+precision, then adds Kyoto's +1. With `京* <東京* +(東京*)`, Kyoto
+contributes first, and the same row retains Tokyo's
+`1.885928302414186e-9` relevance.
+[InnoDB rank calculation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3011)
+[InnoDB rank type](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/include/fts0fts.h#L148).
+
+Fsdb's grouped, repeated, and weighted ngram evaluator now accumulates
+in the order terms first contribute to matching documents,
+rounding after each addition. The regression covers both term orders,
+candidate-restricted evaluation, and the dictionary path.
+The 1,934-query optimized binary trigram corpus now matches in both
+membership and relevance. The same corpus matches at binary size four,
+with both collations at size two, and with the accent-insensitive
+collation at size three. A separate 3,856-query binary trigram holdout
+also matches. The maintained two-column corpus matches all 3,870
+searches at sizes 1–10.
+
+At size two on a fresh MySQL index, the 3,856-query holdout had the
+same mismatch counts before and after this fix: 606 for membership and
+944 for relevance. The fresh-cache behavior remains open.

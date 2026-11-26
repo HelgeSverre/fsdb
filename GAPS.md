@@ -1739,12 +1739,12 @@ now follow the ASCII space boundary, including repeated and opposing
 modifiers and punctuation between CJK terms.
 [Boolean ngram rank cancellation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#boolean-rank-cancellation)
 now treats a final score of zero as a nonmatch in the audited weighted
-term, phrase, group, and prefix cases.
+term, phrase, group, and prefix cases. [Single-precision rank accumulation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#single-precision-rank-accumulation)
+also resolves the near-zero result in the optimized trigram corpus.
 [Required prefixes in nested Boolean groups](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#required-prefix-bounds-across-boolean-groups)
 now carry the posting bounds through the rest of the query on the
 audited optimized indexes, including after indexed text changes and
-recovery. Cache-dependent wildcard behavior, segmented postings, and
-a near-zero trigram relevance difference remain open.
+recovery. Cache-dependent wildcard behavior and segmented postings remain open.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.

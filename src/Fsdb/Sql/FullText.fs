@@ -1388,9 +1388,10 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             && (nodes |> List.exists (function _, BGroup _ -> true | _ -> false))
             && (leaves nodes |> Seq.exists (function Must, BWord(_, true) -> true | _ -> false))
 
-        if not tracksPostingBounds
-           && (frequencies |> Map.forall (fun _ count -> count = 1))
-           && not (hasRankAdjustments nodes) then
+        let weighted = hasRankAdjustments nodes
+        let repeated = frequencies |> Map.exists (fun _ count -> count > 1)
+
+        if not tracksPostingBounds && not repeated && not weighted then
             None
         else
             // A wildcard exclusion visits postings only if its group has matches.
@@ -1401,11 +1402,15 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                     | MustNot, BWord(word, true) -> frequencies.[NgramPrefix word.Key] > 1
                     | _ -> false)
 
+            // In a weighted query, a repeated gram can get its first position
+            // from a document outside the SQL candidates.
+            let needsCorpusOrder = weighted && repeated && frequencies.Count > 1
             let scope =
-                if tracksPostingBounds then view.VisibleDocumentIds
+                if tracksPostingBounds || needsCorpusOrder then view.VisibleDocumentIds
                 elif fullScope then None
                 else candidateIds
             let visits = Collections.Generic.Dictionary<NgramScoringKey, int>()
+            let contributionOrder = Collections.Generic.Dictionary<NgramScoringKey, int>()
             let mutable postingBounds = None
 
             let documentBounds rows =
@@ -1441,7 +1446,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 let steps = if current = -delta then adjustmentSteps term id else 1
                 Math.Clamp(current + steps * delta, -1, 1)
 
-            let rec matchTerm isRequired = function
+            let rec matchTerm isRequired contributes = function
                 | BGroup children -> matchNodes children
                 | term ->
                     let found = keys term
@@ -1459,9 +1464,17 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
 
                     if firstOutside.IsSome then Map.empty
                     else
+                        let matches = evalTerm scope view term
+                        match contributes with
+                        | Some accepts when
+                            (found |> Array.exists (contributionOrder.ContainsKey >> not))
+                            && (matches |> Map.exists (fun id _ -> accepts id)) ->
+                            // A gram gets its position when it first contributes to a document.
+                            for key in found do
+                                contributionOrder.TryAdd(key, contributionOrder.Count) |> ignore
+                        | _ -> ()
                         let terms = Set.ofArray found
-                        evalTerm scope view term
-                        |> Map.map (fun _ _ -> { Terms = terms; Adjustment = 0 })
+                        matches |> Map.map (fun _ _ -> { Terms = terms; Adjustment = 0 })
 
             and matchNodes nodes =
                 // Ordinary terms seed the group before required terms and exclusions.
@@ -1469,7 +1482,8 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 let required, excluded = filters |> List.partition (fun (op, _) -> op = Must)
 
                 let union matches (operator, term) =
-                    matchTerm false term
+                    let contributes id = operator <> Soft || Map.containsKey id matches
+                    matchTerm false (Some contributes) term
                     |> Map.fold (fun matches id incoming ->
                         matches
                         |> Map.change id (fun existing ->
@@ -1487,6 +1501,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                                        Adjustment = adjustment })) matches
 
                 let intersect first matches (_, term) =
+                    let contributes id = first || Map.containsKey id matches
                     let requiredMatches =
                         match term with
                         | BWord(_, true) when tracksPostingBounds ->
@@ -1495,8 +1510,8 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                                 // Required prefixes set query-wide posting bounds.
                                 // Leaving a group preserves those bounds for later phrases.
                                 postingBounds <- if first then None else Some(documentBounds matches)
-                                matchTerm true term
-                        | _ -> matchTerm true term
+                                matchTerm true (Some contributes) term
+                        | _ -> matchTerm true (Some contributes) term
 
                     requiredMatches
                     |> Map.fold (fun narrowed id incoming ->
@@ -1519,7 +1534,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 ||> List.fold (fun matches (_, term) ->
                     match term with
                     | BWord(_, true) when matches.IsEmpty -> matches
-                    | _ -> matchTerm false term |> Map.fold (fun matches id _ -> Map.remove id matches) matches)
+                    | _ -> matchTerm false None term |> Map.fold (fun matches id _ -> Map.remove id matches) matches)
 
             let scoreTerm id term =
                 let count = visits.[term]
@@ -1535,8 +1550,12 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 float rows.[id] * weight * weight
 
             matchNodes nodes
-            |> (if fullScope || tracksPostingBounds then restrictScores candidateIds else id)
-            |> Map.map (fun id matched -> float matched.Adjustment + (matched.Terms |> Seq.sumBy (scoreTerm id)))
+            |> (if fullScope || tracksPostingBounds || needsCorpusOrder then restrictScores candidateIds else id)
+            |> Map.map (fun id matched ->
+                matched.Terms
+                |> Seq.sortBy (fun term -> contributionOrder.[term])
+                |> Seq.fold (fun rank term -> rank + float32 (scoreTerm id term)) (float32 matched.Adjustment)
+                |> float)
             // A rank modifier can cancel the final relevance. MATCH then returns zero.
             |> Map.filter (fun _ score -> score <> 0.0)
             |> Some

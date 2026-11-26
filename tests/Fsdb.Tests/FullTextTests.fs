@@ -342,6 +342,29 @@ let tests =
                   let scores = tryFlatBooleanScoresDictionary index query |> Option.get
                   Expect.equal (Seq.toList scores.Keys) [ 2 ] "dictionary candidates exclude the zero score"
 
+          testCase "Boolean ngram ranking rounds in matched-term order"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_bin" |> Option.get
+              let documents =
+                  [ yield 1, [ "京都駅 東京駅" ]
+                    for id in 2..5 -> id, [ "東京駅" ]
+                    for id in 6..10 -> id, [ "大阪府" ] ]
+              let index = buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 3) collation documents
+              let expected = [ for id in 2..5 -> id, -1.0 ] |> Map.ofList
+              for query in [ "+(京* 東京*) <東京*"; "<東京* +(京* 東京*)" ] do
+                  Expect.equal (booleanScores index query) expected query
+                  Expect.isEmpty (booleanScoresWithin (Set.singleton 1) index query) "a restricted lookup also drops the zero rank"
+
+              let exact = booleanScores index "<東京* 東京*"
+              Expect.equal exact (Map.add 1 -1.0 expected) "adding the tiny contribution to the penalty rounds back to -1"
+              let scores = tryFlatBooleanScoresDictionary index "<東京* 東京*" |> Option.get
+              Expect.equal scores.[1] -1.0 "the dictionary path uses the same precision"
+              let tinyRank = 1.885928302414186e-9
+              Expect.equal (booleanScores index "東京* 東京*").[1] tinyRank "the contribution stays nonzero without the penalty"
+              let reordered = Map.add 1 tinyRank expected
+              Expect.equal (booleanScores index "京* <東京* +(東京*)") reordered "the Kyoto contribution can cancel the penalty before Tokyo contributes"
+              Expect.equal (booleanScoresWithin (Set.singleton 1) index "京* <東京* +(東京*)") (Map.ofList [ 1, tinyRank ]) "a restricted lookup preserves term order"
+
           testCase "required ngram prefixes keep their posting bounds across groups"
           <| fun _ ->
               let collation = tryFind "utf8mb4_bin" |> Option.get
