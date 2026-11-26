@@ -278,6 +278,40 @@ let tests =
                             "decimal and string outer keys compare numerically, row by row"
                     | other -> failtestf "expected coerced correlated counts, got %A" other ]
 
+          testCase "joined correlated text and integer keys share one inner pass"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE owners(id INT PRIMARY KEY, tenant INT, tag VARCHAR(24) COLLATE utf8mb4_unicode_ci)"
+                    "CREATE TABLE items(id INT PRIMARY KEY, tenant INT, tag VARCHAR(24) COLLATE utf8mb4_unicode_ci, payload INT, number DOUBLE)"
+                    "CREATE TABLE marker(id INT PRIMARY KEY)"
+                    "INSERT INTO owners VALUES(1,10,'École'),(2,10,'上海'),(3,10,NULL),(4,20,'ecole'),(5,10,'absent'),(6,NULL,'École')"
+                    "INSERT INTO items VALUES(1,10,'ecole',3,4),(2,10,'ÉCOLE ',NULL,2),(3,10,'上海',5,4),(4,10,NULL,4,5),(5,20,'École',5,6),(6,NULL,'École',6,6),(7,10,'unrelated',7,6)"
+                    "INSERT INTO marker VALUES(1)" ] do
+                  runDefault store sql |> ignore
+
+              let query =
+                  "SELECT o.id,(SELECT COUNT(i.payload) FROM items i JOIN marker m ON m.id=1 AND i.tenant=o.tenant WHERE i.tag<=>o.tag) c,EXISTS(SELECT 1 FROM items i JOIN marker m ON m.id=1 AND i.tenant=o.tenant WHERE i.tag=o.tag) e FROM owners o ORDER BY o.id"
+              let expected =
+                  [ [ Some "1"; Some "1"; Some "1" ]; [ Some "2"; Some "1"; Some "1" ]
+                    [ Some "3"; Some "1"; Some "0" ]; [ Some "4"; Some "1"; Some "1" ]
+                    [ Some "5"; Some "0"; Some "0" ]; [ Some "6"; Some "0"; Some "0" ] ]
+              Expect.equal (runDefault store query) (ResultSet([ "id"; "c"; "e" ], expected)) "MySQL folds accents, case, and padding on both sides of the text key"
+
+              let noisy =
+                  "SELECT o.id,(SELECT COUNT(*) FROM items i JOIN marker m ON m.id=1 WHERE i.tag=o.tag AND i.number<'3x') c FROM owners o WHERE o.id IN(1,4) ORDER BY o.id"
+              let noisyResult, warnings = Fsdb.Diagnostics.capture (fun () -> runDefault store noisy)
+              Expect.equal noisyResult (ResultSet([ "id"; "c" ], [ [ Some "1"; Some "1" ]; [ Some "4"; Some "1" ] ])) "coercive predicates preserve the correlated result"
+              Expect.equal (warnings |> List.map _.Code) [ 1292 ] "falling back preserves the statement's DOUBLE conversion warning"
+
+              let extra = [ 100 .. 299 ] |> List.map (sprintf "(%d,10,'absent')") |> String.concat ","
+              runDefault store ("INSERT INTO owners VALUES " + extra) |> ignore
+              let result, examined = withExaminedRows (fun () -> runDefault store query)
+              match result with
+              | ResultSet(_, rows) -> Expect.equal rows.Length 206 "all outer rows are returned"
+              | other -> failtestf "expected correlated COUNT and EXISTS results, got %A" other
+              Expect.isLessThan examined 330L "the joined inner source is grouped once per subquery"
+
           testCase "joined correlated decimal and unsigned keys compare exactly"
           <| fun _ ->
               let store = newStore ()

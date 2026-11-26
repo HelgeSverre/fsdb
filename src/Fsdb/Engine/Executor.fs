@@ -812,11 +812,17 @@ type private NullTestKind =
 
 type private CteGroup = string * string * string
 
-/// Inner-key row counts for a joined correlated subquery whose outer references
-/// are exact numeric equalities, computed once per statement.
+type private DecorrelatedKeyDomain = ExactNumeric | CollatedText of Collation.Collation
+
+type private DecorrelatedKey =
+    { OuterExpression: Expr
+      NullSafe: bool
+      Domain: DecorrelatedKeyDomain }
+
+/// Inner-key row counts for a correlated subquery, computed once per statement.
 type private DecorrelatedKeyCounts =
-    { OuterKeys: (Expr * bool) list
-      Counts: Dictionary<decimal option list, int64> }
+    { OuterKeys: DecorrelatedKey list
+      Counts: Dictionary<Value list, int64> }
 
 type private CorrelatedNumericWarningState =
     | Pending of string
@@ -10222,10 +10228,12 @@ and private exactNumericKey (value: Value) : decimal option =
     | VDecimal value -> Some value
     | _ -> None
 
-and private exactNullableNumericKey (value: Value) : decimal option option =
-    match value with
-    | VNull -> Some None
-    | _ -> exactNumericKey value |> Option.map Some
+and private decorrelatedKeyValue (key: DecorrelatedKey) value =
+    match key.Domain, value with
+    | _, VNull -> Some VNull
+    | ExactNumeric, _ -> exactNumericKey value |> Option.map VDecimal
+    | CollatedText collation, VString text -> Some(VString(collation.KeyOf text))
+    | CollatedText _, _ -> None
 
 /// Side-effect-free predicate shapes that can run in the grouped inner pass.
 /// Conversion-warning cardinality still depends on the access path; direct
@@ -10255,27 +10263,39 @@ and private isPlainRowPredicate (expression: Expr) : bool =
 /// Splits a subquery's WHERE and inner-join ON clauses into top-level
 /// `outer.column = inner.column` or `<=>` conjuncts and a local remainder. Grouping
 /// the remainder by the inner keys yields every outer row's match count.
-and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : ((Expr * bool) list * SelectStmt) option =
+and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : (DecorrelatedKey list * SelectStmt) option =
+    let sources =
+        (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+        |> List.choose (function FromTable table -> Some table | _ -> None)
+
+    let physicalColumn qualifier columnName =
+        match sources |> List.filter (fun source -> equalsIgnoreCase (source.Alias |> Option.defaultValue source.Table) qualifier) with
+        | [ source ] when not (source.Database.IsNone
+                               && (currentCteScope () |> Map.containsKey (source.Table.ToLowerInvariant()))) ->
+            physicalFastPathTable outer.Store outer.DbName source
+            |> Option.bind (fun (table: Table) ->
+                table.Columns |> List.tryFind (fun (column: ColumnDef) -> equalsIgnoreCase column.Name columnName))
+        | _ -> None
+
     let countColumnIsPhysical =
         if not (isPlainQualifiedColumnCountSelect outer.Registry select) then true
         else
             match select.Projections with
             | [ { Expression = FuncCall(_, [ QualifiedCol(qualifier, columnName) ]) } ] ->
-                let sources: TableRef list =
-                    (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
-                    |> List.choose (function FromTable table -> Some table | _ -> None)
-                    |> List.filter (fun source ->
-                        equalsIgnoreCase (source.Alias |> Option.defaultValue source.Table) qualifier)
-                match sources with
-                | [ source ] when not (source.Database.IsNone
-                                       && (currentCteScope () |> Map.containsKey (source.Table.ToLowerInvariant()))) ->
-                    physicalFastPathTable outer.Store outer.DbName source
-                    |> Option.exists (fun (table: Table) ->
-                        table.Columns
-                        |> List.exists (fun (column: ColumnDef) ->
-                            equalsIgnoreCase column.Name columnName && column.Generated.IsNone))
-                | _ -> false
+                physicalColumn qualifier columnName |> Option.exists (fun column -> column.Generated.IsNone)
             | _ -> false
+
+    let keyDomain outerKey innerKey =
+        match tryColumnDefForExpr outer outerKey, innerKey with
+        | Some outerColumn, QualifiedCol(qualifier, name) when isTextColumn (Some outerColumn) ->
+            match physicalColumn qualifier name with
+            | Some innerColumn when isTextColumn (Some innerColumn) ->
+                // Grouping by the inner column must use the same equality as the comparison.
+                match columnCollationOperand outer outerColumn, columnCollationOperand outer innerColumn with
+                | Ok left, Ok right when left.Collation.Name = right.Collation.Name -> CollatedText right.Collation
+                | _ -> ExactNumeric
+            | _ -> ExactNumeric
+        | _ -> ExactNumeric
     let isPlainBlock =
         countColumnIsPhysical
         && select.GroupBy.IsEmpty
@@ -10340,7 +10360,9 @@ and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : 
         match correlated with
         | _ :: _ when remainder |> List.forall isPlainRowPredicate ->
             let keyPairs = correlated |> List.choose correlation
-            let outerKeys = keyPairs |> List.map (fun (outerKey, _, nullSafe) -> outerKey, nullSafe)
+            let outerKeys =
+                keyPairs |> List.map (fun (outerKey, innerKey, nullSafe) ->
+                    { OuterExpression = outerKey; NullSafe = nullSafe; Domain = keyDomain outerKey innerKey })
             let innerKeys = keyPairs |> List.map (fun (_, innerKey, _) -> innerKey)
             let keyProjections =
                 innerKeys
@@ -10380,18 +10402,32 @@ and private tryDecorrelatedKeyShape (outer: EvalContext) (select: SelectStmt) : 
 and private decorrelatedKeyCounts
     (outer: EvalContext)
     (select: SelectStmt)
-    (outerKeys: (Expr * bool) list, grouped: SelectStmt)
+    (outerKeys: DecorrelatedKey list, grouped: SelectStmt)
     : DecorrelatedKeyCounts option =
     let memo = (currentStatementMemo ()).DecorrelatedKeyCounts
 
     match memo.TryGetValue select with
     | true, counts -> counts
     | false, _ ->
+        let group () =
+            DynamicScope.withValue correlatedNumericWarningScope true (fun () ->
+                runSelectStmt outer.Store outer.Registry outer.DbName grouped None)
+
+        let result =
+            if outerKeys |> List.exists (fun key -> match key.Domain with CollatedText _ -> true | ExactNumeric -> false) then
+                // Keep both the diagnostics and their deduplication state local to the speculative pass.
+                let grouped, conditions =
+                    DynamicScope.withValue statementMemo (freshStatementMemo ()) (fun () ->
+                        Diagnostics.captureStatement (fun () ->
+                            try Some(group ()) with Diagnostics.RaisedCondition _ -> None))
+                if conditions.Count = 0 then grouped else None
+            else
+                Some(group ())
+
         let counts =
-            match DynamicScope.withValue correlatedNumericWarningScope true (fun () ->
-                runSelectStmt outer.Store outer.Registry outer.DbName grouped None) with
-            | ResultSet _, _, rows ->
-                let counts = Dictionary<decimal option list, int64>()
+            match result with
+            | Some(ResultSet _, _, rows) ->
+                let counts = Dictionary<Value list, int64>()
 
                 let collected =
                     rows
@@ -10400,13 +10436,14 @@ and private decorrelatedKeyCounts
                         else
                             let keys = row |> Array.take outerKeys.Length |> Array.toList
                             match row.[outerKeys.Length] with
-                            | VInt _ when List.exists2 (fun (_, nullSafe) key -> not nullSafe && key = VNull) outerKeys keys -> true
+                            | VInt _ when List.exists2 (fun key value -> not key.NullSafe && value = VNull) outerKeys keys -> true
                             | VInt count ->
-                                let numericKeys = keys |> List.map exactNullableNumericKey
-                                if numericKeys |> List.forall Option.isSome then
-                                    counts.[numericKeys |> List.choose id] <- count
+                                match List.map2 decorrelatedKeyValue outerKeys keys |> tryAllSome with
+                                | Some key ->
+                                    let previous = match counts.TryGetValue key with true, value -> value | _ -> 0L
+                                    counts.[key] <- previous + count
                                     true
-                                else false
+                                | None -> false
                             | _ -> false)
 
                 if collected then Some { OuterKeys = outerKeys; Counts = counts } else None
@@ -10415,8 +10452,7 @@ and private decorrelatedKeyCounts
         memo.[select] <- counts
         counts
 
-/// The outer row's match count, or `None` when its key is not exact numeric and
-/// must take the ordinary per-row path to keep SQL's coercion rules.
+/// The outer row's match count, or `None` when ordinary evaluation must handle coercion.
 and private tryDecorrelatedMatchCount (outer: EvalContext) (select: SelectStmt) : Result<int64, EvalError> option =
     let memo = (currentStatementMemo ()).DecorrelatedKeyCounts
     let cached = memo.TryGetValue select
@@ -10430,17 +10466,15 @@ and private tryDecorrelatedMatchCount (outer: EvalContext) (select: SelectStmt) 
 
     shape
     |> Option.bind (fun (outerKeys, grouped) ->
-        let values = outerKeys |> List.map (fst >> evalExpr outer)
+        let values = outerKeys |> List.map (fun key -> evalExpr outer key.OuterExpression)
         match values |> List.tryPick (function Error error -> Some error | _ -> None) with
         | Some error -> Some(Error error)
         | None ->
             let keys = values |> List.choose (function Ok value -> Some value | _ -> None)
-            if List.exists2 (fun (_, nullSafe) key -> not nullSafe && key = VNull) outerKeys keys then None
+            if List.exists2 (fun key value -> not key.NullSafe && value = VNull) outerKeys keys then None
             else
-                let numericKeys = keys |> List.map exactNullableNumericKey
-                if numericKeys |> List.exists Option.isNone then None
-                else
-                    let key = numericKeys |> List.choose id
+                (List.map2 decorrelatedKeyValue outerKeys keys |> tryAllSome)
+                |> Option.bind (fun key ->
                     let counts =
                         match cached with
                         | true, Some counts -> Some counts
@@ -10452,7 +10486,7 @@ and private tryDecorrelatedMatchCount (outer: EvalContext) (select: SelectStmt) 
                     |> Option.map (fun counts ->
                         match counts.Counts.TryGetValue key with
                         | true, count -> Ok count
-                        | false, _ -> Ok 0L))
+                        | false, _ -> Ok 0L)))
 
 and private tryDecorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
     if (isPlainCountRowsSelect outer.Store outer.DbName outer.Registry select

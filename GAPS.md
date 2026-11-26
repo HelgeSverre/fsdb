@@ -217,8 +217,10 @@ every equality; prefix collisions and uncovered predicates retain row filtering.
 Joined correlated `COUNT(*)` and `EXISTS` equality keys also share one grouped
 inner pass for exact integer and decimal values, including mixed decimal and
 unsigned keys above the double-precision integer boundary. Nullable tuples
-retain `=` versus `<=>` semantics while sharing that pass. Text and approximate
-numeric keys retain per-row coercion.
+retain `=` versus `<=>` semantics while sharing that pass. [Matching-collation
+text columns](torture/findings/2026-11-26-correlated-text-keys.md) can share the
+same pass alongside exact numeric keys. Mixed collations, approximate numeric
+keys, and speculative passes that produce diagnostics retain row evaluation.
 For a missing qualified aggregate argument in a correlated scalar subquery,
 including `COUNT(DISTINCT ...)`, `SUM(...)`, and a derived source, binding now
 returns error 1054 before a local `DOUBLE` comparison can emit conversion
