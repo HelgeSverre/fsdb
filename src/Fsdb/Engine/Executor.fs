@@ -17148,11 +17148,7 @@ and private tryPhysicalProjection
                 Dictionary<obj, PhysicalProjection option>(HashIdentity.Reference))
         getMemoized byScope (box scope) compute
 
-and private trySilentProjectionFilter resolveInputIndex (input: PhysicalProjection) predicate =
-    let physicalIndex expression =
-        resolveInputIndex expression
-        |> Option.map (fun index -> input.PhysicalColumnIndices.[index])
-
+and private trySilentIntegerFilter (columns: ColumnDef list) resolveIndex outerValue predicate =
     let operand = function
         | LiteralValue VNull -> Some(fun _ -> VNull)
         | expression ->
@@ -17161,12 +17157,13 @@ and private trySilentProjectionFilter resolveInputIndex (input: PhysicalProjecti
                 let value = VInt literal
                 Some(fun _ -> value)
             | None ->
-                physicalIndex expression
-                |> Option.bind (fun index ->
-                    match input.PhysicalTable.Columns.[index].Type with
+                match resolveIndex expression with
+                | Some index ->
+                    match columns.[index].Type with
                     | TTinyInt false | TSmallInt false | TMediumInt false | TInt false ->
                         Some(fun (row: Value[]) -> row.[index])
-                    | _ -> None)
+                    | _ -> None
+                | None -> outerValue expression |> Option.map (fun value _ -> value)
 
     let comparison op left right =
         let apply (readLeft: Value[] -> Value) (readRight: Value[] -> Value) row =
@@ -17194,8 +17191,23 @@ and private trySilentProjectionFilter resolveInputIndex (input: PhysicalProjecti
             if right row = ValueSome decisive then ValueSome decisive else ValueNone
 
     let nullTest expectNull value =
-        physicalIndex value
+        resolveIndex value
         |> Option.map (fun index (row: Value[]) -> ValueSome((row.[index] = VNull) = expectNull))
+
+    let membership value candidates =
+        let apply readValue readCandidates row =
+            let value = readValue row
+            let rec contains sawNull = function
+                | [] -> if sawNull then ValueNone else ValueSome false
+                | read :: rest ->
+                    match read row with
+                    | VNull -> contains true rest
+                    | candidate when Value.compare value candidate = 0 -> ValueSome true
+                    | _ -> contains sawNull rest
+
+            if value = VNull then ValueNone else contains false readCandidates
+
+        Option.map2 apply (operand value) (candidates |> List.map operand |> tryAllSome)
 
     let rec compile = function
         | IsNull value -> nullTest true value
@@ -17204,6 +17216,7 @@ and private trySilentProjectionFilter resolveInputIndex (input: PhysicalProjecti
             comparison op left right
         | Between(value, lower, upper) ->
             Option.map2 (combine false) (comparison Gte value lower) (comparison Lte value upper)
+        | In(value, candidates) when not candidates.IsEmpty -> membership value candidates
         | BinOp((And | Or as op), left, right) ->
             Option.map2 (combine (op = Or)) (compile left) (compile right)
         | Not value -> compile value |> Option.map (fun evaluate row -> ValueOption.map not (evaluate row))
@@ -17299,6 +17312,9 @@ and private tryPhysicalProjectionUncached
                     directColumn expression
                     |> Option.bind (resolveColumn input.OutputColumns >> Result.toOption)
 
+                let physicalIndex expression =
+                    directIndex expression |> Option.map (fun index -> input.PhysicalColumnIndices.[index])
+
                 if not predicateIsStable then
                     None
                 else
@@ -17329,7 +17345,7 @@ and private tryPhysicalProjectionUncached
                                         | None -> input.SilentFilters
                                         | Some predicate ->
                                             Option.map2 (fun filters filter -> filters @ [ filter ])
-                                                input.SilentFilters (trySilentProjectionFilter directIndex input predicate)
+                                                input.SilentFilters (trySilentIntegerFilter input.PhysicalTable.Columns physicalIndex (fun _ -> None) predicate)
                                     Steps =
                                         input.Steps
                                         @ [ { InputColumns = input.OutputColumns
@@ -19565,6 +19581,11 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
         |> Option.bind (fun (projection, sourceFilters) ->
             let table = projection.PhysicalTable
             let scope = correlatedProbeSource qualifier projection.OutputColumns
+            let resolveIndex expression =
+                tryCorrelatedInnerColumn scope expression
+                |> Option.bind (resolveColumn projection.OutputColumns >> Result.toOption)
+                |> Option.map (fun index -> projection.PhysicalColumnIndices.[index])
+
             let signedColumn = tryCorrelatedSignedIntegerColumn scope projection.OutputColumns
             let innerColumn =
                 if projection.Steps.IsEmpty then signedColumn
@@ -19581,17 +19602,21 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                     |> Option.filter (function VInt _ -> true | _ -> false)
                 | _ -> None
 
-            let pins = equalities |> List.map (tryEqualityPredicate innerColumn bound) |> tryAllSome
+            let outerInteger expression =
+                tryCorrelatedOuterValue scope outer expression
+                |> Option.filter (function VInt _ | VNull -> true | _ -> false)
 
-            // A narrower slice can skip evaluating these residuals on excluded
-            // rows because exact signed comparisons and null tests are silent.
-            let isInner expression = (innerColumn expression).IsSome
-            let isSafeResidual = function
-                | IsNull expression | IsNotNull expression -> isInner expression
-                | BinOp((Lt | Lte | Gt | Gte | Neq), left, right) ->
-                    (isInner left && (isInner right || (bound right).IsSome))
-                    || (isInner right && (bound left).IsSome)
-                | _ -> false
+            let filterBound = function
+                | LiteralValue(VInt _ as value) -> Some value
+                | (Col _ | QualifiedCol _) as column -> outerInteger column
+                | BinOp((Add | Sub), (Col _ | QualifiedCol _ as column), LiteralValue(VInt _)) as expression
+                    when (outerInteger column).IsSome ->
+                    outerInteger expression
+                | _ -> None
+
+            let pinResults = equalities |> List.map (fun expr -> expr, tryEqualityPredicate innerColumn bound expr)
+            let pins = pinResults |> List.choose snd
+            let unpinned = pinResults |> List.choose (function expr, None -> Some expr | _ -> None)
 
             let tighter isTighter oldBound newBound =
                 match oldBound, newBound with
@@ -19603,15 +19628,17 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                 | _ -> Option.orElse oldBound newBound
 
             let classified =
-                ranges
+                ranges @ unpinned
                 |> List.map (fun predicate ->
                     match rangePredicatesFor innerColumn bound predicate with
-                    | [] when not (isSafeResidual predicate) -> None
-                    | bounds -> Some bounds)
+                    | [] ->
+                        trySilentIntegerFilter table.Columns resolveIndex filterBound predicate
+                        |> Option.map (fun keep -> [], Some keep)
+                    | bounds -> Some(bounds, None))
                 |> tryAllSome
 
-            match pins, classified with
-            | Some pins, Some classified when (tryDuplicateIgnoreCase fst pins).IsNone ->
+            match classified with
+            | Some classified when not pins.IsEmpty && (tryDuplicateIgnoreCase fst pins).IsNone ->
                 let values =
                     pins
                     |> List.map (fun (name: string, value) -> name.ToLowerInvariant(), value)
@@ -19622,7 +19649,7 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
 
                 let intervals =
                     classified
-                    |> List.concat
+                    |> List.collect fst
                     |> List.groupBy _.Column
                     |> List.map (fun (_, bounds) ->
                         bounds |> List.reduce (fun current next ->
@@ -19630,7 +19657,8 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                                 Lower = tighter (fun order -> order > 0) current.Lower next.Lower
                                 Upper = tighter (fun order -> order < 0) current.Upper next.Upper }))
 
-                let allRangesCovered = intervals.Length = 1 && List.forall (not << List.isEmpty) classified
+                let allRangesCovered = intervals.Length = 1
+                let residualFilters = classified |> List.choose snd
 
                 intervals
                 |> List.collect (fun range ->
@@ -19657,14 +19685,15 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                 |> List.sortBy (fun (lookup, covered) -> lookup.OrderedRowCount, not covered)
                 |> List.tryHead
                 |> Option.map (fun (lookup, covered) ->
+                    let filters = if covered then sourceFilters @ residualFilters else sourceFilters
                     let filtered =
-                        if sourceFilters.IsEmpty then lookup.OrderedRows
+                        if filters.IsEmpty then lookup.OrderedRows
                         else
                             lookup.OrderedRows
                             |> Seq.mapi (fun index row ->
                                 Limits.checkQueryCancellation index
                                 row)
-                            |> Seq.filter (fun row -> sourceFilters |> List.forall (fun keep -> keep row))
+                            |> Seq.filter (fun row -> filters |> List.forall (fun keep -> keep row))
                     let rows =
                         if projection.Steps.IsEmpty then filtered
                         else
@@ -19673,7 +19702,7 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                             |> Seq.map (fun row -> indices |> Array.map (fun index -> row.[index]))
                     { Columns = projection.OutputColumns
                       Rows = rows
-                      RowCount = if sourceFilters.IsEmpty then Some lookup.OrderedRowCount else None
+                      RowCount = if filters.IsEmpty then Some lookup.OrderedRowCount else None
                       CoversWhere = covered })
             | _ -> None)
     | _ -> None

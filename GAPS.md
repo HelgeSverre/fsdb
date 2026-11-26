@@ -2826,6 +2826,10 @@ implementation effort:
    Boolean combinations of comparisons, null tests, and `BETWEEN`.
    The three timed controls went from about 300 ms to 8–11 ms and
    matched MySQL's results.
+   [Signed-integer WHERE filters](benchmarks/results/2026-11-26-correlated-range-residuals.md)
+   likewise keep the slice for column comparisons, nested disjunctions,
+   and scalar `IN` lists, including eligible outer integer bounds.
+   The four filtered benchmark cases ran 33–41 times faster.
    [Projected aggregate wire metadata](benchmarks/results/2026-11-25-correlated-integer-range-count.md#projected-aggregate-wire-metadata)
    preserves the audited numeric descriptors for scalar aggregates over
    derived tables and CTEs. [Binding checks for projected aggregates](benchmarks/results/2026-11-25-correlated-integer-range-count.md#reuse-of-derived-aggregate-bindings)

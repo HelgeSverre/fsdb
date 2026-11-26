@@ -16055,14 +16055,15 @@ let tests =
                     let fromDerived =
                         "(SELECT b AS payload, k AS sequence_no, owner AS parent_key FROM "
                         + "(SELECT bucket AS b, parent_id AS owner, id AS k FROM children) reordered)"
-                    let measure prefix source aggregate expected =
+                    let measureWhere suffix prefix source aggregate expected =
                         let sql =
-                            $"{prefix} SELECT SUM((SELECT {aggregate} FROM {source} c WHERE c.parent_key=p.id AND c.sequence_no BETWEEN p.id AND p.id+200)) FROM parents p"
+                            $"{prefix} SELECT SUM((SELECT {aggregate} FROM {source} c WHERE c.parent_key=p.id AND c.sequence_no BETWEEN p.id AND p.id+200 {suffix})) FROM parents p"
                         let before = System.GC.GetAllocatedBytesForCurrentThread()
                         match run sql with
                         | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal (decimal actual) expected sql
                         | other -> failtestf "expected a correlated aggregate, got %A" other
                         System.GC.GetAllocatedBytesForCurrentThread() - before
+                    let measure = measureWhere ""
                     let derived = measure "" fromDerived "COUNT(*)" 300M
                     let countPayload = measure "" fromDerived "COUNT(c.payload)" 240M
                     let sumSequence = measure "" fromDerived "SUM(c.sequence_no)" 45150M
@@ -16095,6 +16096,15 @@ let tests =
                         + "WHERE NOT (bucket <=> 1) AND bucket BETWEEN 0 AND 2)"
                     let cteBytes = measure cteFilter "projected" "COUNT(*)" 160M
                     Expect.isLessThan cteBytes 4000000L "the CTE filter reuses the slice"
+
+                    for predicate, aggregate, expected in
+                        [ "c.payload = c.parent_key", "COUNT(*)", 2M
+                          "c.payload = 1 OR c.payload IS NULL", "SUM(c.sequence_no)", 21050M
+                          "c.payload NOT IN (0,2)", "COUNT(*)", 80M
+                          "c.payload NOT IN (0,2,NULL)", "COUNT(*)", 0M
+                          "c.payload >= p.id OR c.payload IS NULL", "SUM(c.sequence_no)", 9254M ] do
+                        let allocated = measureWhere $"AND ({predicate})" "" fromDerived aggregate expected
+                        Expect.isLessThan allocated 8000000L $"the WHERE filter reuses the composite slice for {predicate}"
 
                 testCase "correlated integer count uses the equality prefix and range together"
                 <| fun _ ->

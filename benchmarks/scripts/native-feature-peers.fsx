@@ -15,6 +15,7 @@ let modes =
       "exact-aggregate-controls"
       "projected-range-controls"
       "projected-filter-controls"
+      "correlated-residual-controls"
       "edge-controls" ]
 
 let engine, port, pass, mode =
@@ -154,12 +155,21 @@ let readProjectedRanges () =
     let projection = "SELECT bucket AS payload, id AS sequence_no, parent_id AS parent_key FROM child"
     let nested = $"(SELECT sequence_no, parent_key, payload FROM ({projection}) reordered)"
     let filtered = $"({projection} WHERE bucket IS NOT NULL)"
-    let projected prefix source aggregate =
-        $"{prefix} SELECT SUM((SELECT {aggregate} FROM {source} c WHERE c.parent_key = p.id AND c.sequence_no BETWEEN p.id AND p.id + 1000)) FROM parent p"
+    let projectedWhere suffix prefix source aggregate =
+        $"{prefix} SELECT SUM((SELECT {aggregate} FROM {source} c WHERE c.parent_key = p.id AND c.sequence_no BETWEEN p.id AND p.id + 1000 {suffix})) FROM parent p"
+    let projected = projectedWhere ""
 
     let cases =
         let nullTest = "filtered-derived-count", projected "" filtered "COUNT(*)", 1200L
-        if mode = "projected-filter-controls" then
+        if mode = "correlated-residual-controls" then
+            let cte = $"WITH child_rows AS ({projection})"
+            let residual predicate = projectedWhere $"AND ({predicate})"
+            [ "derived-count", projected "" nested "COUNT(*)", 1500L
+              "derived-column-equality", residual "c.payload = c.parent_key" "" nested "COUNT(*)", 2L
+              "nested-or-sum", residual "c.payload = 1 OR c.payload IS NULL" "" nested "SUM(c.sequence_no)", 525250L
+              "cte-not-in-count", residual "c.payload NOT IN (0,2)" cte "child_rows" "COUNT(*)", 400L
+              "outer-comparison-or-sum", residual "c.payload >= p.id OR c.payload IS NULL" "" nested "SUM(c.sequence_no)", 226754L ]
+        elif mode = "projected-filter-controls" then
             let equality = $"({projection} WHERE bucket = 1)"
             let nestedFilter =
                 $"(SELECT sequence_no, parent_key, payload FROM ({projection} WHERE bucket <> 2 OR bucket IS NULL) reordered WHERE NOT (payload <> 1) OR payload IS NULL)"
@@ -344,7 +354,7 @@ try
 
         let workloads =
             if mode = "range-controls" then [ readRangeControls ]
-            elif mode = "projected-range-controls" || mode = "projected-filter-controls" then [ readProjectedRanges ]
+            elif mode = "projected-range-controls" || mode = "projected-filter-controls" || mode = "correlated-residual-controls" then [ readProjectedRanges ]
             elif mode = "nullable-count-controls" || mode = "expression-count-controls" then [ readCountArguments ]
             elif mode = "exact-aggregate-controls" then [ readExactAggregates ]
             elif mode = "prefix-controls" then
