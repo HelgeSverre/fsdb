@@ -55,6 +55,23 @@ affected zero rows after the writer committed a value that stopped
 matching the caller's WHERE clause. The temporary row stayed unchanged.
 The committed data matched after replaying WAL following an abrupt stop.
 
-An unqualified reference to an outer column renamed by the view still
-returns 1054 in the audited EXISTS subquery when its local table lacks
-a column of that name.
+### Exposed columns in caller subqueries
+
+The [projection fixture](2026-11-26-view-subquery-columns.sql) matches
+MySQL 8.4.11 on 24 result rows and the expected 1054 error in both Fsdb
+storage modes. Caller subqueries resolve local columns first and then
+look for exposed view columns, including renamed and computed columns.
+A base column omitted by the view remains out of scope. The fixture also
+covers nested scalar subqueries, IN and ANY comparisons, a view with its
+own join, and a prepared update while a differently shaped temporary table
+shadows the base. Preparation describes the stored view against the
+permanent catalog. Subquery memoization checks local column names as well
+as aliases, so a qualified fallback to an enclosing row remains correlated.
+
+The earlier qualified fixture still matches, including the lock-wait
+schedule. WAL replay after an abrupt stop recovered matching committed
+rows from both fixtures.
+
+A caller subquery in an explicit joined UPDATE can still return 1054
+for `v.k` after the writable view `v` has been lowered. MySQL resolved
+the same reference in the audited assignment.

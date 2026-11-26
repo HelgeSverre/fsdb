@@ -1341,10 +1341,11 @@ correlated view predicates, and indexed ngram MATCH. [Mixed joined writes](tortu
 can lock just the permanent row when integer equalities identify its
 complete primary key. Missing and unproven keys still use broader claims.
 [Standalone view UPDATE](torture/findings/2026-11-26-joined-update-shadow.md#standalone-update-follow-up)
-now resolves qualified outer references in caller subqueries and writes
-the permanent view target. Unqualified outer references to renamed view
-columns can still fail. Reopening one temporary table can diverge from
-MySQL's error 1137. DROP TEMPORARY TABLE
+now resolves qualified and unqualified outer references from caller
+subqueries against the view's output columns. The audited prepared writes
+still target the permanent table. Caller subqueries in an explicit joined
+UPDATE can still lose the outer view alias. Reopening one temporary table
+can diverge from MySQL's error 1137. DROP TEMPORARY TABLE
 can also fail when a permanent foreign key references the same name.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)

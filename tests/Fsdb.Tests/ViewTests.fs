@@ -481,6 +481,57 @@ let tests =
               Expect.equal (rows store "SELECT n FROM standalone_base WHERE id=2") [ [ Some "60" ] ]
                   "the waiting update leaves the owner's value in place"
 
+          testCase "standalone view UPDATE exposes only logical view columns to caller subqueries"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              let exec sql =
+                  let next, result = Fsdb.QueryHandler.handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "CREATE TABLE logical_base(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE logical_selector(id INT PRIMARY KEY,amount INT)"
+                    "CREATE TABLE local_selector(k INT PRIMARY KEY,amount INT)"
+                    "INSERT INTO logical_base VALUES(1,10),(2,20)"
+                    "INSERT INTO logical_selector VALUES(1,70),(2,80)"
+                    "INSERT INTO local_selector VALUES(9,33)"
+                    "CREATE VIEW logical_view AS SELECT id AS k,n,id+10 AS shifted FROM logical_base"
+                    "CREATE TEMPORARY TABLE logical_base(id INT PRIMARY KEY,private_value INT)"
+                    "INSERT INTO logical_base VALUES(1,100),(2,200)" ] do
+                  expectOk (exec sql) sql
+
+              Expect.equal
+                  (exec "UPDATE logical_view v SET v.n=(SELECT private_value FROM logical_base b WHERE b.id=k) WHERE v.k=1")
+                  (Affected 1UL) "an unqualified name missing from the temporary source binds to the view"
+              Expect.equal
+                  (exec "UPDATE logical_view v SET v.n=(SELECT amount FROM local_selector WHERE k=9) WHERE v.k=2")
+                  (Affected 1UL) "a real local column takes precedence over the outer view"
+              Expect.equal (rows store "SELECT n FROM logical_base ORDER BY id")
+                  [ [ Some "100" ]; [ Some "33" ] ] "both resolutions update the intended permanent row"
+              Expect.equal
+                  (exec "UPDATE logical_view v SET v.n=(SELECT shifted) + (SELECT amount FROM logical_selector s WHERE s.id=k) WHERE v.k=1")
+                  (Affected 1UL) "a scalar subquery can read a computed view output"
+              Expect.equal (rows store "SELECT n FROM logical_base WHERE id=1") [ [ Some "81" ] ]
+                  "the computed value and correlated lookup retain their types"
+              let hidden =
+                  exec "UPDATE logical_view v SET v.n=-1 WHERE v.k=1 AND EXISTS(SELECT 1 WHERE id=1)"
+                  |> errorInfo
+                  |> Option.map _.Code
+              Expect.equal hidden (Some 1054) "a physical column hidden by the view is out of scope"
+              Expect.equal
+                  (exec "UPDATE logical_view v SET v.n=-2 WHERE v.k=1 AND EXISTS(SELECT 1 FROM logical_selector v WHERE v.k=1)")
+                  (Affected 1UL) "a qualified reference can still fall back when the local alias has no such column"
+              Expect.equal (rows store "SELECT n FROM logical_base WHERE id=1") [ [ Some "-2" ] ]
+                  "the write uses the bound outer column"
+              expectOk (exec "PREPARE logical_update FROM 'UPDATE logical_view v SET v.n=v.n+? WHERE v.k=? AND EXISTS(SELECT 1 FROM logical_base b WHERE b.id=k)'")
+                  "preparation describes view columns even when a temporary shadow has a different schema"
+              expectOk (exec "SET @delta=5,@target=1") "bind prepared arguments"
+              Expect.equal (exec "EXECUTE logical_update USING @delta,@target") (Affected 1UL)
+                  "the prepared execution uses the same outer scope"
+              Expect.equal (rows store "SELECT n FROM logical_base WHERE id=1") [ [ Some "3" ] ]
+                  "the prepared update reaches the permanent row"
+
           testCase "mixed joined writes claim complete primary keys through the temporary partner"
           <| fun _ ->
               for keyType, key in [ "INT", "1"; "BIGINT UNSIGNED", "9223372036854775813" ] do
