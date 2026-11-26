@@ -193,6 +193,7 @@ let mutable netWriteTimeoutSeconds = 60
 /// giving up with a retryable 1205 rather than blocking forever —
 /// `innodb_lock_wait_timeout`'s MySQL default.
 let mutable lockWaitTimeoutSeconds = 50
+let mutable metadataLockWaitTimeoutSeconds = 31536000
 
 /// `WITH RECURSIVE`'s default pass ceiling. A session override is threaded
 /// through the statement execution context.
@@ -347,6 +348,12 @@ let private knobs =
         Max = 1073741824L
         Set = fun v -> lockWaitTimeoutSeconds <- int v
         Get = fun () -> int64 lockWaitTimeoutSeconds
+        Reportable = true }
+      { Name = "lock_wait_timeout"
+        Min = 1L
+        Max = 31536000L
+        Set = fun v -> metadataLockWaitTimeoutSeconds <- int v
+        Get = fun () -> int64 metadataLockWaitTimeoutSeconds
         Reportable = true }
       { Name = "cte_max_recursion_depth"
         Min = 0L

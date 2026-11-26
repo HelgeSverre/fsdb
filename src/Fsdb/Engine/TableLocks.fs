@@ -25,6 +25,8 @@ type private TableState =
       mutable ExplicitWriter: int option
       StatementReaders: HashSet<int>
       StatementWriters: HashSet<int>
+      TransactionReaders: HashSet<int>
+      mutable MetadataWriter: int option
       WaitingWriters: HashSet<int>
       PrioritizedWriters: HashSet<int> }
 
@@ -40,6 +42,7 @@ type private Manager =
     { SyncRoot: obj
       Tables: Dictionary<string, TableState>
       Explicit: Dictionary<int, ExplicitContext>
+      TransactionTables: Dictionary<int, HashSet<string>>
       GlobalReaders: HashSet<int>
       WaitingGlobalReaders: HashSet<int> }
 
@@ -53,6 +56,7 @@ let private managerFor (store: Store) =
             { SyncRoot = obj ()
               Tables = Dictionary(StringComparer.OrdinalIgnoreCase)
               Explicit = Dictionary()
+              TransactionTables = Dictionary()
               GlobalReaders = HashSet()
               WaitingGlobalReaders = HashSet() }
     )
@@ -84,6 +88,8 @@ let private stateFor (manager: Manager) key =
               ExplicitWriter = None
               StatementReaders = HashSet()
               StatementWriters = HashSet()
+              TransactionReaders = HashSet()
+              MetadataWriter = None
               WaitingWriters = HashSet()
               PrioritizedWriters = HashSet() }
 
@@ -119,6 +125,7 @@ let private blockedByOwnedGlobalRead policy owner manager physical =
     | RespectGlobalRead -> conflictsWithOwnedGlobalRead owner manager physical
 
 let private explicitlyAvailable policy owner mode (manager: Manager) (state: TableState) =
+    (state.MetadataWriter |> Option.forall ((=) owner)) &&
     match mode with
     | ReadAccess ->
         state.ExplicitWriter |> Option.forall ((=) owner)
@@ -137,6 +144,7 @@ let private explicitAvailable policy owner mode (manager: Manager) key =
     | true, state -> explicitlyAvailable policy owner mode manager state
 
 let private statementAvailable policy owner mode (manager: Manager) (state: TableState) =
+    (state.MetadataWriter |> Option.forall ((=) owner)) &&
     match mode with
     | ReadAccess -> state.ExplicitWriter.IsNone && readerGateOpen owner manager state
     | WriteAccess ->
@@ -149,6 +157,8 @@ let private stateIsIdle (state: TableState) =
     && hasNoOwners state.ExplicitReaders
     && hasNoOwners state.StatementReaders
     && hasNoOwners state.StatementWriters
+    && hasNoOwners state.TransactionReaders
+    && state.MetadataWriter.IsNone
     && hasNoOwners state.WaitingWriters
     && hasNoOwners state.PrioritizedWriters
 
@@ -205,13 +215,19 @@ let private releasePhysical owner (manager: Manager) physical =
 
 let private waitUntil timeout syncRoot ready =
     let deadline = DateTime.UtcNow + timeout
+    let cancellation = Limits.queryCancellation.Value
+    let maxWait = if cancellation.CanBeCanceled then 100 else Int32.MaxValue
 
     let rec wait () =
+        cancellation.ThrowIfCancellationRequested()
         if ready () then
             true
         else
             let remaining = deadline - DateTime.UtcNow
-            remaining > TimeSpan.Zero && Monitor.Wait(syncRoot, remaining) && wait ()
+            if remaining <= TimeSpan.Zero then false
+            else
+                Monitor.Wait(syncRoot, min remaining (TimeSpan.FromMilliseconds(float maxWait))) |> ignore
+                wait ()
 
     wait ()
 
@@ -234,12 +250,12 @@ let private waitForStatement policy timeout owner (manager: Manager) physical =
     waitUntil (deadline - DateTime.UtcNow) manager.SyncRoot ready, waited
 
 let private acquireStatement owner (manager: Manager) physical =
-    for KeyValue(key, mode) in physical do
+    physical |> Map.filter (fun key mode ->
         let state = stateFor manager key
 
         match mode with
-        | ReadAccess -> state.StatementReaders.Add owner |> ignore
-        | WriteAccess -> state.StatementWriters.Add owner |> ignore
+        | ReadAccess -> state.StatementReaders.Add owner
+        | WriteAccess -> state.StatementWriters.Add owner)
 
 let private releaseStatement owner (manager: Manager) physical =
     for KeyValue(key, mode) in physical do
@@ -382,7 +398,80 @@ let private validateExplicitAccess (context: ExplicitContext) (access: Access) =
         Error(1099, sprintf "Table '%s' was locked with a READ lock and can't be updated" (accessName access))
     | _ -> Ok()
 
-let private withStatementAccessUnder policy timeout store owner accesses body =
+let private retainTransactionAccess owner (manager: Manager) physical =
+    if not (Map.isEmpty physical) then
+        let tables =
+            match manager.TransactionTables.TryGetValue owner with
+            | true, tables -> tables
+            | false, _ ->
+                let tables = HashSet()
+                manager.TransactionTables.Add(owner, tables)
+                tables
+        for KeyValue(key, _) in physical do
+            if tables.Add key then
+                (stateFor manager key).TransactionReaders.Add owner |> ignore
+
+let internal releaseTransactionAccess store owner =
+    let manager = managerFor store
+    lock manager.SyncRoot (fun () ->
+        match manager.TransactionTables.TryGetValue owner with
+        | false, _ -> ()
+        | true, tables ->
+            for key in tables do
+                let state = manager.Tables.[key]
+                state.TransactionReaders.Remove owner |> ignore
+                removeIdleState manager key state
+            manager.TransactionTables.Remove owner |> ignore
+            Monitor.PulseAll manager.SyncRoot)
+
+let internal withMetadataWrite timeout store owner targets accesses body =
+    let manager = managerFor store
+    let keys = targets |> List.map (fun (database, table) -> tableKey database table) |> Set.ofList
+    let physical = physicalAccesses accesses
+    let available key =
+        match manager.Tables.TryGetValue key with
+        | false, _ -> true
+        | true, state ->
+            (state.MetadataWriter |> Option.forall ((=) owner))
+            && (state.ExplicitWriter |> Option.forall ((=) owner))
+            && hasNoOtherOwner owner state.ExplicitReaders
+            && hasNoOtherOwner owner state.StatementReaders
+            && hasNoOtherOwner owner state.StatementWriters
+            && hasNoOtherOwner owner state.TransactionReaders
+
+    let ready () =
+        Set.forall available keys
+        && (physical |> Map.forall (fun key mode ->
+            match manager.Tables.TryGetValue key with
+            | false, _ -> true
+            | true, state -> statementAvailable IgnoreGlobalRead owner mode manager state))
+
+    let acquired =
+        lock manager.SyncRoot (fun () ->
+            if waitUntil timeout manager.SyncRoot ready then
+                let reserved = keys |> Set.filter (fun key ->
+                    let state = stateFor manager key
+                    if state.MetadataWriter.IsSome then false
+                    else
+                        state.MetadataWriter <- Some owner
+                        true)
+                Some(reserved, acquireStatement owner manager physical)
+            else None)
+
+    match acquired with
+    | None -> Error(1205, "Lock wait timeout exceeded; try restarting transaction")
+    | Some(reserved, statements) ->
+        try Ok(body ())
+        finally
+            lock manager.SyncRoot (fun () ->
+                releaseStatement owner manager statements
+                for key in reserved do
+                    let state = manager.Tables.[key]
+                    state.MetadataWriter <- None
+                    removeIdleState manager key state
+                Monitor.PulseAll manager.SyncRoot)
+
+let private withStatementAccessUnder policy timeout store owner accesses retain body =
     let manager = managerFor store
     let physical = physicalAccesses accesses
 
@@ -397,44 +486,53 @@ let private withStatementAccessUnder policy timeout store owner accesses body =
                     |> List.fold
                         (fun result access -> result |> Result.bind (fun () -> validateExplicitAccess context access))
                         (Ok())
-                    |> Result.map (fun () -> false)
+                    |> Result.map (fun () -> Map.empty)
                 | false, _ ->
                     let acquired, waited =
                         trackWaitingWriter owner manager physical (fun () ->
                             waitForStatement policy timeout owner manager physical)
 
                     if acquired then
-                        acquireStatement owner manager physical
+                        let acquired = acquireStatement owner manager physical
 
                         if waited then
-                            markPrioritizedWriter owner manager physical
+                            markPrioritizedWriter owner manager acquired
 
-                        Ok true
+                        Ok acquired
                     else
                         Error(1205, "Lock wait timeout exceeded; try restarting transaction"))
 
     match acquired with
     | Error error -> Error error
-    | Ok releaseAfter ->
+    | Ok acquired ->
         try
-            Ok(body ())
+            let result = body ()
+            if retain result then
+                lock manager.SyncRoot (fun () -> retainTransactionAccess owner manager physical)
+            Ok result
         finally
-            if releaseAfter then
+            if not (Map.isEmpty acquired) then
                 lock manager.SyncRoot (fun () ->
-                    releaseStatement owner manager physical
+                    releaseStatement owner manager acquired
                     Monitor.PulseAll manager.SyncRoot)
 
-let withStatementAccess timeout store owner accesses body =
-    withStatementAccessUnder RespectGlobalRead timeout store owner accesses body
+let internal withStatementAccessRetaining timeout store owner accesses retain body =
+    withStatementAccessUnder RespectGlobalRead timeout store owner accesses retain body
 
-let withTemporaryStatementAccess timeout store owner accesses body =
+let withStatementAccess timeout store owner accesses body =
+    withStatementAccessRetaining timeout store owner accesses (fun _ -> false) body
+
+let internal withTemporaryStatementAccessRetaining timeout store owner accesses retain body =
     // Temporary sources have already been removed from `accesses`; a remaining
     // writer still changes shared state and must obey the global read lock.
     let policy =
         if accesses |> List.exists (fun access -> access.Mode = WriteAccess) then RespectGlobalRead
         else IgnoreGlobalRead
 
-    withStatementAccessUnder policy timeout store owner accesses body
+    withStatementAccessUnder policy timeout store owner accesses retain body
+
+let withTemporaryStatementAccess timeout store owner accesses body =
+    withTemporaryStatementAccessRetaining timeout store owner accesses (fun _ -> false) body
 
 let withGlobalWriteAccess timeout store owner body =
     let access =

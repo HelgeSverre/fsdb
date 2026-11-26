@@ -378,12 +378,35 @@ and `TRUNCATE`. A separate run checked the gap after loading a snapshot.
 
 #### Table metadata locks
 
-When the older transaction reads `gate` itself, MySQL holds its metadata
-lock through the transaction. A competing `DROP TABLE gate` returned
-1205 with `lock_wait_timeout=1`. An uncommitted `UPDATE gate` produced
-the same result. Fsdb let the drop complete in both schedules. The
-replacement fix covers an older snapshot that read only a sibling
-table, so no metadata lock on `gate` is expected for that schedule.
+An ordinary transaction now retains shared metadata access to the
+tables it successfully reads or writes. `DROP`, `TRUNCATE`, `ALTER`,
+and `RENAME` wait for these claims before taking database publication
+locks. Both engines let a disjoint `DROP TABLE` proceed during the
+wait, and the original DDL completes after commit. The schedule covers
+READ COMMITTED, REPEATABLE READ, and SERIALIZABLE.
+
+`lock_wait_timeout` controls how long the DDL waits. With a one-second
+timeout, a drop against a table updated in an open transaction returns
+1205. The drop succeeds after rollback. An earlier consistent snapshot
+of a sibling leaves the target free for DDL.
+Reads through a view, including a CTE over the view, held the base
+table until the connection ended. A prepared SELECT acquired the same
+claim and released it on rollback.
+
+MySQL and both Fsdb storage modes passed all 390 maintained checks.
+
+The remaining differences include XA and statement failures. A query
+with an unknown column held a metadata lock on MySQL and released it on
+Fsdb. When a transaction only read a table after a savepoint, rollback
+to the savepoint let MySQL drop that table while Fsdb kept the claim
+until transaction end. InnoDB checks whether the transaction still has
+engine locks before it releases metadata after a savepoint rollback.
+[MySQL 8.4.11 savepoint implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/handler/ha_innodb.cc#L6306-L6321).
+
+MySQL queues a new reader behind an already waiting `DROP TABLE`. Once
+the original holder commits, the drop completes and the late reader
+receives 1146. The same late reader can currently read the table on
+Fsdb before the drop takes effect.
 
 Run the live schedules against disposable servers. Use `--data-dir`
 to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.

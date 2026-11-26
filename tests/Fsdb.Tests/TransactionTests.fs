@@ -1014,6 +1014,29 @@ let tests =
                   finally
                       run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "table DDL waits for a transaction that accessed its target"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let admin = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY)" (Affected 0UL)
+              let admin = run admin "CREATE TABLE sibling(id INT PRIMARY KEY)" (Affected 0UL)
+              let admin = run admin "INSERT INTO gate VALUES (1)" (Affected 1UL)
+              let admin = run admin "SET SESSION lock_wait_timeout=1" (Affected 0UL)
+              let reader = run (create 2 store) "BEGIN" (Affected 0UL)
+              let reader = run reader "SELECT id FROM gate" (ResultSet([ "id" ], [ [ Some "1" ] ]))
+              try
+                  run admin "DROP TABLE sibling" (Affected 0UL) |> ignore
+                  match handle admin "DROP TABLE gate" |> snd with
+                  | Err(1205, _) -> ()
+                  | actual -> failtestf "the accessed table must wait, got %A" actual
+              finally
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+              run admin "DROP TABLE gate" (Affected 0UL) |> ignore
+
           testCase "serializable primary ranges ignore snapshots of replaced tables"
           <| fun _ ->
               let run session sql expected =

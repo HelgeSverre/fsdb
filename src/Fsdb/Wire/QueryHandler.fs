@@ -533,6 +533,13 @@ let private lockWaitTimeout (session: Session) =
     |> Option.map (float >> TimeSpan.FromSeconds)
     |> Option.defaultWith Limits.lockWaitTimeout
 
+let private metadataLockWaitTimeout session =
+    sessionValue session "lock_wait_timeout"
+    |> Option.bind tryInt32
+    |> Option.defaultValue Limits.metadataLockWaitTimeoutSeconds
+    |> float
+    |> TimeSpan.FromSeconds
+
 let private canInspectRoutine (session: Session) schema definer =
     match Auth.tryParseAccount definer with
     | None -> false
@@ -2592,6 +2599,7 @@ let private commitSessionWith (publishFlat: bool) (session: Session) : Session =
     match session.Tx with
     | Some tx ->
         publishTransaction publishFlat session tx
+        TableLocks.releaseTransactionAccess session.Store session.ConnectionId
         removeTransactionView session
         Session.endTransactionTracking { session with Tx = None; Cursors = Map.empty }
     | None -> { session with Cursors = Map.empty }
@@ -2618,6 +2626,7 @@ let private rollbackSession (session: Session) : Session =
         Storage.releaseTransactionLocks tx.Snapshot
     | None -> ()
 
+    TableLocks.releaseTransactionAccess session.Store session.ConnectionId
     removeTransactionView session
 
     let session = { session with Tx = None; Cursors = Map.empty }
@@ -3715,21 +3724,28 @@ let private lockedExecutionResult session = function
     | Ok result -> result
     | Error(code, message) -> session, Err(code, message)
 
+let private retainsMetadata (session: Session, result) =
+    terminalErrorInfo result |> Option.isNone
+    && retainsTransactionAfterStatement session
+    && (session.Tx |> Option.exists (fun tx -> tx.Xa.IsNone))
+
 let private executeWithStatementAccess session accesses execute =
-    TableLocks.withStatementAccess
+    TableLocks.withStatementAccessRetaining
         (lockWaitTimeout session)
         session.Store
         session.ConnectionId
         accesses
+        retainsMetadata
         execute
     |> lockedExecutionResult session
 
 let private executeWithTemporaryStatementAccess session accesses execute =
-    TableLocks.withTemporaryStatementAccess
+    TableLocks.withTemporaryStatementAccessRetaining
         (lockWaitTimeout session)
         session.Store
         session.ConnectionId
         accesses
+        retainsMetadata
         execute
     |> lockedExecutionResult session
 
@@ -3931,6 +3947,19 @@ let private implicitCommitDatabases dbName stmt =
         | _ -> None)
     |> Set.ofList
     |> Set.add "mysql"
+
+let private metadataWriteTargets dbName stmt =
+    let names =
+        match stmt with
+        | CreateTable table -> [ table.Name ]
+        | CreateTableLike(table, _, _)
+        | Truncate table | CreateIndex(_, table, _, _, _, _) | DropIndexStmt(_, table, _) -> [ table ]
+        | DropTable(tables, _) -> tables
+        | AlterTable(table, actions) ->
+            table :: (actions |> List.choose (function RenameTo target -> Some target | _ -> None))
+        | RenameTable pairs -> pairs |> List.collect (fun (source, target) -> [ source; target ])
+        | _ -> []
+    names |> List.map (splitQualified dbName)
 
 let private changesCatalogMembership = function
     | CreateDatabase _
@@ -4183,19 +4212,30 @@ let private executeParsedWithTemporaryActionCore (action: TemporaryAction option
 
             let executeWithDatabaseLocks () =
                 if changesCatalogMembership stmt then
-                    executeParsedCore session stmt
+                    executeParsedCoreUnderLock session stmt
                 else
                     Storage.withDatabaseLocks
                         (lockWaitTimeout session)
                         session.Store
                         (implicitCommitDatabases dbName stmt)
-                        (fun () -> executeParsedCore session stmt)
+                        (fun () -> executeParsedCoreUnderLock session stmt)
+
+            let executeWithMetadataLocks () =
+                // Resolve statement access before publication locks, including DDL that only reads a dependency.
+                TableLocks.withMetadataWrite
+                    (metadataLockWaitTimeout session)
+                    session.Store
+                    session.ConnectionId
+                    (metadataWriteTargets dbName stmt)
+                    (statementAccesses session)
+                    executeWithDatabaseLocks
+                |> lockedExecutionResult session
 
             match stmt with
             | CreateTableAs(name, _, _, _) ->
                 executeWithGlobalWriteAccess session (fun () ->
-                    DynamicScope.withValue creatingTable (Some(splitQualified dbName name |> snd)) executeWithDatabaseLocks)
-            | _ -> executeWithGlobalWriteAccess session executeWithDatabaseLocks
+                    DynamicScope.withValue creatingTable (Some(splitQualified dbName name |> snd)) executeWithMetadataLocks)
+            | _ -> executeWithGlobalWriteAccess session executeWithMetadataLocks
         else
             let session =
                 if session.Tx.IsNone && autocommitDisabled session && startsTransaction stmt then
@@ -8223,6 +8263,7 @@ let private abortTransaction (session: Session) =
     |> Option.iter (fst >> removeXaAssociation session)
 
     session.Tx |> Option.iter (fun transaction -> Storage.releaseTransactionLocks transaction.Snapshot)
+    TableLocks.releaseTransactionAccess session.Store session.ConnectionId
     removeTransactionView session
     let session = { session with Tx = None }
     if hadTransaction then Session.endTransactionTracking session else session

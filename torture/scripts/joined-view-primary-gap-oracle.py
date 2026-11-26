@@ -1015,6 +1015,69 @@ def check(port, mysql):
             execute(reader, "ROLLBACK")
             execute(older, "ROLLBACK")
 
+    metadata_setup = (
+        "CREATE TABLE gate(id INT PRIMARY KEY,v INT)",
+        "INSERT INTO gate VALUES (1,10)",
+        "CREATE TABLE sibling(id INT PRIMARY KEY)",
+    )
+    for isolation in ("READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"):
+        for ddl in (
+            "DROP TABLE gate",
+            "TRUNCATE TABLE gate",
+            "ALTER TABLE gate ADD COLUMN pad INT",
+            "RENAME TABLE gate TO moved",
+        ):
+            label = f"{isolation} {ddl}"
+            with fixture(port, schema, mysql, metadata_setup) as (
+                _,
+                _,
+                holder,
+                ddl_session,
+                independent,
+            ):
+                execute(ddl_session, "SET SESSION lock_wait_timeout=2")
+                execute(holder, f"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}")
+                execute(holder, "BEGIN")
+                expect(
+                    label + " initial read", scalar(holder, "SELECT v FROM gate"), 10
+                )
+                sent = Event()
+
+                def perform(connection, statement, dispatched):
+                    dispatched.set()
+                    return outcome(connection, statement)
+
+                with ThreadPoolExecutor(1) as pool:
+                    pending = pool.submit(perform, ddl_session, ddl, sent)
+                    assert sent.wait(1)
+                    try:
+                        pending.result(0.15)
+                        waited = False
+                    except TimeoutError:
+                        waited = True
+                    try:
+                        expect(label + " waits for metadata", waited, True)
+                        expect(
+                            label + " allows disjoint DDL",
+                            outcome(independent, "DROP TABLE sibling"),
+                            0,
+                        )
+                    finally:
+                        execute(holder, "COMMIT")
+                    expect(label + " completes on release", pending.result(2.5), 0)
+
+    with fixture(port, schema, mysql, metadata_setup) as (_, _, holder, ddl, _):
+        execute(ddl, "SET SESSION lock_wait_timeout=1")
+        execute(holder, "SET SESSION autocommit=0")
+        execute(holder, "UPDATE gate SET v=v+1 WHERE id=1")
+        expect(
+            "open write times out competing DDL",
+            outcome(ddl, "DROP TABLE gate"),
+            TIMEOUT,
+        )
+        execute(holder, "ROLLBACK")
+        expect("rollback releases metadata", outcome(ddl, "DROP TABLE gate"), 0)
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 
