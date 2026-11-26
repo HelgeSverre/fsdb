@@ -7,13 +7,20 @@ open MySqlConnector
 
 let arguments = fsi.CommandLineArgs |> Array.skip 1
 
+let modes =
+    [ "range-controls"
+      "prefix-controls"
+      "nullable-count-controls"
+      "expression-count-controls"
+      "exact-aggregate-controls"
+      "projected-range-controls" ]
+
 let engine, port, pass, mode =
     match arguments with
     | [| engine; port; pass |] -> engine, int port, int pass, ""
-    | [| engine; port; pass; mode |]
-        when List.contains mode [ "range-controls"; "prefix-controls"; "nullable-count-controls"; "expression-count-controls"; "exact-aggregate-controls" ] ->
+    | [| engine; port; pass; mode |] when List.contains mode modes ->
         engine, int port, int pass, mode
-    | _ -> failwith "Usage: dotnet fsi native-feature-peers.fsx -- ENGINE PORT PASS [range-controls|prefix-controls|nullable-count-controls|expression-count-controls|exact-aggregate-controls]"
+    | _ -> failwithf "Usage: dotnet fsi native-feature-peers.fsx -- ENGINE PORT PASS [%s]" (String.concat "|" modes)
 
 CultureInfo.CurrentCulture <- CultureInfo.InvariantCulture
 
@@ -135,6 +142,27 @@ let readRangeControls () =
 let seedNullableBuckets () =
     write "ALTER TABLE child ADD COLUMN bucket INT NULL"
     write "UPDATE child SET bucket=CASE WHEN MOD(id,5)=0 THEN NULL ELSE MOD(id,3) END"
+
+let readProjectedRanges () =
+    seedNullableBuckets ()
+
+    let projection = "SELECT bucket AS payload, id AS sequence_no, parent_id AS parent_key FROM child"
+    let nested = $"(SELECT sequence_no, parent_key, payload FROM ({projection}) reordered)"
+    let filtered = $"({projection} WHERE bucket IS NOT NULL)"
+    let projected prefix source aggregate =
+        $"{prefix} SELECT SUM((SELECT {aggregate} FROM {source} c WHERE c.parent_key = p.id AND c.sequence_no BETWEEN p.id AND p.id + 1000)) FROM parent p"
+
+    let cases =
+        [ "physical-count", "SELECT SUM((SELECT COUNT(*) FROM child c WHERE c.parent_id = p.id AND c.id BETWEEN p.id AND p.id + 1000)) FROM parent p", 1500L
+          "derived-count", projected "" nested "COUNT(*)", 1500L
+          "derived-count-payload", projected "" nested "COUNT(c.payload)", 1200L
+          "derived-sum-sequence", projected "" nested "SUM(c.sequence_no)", 1125750L
+          "cte-count", projected $"WITH child_rows AS ({projection})" "child_rows" "COUNT(*)", 1500L
+          "filtered-derived-count", projected "" filtered "COUNT(*)", 1200L ]
+
+    let ordered = if pass % 2 = 0 then List.rev cases else cases
+    for lane, query, expected in ordered do
+        probe lane (fun () -> measure lane 30 (fun () -> scalar query |> require lane expected))
 
 let readCountArguments () =
     seedNullableBuckets ()
@@ -270,6 +298,7 @@ try
 
         let workloads =
             if mode = "range-controls" then [ readRangeControls ]
+            elif mode = "projected-range-controls" then [ readProjectedRanges ]
             elif mode = "nullable-count-controls" || mode = "expression-count-controls" then [ readCountArguments ]
             elif mode = "exact-aggregate-controls" then [ readExactAggregates ]
             elif mode = "prefix-controls" then
