@@ -217,6 +217,18 @@ let regexpMatchTimeout = TimeSpan.FromMilliseconds 100.0
 /// and these are written while readers may already exist.
 let lockWaitTimeout () = TimeSpan.FromSeconds(float lockWaitTimeoutSeconds)
 
+let private statementLockWait = AsyncLocal<TimeSpan voption>()
+
+let internal statementLockWaitTimeout () =
+    match statementLockWait.Value with
+    | ValueSome timeout -> timeout
+    | ValueNone -> lockWaitTimeout ()
+
+let internal withLockWaitTimeout timeout execute =
+    let setting = if timeout = lockWaitTimeout () then ValueNone else ValueSome timeout
+    if setting = statementLockWait.Value then execute ()
+    else DynamicScope.withValue statementLockWait setting execute
+
 // ---------------------------------------------------------------------------
 // Configuration. One table drives setting, validation, and SHOW VARIABLES
 // reporting so those paths cannot drift.

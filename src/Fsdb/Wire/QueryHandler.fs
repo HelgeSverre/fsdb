@@ -3787,7 +3787,9 @@ let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Stateme
                     store
                     (accountOf session)
                     session.ActiveRoles
-                    (fun () -> executeParsedStatement session stmt))
+                    (fun () ->
+                        Limits.withLockWaitTimeout (lockWaitTimeout session)
+                            (fun () -> executeParsedStatement session stmt)))
 
         let executed, result =
             match lockBoundary with

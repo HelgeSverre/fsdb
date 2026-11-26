@@ -36,6 +36,15 @@ after the second rolls back. Rolling back to a savepoint from
 before the missing-key lookup releases the gap in this fixture.
 [InnoDB gap and insertion-intention locks](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking.html#innodb-gap-locks).
 
+In a separate two-session cycle, the gap holder waited for a row
+held by the transaction trying to insert into the gap. Both engines
+aborted one transaction with 1213 and let the other proceed. MySQL
+aborted the insert, and Fsdb aborted the row update.
+
+The autocommit probes waited about one second before returning 1205
+for both an insert into the gap and a key move into it, using
+`innodb_lock_wait_timeout=1` in the contender session.
+
 ## Changes to neighboring keys
 
 | Gate change while the missing lookup is protected | Observed MySQL behavior |

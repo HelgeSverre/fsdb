@@ -5900,12 +5900,16 @@ let tests =
 
               let contender = run (create 3 store) "SET SESSION innodb_lock_wait_timeout=1" 0UL
               run contender "INSERT INTO gate VALUES (6,0)" 1UL |> ignore
+              let blockedWrites = System.Diagnostics.Stopwatch.StartNew()
               for sql in [ "INSERT INTO gate VALUES (3,0)"; "UPDATE gate SET id=4 WHERE id=5" ] do
                   match handle contender sql |> snd with
                   | Err(1205, _) -> ()
                   | result -> failtestf "expected an insertion wait for %s, got %A" sql result
+              Expect.isLessThan blockedWrites.Elapsed (TimeSpan.FromSeconds 10.0)
+                  "autocommit writes use the session lock wait timeout"
 
-              let waiting = Threading.Tasks.Task.Run(fun () -> handle (create 4 store) "INSERT INTO gate VALUES (2,0)")
+              let longWait = run (create 4 store) "SET SESSION innodb_lock_wait_timeout=1073741824" 0UL
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle longWait "INSERT INTO gate VALUES (2,0)")
               try
                   Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the insert waits for the gap"
                   run writer "ROLLBACK TO SAVEPOINT before_lookup" 0UL |> ignore

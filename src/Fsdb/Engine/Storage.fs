@@ -4262,8 +4262,9 @@ let private awaitLock
                 | WakeDeadlockVictim victimMonitor -> wakeLockWaiter victimMonitor
                 | WaitRegistered -> ()
 
+                let waitInterval = min remaining (TimeSpan.FromMilliseconds(float Int32.MaxValue))
                 let signaled =
-                    try Threading.Monitor.Wait(syncRoot, remaining)
+                    try Threading.Monitor.Wait(syncRoot, waitInterval)
                     finally clearLockWait waits context.Owner
 
                 Limits.checkQueryInterruption cancellation
@@ -4271,7 +4272,7 @@ let private awaitLock
                 if context.DeadlockVictim then
                     raise (DeadlockVictim dbName)
 
-                if not signaled then
+                if not signaled && waitInterval = remaining then
                     raise (LockWaitTimeout dbName)
 
                 acquire ()
@@ -4521,7 +4522,7 @@ let private withWriteLocksFor
             releaseLockStripes context claimed
 
 let private withRowLocks store dbName tableName rowIds body =
-    withWriteLocksFor (Fsdb.Limits.lockWaitTimeout ()) store dbName tableName rowIds [] body
+    withWriteLocksFor (Fsdb.Limits.statementLockWaitTimeout ()) store dbName tableName rowIds [] body
 
 let private withFullScanRowLocks store dbName tableName body =
     let rowIds =
@@ -4532,7 +4533,7 @@ let private withFullScanRowLocks store dbName tableName body =
     withRowLocks store dbName tableName rowIds body
 
 let private withInsertLocks store dbName tableName rowIds keys body =
-    withWriteLocksFor (Fsdb.Limits.lockWaitTimeout ()) store dbName tableName rowIds keys body
+    withWriteLocksFor (Fsdb.Limits.statementLockWaitTimeout ()) store dbName tableName rowIds keys body
 
 let acquireTransactionWriteTargets
     (timeout: TimeSpan)
