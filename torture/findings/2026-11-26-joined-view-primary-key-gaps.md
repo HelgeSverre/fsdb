@@ -260,15 +260,28 @@ all 152 checks in the expanded schedule oracle.
 Wider scans and dependent predicates remain outside this path. MySQL
 can choose a full scan without an index hint, which can hold wider locks.
 
-`ORDER BY id LIMIT 1` over `id BETWEEN 12 AND 39` has a shorter lock
-footprint on MySQL. With keys `10, 20, 30, 40`, it protects row `20`
-and the preceding gap. A pending insertion at `15` makes it wait and
-return `15` after commit. Pending insertions at `11` or `25` leave this
-read free to return `20`. If the pending writer deletes `20`, the
-reader waits and returns `30` after commit. Limited ranges remain open.
-At an exact inclusive start, MySQL can take a record-only lock. Reversing
-the scan can also lock a gap beyond the first returned row. A limited
-range needs to account for the actual scan direction and stop position.
+### Forward ordered limits
+
+A range can now stop at the last row consumed by a positive `LIMIT`
+when the query explicitly follows the primary index's physical order.
+`OFFSET` counts toward the rows visited. The audited scans cover
+ascending and descending primary keys, aliases and ordinal ordering,
+and a mixed-direction composite index with a leading equality. An
+exact inclusive start can take a record-only lock. If the scan runs
+out of matching rows, it protects the predicate's ending gap.
+
+With keys `10, 20, 30, 40`, `id BETWEEN 12 AND 39 ORDER BY id LIMIT 1`
+protects row `20` and the preceding gap. A pending insertion at `15`
+makes it wait and return `15` after commit. Another pending insertion
+at `18` stays beyond the new stopping row. Pending insertions at `11`
+or `25` leave the read free to return `20`. If the pending writer
+deletes `20`, the reader waits and returns `30` after commit.
+MySQL and both Fsdb modes matched all 207 checks in the expanded oracle.
+[InnoDB next-key locking](https://dev.mysql.com/doc/refman/8.4/en/innodb-next-key-locking.html).
+
+Reverse-order scans remain open. MySQL can lock an additional gap at
+the start of a reverse scan, and an empty reverse scan can lock a row
+outside the predicate. Unordered limits also remain open.
 
 Run the live schedules against disposable servers. Use `--data-dir`
 to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.

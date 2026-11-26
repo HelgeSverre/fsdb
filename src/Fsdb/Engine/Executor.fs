@@ -34715,15 +34715,56 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                 | Lit(VUInt _) -> true
                 | _ -> false
 
+            let literalRowCounts =
+                Option.forall literalRowCount select.Limit
+                && Option.forall literalRowCount select.Offset
+
             let seeksPoint =
                 List.forall (fst >> isSourceColumn) select.OrderBy
-                && Option.forall literalRowCount select.Limit
-                && Option.forall literalRowCount select.Offset
+                && literalRowCounts
                 // OFFSET can discard the result after the key has been sought.
                 && (select.CalculateFoundRows || Option.forall (fun limit -> rowCount limit > 0) select.Limit)
 
             let keys = Storage.primaryKeyColumns table
             let conditions = optionalConjuncts select.Where
+            let primaryIndex = table.Indexes |> List.tryFind (fun index -> equalsIgnoreCase "PRIMARY" index.Name)
+            let keyDirection key =
+                primaryIndex
+                |> Option.bind (fun index -> index.KeyColumns |> List.tryFind (fun column -> equalsIgnoreCase key column.Name))
+                |> Option.map _.Direction
+                |> Option.defaultValue Asc
+
+            let rangeRowsToVisit prefixLength =
+                match select.Limit, select.OrderBy with
+                | None, [] when select.Offset.IsNone -> Some None
+                | Some limit, _ :: _ when literalRowCounts && not select.Distinct && not select.CalculateFoundRows && rowCount limit > 0 ->
+                    let columnIndex = columnIndexOf table.Columns
+                    let qualifiers = Map.ofList [ qualifier.ToLowerInvariant(), (table.Columns, 0) ]
+                    let projections = expandOrderProjections table.Columns qualifiers select.Projections
+                    let orderColumn (expression, direction) =
+                        let resolved =
+                            match expression with
+                            | Col name ->
+                                resolveOrderProjection columnIndex qualifiers projections name
+                                |> Result.toOption
+                                |> Option.map (function Some(_, projection) -> projection.Expression | None -> expression)
+                            | _ -> Some(resolveOrderPosition projections expression)
+                        resolved |> Option.bind predicateColumn |> Option.map (fun column -> column, direction)
+
+                    let constantKeys, orderedKeys = List.splitAt prefixLength keys
+                    let followsPrimaryOrder (ordering: (string * Direction) list) =
+                        let varyingOrder =
+                            ordering |> List.filter (fun (column, _) -> not (List.exists (equalsIgnoreCase column) constantKeys))
+                        List.length varyingOrder = List.length orderedKeys
+                        && List.forall2 (fun (column, direction) key -> equalsIgnoreCase column key && direction = keyDirection key)
+                            varyingOrder orderedKeys
+
+                    select.OrderBy |> List.map orderColumn |> tryAllSome |> Option.filter followsPrimaryOrder
+                    |> Option.map (fun _ ->
+                        let offset = select.Offset |> Option.map rowCount |> Option.defaultValue 0
+                        Some(min (int64 System.Int32.MaxValue) (int64 offset + int64 (rowCount limit)) |> int))
+                | _ -> None
+
             let isIntegerColumn column =
                 resolveColumn table.Columns column
                 |> Result.toOption
@@ -34755,8 +34796,8 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
             let range () =
                 let prefix =
                     keys |> Seq.map boundFor |> Seq.takeWhile Option.isSome |> Seq.choose id |> List.ofSeq
-                match List.skip prefix.Length keys with
-                | key :: remaining when prefix.Length = equalities.Length ->
+                match List.skip prefix.Length keys, rangeRowsToVisit prefix.Length with
+                | key :: remaining, Some rowsToVisit when prefix.Length = equalities.Length ->
                     let keyColumn = predicateColumn >> Option.filter (equalsIgnoreCase key)
                     let predicates =
                         conditions |> List.filter (equality >> Option.isNone)
@@ -34781,34 +34822,31 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                             | None -> None
                         let exactBound = Option.forall (fun (values, _) -> Storage.isExactPrimaryKeyPrefix store table values)
                         let physicalLower, physicalUpper =
-                            let direction =
-                                table.Indexes
-                                |> List.tryFind (fun index -> equalsIgnoreCase "PRIMARY" index.Name)
-                                |> Option.bind (fun index -> index.KeyColumns |> List.tryFind (fun column -> equalsIgnoreCase key column.Name))
-                                |> Option.map _.Direction
-                            if direction = Some Desc then edge upper, edge lower else edge lower, edge upper
+                            if keyDirection key = Desc then edge upper, edge lower else edge lower, edge upper
+                        let rangeRead = Some(Storage.PrimaryRange(physicalLower, physicalUpper), rowsToVisit)
                         if not (exactBound physicalLower && exactBound physicalUpper) then None
                         else
                             match lower, upper with
                             | Some(low, includeLow), Some(high, includeHigh) when compare low high = 0 ->
                                 if not (includeLow && includeHigh) then None
-                                elif remaining.IsEmpty then point (prefix @ [ low ])
-                                else Some(Storage.PrimaryRange(physicalLower, physicalUpper))
+                                elif remaining.IsEmpty then point (prefix @ [ low ]) |> Option.map (fun access -> access, None)
+                                else rangeRead
                             | Some(low, _), Some(high, _) when compare low high > 0 -> None
-                            | _ -> Some(Storage.PrimaryRange(physicalLower, physicalUpper))
+                            | _ -> rangeRead
                 | _ -> None
 
             if keys.IsEmpty || conditions.IsEmpty || not (List.forall isIntegerColumn keys)
                || not (List.forall simpleProjection select.Projections) then None
             else
                 exact ()
-                |> Option.orElseWith (fun () ->
-                    if select.OrderBy.IsEmpty && select.Limit.IsNone && select.Offset.IsNone then range () else None)
-                |> Option.map (fun read ->
+                |> Option.map (fun access -> access, None)
+                |> Option.orElseWith range
+                |> Option.map (fun (access, rowsToVisit) ->
                     { ReadDatabase = database
                       ReadTableName = source.Table
                       ReadSchemaRevision = table.SchemaRevision
-                      ReadAccess = read }))
+                      ReadAccess = access
+                      ReadRangeRowsToVisit = rowsToVisit }))
     | _ -> None
 
 let transactionWriteTargets

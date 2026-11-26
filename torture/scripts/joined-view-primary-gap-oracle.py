@@ -5,7 +5,9 @@ The script connects as root without a password and creates a disposable schema.
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextlib import ExitStack, contextmanager
+from threading import Event
 from time import monotonic, sleep
 from uuid import uuid4
 
@@ -655,6 +657,105 @@ def check(port, mysql):
             ),
             1,
         )
+        execute(reader, "ROLLBACK")
+
+    ascending_range = (
+        "CREATE TABLE gate(id INT PRIMARY KEY)",
+        "INSERT INTO gate VALUES (10),(20),(30),(40)",
+    )
+    for label, setup, query, rows, row_probes, inserts in (
+        (
+            "limited offset",
+            ascending_range,
+            "SELECT id FROM gate FORCE INDEX(PRIMARY) WHERE id BETWEEN 12 AND 39 ORDER BY id LIMIT 1 OFFSET 1",
+            ((30,),),
+            (("id=20", 3572), ("id=30", 3572), ("id=40", 1)),
+            (("(11)", TIMEOUT), ("(25)", TIMEOUT), ("(35)", 1)),
+        ),
+        (
+            "limited exact start",
+            ascending_range,
+            "SELECT id FROM gate FORCE INDEX(PRIMARY) WHERE id BETWEEN 20 AND 39 ORDER BY 1 LIMIT 1",
+            ((20,),),
+            (("id=20", 3572), ("id=30", 1)),
+            (("(15)", 1), ("(25)", 1)),
+        ),
+        (
+            "limited exhaustion",
+            ascending_range,
+            "SELECT id FROM gate FORCE INDEX(PRIMARY) WHERE id BETWEEN 12 AND 28 ORDER BY id LIMIT 5",
+            ((20,),),
+            (("id=20", 3572), ("id=30", 1)),
+            (("(11)", TIMEOUT), ("(29)", TIMEOUT)),
+        ),
+        (
+            "limited descending end",
+            (descending, ascending_range[1]),
+            "SELECT id FROM gate FORCE INDEX(PRIMARY) WHERE id BETWEEN 10 AND 39 ORDER BY id DESC LIMIT 3",
+            ((30,), (20,), (10,)),
+            (("id=10", 3572), ("id=40", 1)),
+            (("(35)", TIMEOUT), ("(5)", 1)),
+        ),
+        (
+            "limited composite prefix",
+            ("CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a,b DESC))", composite_rows),
+            "SELECT b AS newest FROM gate FORCE INDEX(PRIMARY) WHERE a=2 ORDER BY newest DESC LIMIT 2",
+            ((40,), (30,)),
+            (("a=2 AND b=30", 3572), ("a=2 AND b=20", 1)),
+            (("(2,45)", TIMEOUT), ("(2,35)", TIMEOUT), ("(2,25)", 1)),
+        ),
+    ):
+        with fixture(port, schema, mysql, setup) as (_, _, reader, _, probe):
+            execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            execute(reader, "BEGIN")
+            with reader.cursor() as cursor:
+                cursor.execute(query)
+                expect(label + " rows", cursor.fetchall(), rows)
+            for predicate, expected in row_probes:
+                sql = f"SELECT * FROM gate WHERE {predicate} FOR UPDATE NOWAIT"
+                expect(label + " " + sql, rolled_back_outcome(probe, sql), expected)
+            for values, expected in inserts:
+                sql = f"INSERT INTO gate VALUES {values}"
+                expect(label + " " + sql, rolled_back_outcome(probe, sql), expected)
+            execute(reader, "ROLLBACK")
+
+    with fixture(port, schema, mysql, ascending_range) as (_, later, reader, first, _):
+        execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        for connection, key in ((later, 18), (first, 15)):
+            execute(connection, "BEGIN")
+            execute(connection, f"INSERT INTO gate VALUES ({key})")
+        execute(reader, "BEGIN")
+        dispatched = Event()
+
+        def first_row():
+            with reader.cursor() as cursor:
+                dispatched.set()
+                cursor.execute(
+                    "SELECT id FROM gate FORCE INDEX(PRIMARY) "
+                    "WHERE id BETWEEN 12 AND 39 ORDER BY id LIMIT 1"
+                )
+                return cursor.fetchall()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(first_row)
+            try:
+                assert dispatched.wait(1)
+                try:
+                    result.result(timeout=0.15)
+                    waited = False
+                except TimeoutError:
+                    waited = True
+                expect("limited read waits for the first pending key", waited, True)
+                execute(first, "COMMIT")
+                try:
+                    rows = result.result(timeout=0.65)
+                except TimeoutError:
+                    rows = "still waiting"
+                expect(
+                    "later pending key leaves the read free to finish", rows, ((15,),)
+                )
+            finally:
+                execute(later, "ROLLBACK")
         execute(reader, "ROLLBACK")
 
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")

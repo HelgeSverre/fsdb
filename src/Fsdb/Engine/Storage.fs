@@ -6414,11 +6414,18 @@ type internal IntegerPrimaryReadPlan =
     { ReadDatabase: string
       ReadTableName: string
       ReadSchemaRevision: int64
-      ReadAccess: IntegerPrimaryRead }
+      ReadAccess: IntegerPrimaryRead
+      ReadRangeRowsToVisit: int option }
 
 let internal compareIntegerPrimaryValues = compareIndexedValues None
 
-let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (database: string) tableName read =
+type private PrimaryGapScan =
+    | OrdinaryGap
+    | LimitedGap of stoppedAtRecord: bool
+
+// A limited scan returns false after waiting for one key so its caller can
+// reselect the stopping row before claiming a gap or waiting for another key.
+let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (database: string) tableName scan read =
     match snapshot.TransactionLocks, tableAt snapshot database tableName with
     | Some context, Some observed ->
         let tableKey = normalizeTableName tableName
@@ -6431,7 +6438,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
             && (match read with
                 | PrimaryPoint values -> values.Length = group.Indices.Length
                 | PrimaryRange _ -> true))
-        |> Option.iter (fun group ->
+        |> Option.map (fun group ->
             let width = group.Indices.Length
             let encode (table: Table) values =
                 primaryLockKeyPrefix + encodeEqualityValues table.Columns group.Indices values
@@ -6457,7 +6464,8 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             + (if inclusive then "i" else "e")
                         | None -> "-"
                     let anchor (values: Value list, inclusive) = values, values.Length = width || not inclusive
-                    "range:" + identity lower + ":" + identity upper, Option.map anchor lower, Option.map anchor upper
+                    let prefix = if scan = LimitedGap true then "stopped:" else "range:"
+                    prefix + identity lower + ":" + identity upper, Option.map anchor lower, Option.map anchor upper
             let needsGap table =
                 match read with
                 | PrimaryRange _ -> true
@@ -6476,7 +6484,8 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             match weak.TryGetTarget() with
                             | true, stripe ->
                                 stripe.ExclusiveOwner
-                                |> Option.bind (fun owner -> tryIntegerPrimaryLockValues width key |> Option.map (fun key -> owner, key))
+                                |> Option.bind (fun owner ->
+                                    tryIntegerPrimaryLockValues width key |> Option.map (fun values -> owner, key, values))
                             | _ -> None
                         else None)
 
@@ -6502,7 +6511,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                 seq {
                     yield! neighbor lower inclusive pivot table |> Option.toList
                     yield! readTables () |> Seq.choose (neighbor lower inclusive pivot)
-                    yield! pending () |> Seq.map snd |> Seq.filter qualifies
+                    yield! pending () |> Seq.map (fun (_, _, values) -> values) |> Seq.filter qualifies
                 }
                 |> Seq.fold (fun best candidate ->
                     if best |> Option.forall (improves candidate) then Some candidate else best) None
@@ -6525,7 +6534,8 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             match read with
                             // An inclusive descending scan can reach the end of the index.
                             | PrimaryRange(_, Some(stoppingKey, true))
-                                when group.Directions = [ Desc ] && (nearest false (stoppingKey, false) table).IsNone ->
+                                when scan <> LimitedGap true && group.Directions = [ Desc ]
+                                     && (nearest false (stoppingKey, false) table).IsNone ->
                                 None
                             | _ -> upper |> Option.bind (fun edge -> nearest false edge table)
                         let mutable upper = upperAnchor |> Option.map boundary
@@ -6559,41 +6569,69 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                         lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe |> ignore)
                 | _ -> ()
 
-            if needsGap observed then
-                let blockers () =
-                    let owners = HashSet<int64>()
-                    let add owner = if owner <> context.Owner then owners.Add owner |> ignore
-                    match read with
-                    | PrimaryPoint _ -> exactKeyOwner cache probe |> Option.iter add
-                    | PrimaryRange(lower, upper) ->
-                        let within direction bound value =
-                            bound |> Option.forall (fun (limit, inclusive) ->
-                                let order = compareToPrefix limit value
-                                order * direction > 0 || (inclusive && order = 0))
-                        for owner, values in pending () do
-                            if within 1 lower values && within -1 upper values then add owner
-                    owners
-                let available () =
-                    match read with
-                    | PrimaryPoint _ -> exactKeyOwner cache probe |> Option.forall ((=) context.Owner)
-                    | PrimaryRange _ -> (blockers ()).Count = 0
-                let installed =
-                    lock cache.SyncRoot (fun () ->
-                        if available () then
-                            install ()
-                            true
-                        else false)
-                if not installed then
-                    awaitLock (DateTime.UtcNow + timeout) live.LockWaits database context
-                        queryCancellation.Value cache.SyncRoot available blockers install)
-    | _ -> ()
+            let rangeBlockers lower upper =
+                let within direction bound value =
+                    bound |> Option.forall (fun (limit, inclusive) ->
+                        let order = compareToPrefix limit value
+                        order * direction > 0 || (inclusive && order = 0))
+                pending ()
+                |> Seq.filter (fun (owner, _, values) ->
+                    owner <> context.Owner && within 1 lower values && within -1 upper values)
+
+            if not (needsGap observed) then true
+            else
+                match scan, read with
+                | LimitedGap _, PrimaryRange(lower, upper) ->
+                    let firstBlocker =
+                        lock cache.SyncRoot (fun () ->
+                            let blocker =
+                                rangeBlockers lower upper
+                                |> Seq.fold (fun first ((_, _, values) as candidate) ->
+                                    match first with
+                                    | Some(_, _, earlier) when compare earlier values <= 0 -> first
+                                    | _ -> Some candidate) None
+                            if blocker.IsNone then install ()
+                            blocker)
+                    match firstBlocker with
+                    | None -> true
+                    | Some(owner, key, _) ->
+                        let available () = exactKeyOwner cache key <> Some owner
+                        let blockers = HashSet([ owner ])
+                        awaitLock (DateTime.UtcNow + timeout) live.LockWaits database context
+                            queryCancellation.Value cache.SyncRoot available (fun () -> blockers) ignore
+                        false
+                | _ ->
+                    let blockers () =
+                        let owners = HashSet<int64>()
+                        let add owner = if owner <> context.Owner then owners.Add owner |> ignore
+                        match read with
+                        | PrimaryPoint _ -> exactKeyOwner cache probe |> Option.iter add
+                        | PrimaryRange(lower, upper) ->
+                            for owner, _, _ in rangeBlockers lower upper do add owner
+                        owners
+                    let available () =
+                        match read with
+                        | PrimaryPoint _ -> exactKeyOwner cache probe |> Option.forall ((=) context.Owner)
+                        | PrimaryRange _ -> (blockers ()).Count = 0
+                    let installed =
+                        lock cache.SyncRoot (fun () ->
+                            if available () then
+                                install ()
+                                true
+                            else false)
+                    if not installed then
+                        awaitLock (DateTime.UtcNow + timeout) live.LockWaits database context
+                            queryCancellation.Value cache.SyncRoot available blockers install
+                    true)
+        |> Option.defaultValue true
+    | _ -> true
 
 let internal acquireMissingPrimaryGap timeout live snapshot database tableName values =
-    acquirePrimaryReadGap timeout live snapshot database tableName (PrimaryPoint values)
+    acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap (PrimaryPoint values) |> ignore
 
-let private primaryRangeRowIds (table: Table) lower upper =
+let private primaryRangeRows (table: Table) lower upper limit =
     match Map.tryFind "PRIMARY" table.SecondaryOrder with
-    | None -> []
+    | None -> [], None
     | Some entries ->
         let start =
             lower |> Option.map (fun (values, inclusive) ->
@@ -6605,37 +6643,68 @@ let private primaryRangeRowIds (table: Table) lower upper =
                 let first, after = orderedPrefixBounds entries values
                 if inclusive then after else first)
             |> Option.defaultValue entries.Count
-        [ for index in start .. finish - 1 do entries.[index].RowId ]
+        let stop = limit |> Option.filter (fun count -> count <= finish - start)
+        let after = stop |> Option.map ((+) start) |> Option.defaultValue finish
+        [ for index in start .. after - 1 do entries.[index].RowId ],
+        (stop |> Option.map (fun _ -> entries.[after - 1].Values))
 
 let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Store) (plan: IntegerPrimaryReadPlan) =
     let deadline = DateTime.UtcNow + timeout
     let database, tableName = plan.ReadDatabase, plan.ReadTableName
+    let remaining () =
+        let duration = deadline - DateTime.UtcNow
+        if duration <= TimeSpan.Zero then raise (LockWaitTimeout database)
+        duration
+    let lockRows snapshot rowIds =
+        if not (List.isEmpty rowIds) then
+            acquireTransactionReadTargets (remaining ()) snapshot database tableName ShareLock WaitForLocks rowIds |> ignore
     let rows snapshot =
         tableAt snapshot database tableName
         |> Option.filter (fun table -> table.SchemaRevision = plan.ReadSchemaRevision)
         |> Option.bind (fun table ->
             match plan.ReadAccess with
-            | PrimaryPoint values -> tryPrimaryWriteLockTargets snapshot table values |> Option.map _.RowIds
-            | PrimaryRange(lower, upper) -> Some(primaryRangeRowIds table lower upper))
-    let rec acquire snapshot rowIds =
-        let remaining = deadline - DateTime.UtcNow
-        if remaining <= TimeSpan.Zero then raise (LockWaitTimeout database)
+            | PrimaryPoint values -> tryPrimaryWriteLockTargets snapshot table values |> Option.map (fun targets -> targets.RowIds, None)
+            | PrimaryRange(lower, upper) -> Some(primaryRangeRows table lower upper plan.ReadRangeRowsToVisit))
+    let rec acquire snapshot ((rowIds, _) as selection) =
+        let timeout = remaining ()
         match plan.ReadAccess with
         | PrimaryPoint _ when not (List.isEmpty rowIds) -> ()
-        | _ -> acquirePrimaryReadGap remaining live snapshot database tableName plan.ReadAccess
-        if not (List.isEmpty rowIds) then
-            let remaining = deadline - DateTime.UtcNow
-            if remaining <= TimeSpan.Zero then raise (LockWaitTimeout database)
-            acquireTransactionReadTargets remaining snapshot database tableName ShareLock WaitForLocks rowIds |> ignore
+        | _ -> acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap plan.ReadAccess |> ignore
+        lockRows snapshot rowIds
         // A writer can publish a new row identity for the key while the read waits.
         let current = refresh ()
         match rows current with
-        | Some next when next <> rowIds -> acquire current next
+        | Some next when next <> selection -> acquire current next
         | _ -> current
+
+    let rec acquireLimited lower rangeUpper snapshot ((rowIds, stop) as selection) =
+        let retained = transactionGapLocks snapshot
+        let upper = stop |> Option.map (fun key -> key, true) |> Option.orElse rangeUpper
+        let read = PrimaryRange(lower, upper)
+        let installed = acquirePrimaryReadGap (remaining ()) live snapshot database tableName (LimitedGap stop.IsSome) read
+        let current = refresh ()
+        match rows current with
+        | None ->
+            releaseLaterGapLocks snapshot retained
+            current
+        | Some next when not installed || next <> selection ->
+            releaseLaterGapLocks snapshot retained
+            acquireLimited lower rangeUpper current next
+        | Some _ ->
+            lockRows current rowIds
+            let current = refresh ()
+            match rows current with
+            | Some next when next <> selection ->
+                acquireLimited lower rangeUpper current next
+            | _ -> current
 
     let initial = refresh ()
     match rows initial with
-    | Some rowIds -> withTransactionLockCheckpoint initial (fun () -> acquire initial rowIds)
+    | Some selection ->
+        withTransactionLockCheckpoint initial (fun () ->
+            match plan.ReadAccess, plan.ReadRangeRowsToVisit with
+            | PrimaryRange(lower, upper), Some _ -> acquireLimited lower upper initial selection
+            | _ -> acquire initial selection)
     | None -> initial
 
 /// Read either side of an indexed NULL test after any exact bound leading key

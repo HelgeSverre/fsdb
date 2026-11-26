@@ -874,6 +874,39 @@ let tests =
                   run reader "ROLLBACK" (Affected 0UL) |> ignore
               Expect.equal (attempt "INSERT INTO gate VALUES (15,0)") (Affected 1UL) "rollback releases the range"
 
+          testCase "serializable ordered limits lock visited rows but leave the range tail writable"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY)" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES (10),(20),(30),(40)" (Affected 4UL) |> ignore
+              let probe = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let attempt sql =
+                  let transaction = run probe "BEGIN" (Affected 0UL)
+                  let transaction, result = handle transaction sql
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  result
+
+              let reader = run (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+              let reader = run reader "BEGIN" (Affected 0UL)
+              let reader = run reader "SELECT id FROM gate FORCE INDEX (PRIMARY) WHERE id BETWEEN 12 AND 39 ORDER BY id LIMIT 1 OFFSET 1"
+                               (ResultSet([ "id" ], [ [ Some "30" ] ]))
+              try
+                  for key in [ 20; 30 ] do
+                      match attempt $"SELECT id FROM gate WHERE id={key} FOR UPDATE NOWAIT" with
+                      | Err(3572, _) -> ()
+                      | actual -> failtestf "the visited key %d must be locked, got %A" key actual
+                  match attempt "INSERT INTO gate VALUES (25)" with
+                  | Err(1205, _) -> ()
+                  | actual -> failtestf "the gap before the last visited key must be locked, got %A" actual
+                  Expect.equal (attempt "INSERT INTO gate VALUES (35)") (Affected 1UL) "the unused tail stays writable"
+              finally
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "serializable primary ranges follow descending and composite index order"
           <| fun _ ->
               let run session sql expected =
