@@ -3,7 +3,7 @@
 Build Fsdb.Cli in Release first. Requires native mysqld/mysqladmin and PyMySQL.
 Each token size uses disposable servers and data directories.
 Use --legacy-punctuation, --legacy-radicals, or --legacy-range for the expanded
-utf8mb4_unicode_ci corpora.
+utf8mb4_unicode_ci corpora, or --cache-lifecycle for fresh and flushed postings.
 """
 
 import argparse
@@ -276,10 +276,147 @@ def probe_han_permutation(mysql_connection, fsdb_connection, collation,
         print("  MySQL weight", value, query(mysql_connection, weight_sql, (value,))[0][0])
 
 
+def verify_cache_lifecycle(mysql, fsdb):
+    documents = [("東京", ""), ("東海", ""), ("大阪", "")]
+    for connection in (mysql, fsdb):
+        query(connection, "SET SESSION innodb_ft_enable_stopword=OFF")
+        setup(connection, 2, documents, "utf8mb4_bin")
+
+    terms = (
+        "東京",
+        "東*",
+        "東京 東*",
+        "東* 東京",
+        "東京 (東*)",
+        "(東京) 東*",
+        "不存在 東*",
+        "東京 +東*",
+        "東京 -東*",
+        "東* -東京",
+        "東* 京都 -東*",
+        "東京 >東*",
+        "東京 ~東*",
+        "東京 +(+東*)",
+        "東京駅 東*",
+        '"東海" 東*',
+        '"不存在" 東*',
+    )
+    mode = "IN BOOLEAN MODE"
+    seed = "INSERT INTO docs VALUES(1,'東京',''),(2,'東海',''),(3,'大阪','')"
+    # Refresh the estimated document count after flushing so it cannot mask
+    # changes caused by the posting lookup.
+    optimize = ("OPTIMIZE TABLE docs", "ANALYZE TABLE docs")
+    stages = (
+        ("fresh", (), (3, 0)),
+        ("analyzed", ("ANALYZE TABLE docs",), (3, 0)),
+        ("table flush", ("FLUSH TABLES docs",), (3, 0)),
+        ("default optimize", ("OPTIMIZE TABLE docs",), (3, 0)),
+        (
+            "full-text optimize",
+            ("SET GLOBAL innodb_optimize_fulltext_only=ON", *optimize),
+            (0, 3),
+        ),
+        (
+            "mixed postings",
+            (
+                "INSERT INTO docs VALUES(4,'東北',''),(5,'東京 東海 東海','')",
+                "ANALYZE TABLE docs",
+            ),
+            (3, 3),
+        ),
+        ("full-text optimize again", optimize, (0, 6)),
+        (
+            "populated index creation",
+            (
+                "DROP TABLE docs",
+                "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_bin,title TEXT COLLATE utf8mb4_bin)",
+                seed,
+                "ALTER TABLE docs ADD FULLTEXT KEY ft(body,title) WITH PARSER ngram",
+            ),
+            (0, 3),
+        ),
+        (
+            "metadata alter with mixed postings",
+            (
+                "INSERT INTO docs VALUES(4,'東北','')",
+                "ALTER TABLE docs COMMENT='keep posting layout'",
+                "ANALYZE TABLE docs",
+            ),
+            (1, 3),
+        ),
+        ("reinsert after truncate", ("TRUNCATE TABLE docs", seed), (3, 0)),
+        (
+            "cached frequency order",
+            (
+                "TRUNCATE TABLE docs",
+                "INSERT INTO docs VALUES(1,'東京 東北 東京',''),(2,'東海',''),(4,'札幌',''),(3,'大阪','')",
+                "ANALYZE TABLE docs",
+            ),
+            (5, 0),
+        ),
+        ("flushed frequency order", optimize, (0, 5)),
+        (
+            "cached frequency after deletion",
+            (
+                "TRUNCATE TABLE docs",
+                "INSERT INTO docs VALUES(1,'東京 東北 東京',''),(3,'大阪',''),(2,'東海',''),(4,'札幌','')",
+                "DELETE FROM docs WHERE id=3",
+                "INSERT INTO docs VALUES(3,'大阪','')",
+                "ANALYZE TABLE docs",
+            ),
+            (6, 0),
+        ),
+    )
+    failures = 0
+    for stage, statements, expected_counts in stages:
+        for statement in statements:
+            query(mysql, statement)
+            try:
+                query(fsdb, statement)
+            except pymysql.MySQLError as error:
+                print(f"{stage}: Fsdb rejected {statement!r}: {error.args}")
+                failures += 1
+
+        query(mysql, "SET GLOBAL innodb_ft_aux_table='probe/docs'")
+        posting_counts = tuple(
+            query(
+                mysql,
+                f"SELECT COUNT(DISTINCT WORD,DOC_ID) FROM information_schema.INNODB_FT_INDEX_{source}",
+            )[0][0]
+            for source in ("CACHE", "TABLE")
+        )
+        if posting_counts != expected_counts:
+            raise AssertionError(
+                f"{stage}: expected MySQL cache/disk counts {expected_counts}, got {posting_counts}"
+            )
+
+        membership = relevance = 0
+        for term in terms:
+            expected = result(mysql, term, mode)
+            actual = result(fsdb, term, mode)
+            if actual != expected:
+                print(f"{stage}: {term!r}: MySQL IDs {expected}, Fsdb IDs {actual}")
+                membership += 1
+            expected_scores = scored_result(mysql, term, mode)
+            actual_scores = scored_result(fsdb, term, mode)
+            if not scores_agree(expected_scores, actual_scores):
+                if actual == expected:
+                    print(
+                        f"{stage}: {term!r}: MySQL ranks {expected_scores}, Fsdb ranks {actual_scores}"
+                    )
+                relevance += 1
+        print(
+            f"{stage}: MySQL cache/disk postings {posting_counts}, "
+            f"{membership} membership and {relevance} relevance differences in {len(terms)} queries"
+        )
+        failures += membership + relevance
+    return failures
+
+
 def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None,
            collation_override=None, legacy_term_range=None, weight_checks=False,
            mixed_checks=False, order_checks=False, cldr_pinyin=None,
-           tailoring_probe=False, all_range_scalars=False):
+           tailoring_probe=False, all_range_scalars=False, cache_lifecycle=False):
     prefix = '中' * (size - 1)
     if legacy_radicals:
         legacy_chars = LEGACY_RADICALS
@@ -347,6 +484,8 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     stdout=fsdb_log, stderr=subprocess.STDOUT,
                 )
                 fsdb_connection = connect(host="127.0.0.1", port=port)
+                if cache_lifecycle:
+                    return verify_cache_lifecycle(mysql_connection, fsdb_connection)
                 for connection in (mysql_connection, fsdb_connection):
                     setup(connection, size, documents, collation)
 
@@ -537,6 +676,7 @@ if __name__ == "__main__":
     corpus.add_argument("--legacy-punctuation", action="store_true")
     corpus.add_argument("--legacy-radicals", action="store_true")
     corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
+    corpus.add_argument("--cache-lifecycle", action="store_true", help="compare binary bigram ranks across cache and disk transitions")
     parser.add_argument("--all-range-scalars", action="store_true", help="include range scalars missing from Python's Unicode character database")
     parser.add_argument("--legacy-term-range", help="search only this subrange of --legacy-range while indexing the whole range")
     parser.add_argument("--weight-checks", action="store_true", help="compare exact WEIGHT_STRING bytes for --legacy-range")
@@ -546,6 +686,10 @@ if __name__ == "__main__":
     parser.add_argument("--mixed-checks", action="store_true", help="compare compatibility forms wrapped with ASCII or Han")
     parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_0900_as_ci", "utf8mb4_ja_0900_as_cs_ks", "utf8mb4_0900_as_cs", "utf8mb4_zh_0900_as_cs"))
     args = parser.parse_args()
+    if args.cache_lifecycle:
+        if args.sizes not in ([], [2]) or args.collation:
+            parser.error("--cache-lifecycle uses binary bigrams")
+        raise SystemExit(bool(verify(2, cache_lifecycle=True)))
     legacy_range = None
     if args.legacy_range:
         try:

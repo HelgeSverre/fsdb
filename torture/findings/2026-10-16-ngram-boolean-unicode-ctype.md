@@ -297,3 +297,63 @@ searches at sizes 1–10.
 At size two on a fresh MySQL index, the 3,856-query holdout had the
 same mismatch counts before and after this fix: 606 for membership and
 944 for relevance. The fresh-cache behavior remains open.
+
+## Cached and flushed prefix postings
+
+A binary bigram index on `東京`, `東海`, and `大阪` isolates
+the membership change. On a fresh index, `東*` returns IDs 1 and 2,
+but `東京 東*` returns only ID 1. Putting the prefix first or making
+it required returns both IDs. The same behavior holds through a
+parenthesized group and after a phrase with zero matches.
+
+InnoDB retains its phrase-search flag after evaluating a phrase. Optional,
+weighted, and excluded short prefixes then skip the wildcard cache
+lookup. Required prefixes take a different path that still searches
+the cache. All of these paths continue to visit disk postings.
+[InnoDB Boolean query execution](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc).
+
+| MySQL 8.4.11 operation | Cached postings | Disk postings | IDs for `東京 東*` |
+| --- | ---: | ---: | --- |
+| Insert the three rows into an empty indexed table | 3 | 0 | 1 |
+| Analyze, flush the table, or run default optimize in this fixture | 3 | 0 | 1 |
+| Optimize with `innodb_optimize_fulltext_only=ON` | 0 | 3 | 1, 2 |
+| Insert `東北` and `東京 東海 東海` after the flush | 3 | 3 | 1, 2, 5 |
+| Run full-text-only optimize again | 0 | 6 | 1, 2, 4, 5 |
+
+Adding a full-text index to an already-populated table starts
+with disk postings. A metadata-only ALTER preserved a mixed layout.
+Truncation followed by insertion returned the index to cached postings.
+A clean MySQL restart flushed the postings of the three-row fixture.
+After abrupt restart, the metadata tables initially showed no postings.
+The first search reconstructed them in cache and kept the fresh-index
+membership.
+
+Storage also affects term frequency independently of membership. With
+`東京 東北 東京`, `東海`, `大阪`, and `札幌`, the first row's
+`東*` rank is about 0.0156097 in cache in that insertion order and
+0.0312194 on disk. Twelve of the 24 insertion orders give each of these
+scores while the postings are cached. InnoDB
+keeps the first matching gram's frequency. The cache starts at the
+first prefix match on its tree search path, then visits predecessors
+and successors. It searches this cache before visiting disk postings.
+[InnoDB wildcard cache lookup](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L844).
+
+The cache also retains history from deleted rows. Inserting an
+extra `大阪` row between the first two live documents, deleting it,
+and finally inserting the live `大阪` row leaves six cache postings
+instead of five. The live rows and their relative insertion order
+are identical, but the first row's `東*` score changes from
+0.0156097 to 0.0312194. The cache tree therefore depends on terms
+from deleted documents as well as live rows.
+
+The differential oracle refreshes MySQL's estimated document count
+after a full-text flush to isolate its effect on relevance. It verifies
+the cache and disk counts, then
+compares Boolean membership and relevance at each stage. Fsdb matches
+the fully flushed stages and diverges in fresh and mixed states. It
+also rejects `innodb_optimize_fulltext_only` with error 1193.
+
+```sh
+dotnet build src/Fsdb.Cli -c Release
+uv run --no-project --with pymysql python torture/scripts/ngram-multicol-oracle.py --cache-lifecycle
+```

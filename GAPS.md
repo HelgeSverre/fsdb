@@ -1744,7 +1744,10 @@ also resolves the near-zero result in the optimized trigram corpus.
 [Required prefixes in nested Boolean groups](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#required-prefix-bounds-across-boolean-groups)
 now carry the posting bounds through the rest of the query on the
 audited optimized indexes, including after indexed text changes and
-recovery. Cache-dependent wildcard behavior and segmented postings remain open.
+recovery. The [cache lifecycle oracle](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#cached-and-flushed-prefix-postings)
+now isolates the remaining cache-dependent wildcard behavior across fresh,
+flushed, and mixed postings. Cache lookup order and segmented postings
+remain open.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.
