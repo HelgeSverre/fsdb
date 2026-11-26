@@ -20028,9 +20028,8 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
             let innerKey expression =
                 outputIndex expression
                 |> Option.bind (fun index -> projectedShiftedKey projection.PhysicalOutputs.[index])
-                |> Option.bind (fun (index, offset) ->
-                    let name = table.Columns.[index].Name
-                    correlatedSignedIntegerBounds table.Columns name |> Option.map (fun _ -> name, offset))
+                |> Option.filter (fun (index, _) -> Storage.isIntegerKeyType table.Columns.[index].Type)
+                |> Option.map (fun (index, offset) -> table.Columns.[index].Name, offset)
 
             let storedBound offset value =
                 if offset = 0I then Some value
@@ -20053,8 +20052,11 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                     (translate range.Lower) (translate range.Upper)
 
             let bound = function
-                | LiteralValue(VInt _ as value) -> Some value
-                | (Col _ | QualifiedCol _ | BinOp((Add | Sub), (Col _ | QualifiedCol _), LiteralValue(VInt _))) as expression ->
+                | LiteralValue((VInt _ | VUInt _) as value) -> Some value
+                | (Col _ | QualifiedCol _) as expression ->
+                    tryCorrelatedOuterValue scope outer expression
+                    |> Option.filter (function VInt _ | VUInt _ -> true | _ -> false)
+                | BinOp((Add | Sub), (Col _ | QualifiedCol _), LiteralValue(VInt _)) as expression ->
                     tryCorrelatedOuterValue scope outer expression
                     |> Option.filter (function VInt _ -> true | _ -> false)
                 | _ -> None
@@ -35411,7 +35413,7 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
             let isIntegerColumn column =
                 resolveColumn table.Columns column
                 |> Result.toOption
-                |> Option.exists (fun index -> Storage.isIntegerPrimaryKeyType table.Columns.[index].Type)
+                |> Option.exists (fun index -> Storage.isIntegerKeyType table.Columns.[index].Type)
             let point values =
                 Storage.tryPrimaryWriteLockTargets store table values
                 |> Option.map (fun _ -> Storage.PrimaryPoint values)
@@ -36080,7 +36082,7 @@ let private transactionWriteTargetsIn
 
             let equalities = qualifiedColumnEqualities conditions
             if temporaryCatalog.IsSome then
-                joinBounds Storage.isIntegerPrimaryKeyType isIntegerJoinLiteral columnTypes equalities conditions
+                joinBounds Storage.isIntegerKeyType isIntegerJoinLiteral columnTypes equalities conditions
             else
                 signedJoinBounds columnTypes equalities conditions
 
@@ -36788,7 +36790,7 @@ let internal transactionWriteReadClaims
                     |> tryAllSome
 
                 let readBounds () =
-                    let isKey = Storage.isIntegerPrimaryKeyType
+                    let isKey = Storage.isIntegerKeyType
                     let columnTypes = outerColumnTypes.Value
                     let conditions = update.Joins |> List.collect (_.On >> conjuncts)
                     let edges = qualifiedColumnEqualities conditions

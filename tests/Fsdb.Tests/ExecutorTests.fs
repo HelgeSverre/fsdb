@@ -16281,6 +16281,44 @@ let tests =
                             "descending ranges intersect strictly and preserve unsupported conjuncts"
                     | other -> failtestf "expected one-sided correlated counts, got %A" other
 
+                testCase "correlated composite counts use signed and unsigned integer key domains"
+                <| fun _ ->
+                    let store = newStore ()
+                    let run = runDefault store
+                    run "CREATE TABLE range_parents (id INT PRIMARY KEY, signed_low INT, signed_high INT, wide_low BIGINT UNSIGNED, wide_high BIGINT UNSIGNED)" |> ignore
+                    run "CREATE TABLE range_children (id INT PRIMARY KEY, tenant BIGINT UNSIGNED, signed_tenant INT, signed_key INT, wide_key BIGINT UNSIGNED, KEY ix_signed(signed_tenant,signed_key), KEY ix_wide(tenant,wide_key DESC))" |> ignore
+                    let wide key = 9223372036854775808UL + uint64 key
+                    let insert table rows =
+                        run ("INSERT INTO " + table + " VALUES " + String.concat "," rows) |> ignore
+
+                    [ 1..120 ] |> List.map (fun id -> $"({id},10,12,{wide 10},{wide 12})") |> insert "range_parents"
+                    [ 1..7200 ]
+                    |> List.map (fun id ->
+                        let key = id % 60
+                        let tenant = (id - 1) / 60 + 1
+                        $"({id},{tenant},{tenant},{key},{wide key})")
+                    |> insert "range_children"
+
+                    let count tenant key low high = $"""
+                        SELECT SUM((SELECT COUNT(*) FROM range_children c
+                            WHERE c.{tenant}=p.id AND c.{key} BETWEEN p.{low} AND p.{high}))
+                        FROM range_parents p"""
+                    let measure sql =
+                        let before = System.GC.GetAllocatedBytesForCurrentThread()
+                        let result = run sql
+                        let allocated = System.GC.GetAllocatedBytesForCurrentThread() - before
+                        match result with
+                        | ResultSet(_, [ [ Some "360" ] ]) -> allocated
+                        | other -> failtestf "expected a count of 360, got %A" other
+
+                    let signedQuery = count "signed_tenant" "signed_key" "signed_low" "signed_high"
+                    let unsignedQuery = count "tenant" "wide_key" "wide_low" "wide_high"
+                    measure signedQuery |> ignore
+                    measure unsignedQuery |> ignore
+                    let signedAllocations = measure signedQuery
+                    let unsignedAllocations = measure unsignedQuery
+                    Expect.isLessThan unsignedAllocations (signedAllocations * 3L) "wide unsigned bounds use the same composite slice"
+
                 testCase "correlated plain and functional candidates intersect in conjuncts and OR branches"
                 <| fun _ ->
                     let mutable calls = 0

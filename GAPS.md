@@ -2896,6 +2896,10 @@ implementation effort:
    translate a bounded signed integer offset on either composite key
    part back into a stored bound. Correlated aggregate binding also
    resolves enclosing CTEs referenced by a nested derived table.
+   [Direct integer key domains](benchmarks/results/2026-11-26-correlated-integer-key-domains.md)
+   use the composite slice for signed and unsigned TINYINT through BIGINT.
+   The three native unsigned workloads ran 4.8–5.3× faster, including a
+   sum through a projected CTE.
    Other computed lookup keys, residual predicates, and broader
    aggregate shapes still need work.
 

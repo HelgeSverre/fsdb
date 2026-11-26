@@ -19,6 +19,7 @@ let modes =
       "correlated-residual-controls"
       "computed-projection-controls"
       "offset-key-controls"
+      "integer-key-controls"
       "overlay-controls"
       "edge-controls" ]
 
@@ -213,6 +214,31 @@ let readProjectedRanges () =
     for lane, query, expected in ordered do
         probe lane (fun () -> measure lane 30 (fun () -> scalar query |> require lane expected))
 
+let readIntegerKeyRanges () =
+    let wide key = 9223372036854775808UL + uint64 key
+    write "CREATE TABLE range_parent(id INT PRIMARY KEY, int_low INT, int_high INT, uint_low INT UNSIGNED, uint_high INT UNSIGNED, wide_low BIGINT UNSIGNED, wide_high BIGINT UNSIGNED)"
+    write "CREATE TABLE range_child(id INT PRIMARY KEY, tenant INT, int_key INT, uint_key INT UNSIGNED, wide_key BIGINT UNSIGNED, amount INT, KEY ix_int(tenant,int_key), KEY ix_uint(tenant,uint_key), KEY ix_wide(tenant,wide_key DESC))"
+    seed "range_parent" 500 (fun id -> $"({id},10,12,4000000010,4000000012,{wide 10},{wide 12})")
+    seed "range_child" 20000 (fun id ->
+        let key = id % 40
+        let tenant = (id - 1) / 40 + 1
+        $"({id},{tenant},{key},{4000000000UL + uint64 key},{wide key},{key})")
+
+    let count key low high =
+        $"SELECT SUM((SELECT COUNT(*) FROM range_child c WHERE c.tenant=p.id AND c.{key} BETWEEN p.{low} AND p.{high})) FROM range_parent p"
+    let projected =
+        """WITH projected AS (SELECT tenant AS owner, wide_key AS reading, amount FROM range_child)
+           SELECT SUM((SELECT SUM(c.amount) FROM projected c WHERE c.owner=p.id AND c.reading BETWEEN p.wide_low AND p.wide_high))
+           FROM range_parent p"""
+    let cases =
+        [ "signed-int-count", count "int_key" "int_low" "int_high", 1500L
+          "unsigned-int-count", count "uint_key" "uint_low" "uint_high", 1500L
+          "unsigned-bigint-count", count "wide_key" "wide_low" "wide_high", 1500L
+          "unsigned-bigint-projected-sum", projected, 16500L ]
+    let ordered = if pass % 2 = 0 then List.rev cases else cases
+    for lane, query, expected in ordered do
+        probe lane (fun () -> measure lane 20 (fun () -> scalar query |> require lane expected))
+
 let readCountArguments () =
     seedNullableBuckets ()
 
@@ -401,10 +427,11 @@ try
     write $"CREATE DATABASE {database}"
     try
         write $"USE {database}"
-        if mode <> "edge-controls" && mode <> "overlay-controls" then seedAccounts ()
+        if mode <> "edge-controls" && mode <> "overlay-controls" && mode <> "integer-key-controls" then seedAccounts ()
 
         let workloads =
             if mode = "range-controls" then [ readRangeControls ]
+            elif mode = "integer-key-controls" then [ readIntegerKeyRanges ]
             elif List.contains mode [ "projected-range-controls"; "projected-filter-controls"; "correlated-residual-controls"; "computed-projection-controls"; "offset-key-controls" ] then
                 [ readProjectedRanges ]
             elif mode = "nullable-count-controls" || mode = "expression-count-controls" then [ readCountArguments ]

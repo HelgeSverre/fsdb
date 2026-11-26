@@ -4050,8 +4050,7 @@ let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parent
         |> VString
     | _ -> parentValue
 
-let private isIntegerKeyType =
-    function
+let internal isIntegerKeyType = function
     | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
     | _ -> false
 
@@ -6374,10 +6373,6 @@ let private orderedPrefixBounds (entries: ImmutableSortedSet<SecondaryOrderEntry
 
         insertionIndex FirstEqual, insertionIndex AfterEqual
 
-let internal isIntegerPrimaryKeyType = function
-    | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
-    | _ -> false
-
 let private tryIntegerPrimaryLockValues width (key: string) =
     let rec read offset remaining reversed =
         if remaining = 0 then
@@ -6444,7 +6439,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
     | Some context, Some observed ->
         let tableKey = normalizeTableName tableName
         let database = database.ToLowerInvariant()
-        let integer column = isIntegerPrimaryKeyType observed.Columns.[column].Type
+        let integer column = isIntegerKeyType observed.Columns.[column].Type
         uniqueKeyGroups observed
         |> List.tryFind (fun group ->
             group.Name = "PRIMARY" && indexesWholeColumns group
