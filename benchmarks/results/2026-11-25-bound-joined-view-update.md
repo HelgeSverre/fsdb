@@ -351,12 +351,35 @@ key `3`, and an exclusive `NOWAIT` read returned error 3572 while the
 joined writer was open. An exclusive lock on key `5` remained available
 after its owner ended.
 
-Materialized reads remain a separate gap. With `gate` containing keys
-`1`, `3`, and `5`, MySQL held shared row locks on all three keys for a
-derived `LIMIT 50` or `DISTINCT` at READ COMMITTED and REPEATABLE READ.
-With `ORDER BY id LIMIT 1`, MySQL retained a lock only on `1` despite
-the outer update affecting zero rows. Fsdb allowed exclusive locks on
-all three keys in these materialized cases.
+### Locks through materialized outer sources
+
+A joined update with a bound view driver now retains shared locks for
+audited single-table `DISTINCT` and literal `LIMIT` materializations.
+With `gate` containing primary keys `1`, `3`, and `5`, the four-isolation
+MySQL 8.4.11 comparison matched these visible row locks.
+
+| Inner source | READ UNCOMMITTED / READ COMMITTED | REPEATABLE READ / SERIALIZABLE |
+| --- | --- | --- |
+| `LIMIT 50`, unbounded `DISTINCT`, or `ORDER BY delta LIMIT 1` with filesort | 1, 3, 5 | 1, 3, 5 |
+| `ORDER BY id LIMIT 1`, as a derived table or CTE | 1 | 1 |
+| `ORDER BY id DESC LIMIT 1` | 5 | 5 |
+| `ORDER BY id LIMIT 1 OFFSET 1` | 3 | 1, 3 |
+| `ORDER BY id LIMIT 0` | none | none |
+
+All 32 result and lock-set comparisons matched. On 12 additional
+contention schedules, the wait decisions, affected counts, visible row
+locks, and updated values agreed. A skipped `OFFSET` row remained locked
+at READ COMMITTED when the scan had to wait for it. A pending insert
+ahead of the ordered limit and a deletion of its original first row
+both forced the scan to use the refreshed first row. An insert or
+update beyond the limit left the scan free to proceed. Three attempts
+to lock absent keys still differed, including two probes of the deleted
+first key. Absent-key and deleted-record locking remain open.
+
+The audited source has one physical table and uses direct projections
+without an inner filter. The early-stop cases use primary-key order.
+Secondary scans, an unordered limit that cuts the scan short, and
+plans without a proved outer driver need separate coverage.
 
 ### Scope of the missing-key gap
 

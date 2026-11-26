@@ -4045,6 +4045,7 @@ type private StripeLockMode =
 
 type private StripeWaitPolicy =
     | WaitUntilAvailable
+    | WaitIfContended
     | FailIfUnavailable
     | SkipIfUnavailable
 
@@ -4181,11 +4182,14 @@ let private acquireStripe
     | SkipIfUnavailable ->
         lock stripe.SyncRoot (fun () ->
             if available () then claim () else false, false)
-    | WaitUntilAvailable ->
+    | WaitUntilAvailable | WaitIfContended ->
         let cancellation = queryCancellation.Value
         Limits.checkQueryInterruption cancellation
 
-        match lock stripe.SyncRoot (fun () -> if available () then Some(claim ()) else None) with
+        match lock stripe.SyncRoot (fun () ->
+            if not (available ()) then None
+            elif waitPolicy = WaitIfContended then Some(false, false)
+            else Some(claim ())) with
         | Some acquired -> acquired
         | None ->
             use cancellationWake =
@@ -4561,13 +4565,13 @@ let internal waitForTransactionReadDependencies timeout (store: Store) dbName ta
         | _ -> ()
     | None -> ()
 
-let acquireTransactionReadTargets
+let private acquireTransactionReadTargetsWith
     (timeout: TimeSpan)
     (store: Store)
     (dbName: string)
     (tableName: string)
     (strength: LockingReadStrength)
-    (wait: LockingReadWait)
+    (waitPolicy: StripeWaitPolicy)
     (rowIds: RowId list)
     : RowId list =
     match store.TransactionLocks with
@@ -4584,12 +4588,6 @@ let acquireTransactionReadTargets
             | ShareLock -> SharedStripe
             | UpdateLock -> ExclusiveStripe
 
-        let waitPolicy =
-            match wait with
-            | WaitForLocks -> WaitUntilAvailable
-            | NoWait -> FailIfUnavailable
-            | SkipLocked -> SkipIfUnavailable
-
         let deadline = DateTime.UtcNow + timeout
         let claimed = ResizeArray<RowLockStripe>()
 
@@ -4599,13 +4597,16 @@ let acquireTransactionReadTargets
                 |> List.groupBy stripeIndex
                 |> List.sortBy fst
                 |> List.collect (fun (index, rows) ->
-                    let stripe = rowLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ()))
-                    let acquired, newlyHeld = acquireStripe deadline store.LockWaits dbName context mode waitPolicy stripe
-
-                    if newlyHeld then
-                        claimed.Add stripe
-
-                    if acquired then rows else [])
+                    let stripe =
+                        if waitPolicy = WaitIfContended then
+                            match rowLocks.TryGetValue index with true, stripe -> Some stripe | _ -> None
+                        else Some(rowLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ())))
+                    match stripe with
+                    | None -> []
+                    | Some stripe ->
+                        let acquired, newlyHeld = acquireStripe deadline store.LockWaits dbName context mode waitPolicy stripe
+                        if newlyHeld then claimed.Add stripe
+                        if acquired then rows else [])
 
             lock context.LockClaims (fun () ->
                 for rowId in acquiredRows do
@@ -4620,6 +4621,18 @@ let acquireTransactionReadTargets
         with _ ->
             releaseLockStripes context claimed
             reraise ()
+
+let acquireTransactionReadTargets timeout store dbName tableName strength wait rowIds =
+    let policy =
+        match wait with
+        | WaitForLocks -> WaitUntilAvailable
+        | NoWait -> FailIfUnavailable
+        | SkipLocked -> SkipIfUnavailable
+    acquireTransactionReadTargetsWith timeout store dbName tableName strength policy rowIds
+
+/// Lower-isolation OFFSET scans keep a shared lock on rows for which they had to wait.
+let internal acquireContendedReadTargets timeout store dbName tableName rowIds =
+    acquireTransactionReadTargetsWith timeout store dbName tableName ShareLock WaitIfContended rowIds
 
 // mysql.* uses ordinary stored tables, including DML and persistence paths.
 // Column shapes follow MySQL 8.4.
@@ -6903,6 +6916,10 @@ let internal tryOrderedIndexLookupWith
 
 let tryOrderedIndexLookup store dbName tableName terms =
     tryOrderedIndexLookupWith (fun _ -> true) store dbName tableName terms
+
+let internal tryOrderedIndexRowIdsInTableWith allowed store table terms =
+    tryOrderedIndexSliceWithPrefix allowed store (Some table) terms [] None None
+    |> Option.map (fun (_, slice, traversal) -> orderedEntries traversal slice |> Seq.map _.RowId)
 
 let internal tryOrderedIndexPrefixLookupWith
     (allowed: string -> bool)

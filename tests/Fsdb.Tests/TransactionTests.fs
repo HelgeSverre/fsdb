@@ -5872,6 +5872,73 @@ let tests =
                       | actual -> failtestf "%s should retain the published row lock (replacing=%b), got %A" isolation replacesExisting actual
                       run setup "UPDATE gate SET delta=7 WHERE id=1" (Affected 1UL) |> ignore
 
+          testCase "a materialized joined update retains the rows read by its scan"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql, count in
+                  [ "CREATE TABLE parent (id INT PRIMARY KEY,n INT)", 0UL
+                    "CREATE TABLE partner (id INT,seq INT,delta INT,PRIMARY KEY(id,seq))", 0UL
+                    "CREATE TABLE gate (id INT PRIMARY KEY,delta INT)", 0UL
+                    "INSERT INTO parent VALUES (3,10)", 1UL
+                    "INSERT INTO partner VALUES (3,20,3)", 1UL
+                    "INSERT INTO gate VALUES (1,7),(3,19),(5,13)", 3UL
+                    "CREATE VIEW active AS SELECT p.id,p.n,s.seq,s.delta FROM parent p JOIN partner s ON p.id=s.id", 0UL ] do
+                  run setup sql (Affected count) |> ignore
+
+              let update prefix source =
+                  $"{prefix} UPDATE active a JOIN {source} g ON g.id=a.id SET a.n=a.n+a.delta+g.delta WHERE a.id=3 AND a.seq BETWEEN 20 AND 22"
+
+              for isolation, retainsOffset in [ "READ COMMITTED", false; "REPEATABLE READ", true ] do
+                  let writer = run (create 2 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let contender = create 3 store
+                  for sql, affected, locked in
+                      [ update "" "(SELECT id,delta FROM gate LIMIT 50)", 1UL, [ 1; 3; 5 ]
+                        update "" "(SELECT id,delta FROM gate ORDER BY id LIMIT 1)", 0UL, [ 1 ]
+                        update "" "(SELECT id,delta FROM gate ORDER BY id DESC LIMIT 1)", 0UL, [ 5 ]
+                        update "" "(SELECT id,delta FROM gate ORDER BY id LIMIT 1 OFFSET 1)", 1UL, (if retainsOffset then [ 1; 3 ] else [ 3 ])
+                        update "" "(SELECT id,delta FROM gate ORDER BY delta LIMIT 1)", 0UL, [ 1; 3; 5 ]
+                        update "" "(SELECT DISTINCT id,delta FROM gate)", 1UL, [ 1; 3; 5 ]
+                        update "" "(SELECT id,delta FROM gate ORDER BY id LIMIT 0)", 0UL, []
+                        update "WITH gate_rows AS (SELECT id,delta FROM gate ORDER BY id LIMIT 1)" "gate_rows", 0UL, [ 1 ] ] do
+                      let writing = run writer "BEGIN" (Affected 0UL)
+                      let writing = run writing sql (Affected affected)
+                      let mutable reading = run contender "BEGIN" (Affected 0UL)
+                      for key in [ 1; 3; 5 ] do
+                          let next, result = handle reading $"SELECT id FROM gate WHERE id={key} FOR UPDATE NOWAIT"
+                          reading <- next
+                          match result, List.contains key locked with
+                          | Err(3572, _), true -> ()
+                          | ResultSet(_, [ [ Some actual ] ]), false when actual = string key -> ()
+                          | _ -> failtestf "%s, %s: unexpected lock on key %d: %A" isolation sql key result
+                      run reading "ROLLBACK" (Affected 0UL) |> ignore
+                      run writing "ROLLBACK" (Affected 0UL) |> ignore
+
+              let owner = run (create 4 store) "BEGIN" (Affected 0UL)
+              let owner = run owner "UPDATE gate SET delta=21 WHERE id=1" (Affected 1UL)
+              let writer = run (create 5 store) "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED" (Affected 0UL)
+              let writer = run writer "BEGIN" (Affected 0UL)
+              let sql = update "" "(SELECT id,delta FROM gate ORDER BY id LIMIT 1 OFFSET 1)"
+              let pending = Threading.Tasks.Task.Run(fun () -> handle writer sql)
+              let waited = not (pending.Wait(TimeSpan.FromMilliseconds 150.0))
+              run owner "ROLLBACK" (Affected 0UL) |> ignore
+              Expect.isTrue waited "the inner scan waits on the skipped row"
+              Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 5.0)) "the scan resumes after rollback"
+              let writer, result = pending.GetAwaiter().GetResult()
+              Expect.equal result (Affected 1UL) "the selected row still supplies the update"
+              let reader = run (create 6 store) "BEGIN" (Affected 0UL)
+              let reader, result = handle reader "SELECT id FROM gate WHERE id=1 FOR UPDATE NOWAIT"
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+              run writer "ROLLBACK" (Affected 0UL) |> ignore
+              match result with
+              | Err(3572, _) -> ()
+              | _ -> failtestf "the scan should retain the skipped row after waiting, got %A" result
+
           testCase "a lower-isolation joined update waits for the range boundary without retaining its lock"
           <| fun _ ->
               let run session sql expected =

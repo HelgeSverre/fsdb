@@ -2957,14 +2957,23 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
 
         let initialReadSnapshot = readSnapshot transaction
         let readTargets = readClaims pendingConnection initialReadSnapshot
+        let acquireScanOffset timeout (transaction: Transaction) database table (scan: Executor.MaterializedWriteRead option) =
+            match scan with
+            | Some { Offset = (_ :: _) as rows } ->
+                Storage.acquireContendedReadTargets timeout transaction.Snapshot database table rows |> List.isEmpty |> not
+            | _ -> false
+
         let pendingReads =
-            readTargets |> List.filter (fun (_, _, claims) -> not (claims.WaitKeys.IsEmpty && claims.WaitRows.IsEmpty))
+            readTargets |> List.filter (fun (_, _, claims) ->
+                not (claims.WaitKeys.IsEmpty && claims.WaitRows.IsEmpty)
+                || (claims.Materialized |> Option.exists (fun scan -> not scan.Offset.IsEmpty)))
 
         let transaction, readTargets =
             if pendingReads.IsEmpty then
                 if readTargets.IsEmpty then transaction, readTargets else initialReadSnapshot, readTargets
             else
                 for database, table, claims in pendingReads do
+                    acquireScanOffset timeout initialReadSnapshot database table claims.Materialized |> ignore
                     Storage.waitForTransactionReadDependencies timeout initialReadSnapshot.Snapshot database table claims.WaitKeys claims.WaitRows
 
                 // An owner can commit a new row or move an existing row
@@ -2979,11 +2988,18 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
                 else Some(database, table, claims.PrimaryProbes, Set.ofList claims.RetainedRows))
 
         let acquireReadRows remaining (transaction: Transaction) database table rows =
-            Storage.acquireTransactionReadTargets remaining transaction.Snapshot database table ShareLock WaitForLocks rows |> ignore
+            if not (List.isEmpty rows) then
+                Storage.acquireTransactionReadTargets remaining transaction.Snapshot database table ShareLock WaitForLocks rows |> ignore
+
+        let scans =
+            readTargets
+            |> List.choose (fun (database, table, claims) ->
+                claims.Materialized |> Option.map (fun scan -> (database, table), Set.ofList scan.Retained))
+            |> Map.ofList
 
         let refreshReadRows (transaction: Transaction) =
             let refreshed = refresh transaction
-            if primaryProbes.IsEmpty then refreshed
+            if primaryProbes.IsEmpty && scans.IsEmpty then refreshed
             else
                 let deadline = DateTime.UtcNow + timeout
                 let remaining database =
@@ -2999,12 +3015,18 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
                 // A delete and insert can leave the same key on a different
                 // row. Hold a shared lock on the identity in the statement's
                 // refreshed snapshot before using that row in the update.
-                let rec stabilize previous snapshot probes =
+                let rec stabilize previous snapshot probes scans =
+                    let changed database table =
+                        match tableAt database table previous, tableAt database table snapshot with
+                        | Some before, Some after -> not (obj.ReferenceEquals(before, after))
+                        | None, None -> false
+                        | _ -> true
+
                     let next =
                         probes
                         |> List.map (fun (database, table, values, held) ->
-                            match tableAt database table previous, tableAt database table snapshot with
-                            | before, Some current when not (before |> Option.exists (fun table -> obj.ReferenceEquals(table, current))) ->
+                            match tableAt database table snapshot with
+                            | Some current when changed database table ->
                                 let claims =
                                     values
                                     |> List.choose (Storage.tryPrimaryWriteLockTargets snapshot.Snapshot current)
@@ -3019,12 +3041,29 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
                                 (database, table, values, Set.union held (Set.ofList rows)), not rows.IsEmpty
                             | _ -> (database, table, values, held), false)
 
-                    if next |> List.exists snd then stabilize snapshot (refresh snapshot) (List.map fst next)
+                    let revisedScans =
+                        if scans |> Map.exists (fun (database, table) _ -> changed database table) then
+                            readClaims None snapshot
+                            |> List.choose (fun (database, table, claims) ->
+                                let key = database, table
+                                match scans |> Map.tryFind key, claims.Materialized with
+                                | Some held, Some scan ->
+                                    let waited = acquireScanOffset (remaining database) snapshot database table claims.Materialized
+                                    let uncovered = scan.Retained |> List.filter (fun row -> not (Set.contains row held))
+                                    if not uncovered.IsEmpty then
+                                        acquireReadRows (remaining database) snapshot database table uncovered
+                                    Some(key, Set.union held (Set.ofList uncovered), waited || not uncovered.IsEmpty)
+                                | _ -> None)
+                        else []
+
+                    if (next |> List.exists snd) || (revisedScans |> List.exists (fun (_, _, acquired) -> acquired)) then
+                        let scans = revisedScans |> List.fold (fun map (key, held, _) -> Map.add key held map) scans
+                        stabilize snapshot (refresh snapshot) (List.map fst next) scans
                     else snapshot
 
-                stabilize transaction refreshed primaryProbes
+                stabilize transaction refreshed primaryProbes scans
 
-        let readTargets = readTargets |> List.filter (fun (_, _, claims) -> not claims.RetainedRows.IsEmpty)
+        let readTargets = readTargets |> List.filter (fun (_, _, claims) -> not claims.RetainedRows.IsEmpty || claims.Materialized.IsSome)
         let targets =
             Executor.transactionWriteTargets transaction.Snapshot registry dbName statement
             |> List.filter (fun (_, _, target) -> not target.RowIds.IsEmpty || not target.Keys.IsEmpty)
@@ -3040,7 +3079,9 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
         | _ ->
             readTargets
             |> List.iter (fun (database, table, claims) ->
-                acquireReadRows timeout transaction database table claims.RetainedRows)
+                acquireScanOffset timeout transaction database table claims.Materialized |> ignore
+                let rows = claims.RetainedRows @ (claims.Materialized |> Option.map _.Retained |> Option.defaultValue [])
+                acquireReadRows timeout transaction database table rows)
             targets
             |> List.iter (fun (database, table, target) ->
                 Storage.acquireTransactionWriteTargets

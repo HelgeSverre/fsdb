@@ -35338,44 +35338,132 @@ type internal WriteReadScope =
     | LockingPartners
     | JoinedRanges
 
+type internal MaterializedWriteRead =
+    { Retained: RowId list
+      Offset: RowId list }
+
 type internal WriteReadDependencies =
     { RetainedRows: RowId list
       WaitKeys: string list
       WaitRows: RowId list
-      PrimaryProbes: Value list list }
+      PrimaryProbes: Value list list
+      Materialized: MaterializedWriteRead option }
 
-let private tryJoinedRangeReadTargets scope store (database: string) (source: BoundUpdateSource) range retains (pendingConnection: int option) =
+let private materializedWriteScan store registry scope (reference: TableRef) (select: SelectStmt) (table: Table) =
+    let literalLimit = function None | Some(Lit(VInt _ | VUInt _)) -> true | _ -> false
+    let qualifier = reference.Alias |> Option.defaultValue reference.Table
+    let localColumn name = (resolveColumn table.Columns name |> Result.isOk) && (tryRoutineVariable name).IsNone
+    let directProjection expression =
+        match expression with
+        | Col name -> localColumn name
+        | QualifiedCol(owner, name) -> equalsIgnoreCase owner qualifier && (resolveColumn table.Columns name |> Result.isOk)
+        | Star owner -> owner |> Option.forall (equalsIgnoreCase qualifier)
+        | _ -> false
+
+    if not (select.Limit.IsSome || select.Distinct) || not select.Joins.IsEmpty
+       || select.Where.IsSome || not select.GroupBy.IsEmpty || select.Having.IsSome
+       || not select.Windows.IsEmpty || not select.Ctes.IsEmpty || not select.Locking.IsEmpty
+       || select.Rollup || select.CalculateFoundRows || SelectStmt.hasDestination select
+       || not (literalLimit select.Limit && literalLimit select.Offset)
+       || (select.Distinct && select.Limit.IsSome)
+       || not reference.IndexHints.IsEmpty || not reference.Partitions.IsEmpty
+       || not (select.Projections |> List.forall (_.Expression >> directProjection))
+       || (table.Indexes |> List.exists (fun index -> index.Kind = BTree && not (equalsIgnoreCase index.Name "PRIMARY")))
+       || not (storedRowsMatchReadRows store table.Columns) then None
+    else
+        let limit = select.Limit |> Option.map rowCount
+        let offset = select.Offset |> Option.map rowCount |> Option.defaultValue 0
+        let fullScan () = table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq
+        let streamingRows rows count =
+            let consumed = min (int64 System.Int32.MaxValue) (int64 offset + int64 count) |> int
+            let scanned = rows |> Seq.truncate consumed |> List.ofSeq
+            if scope = WriteReadScope.LockingPartners || offset = 0 then { Retained = scanned; Offset = [] }
+            else
+                let skipped = min offset scanned.Length
+                { Retained = List.skip skipped scanned; Offset = List.take skipped scanned }
+
+        match limit with
+        | Some 0 -> Some { Retained = []; Offset = [] }
+        | None -> Some { Retained = fullScan (); Offset = [] }
+        | Some count when select.OrderBy.IsEmpty && offset = 0 && count >= table.RowsArray.Count ->
+            Some { Retained = fullScan (); Offset = [] }
+        | Some count when not select.OrderBy.IsEmpty ->
+            indexOrderTerms registry reference select
+            |> Option.filter (List.forall (_.Transform >> Option.isNone))
+            |> Option.map (fun terms ->
+                match Storage.tryOrderedIndexRowIdsInTableWith (equalsIgnoreCase "PRIMARY") store table (storageOrderTerms terms) with
+                | Some ordered -> streamingRows ordered count
+                // Filesort consumes the source before applying LIMIT/OFFSET.
+                | None -> { Retained = fullScan (); Offset = [] })
+        | _ -> None
+
+let private pendingReadTables store (database: string) (table: string) connection =
     let databaseKey = database.ToLowerInvariant()
-    let tableKey = source.Reference.Table.ToLowerInvariant()
+    let tableKey = table.ToLowerInvariant()
     let tableIn catalog = catalog |> Map.tryFind databaseKey |> Option.bind (Map.tryFind tableKey)
+    TransactionRegistry.entries store
+    |> List.choose (fun (owner, transaction) ->
+        if Some owner <> connection
+           && Set.contains (databaseKey, tableKey) transaction.ChangedTables then
+            match tableIn transaction.BaseCatalog, tableIn transaction.Catalog with
+            | Some original, Some table -> Some(original, table)
+            | _ -> None
+        else None)
+
+let private primaryDependencyKeys store (table: Table) =
+    let primaryIndices =
+        lazy (
+            Storage.primaryKeyColumns table
+            |> List.map (resolveColumn table.Columns >> Result.toOption)
+            |> tryAllSome)
+    fun rowId ->
+        primaryIndices.Value
+        |> Option.bind (fun indices ->
+            table.RowsArray.TryFind rowId
+            |> Option.bind (fun row -> Storage.tryPrimaryWriteLockTargets store table (indices |> List.map (fun index -> row[index]))))
+        |> Option.map _.Keys
+        |> Option.defaultValue []
+
+let private tryMaterializedReadTargets scope store registry dbName select (source: TableRef) pendingConnection =
+    let database = source.Database |> Option.defaultValue dbName
+    let scan = materializedWriteScan store registry scope source select
+
+    physicalFastPathTable store dbName source
+    |> Option.bind (fun table ->
+        scan table |> Option.map (fun planned ->
+            let pending =
+                match pendingConnection with
+                | Some _ -> pendingReadTables store database source.Table pendingConnection
+                | None -> []
+
+            let keys, rows =
+                pending
+                |> List.fold (fun (keys, rows) (original, changed) ->
+                    let insertedKeys = primaryDependencyKeys store changed
+                    match scan changed with
+                    | None -> keys, rows
+                    | Some scan ->
+                        scan.Retained @ scan.Offset
+                        |> List.fold (fun (keys, rows) rowId ->
+                            if (original.RowsArray.TryFind rowId).IsNone then insertedKeys rowId @ keys, rows
+                            elif (table.RowsArray.TryFind rowId).IsSome then keys, rowId :: rows
+                            else keys, rows) (keys, rows)) ([], [])
+
+            database, source.Table,
+            { RetainedRows = []; WaitKeys = keys; WaitRows = rows
+              PrimaryProbes = []; Materialized = Some planned }))
+
+let private tryJoinedRangeReadTargets scope store database (source: BoundUpdateSource) range retains (pendingConnection: int option) =
     let transientBoundary = scope = WriteReadScope.JoinedRanges && pendingConnection.IsSome
     let lockingPartners = scope = WriteReadScope.LockingPartners
-    let empty = { RetainedRows = []; WaitKeys = []; WaitRows = []; PrimaryProbes = [] }
+    let empty = { RetainedRows = []; WaitKeys = []; WaitRows = []; PrimaryProbes = []; Materialized = None }
 
     // A moved row retains its identity across snapshots. A new row has
     // only its insertion key in common until the transaction publishes it.
-    TransactionRegistry.entries store
-    |> List.choose (fun (connection, transaction) ->
-        if (lockingPartners || transientBoundary)
-           && Some connection <> pendingConnection
-           && Set.contains (databaseKey, tableKey) transaction.ChangedTables then
-            match tableIn transaction.BaseCatalog, tableIn transaction.Catalog with
-            | Some original, Some table when not (obj.ReferenceEquals(table, source.Table)) -> Some(original, table)
-            | _ -> None
-        else None)
+    (if lockingPartners || transientBoundary then pendingReadTables store database source.Reference.Table pendingConnection else [])
+    |> List.filter (fun (_, table) -> not (obj.ReferenceEquals(table, source.Table)))
     |> List.map (fun ((original: Table), (table: Table)) ->
-        let primaryIndices =
-            lazy (
-                Storage.primaryKeyColumns table
-                |> List.map (fun name -> table.Columns |> List.tryFindIndex (fun column -> equalsIgnoreCase name column.Name))
-                |> tryAllSome)
-        let insertedKeys rowId =
-            primaryIndices.Value
-            |> Option.bind (fun indices ->
-                table.RowsArray.TryFind rowId
-                |> Option.bind (fun row -> Storage.tryPrimaryWriteLockTargets store table (indices |> List.map (fun index -> row[index]))))
-            |> Option.map _.Keys
-            |> Option.defaultValue []
+        let insertedKeys = primaryDependencyKeys store table
 
         let addDependency retain claims rowId =
             match original.RowsArray.TryFind rowId, pendingConnection with
@@ -35401,7 +35489,8 @@ let private tryJoinedRangeReadTargets scope store (database: string) (source: Bo
           WaitRows =
             (if transientBoundary then rows @ Option.toList range.FollowingRow else [])
             @ (pending |> List.collect _.WaitRows)
-          PrimaryProbes = [] })
+          PrimaryProbes = []
+          Materialized = None })
 
 let internal transactionWriteReadClaims
     (scope: WriteReadScope)
@@ -35650,7 +35739,7 @@ let internal transactionWriteReadClaims
                                         // An insert may own the key before its row is visible.
                                         let waitKeys = if pendingConnection.IsSome && target.RowIds.IsEmpty then target.Keys else []
                                         sourceDb, source.Table,
-                                        { RetainedRows = target.RowIds; WaitKeys = waitKeys; WaitRows = []; PrimaryProbes = [ values ] })))
+                                        { RetainedRows = target.RowIds; WaitKeys = waitKeys; WaitRows = []; PrimaryProbes = [ values ]; Materialized = None })))
                     | _ -> []
 
                 if allInner || singleLeft then sources |> Option.map planReads |> Option.defaultValue []
@@ -35727,6 +35816,35 @@ let internal transactionWriteReadClaims
                         let qualifier = source.Alias |> Option.defaultValue source.Table
                         boundFor qualifier sourceJoins sourceLiterals
 
+                    let materializedOuterReads () =
+                        let provedOuterDriver =
+                            accesses.Value
+                            |> Option.exists (fun (_, chosen, _) ->
+                                let points = chosen |> Map.values |> Seq.choose (function UpdatePrimary claim -> Some claim | _ -> None) |> List.ofSeq
+                                not points.IsEmpty && (points |> List.forall (fun claim -> not claim.RowIds.IsEmpty)))
+
+                        let body = function
+                            | FromSubquery(PlainSelect select, _) when update.Ctes.IsEmpty -> Some select
+                            | FromTable source ->
+                                cteFor source |> Option.bind (fun cte ->
+                                    match cte.Body with PlainSelect select -> Some select | _ -> None)
+                            | _ -> None
+
+                        match update.Joins with
+                        | [ join ] when viewRef = update.From && innerJoin join.Kind && join.Using.IsEmpty ->
+                                body join.Table
+                                |> Option.bind (fun select ->
+                                    // The optimizer may skip a materialized source
+                                    // when its outer driver has no matching key.
+                                    if not (select.Limit.IsSome || select.Distinct) || not provedOuterDriver then None
+                                    else
+                                        match select.From with
+                                        | Some(FromTable source) when (cteFor source).IsNone ->
+                                            tryMaterializedReadTargets scope store registry dbName select source pendingConnection
+                                        | _ -> None)
+                                |> Option.toList
+                        | _ -> []
+
                     let rec selectReadSources (select: SelectStmt) =
                         (select.From |> Option.toList |> List.collect physicalReadSources)
                         @ (select.Joins |> List.collect (fun join -> physicalReadSources join.Table))
@@ -35747,7 +35865,8 @@ let internal transactionWriteReadClaims
 
                     // MySQL materializes these derived inputs before the outer
                     // view filter, so an outer key does not narrow their claims.
-                    (FromTable view.UpdateFrom :: (view.UpdateJoins |> List.map _.Table))
+                    let partnerReads =
+                      (FromTable view.UpdateFrom :: (view.UpdateJoins |> List.map _.Table))
                     |> List.collect (fun item ->
                         match item with
                         | FromTable source -> [ source, sourcePredicate source, false ]
@@ -35765,7 +35884,7 @@ let internal transactionWriteReadClaims
                                     let indexedRows () = table.RowsArray.Indexed |> Seq.map fst |> Seq.toList
                                     let fallback rows =
                                         if scope = WriteReadScope.LockingPartners then
-                                            Some { RetainedRows = rows (); WaitKeys = []; WaitRows = []; PrimaryProbes = [] }
+                                            Some { RetainedRows = rows (); WaitKeys = []; WaitRows = []; PrimaryProbes = []; Materialized = None }
                                         else None
 
                                     let claims =
@@ -35814,6 +35933,8 @@ let internal transactionWriteReadClaims
                                                     |> Option.defaultWith indexedRows))
 
                                     claims |> Option.map (fun claims -> sourceDatabase, source.Table, claims)))
+
+                    partnerReads @ materializedOuterReads ()
                 | _ -> []
             | _ -> []
 
@@ -35826,13 +35947,20 @@ let internal transactionWriteReadClaims
             { RetainedRows = collect _.RetainedRows
               WaitKeys = collect _.WaitKeys
               WaitRows = collect _.WaitRows
-              PrimaryProbes = collect _.PrimaryProbes })
+              PrimaryProbes = collect _.PrimaryProbes
+              Materialized =
+                  match sources |> List.choose (fun (_, _, claims) -> claims.Materialized) with
+                  | [] -> None
+                  | scans ->
+                      let rows field = List.collect field scans |> List.distinct
+                      Some { Retained = rows _.Retained; Offset = rows _.Offset } })
         |> List.sortBy (fun (database, table, _) -> database.ToLowerInvariant(), table.ToLowerInvariant())
     | _ -> []
 
 let transactionWriteReadTargets store registry dbName statement =
     transactionWriteReadClaims WriteReadScope.LockingPartners None store registry dbName statement
-    |> List.map (fun (database, table, claims) -> database, table, claims.RetainedRows)
+    |> List.map (fun (database, table, claims) ->
+        database, table, claims.RetainedRows @ (claims.Materialized |> Option.map _.Retained |> Option.defaultValue []))
 
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) =
     let root = Auth.account "root" "%"
