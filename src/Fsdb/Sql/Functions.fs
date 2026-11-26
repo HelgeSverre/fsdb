@@ -6292,8 +6292,8 @@ let private geometryDistanceFn: Scalar =
     | [ first; second; unit ] -> distance first second (Some unit)
     | _ -> nativeParameterCountError "st_distance"
 
-let private geometryFrechetDistanceFn: Scalar =
-    let functionName = "st_frechetdistance"
+let private geometryVertexDistanceFn (name: string) quantity measure : Scalar =
+    let functionName = name.ToLowerInvariant()
 
     let geometryAndReferenceSystem value =
         let input =
@@ -6326,34 +6326,34 @@ let private geometryFrechetDistanceFn: Scalar =
         if first.Srid <> second.Srid then
             raise (SqlError(3033, $"Binary geometry function {functionName} given two geometries of different srids: {first.Srid} and {second.Srid}, which should have been identical."))
 
-        match first.Shape, second.Shape with
-        | firstShape, secondShape when isEmpty firstShape || isEmpty secondShape -> VNull
-        | GLineString firstPoints, GLineString secondPoints ->
+        if isEmpty first.Shape || isEmpty second.Shape then VNull
+        else
             let pointDistance =
                 if referenceSystem.SemiMajorAxis.IsSome then geographicVertexDistance referenceSystem
                 else planarPointDistance
 
-            let measured = discreteFrechetDistance pointDistance firstPoints secondPoints
-            if not (Double.IsFinite measured) then
-                raise (SqlError(1690, $"FrechetDistance value is out of range in '{functionName}'"))
+            match measure pointDistance first.Shape second.Shape with
+            | Some measured ->
+                if not (Double.IsFinite measured) then
+                    raise (SqlError(1690, $"{quantity} value is out of range in '{functionName}'"))
 
-            match unit with
-            | None -> VDouble measured
-            | Some VNull -> VNull
-            | Some unit when first.Srid = 0 ->
-                raise (SqlError(3882, $"The geometry passed to function {functionName} is in SRID 0, which doesn't specify a length unit. Can't convert to '{req unit}'."))
-            | Some _ ->
-                let coordinateUnit = referenceSystem.LinearUnitInMetres |> Option.defaultValue 1.0
-                VDouble(measured * coordinateUnit / linearUnitMetres unit)
-        | firstShape, secondShape ->
-            let typeName shape =
-                match geometryKind shape with
-                | GeometryCollection -> "GEOMCOLLECTION"
-                | kind -> geometryTypeName kind
-            let firstType, secondType = typeName firstShape, typeName secondShape
-            let code, system =
-                if referenceSystem.SemiMajorAxis.IsSome then 3618, "geographic" else 3704, "Cartesian"
-            raise (SqlError(code, $"{functionName}({firstType}, {secondType}) has not been implemented for {system} spatial reference systems."))
+                match unit with
+                | None -> VDouble measured
+                | Some VNull -> VNull
+                | Some unit when first.Srid = 0 ->
+                    raise (SqlError(3882, $"The geometry passed to function {functionName} is in SRID 0, which doesn't specify a length unit. Can't convert to '{req unit}'."))
+                | Some _ ->
+                    let coordinateUnit = referenceSystem.LinearUnitInMetres |> Option.defaultValue 1.0
+                    VDouble(measured * coordinateUnit / linearUnitMetres unit)
+            | None ->
+                let typeName shape =
+                    match geometryKind shape with
+                    | GeometryCollection -> "GEOMCOLLECTION"
+                    | kind -> geometryTypeName kind
+                let firstType, secondType = typeName first.Shape, typeName second.Shape
+                let code, system =
+                    if referenceSystem.SemiMajorAxis.IsSome then 3618, "geographic" else 3704, "Cartesian"
+                raise (SqlError(code, $"{functionName}({firstType}, {secondType}) has not been implemented for {system} spatial reference systems."))
 
     function
     | [ VNull; _ ]
@@ -6362,7 +6362,16 @@ let private geometryFrechetDistanceFn: Scalar =
     | [ _; VNull; _ ] -> VNull
     | [ first; second ] -> distance first second None
     | [ first; second; unit ] -> distance first second (Some unit)
-    | _ -> nativeParameterCountError "ST_FrechetDistance"
+    | _ -> nativeParameterCountError name
+
+let private geometryFrechetDistanceFn =
+    geometryVertexDistanceFn "ST_FrechetDistance" "FrechetDistance" (fun distance first second ->
+        match first, second with
+        | GLineString firstPoints, GLineString secondPoints -> Some(discreteFrechetDistance distance firstPoints secondPoints)
+        | _ -> None)
+
+let private geometryHausdorffDistanceFn =
+    geometryVertexDistanceFn "ST_HausdorffDistance" "Hausdorff_distance" discreteHausdorffDistance
 
 let private geometryDistanceSphereFn: Scalar =
     let coordinates functionName (geometry: Geometry) =
@@ -6965,7 +6974,7 @@ let private registerGeometryConstructors construct constructors registry =
 
 let private registerSpatialBuiltins registry =
     let geometry = ColumnWire.parameterMetadataOfType(TGeometry Geometry)
-    let frechetResult =
+    let vertexDistanceResult =
         { ColumnWire.parameterMetadataOfType(TDouble false) with CollationId = Some Collation.binaryId }
 
     registry
@@ -7004,7 +7013,8 @@ let private registerSpatialBuiltins registry =
     |> registerScalar "ST_GEOMETRYN" geometryNFn
     |> registerScalar "ST_DISTANCE" geometryDistanceFn
     // MySQL also describes the optional unit placeholder as GEOMETRY at prepare time.
-    |> registerScalarWithSignature "ST_FRECHETDISTANCE" [ geometry; geometry; geometry ] frechetResult geometryFrechetDistanceFn
+    |> registerScalarWithSignature "ST_FRECHETDISTANCE" [ geometry; geometry; geometry ] vertexDistanceResult geometryFrechetDistanceFn
+    |> registerScalarWithSignature "ST_HAUSDORFFDISTANCE" [ geometry; geometry; geometry ] vertexDistanceResult geometryHausdorffDistanceFn
     |> registerScalar "ST_DISTANCE_SPHERE" geometryDistanceSphereFn
     |> registerScalar "ST_LENGTH" geometryLengthFn
     |> registerScalar "ST_LINEINTERPOLATEPOINT" (geometryLineInterpolateFn "ST_LineInterpolatePoint" FractionPoint)

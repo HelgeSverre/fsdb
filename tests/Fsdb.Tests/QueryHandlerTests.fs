@@ -5292,6 +5292,54 @@ let tests =
               | Error(1582, _) -> ()
               | other -> failtestf "expected the invalid argument count to fail at prepare time, got %A" other
 
+          testCase "discrete Hausdorff distance preserves direction and line components"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "USE fsdb"
+                        "SET @a=ST_GeomFromText('LINESTRING(0 0,1 0)'), @b=ST_GeomFromText('LINESTRING(0 0,1 0,10 0)'), @p=ST_GeomFromText('POINT(0 0)')"
+                        "SET @near=ST_GeomFromText('MULTIPOINT((0 0),(1 0))'), @far=ST_GeomFromText('MULTIPOINT((1 0),(100 0))'), @wide=ST_GeomFromText('MULTIPOINT((0 0),(1 0),(10 0))')"
+                        "SET @multi=ST_GeomFromText('MULTILINESTRING((0 0,1 0),(10 0,11 0))'), @one=ST_GeomFromText('MULTILINESTRING((0 0,2 0))')" ]
+
+              for arguments, expected in
+                  [ [ "@a,@b"; "@b,@a"; "@p,@far"; "@far,@p"; "@near,@wide"; "@wide,@near" ], [ "0"; "9"; "1"; "1"; "0"; "9" ]
+                    [ "@a,@multi"; "@multi,@a"; "@multi,@one"; "@one,@multi"; "@multi,@multi" ], [ "10"; "10"; "9"; "10"; "10" ] ] do
+                  let select = "SELECT " + (arguments |> List.map (sprintf "ST_HausdorffDistance(%s)") |> String.concat ", ")
+                  match run select with
+                  | ResultSet(_, [ row ]) -> Expect.equal row (List.map Some expected) select
+                  | other -> failtestf "expected Hausdorff distances, got %A" other
+
+          testCase "discrete Hausdorff distance applies spatial diagnostics and prepared metadata"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "USE fsdb"
+                        "SET @p=ST_GeomFromText('POINT(0 0)'), @geo=ST_GeomFromText('POINT(0 0)',4326), @mp=ST_GeomFromText('MULTIPOINT((1 0),(5 0))',4326)"
+                        "SET @a=ST_GeomFromText('LINESTRING(0 0,1000 0)',3857), @b=ST_GeomFromText('LINESTRING(0 1000,1000 1000)',3857)" ]
+              match run "SELECT ST_HausdorffDistance(@a,@b,'kilometre'), ROUND(ST_HausdorffDistance(@geo,@mp,'kilometre'),6), ST_HausdorffDistance(@a,@b,NULL)" with
+              | ResultSet(_, [ row ]) -> Expect.equal row [ Some "1"; Some "110.573138"; None ] "units and NULL"
+              | other -> failtestf "expected projected and geographic distances, got %A" other
+
+              for expression, code in
+                  [ "ST_HausdorffDistance(@p,@p,NULL)", 3704
+                    "ST_HausdorffDistance(@geo,@a)", 3033
+                    "ST_HausdorffDistance(@geo,@mp,'unknown')", 3902
+                    "ST_HausdorffDistance(@a)", 1582 ] do
+                  TestSupport.Sql.expectError code (run ("SELECT " + expression)) expression
+
+              let session, _ = handle (create 1 (Fsdb.Storage.create ())) "USE fsdb"
+              match prepareStatementForSession session "SELECT ST_HausdorffDistance(?, ?, ?) AS distance" with
+              | Ok(statement, parameterCount) ->
+                  let parameters, columns = preparedMetadata session statement parameterCount
+                  Expect.equal (parameters |> List.map _.TypeId) [ TypeGeometry; TypeGeometry; TypeGeometry ] "prepared parameters"
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId, column.Metadata.Flags))
+                      [ TypeDouble, BinaryFlag ] "result metadata"
+              | Error error -> failtestf "expected Hausdorff distance to prepare, got %A" error
+
+              match prepareStatementForSession session "SELECT ST_HausdorffDistance(?)" with
+              | Error(1582, _) -> ()
+              | other -> failtestf "expected the invalid argument count to fail at prepare time, got %A" other
+
           testCase "planar geometry functions retain result metadata without rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

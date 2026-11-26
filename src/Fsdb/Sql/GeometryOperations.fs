@@ -1662,6 +1662,33 @@ let internal discreteFrechetDistance
 
     costs.[columns.Length - 1]
 
+let internal discreteHausdorffDistance pointDistance first second =
+    let nearest point targets =
+        let mutable best = Double.PositiveInfinity
+        let mutable index = 0
+        for target in targets do
+            Limits.checkQueryCancellation index
+            best <- min best (pointDistance point target)
+            index <- index + 1
+        best
+
+    let directed vertices targets =
+        vertices |> List.fold (fun longest point -> max longest (nearest point targets)) 0.0
+
+    let betweenComponents sources targets =
+        sources |> List.fold (fun longest vertices ->
+            targets |> List.fold (fun longest target -> max longest (directed vertices target)) longest) 0.0
+
+    match first, second with
+    | GPoint(x, y), GMultiPoint points
+    | GMultiPoint points, GPoint(x, y) -> Some(nearest (x, y) points)
+    | GLineString vertices, GLineString targets
+    | GMultiPoint vertices, GMultiPoint targets -> Some(directed vertices targets)
+    | GLineString vertices, GMultiLineString targets
+    | GMultiLineString targets, GLineString vertices -> Some(betweenComponents [ vertices ] targets)
+    | GMultiLineString sources, GMultiLineString targets -> Some(betweenComponents sources targets)
+    | _ -> None
+
 let internal lineworkLength (segmentDistance: float * float -> float * float -> float) =
     let length (points: (float * float) list) =
         points

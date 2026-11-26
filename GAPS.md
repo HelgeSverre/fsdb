@@ -642,6 +642,12 @@ unit conversion, NULL and error precedence, and prepared metadata. Geographic
 point distances now return zero for coincident coordinates and use the
 meridian arc when applicable. Small geographic rounding differences remain.
 
+[`ST_HausdorffDistance`](torture/findings/2026-11-26-hausdorff-distance.md)
+matches MySQL's directed vertex comparisons and component-by-component
+multiline comparisons for the supported point and line types. The audited
+cases cover units, spatial diagnostics, and prepared metadata. Small
+geographic rounding differences remain.
+
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 (`Use_leap_seconds = Y`) remain unsupported.
