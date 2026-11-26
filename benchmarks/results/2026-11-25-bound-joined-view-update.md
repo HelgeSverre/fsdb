@@ -331,3 +331,20 @@ With no outer row and no pending writer, MySQL prevents another
 transaction from inserting that key. Fsdb allows the insert. Fsdb can
 also reject a SERIALIZABLE commit after an unrelated writer commits
 first, matching its pre-existing whole-catalog validation rule.
+
+### Scope of the missing-key gap
+
+A native MySQL 8.4.11 follow-up moved the parent and partner to key `3`
+and seeded `gate` with keys `1` and `5`. The joined update above used
+`a.id=3` and affected zero rows. A separate transaction attempted each
+insert with `innodb_lock_wait_timeout=1` while the joined writer stayed
+open. Each successful insert was rolled back before the next attempt.
+
+| Isolation | MySQL timed out | MySQL inserted | Fsdb inserted |
+| --- | --- | --- | --- |
+| READ COMMITTED | — | 0, 2, 3, 4, 6 | 0, 2, 3, 4, 6 |
+| REPEATABLE READ | 2, 3, 4 | 0, 6 | 0, 2, 3, 4, 6 |
+| SERIALIZABLE | 2, 3, 4 | 0, 6 | 0, 2, 3, 4, 6 |
+
+MySQL returned error 1205 for all six blocked inserts. The observed
+lock covers the open interval between the neighboring primary keys.
