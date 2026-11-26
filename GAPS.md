@@ -1752,7 +1752,9 @@ checkpoints and WAL replay. Cached prefix ranking now follows the
 cache tree's term order, preserving terms from committed deletions
 and discarding transient writes at commit. Required phrases apply
 their document-ID bounds separately to cached and flushed postings.
-Retained deleted-posting counts, clean-shutdown and automatic
+An orderly CLI shutdown or durable host close flushes the cache at
+the final checkpoint. Crash recovery and ordinary checkpoints
+preserve the cached state. Retained deleted-posting counts, automatic
 flushing, and multiple disk segments per gram remain open.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including

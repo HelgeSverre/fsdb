@@ -394,7 +394,8 @@ type CommitEvent =
 type DurableCommitSink =
     { DataDirectory: string
       Enqueue: CommitEvent list -> (unit -> unit)
-      EnqueueCheckpoint: unit -> (unit -> unit) }
+      EnqueueCheckpoint: unit -> (unit -> unit)
+      EnqueueShutdownCheckpoint: unit -> (unit -> unit) }
 
 type DurableCommitSlot = { mutable Sink: DurableCommitSink option }
 
@@ -12501,6 +12502,13 @@ let setTableStatisticsForReplay (store: Store) dbName tableName statistics (onMi
 
 let internal flushFullTextForReplay store dbName tableName onMissing =
     changeTableForReplay store dbName tableName flushTableFullText onMissing
+
+/// Applies the final cache flush to the checkpoint replica after its queued
+/// writes have landed. Prepared XA catalogs still describe their own snapshots.
+let internal flushFullTextForShutdown (replica: Store) =
+    for KeyValue(_, slot) in replica.Databases do
+        slot.Value <- slot.Value |> Map.map (fun _ table ->
+            if table.FullTextIndexes.IsEmpty then table else flushTableFullText table)
 
 /// Puts already-committed rows back exactly as they were, for WAL replay.
 /// Deliberately not `insertRows`: these rows passed validation when committed,

@@ -3600,7 +3600,8 @@ let tests =
                                             releaseFirst.Wait()
                                     else
                                         ignore
-                              EnqueueCheckpoint = fun () -> ignore }
+                              EnqueueCheckpoint = fun () -> ignore
+                              EnqueueShutdownCheckpoint = fun () -> ignore }
 
                     let insert id name =
                         insertRows store defaultDatabase "users" None [ [ VInt id; VString name; VInt 30L ] ]
@@ -3643,7 +3644,8 @@ let tests =
                                         releaseEnqueue.Wait()
 
                                     ignore
-                              EnqueueCheckpoint = fun () -> ignore }
+                              EnqueueCheckpoint = fun () -> ignore
+                              EnqueueShutdownCheckpoint = fun () -> ignore }
 
                     let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
 

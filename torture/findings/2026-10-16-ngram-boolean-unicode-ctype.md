@@ -399,8 +399,21 @@ frequency totals still use live postings. MySQL's single, unmodified
 short prefix takes a separate ranking path that subtracts one for each
 deleted document found. A required, grouped, weighted, or repeated
 prefix retains the historical frequency in the audited fixture.
-Clean-shutdown flushing and automatic cache flushing also remain open.
+Automatic cache flushing remains open.
 [InnoDB rank optimization and deleted-document adjustment](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3119).
+
+Fsdb's orderly CLI shutdown now closes accepted clients, waits for
+their work to finish, and flushes the ngram cache in the final
+checkpoint. SQL `SHUTDOWN`, SIGTERM, and SIGINT all reopened the
+three-row fixture with IDs 1 and 2 matching `東京 東*`. After SIGKILL
+and WAL recovery only ID 1 matched, as on the fresh index. No
+uncommitted peer rows survived either form of restart.
+
+Closing an owned durable database through the embedding API uses
+the same final checkpoint. Ordinary checkpoints retain the cache
+and its insertion order. A prepared XA branch stays pending across
+the close, and its postings enter the cache when it commits after
+reopen.
 
 ```sh
 dotnet build src/Fsdb.Cli -c Release

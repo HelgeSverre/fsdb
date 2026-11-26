@@ -2545,6 +2545,57 @@ let tests =
                   check store
                   load dir |> check
 
+          testCase "a clean close flushes ngram postings while a checkpoint preserves the cache"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let execute current sql = handle (Fsdb.Session.create 1 current) sql |> snd
+              execute store "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin" |> ignore
+              execute store "INSERT INTO docs VALUES(1,'東京'),(2,'東海'),(3,'大阪')" |> ignore
+              let read current =
+                  match execute current "SELECT id FROM docs WHERE MATCH(body) AGAINST('東京 東*' IN BOOLEAN MODE) ORDER BY id" with
+                  | ResultSet(_, rows) -> rows
+                  | other -> failtestf "unexpected ngram result: %A" other
+              let fresh = [ [ Some "1" ] ]
+              Expect.equal (read store) fresh "the prefix skips cached postings"
+              Expect.equal (read (load dir)) fresh "WAL recovery preserves cached postings"
+              snapshotNow dir store
+              Expect.equal (read (load dir)) fresh "an ordinary checkpoint preserves cached postings"
+              detach store
+
+              let reopened = load dir
+              Expect.equal (read reopened) [ [ Some "1" ]; [ Some "2" ] ] "clean close flushes previously cached postings"
+              execute reopened "INSERT INTO docs VALUES(4,'東北'),(5,'東京 東海 東海')" |> ignore
+              Expect.equal (read reopened) [ [ Some "1" ]; [ Some "2" ]; [ Some "5" ] ] "new writes enter the cache again"
+
+          testCase "clean close flushes committed ngrams while keeping a prepared branch pending"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let execute session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+              let session = Fsdb.Session.create 1 store
+              let session = execute session "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin"
+              let session = execute session "INSERT INTO docs VALUES(1,'東京'),(2,'東海'),(3,'大阪')"
+              let session = execute session "XA START 'pending-ngram'"
+              let session = execute session "INSERT INTO docs VALUES(4,'東京'),(5,'東北')"
+              let session = execute session "XA END 'pending-ngram'"
+              execute session "XA PREPARE 'pending-ngram'" |> ignore
+              detach store
+
+              let recovered = load dir
+              let session = Fsdb.Session.create 2 recovered
+              let search session =
+                  handle session "SELECT id FROM docs WHERE MATCH(body) AGAINST('東京 東*' IN BOOLEAN MODE) ORDER BY id"
+                  |> snd
+              Expect.equal (search session) (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) "only committed postings are visible"
+              let session = execute session "XA COMMIT 'pending-ngram'"
+              Expect.equal (search session) (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "4" ] ])) "newly committed postings are cached"
+
           testCase "ngram posting flush positions survive checkpoints and WAL replay"
           <| fun _ ->
               let dir = tempDataDir ()

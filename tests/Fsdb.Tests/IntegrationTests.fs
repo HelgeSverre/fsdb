@@ -4939,6 +4939,34 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "owned SHUTDOWN closes accepted peers before returning"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening Net.IPAddress.Loopback 0
+                  try
+                      let store = Fsdb.Storage.create ()
+                      let serving =
+                          Fsdb.Server.serveOwnedWithOptions Fsdb.ServerOptions.defaults listener store Fsdb.Functions.empty
+                          |> Async.StartAsTask
+                      let port = Fsdb.Server.port listener
+                      let! peer, peerStream = connectRaw port
+                      use peer = peer
+                      let! client, stream = connectRaw port
+                      use client = client
+                      let shutdown = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SHUTDOWN")
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = shutdown }
+                      let! reply = readPacketAsync stream
+                      Expect.equal reply.Value.Payload.[0] 0x00uy "shutdown replies OK"
+                      let timeout = TimeSpan.FromSeconds 5.
+                      do! serving.WaitAsync(timeout) |> Async.AwaitTask
+                      let closed = readPacketAsync peerStream |> Async.StartAsTask
+                      let! reply = closed.WaitAsync(timeout) |> Async.AwaitTask
+                      Expect.isNone reply "the peer is closed before the owner detaches storage"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           testCase "COM_STMT_PREPARE on invalid SQL replies ERR and the connection stays usable"
           <| fun _ ->
               async {

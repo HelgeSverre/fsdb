@@ -8,7 +8,7 @@ open System.Threading.Tasks
 module internal GroupCommit =
     type private Work<'T> =
         | Write of value: 'T * completion: TaskCompletionSource<unit>
-        | Checkpoint of completion: TaskCompletionSource<unit>
+        | Checkpoint of before: (unit -> unit) option * completion: TaskCompletionSource<unit>
 
     let private completion () =
         TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
@@ -31,7 +31,7 @@ module internal GroupCommit =
         let fail (work: Work<'T>) (error: exn) =
             match work with
             | Write(_, completion)
-            | Checkpoint completion -> completion.TrySetException error |> ignore
+            | Checkpoint(_, completion) -> completion.TrySetException error |> ignore
 
         let completeWrites (writes: ('T * TaskCompletionSource<unit>) list) =
             match writes with
@@ -45,8 +45,9 @@ module internal GroupCommit =
                 function
                 | [] -> completeWrites (List.rev writes)
                 | Write(value, completion) :: rest -> loop ((value, completion) :: writes) rest
-                | Checkpoint completion :: rest ->
+                | Checkpoint(before, completion) :: rest ->
                     completeWrites (List.rev writes)
+                    before |> Option.iter (fun run -> run ())
                     checkpoint ()
                     completion.TrySetResult() |> ignore
                     loop [] rest
@@ -112,6 +113,6 @@ module internal GroupCommit =
             let completion = completion ()
             enqueue (Write(value, completion)) completion
 
-        member _.EnqueueCheckpoint() : unit -> unit =
+        member _.EnqueueCheckpoint(?before: unit -> unit) : unit -> unit =
             let completion = completion ()
-            enqueue (Checkpoint completion) completion
+            enqueue (Checkpoint(before, completion)) completion

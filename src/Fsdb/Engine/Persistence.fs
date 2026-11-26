@@ -2511,8 +2511,7 @@ let load (dataDir: string) : Store =
     restorePreparedXaLocks store
     store
 
-/// Appends ordered WAL batches and acknowledges each commit after their shared fsync.
-let attach (dataDir: string) (store: Store) : unit =
+let private attachWithSignalCheckpoint registerSignalCheckpoint (dataDir: string) (store: Store) : unit =
     let dataDir = Path.GetFullPath dataDir
     Directory.CreateDirectory dataDir |> ignore
     let walPath = Path.Combine(dataDir, walFileName)
@@ -2607,21 +2606,33 @@ let attach (dataDir: string) (store: Store) : unit =
     let sink =
         { DataDirectory = dataDir
           Enqueue = fun events -> enqueue "WAL append" (fun () -> commits.Enqueue events)
-          EnqueueCheckpoint = fun () -> enqueue "snapshot checkpoint" commits.EnqueueCheckpoint }
+          EnqueueCheckpoint = fun () -> enqueue "snapshot checkpoint" (fun () -> commits.EnqueueCheckpoint())
+          EnqueueShutdownCheckpoint =
+            fun () ->
+                enqueue "shutdown checkpoint" (fun () ->
+                    commits.EnqueueCheckpoint(before = fun () -> flushFullTextForShutdown replica)) }
 
     lock store.CommitLock (fun () ->
         match store.Durability.Sink with
         | Some _ -> invalidOp "Durability is already attached to this store."
         | None -> store.Durability.Sink <- Some sink)
 
+    // An embedding host can cancel a process signal and keep using this store.
     let onShutdown (_: PosixSignalContext) =
         lock store.CommitLock (fun () ->
             if store.Durability.Sink.IsSome then sink.EnqueueCheckpoint() ())
 
-    let registrations =
-        shutdownSignals (OperatingSystem.IsWindows())
-        |> List.map (fun signal -> PosixSignalRegistration.Create(signal, onShutdown) :> IDisposable)
-    lock shutdownRegistrations (fun () -> shutdownRegistrations.Add(store, registrations))
+    if registerSignalCheckpoint then
+        let registrations =
+            shutdownSignals (OperatingSystem.IsWindows())
+            |> List.map (fun signal -> PosixSignalRegistration.Create(signal, onShutdown) :> IDisposable)
+        lock shutdownRegistrations (fun () -> shutdownRegistrations.Add(store, registrations))
+
+/// Appends ordered WAL batches and acknowledges each commit after their shared fsync.
+let attach dataDir store = attachWithSignalCheckpoint true dataDir store
+
+/// The process owner handles its signals and calls detach after draining clients.
+let internal attachOwned dataDir store = attachWithSignalCheckpoint false dataDir store
 
 /// Flushes a final checkpoint and disconnects a durable store after its callers have stopped.
 let detach (store: Store) : unit =
@@ -2629,7 +2640,7 @@ let detach (store: Store) : unit =
         match store.Durability.Sink with
         | None -> ()
         | Some sink ->
-            sink.EnqueueCheckpoint() ()
+            sink.EnqueueShutdownCheckpoint() ()
             store.Durability.Sink <- None)
     lock shutdownRegistrations (fun () ->
         for index in shutdownRegistrations.Count - 1 .. -1 .. 0 do

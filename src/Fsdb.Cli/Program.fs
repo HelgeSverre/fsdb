@@ -2,6 +2,7 @@ module Fsdb.Program
 
 open System.Net
 open System.Reflection
+open System.Runtime.InteropServices
 open Argu
 
 type Arguments =
@@ -185,16 +186,28 @@ let main argv =
                 match results.TryGetResult Data_Dir with
                 | Some dataDir ->
                     printfn "fsdb: durability on, data-dir %s" dataDir
-                    db |> Db.withDataDir dataDir
+                    db |> Db.withOwnedDataDir dataDir
                 | None -> db
 
             let db = { db with Transport = options }
 
             try
-                let serve = db |> Db.listen address port
-                printfn "fsdb listening on %O:%d" address port
-                serve |> Async.RunSynchronously
-                0
+                let listener = Server.startListening address port
+                let signals =
+                    Persistence.shutdownSignals (System.OperatingSystem.IsWindows())
+                    |> List.map (fun signal ->
+                        PosixSignalRegistration.Create(signal, fun context ->
+                            context.Cancel <- true
+                            listener.Stop()))
+                try
+                    printfn "fsdb listening on %O:%d" address port
+                    Server.serveOwnedWithOptions db.Transport listener db.Store db.Functions |> Async.RunSynchronously
+                    Persistence.detach db.Store
+                    0
+                finally
+                    for registration in signals do
+                        registration.Dispose()
+                    listener.Stop()
             with :? System.Net.Sockets.SocketException as ex when
                 ex.SocketErrorCode = System.Net.Sockets.SocketError.AddressAlreadyInUse ->
                 eprintfn "fsdb: %O:%d is already in use — another server is running there (use --port to pick another)" address port

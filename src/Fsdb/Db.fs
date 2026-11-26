@@ -38,13 +38,7 @@ let private configureFullTextStopwordTables (tables: StorageOptions.StopwordTabl
     Session.setGlobalVariable store "innodb_ft_user_stopword_table" tables.UserTable
     Session.setGlobalVariable store "innodb_ft_server_stopword_table" tables.ServerTable
 
-/// Opts into durability under `dataDir`. Loads whatever
-/// state is already there (a snapshot plus any WAL entries after it, or
-/// nothing for a fresh directory) and subscribes the result to keep writing
-/// every future commit to its WAL, so this replaces `db.Store` rather than
-/// reusing the one `create` made. Chains like every other `Db` builder:
-/// `Db.create () |> Db.withDataDir "/var/lib/fsdb" |> Db.listen ...`.
-let withDataDir (dataDir: string) (db: Db) : Db =
+let private attachDataDir attach (dataDir: string) (db: Db) : Db =
     if db.Store.OnCommit.Count > 0 then
         invalidOp "Configure durable storage before registering commit subscribers."
     let store = Persistence.load dataDir
@@ -58,8 +52,18 @@ let withDataDir (dataDir: string) (db: Db) : Db =
           ServerTable = Session.tryGlobalVariable db.Store "innodb_ft_server_stopword_table" |> Option.flatten } store
     Session.tryGlobalVariable db.Store "ft_query_expansion_limit"
     |> Option.iter (Session.setGlobalVariable store "ft_query_expansion_limit")
-    Persistence.attach dataDir store
+    attach dataDir store
     { db with Store = store; DataDir = Some dataDir }
+
+/// Opts into durability under `dataDir`. Loads whatever
+/// state is already there (a snapshot plus any WAL entries after it, or
+/// nothing for a fresh directory) and subscribes the result to keep writing
+/// every future commit to its WAL, so this replaces `db.Store` rather than
+/// reusing the one `create` made. Chains like every other `Db` builder:
+/// `Db.create () |> Db.withDataDir "/var/lib/fsdb" |> Db.listen ...`.
+let withDataDir dataDir db = attachDataDir Persistence.attach dataDir db
+
+let internal withOwnedDataDir dataDir db = attachDataDir Persistence.attachOwned dataDir db
 
 /// Reports the startup expansion limit; InnoDB-style search does not use the MyISAM seed cap.
 let withFullTextQueryExpansionLimit (limit: int) (db: Db) : Db =

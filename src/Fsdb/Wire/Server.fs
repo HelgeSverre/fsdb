@@ -11,6 +11,7 @@ open System.Net.Security
 open System.Security.Authentication
 open System.Text
 open System.Threading
+open System.Threading.Tasks
 open Fsdb.Collections
 open Fsdb.Binary
 open Fsdb.Compression
@@ -2765,7 +2766,8 @@ let private reserveConnectionWorkers activeConnections =
     if required > workerThreads then
         ThreadPool.SetMinThreads(required, completionThreads) |> ignore
 
-let serveWithOptions
+let private serveLoop
+    (drainClients: bool)
     (options: ServerOptions.Settings)
     (listener: TcpListener)
     (store: Storage.Store)
@@ -2773,6 +2775,20 @@ let serveWithOptions
     : Async<unit> =
     validateTransportOptions options
     use _scheduler = EventScheduler.acquire store customFunctions
+
+    let clients =
+        if drainClients then Some(System.Collections.Concurrent.ConcurrentDictionary<int, TcpClient * Task<unit>>())
+        else None
+
+    let trackClient connectionId client =
+        match clients with
+        | None -> ignore
+        | Some clients ->
+            let completed = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            clients.[connectionId] <- client, completed.Task
+            fun () ->
+                completed.TrySetResult() |> ignore
+                clients.TryRemove connectionId |> ignore
 
     let rejectAtCapacity (client: TcpClient) =
         async {
@@ -2804,6 +2820,7 @@ let serveWithOptions
                     // on this number, so two listeners in one process (the test
                     // suite, the embedding API) must never hand out the same id.
                     let connectionId = int (Interlocked.Increment connectionCounter)
+                    let complete = trackClient connectionId client
 
                     Async.Start(
                         async {
@@ -2814,13 +2831,30 @@ let serveWithOptions
                                     Log.diagnostic "fsdb: connection %d: %s" connectionId ex.Message
                             finally
                                 Interlocked.Decrement activeConnectionCounter |> ignore
+                                complete ()
                         }
                     )
 
                 return! loop ()
         }
 
-    loop ()
+    match clients with
+    | None -> loop ()
+    | Some clients ->
+        async {
+            do! loop ()
+            let connected = clients.Values |> Seq.toArray
+            for client, _ in connected do
+                client.Dispose()
+            do! Task.WhenAll(connected |> Array.map snd) |> Async.AwaitTask |> Async.Ignore
+        }
+
+let serveWithOptions options listener store customFunctions =
+    serveLoop false options listener store customFunctions
+
+/// The CLI owns its entire listener and waits for its clients before closing storage.
+let internal serveOwnedWithOptions options listener store customFunctions =
+    serveLoop true options listener store customFunctions
 
 /// Serves with plaintext transport unless an embedding host supplies TLS settings.
 let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Functions.Registry) : Async<unit> =
