@@ -3114,13 +3114,16 @@ implementation effort:
    through [unfiltered derived projections and simple CTEs](benchmarks/results/2026-11-25-bound-joined-view-update.md#locks-through-projected-outer-sources),
    including renamed keys. [Audited materialized scans](benchmarks/results/2026-11-25-bound-joined-view-update.md#locks-through-materialized-outer-sources)
    retain shared locks according to scan order, early termination, and
-   isolation. Broader scan plans remain open. [Missing-key gap
-   locks](benchmarks/results/2026-11-25-bound-joined-view-update.md#scope-of-the-missing-key-gap)
-   cover the interval between neighboring primary keys in MySQL at
-   REPEATABLE READ and SERIALIZABLE. The [schedule oracle](torture/findings/2026-11-26-joined-view-primary-key-gaps.md)
-   also covers key moves, shared holders, unbounded intervals, changes to
-   neighboring keys, and the lifetime of gaps in prepared XA branches.
-   Gap protection and other outer join access paths remain open. An audited
+   isolation. At REPEATABLE READ and SERIALIZABLE, an absent fully bound
+   signed primary key now protects the interval between neighboring records
+   in the audited joined-view updates. The
+   [schedule oracle](torture/findings/2026-11-26-joined-view-primary-key-gaps.md)
+   covers insertions, key moves, shared holders, open-ended intervals,
+   changes to neighboring keys, savepoints, and the lifetime of live
+   prepared XA claims. Eventual widening after purge of a committed
+   predecessor remains open, along with qualified foreign-key key
+   moves, broader scan plans, and other key types and join access paths.
+   An audited
    [nested checked view LEFT JOINed to a window CTE](torture/findings/2026-11-17-nested-window-outer-view.md)
    correctly remains read only, matching MySQL's metadata, rows, CHECK OPTION
    rejection, and mutation rejection. Procedures, functions, and triggers

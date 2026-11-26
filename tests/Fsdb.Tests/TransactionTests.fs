@@ -5872,6 +5872,50 @@ let tests =
                       | actual -> failtestf "%s should retain the published row lock (replacing=%b), got %A" isolation replacesExisting actual
                       run setup "UPDATE gate SET delta=7 WHERE id=1" (Affected 1UL) |> ignore
 
+          testCase "a missing joined-view primary key protects its gap until savepoint rollback"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result (Affected expected) sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql, count in
+                  [ "CREATE TABLE parent (id INT PRIMARY KEY,n INT)", 0UL
+                    "CREATE TABLE partner (id INT,seq INT,PRIMARY KEY(id,seq))", 0UL
+                    "CREATE TABLE gate (id INT PRIMARY KEY,delta INT)", 0UL
+                    "INSERT INTO parent VALUES (3,10)", 1UL
+                    "INSERT INTO partner VALUES (3,20)", 1UL
+                    "INSERT INTO gate VALUES (1,7),(5,13)", 2UL
+                    "CREATE VIEW active AS SELECT p.id,p.n,s.seq FROM parent p JOIN partner s ON p.id=s.id", 0UL ] do
+                  run setup sql count |> ignore
+
+              let writer = run (create 2 store) "START TRANSACTION" 0UL
+              let writer = run writer "SAVEPOINT before_lookup" 0UL
+              let writer =
+                  run writer
+                      "UPDATE active a JOIN gate g ON g.id=a.id SET a.n=a.n+g.delta WHERE a.id=3 AND a.seq BETWEEN 20 AND 22"
+                      0UL
+
+              let contender = run (create 3 store) "SET SESSION innodb_lock_wait_timeout=1" 0UL
+              run contender "INSERT INTO gate VALUES (6,0)" 1UL |> ignore
+              for sql in [ "INSERT INTO gate VALUES (3,0)"; "UPDATE gate SET id=4 WHERE id=5" ] do
+                  match handle contender sql |> snd with
+                  | Err(1205, _) -> ()
+                  | result -> failtestf "expected an insertion wait for %s, got %A" sql result
+
+              let waiting = Threading.Tasks.Task.Run(fun () -> handle (create 4 store) "INSERT INTO gate VALUES (2,0)")
+              try
+                  Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the insert waits for the gap"
+                  run writer "ROLLBACK TO SAVEPOINT before_lookup" 0UL |> ignore
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "rollback to savepoint wakes the waiting insert"
+                  Expect.equal (waiting.GetAwaiter().GetResult() |> snd) (Affected 1UL) "the insert succeeds"
+              finally
+                  run writer "ROLLBACK" 0UL |> ignore
+
+              run contender "UPDATE gate SET id=4 WHERE id=5" 1UL |> ignore
+
           testCase "a materialized joined update retains the rows read by its scan"
           <| fun _ ->
               let run session sql expected =

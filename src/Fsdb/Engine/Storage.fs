@@ -414,7 +414,9 @@ type RowLockStripe =
     { SyncRoot: obj
       mutable ExclusiveOwner: int64 option
       SharedOwners: HashSet<int64>
-      KeyActivity: KeyLockActivity option }
+      KeyActivity: KeyLockActivity option
+      // Gap claims use the same release and wait machinery as row stripes.
+      Gap: (string * (string -> bool)) option }
 
 /// A catalog rebase staged until every generated-key and duplicate-row claim
 /// succeeds, so a failed lock wait cannot mutate the transaction root.
@@ -470,16 +472,20 @@ let private createRowLockStripe () =
     { SyncRoot = obj ()
       ExclusiveOwner = None
       SharedOwners = HashSet()
-      KeyActivity = None }
+      KeyActivity = None
+      Gap = None }
 
-let private createKeyLockStripe activity =
-    { SyncRoot = obj ()
+let private createKeyLockStripe syncRoot activity =
+    { SyncRoot = syncRoot
       ExclusiveOwner = None
       SharedOwners = HashSet()
-      KeyActivity = Some activity }
+      KeyActivity = Some activity
+      Gap = None }
 
 type KeyLockCache =
-    { Entries: ConcurrentDictionary<string, WeakReference<RowLockStripe>>
+    { SyncRoot: obj
+      Entries: ConcurrentDictionary<string, WeakReference<RowLockStripe>>
+      Gaps: ResizeArray<WeakReference<RowLockStripe>>
       Activity: KeyLockActivity
       mutable Insertions: int64 }
 
@@ -589,6 +595,8 @@ type Store =
       /// Exact keys prevent unrelated unique values from sharing a lock.
       /// Weak entries let idle keys be reclaimed after their owners and waiters leave.
       KeyLocks: ConcurrentDictionary<string, KeyLockCache>
+      /// Repeatable reads can keep deleted index records as gap boundaries.
+      ConsistentReadViews: ConcurrentDictionary<int64, Catalog>
       /// Transaction snapshots share identity reservation state so concurrent
       /// inserts cannot assign the same value from an older table root.
       AutoIncrementCounters: ConcurrentDictionary<string, AutoIncrementCounter>
@@ -904,6 +912,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       CommitLock = store.CommitLock
       RowLocks = store.RowLocks
       KeyLocks = store.KeyLocks
+      ConsistentReadViews = store.ConsistentReadViews
       AutoIncrementCounters = store.AutoIncrementCounters
       AccountResources = store.AccountResources
       PreparedXas = store.PreparedXas
@@ -1035,8 +1044,28 @@ let releaseTransactionLocks (store: Store) : unit =
     match store.TransactionLocks with
     | None -> ()
     | Some context ->
+        store.ConsistentReadViews.TryRemove context.Owner |> ignore
         let stripes = lock context.HeldStripes (fun () -> context.HeldStripes |> Seq.toArray)
         releaseLockStripes context stripes
+
+let internal recordConsistentReadView (live: Store) (snapshot: Store) =
+    snapshot.TransactionLocks
+    |> Option.iter (fun context ->
+        if not (live.ConsistentReadViews.ContainsKey context.Owner) then
+            live.ConsistentReadViews.TryAdd(context.Owner, live.Catalog) |> ignore)
+
+let internal transactionGapLocks (store: Store) =
+    match store.TransactionLocks with
+    | None -> []
+    | Some context ->
+        lock context.HeldStripes (fun () ->
+            context.HeldStripes |> Seq.filter (fun stripe -> stripe.Gap.IsSome) |> List.ofSeq)
+
+let internal releaseLaterGapLocks (store: Store) (retained: RowLockStripe list) =
+    store.TransactionLocks |> Option.iter (fun context ->
+        transactionGapLocks store
+        |> List.filter (fun stripe -> not (retained |> List.exists (fun saved -> obj.ReferenceEquals(saved, stripe))))
+        |> releaseLockStripes context)
 
 let withTransactionLockCheckpoint (store: Store) (body: unit -> 'a) : 'a =
     match store.TransactionLocks with
@@ -4249,7 +4278,7 @@ let private awaitLock
 
         acquire ())
 
-let private acquireStripe
+let private acquireStripeWithBlockers
     (deadline: DateTime)
     (waits: LockWaitGraph)
     (dbName: string)
@@ -4257,14 +4286,13 @@ let private acquireStripe
     (mode: StripeLockMode)
     (waitPolicy: StripeWaitPolicy)
     (stripe: RowLockStripe)
+    (additionalBlockers: unit -> int64 list)
     =
     let available () =
-        match mode with
-        | SharedStripe -> stripe.ExclusiveOwner |> Option.forall ((=) context.Owner)
-        | ExclusiveStripe ->
-            stripe.ExclusiveOwner |> Option.forall ((=) context.Owner)
-            && (stripe.SharedOwners.Count = 0
-                || (stripe.SharedOwners.Count = 1 && stripe.SharedOwners.Contains context.Owner))
+        (stripe.ExclusiveOwner |> Option.forall ((=) context.Owner))
+        && (mode = SharedStripe || stripe.SharedOwners.Count = 0
+            || (stripe.SharedOwners.Count = 1 && stripe.SharedOwners.Contains context.Owner))
+        && (additionalBlockers ()).IsEmpty
 
     let claim () =
         let newlyHeld =
@@ -4297,8 +4325,52 @@ let private acquireStripe
             else Some(claim ())) with
         | Some acquired -> acquired
         | None ->
+            let blockers () =
+                let blockers = stripeBlockers context.Owner mode stripe
+                blockers.UnionWith(additionalBlockers ())
+                blockers
+
             awaitLock deadline waits dbName context cancellation stripe.SyncRoot available
-                (fun () -> stripeBlockers context.Owner mode stripe) claim
+                blockers claim
+
+let private acquireStripe deadline waits dbName context mode waitPolicy stripe =
+    acquireStripeWithBlockers deadline waits dbName context mode waitPolicy stripe (fun () -> [])
+
+let private keyLockCache (store: Store) tableKey =
+    store.KeyLocks.GetOrAdd(
+        tableKey,
+        (fun _ ->
+            { SyncRoot = obj ()
+              Entries = ConcurrentDictionary<string, WeakReference<RowLockStripe>>(StringComparer.Ordinal)
+              Gaps = ResizeArray()
+              Activity = { Owners = 0L }
+              Insertions = 0L }))
+
+let private primaryLockKeyPrefix = "PRIMARY\u0000"
+
+let private primaryLockKey (key: string) =
+    key.StartsWith(primaryLockKeyPrefix, StringComparison.Ordinal)
+
+let private visitLivePrimaryGaps (cache: KeyLockCache) visit =
+    cache.Gaps.RemoveAll(fun weak ->
+        match weak.TryGetTarget() with
+        | true, stripe when stripe.SharedOwners.Count > 0 ->
+            visit stripe
+            false
+        | _ -> true)
+    |> ignore
+
+let private primaryGapBlockers (cache: KeyLockCache) owner key =
+    if cache.Gaps.Count = 0 then []
+    else
+        let mutable blockers = []
+        visitLivePrimaryGaps cache (fun stripe ->
+            match stripe.Gap with
+            | Some(_, contains) when not (stripe.SharedOwners.Contains owner) && contains key ->
+                for owner in stripe.SharedOwners do
+                    blockers <- owner :: blockers
+            | _ -> ())
+        blockers
 
 let private withWriteLocksFor
     (timeout: TimeSpan)
@@ -4334,16 +4406,14 @@ let private withWriteLocksFor
         match keys with
         | [] -> []
         | _ ->
-            let cache =
-                store.KeyLocks.GetOrAdd(
-                    tableKey,
-                    (fun _ ->
-                        { Entries = ConcurrentDictionary<string, WeakReference<RowLockStripe>>(StringComparer.Ordinal)
-                          Activity = { Owners = 0L }
-                          Insertions = 0L })
-                )
+            let cache = keyLockCache store tableKey
             let locks = cache.Entries
             let mutable sweep = false
+
+            let newStripe key =
+                // Primary key ownership and interval claims must be admitted atomically.
+                let monitor = if primaryLockKey key then cache.SyncRoot else obj ()
+                createKeyLockStripe monitor cache.Activity
 
             let rec stripe key =
                 let mutable existing = Unchecked.defaultof<WeakReference<RowLockStripe>>
@@ -4354,14 +4424,14 @@ let private withWriteLocksFor
                     if existing.TryGetTarget(&target) then
                         target
                     else
-                        let target = createKeyLockStripe cache.Activity
+                        let target = newStripe key
 
                         if locks.TryUpdate(key, WeakReference<RowLockStripe>(target), existing) then
                             target
                         else
                             stripe key
                 else
-                    let target = createKeyLockStripe cache.Activity
+                    let target = newStripe key
 
                     if locks.TryAdd(key, WeakReference<RowLockStripe>(target)) then
                         if Threading.Interlocked.Increment(&cache.Insertions) % 8192L = 0L then
@@ -4373,14 +4443,15 @@ let private withWriteLocksFor
 
             // Claim multiple keys in one stable order, as the old sorted stripe
             // set did, so opposite input orders cannot create an avoidable cycle.
+            let build key = stripe key, if primaryLockKey key then Some(cache, key) else None
             let result =
                 match keys with
-                | [ key ] -> [ stripe key ]
+                | [ key ] -> [ build key ]
                 | _ ->
                     keys
                     |> List.distinct
                     |> List.sortWith (fun left right -> StringComparer.Ordinal.Compare(left, right))
-                    |> List.map stripe
+                    |> List.map build
 
             // Removing only the observed dead weak reference cannot discard a
             // replacement installed by a concurrent claimant.
@@ -4395,7 +4466,6 @@ let private withWriteLocksFor
 
             result
 
-    let stripes = rowStripes @ keyStripes
     let context, releaseAfter =
         match store.TransactionLocks with
         | Some context -> context, false
@@ -4415,16 +4485,20 @@ let private withWriteLocksFor
 
     let deadline = DateTime.UtcNow + timeout
     let claimed = ResizeArray<RowLockStripe>()
+    let acquire stripe additional =
+        let _, newlyHeld =
+            acquireStripeWithBlockers deadline store.LockWaits dbName context ExclusiveStripe WaitUntilAvailable stripe additional
+        if newlyHeld then
+            claimed.Add stripe
 
     try
         try
-            stripes
-            |> List.iter (fun stripe ->
-                let _, newlyHeld =
-                    acquireStripe deadline store.LockWaits dbName context ExclusiveStripe WaitUntilAvailable stripe
-
-                if newlyHeld then
-                    claimed.Add stripe)
+            for stripe in rowStripes do
+                acquire stripe (fun () -> [])
+            for stripe, primary in keyStripes do
+                match primary with
+                | Some(cache, key) -> acquire stripe (fun () -> primaryGapBlockers cache context.Owner key)
+                | None -> acquire stripe (fun () -> [])
 
             if not releaseAfter then
                 lock context.LockClaims (fun () ->
@@ -5550,6 +5624,7 @@ let create () : Store =
       CommitLock = obj ()
       RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       KeyLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
+      ConsistentReadViews = ConcurrentDictionary()
       AutoIncrementCounters = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       LockWaits =
         { SyncRoot = obj ()
@@ -6272,6 +6347,166 @@ let private orderedPrefixBounds (entries: ImmutableSortedSet<SecondaryOrderEntry
             sortedInsertionPoint boundary entries.Count (fun current -> comparePrefix entries.[current])
 
         insertionIndex FirstEqual, insertionIndex AfterEqual
+
+let private trySignedPrimaryLockValues width (key: string) =
+    let rec read offset remaining reversed =
+        if remaining = 0 then
+            if offset = key.Length then Some(List.rev reversed) else None
+        else
+            let separator = key.IndexOf(':', offset)
+            if separator <= offset then None
+            else
+                let start = separator + 1
+                match Int32.TryParse(key.AsSpan(offset, separator - offset)) with
+                | true, length when length >= 2 && length <= key.Length - start && key.[start] = 'I' ->
+                    match Int64.TryParse(key.AsSpan(start + 1, length - 1)) with
+                    | true, value -> read (start + length) (remaining - 1) (VInt value :: reversed)
+                    | _ -> None
+                | _ -> None
+    if primaryLockKey key then read primaryLockKeyPrefix.Length width [] else None
+
+let private exactKeyOwner (cache: KeyLockCache) key =
+    match cache.Entries.TryGetValue key with
+    | true, weak ->
+        match weak.TryGetTarget() with
+        | true, stripe -> stripe.ExclusiveOwner
+        | _ -> None
+    | _ -> None
+
+type private PrimaryGapBoundary =
+    { Values: Value list
+      LockKey: string
+      WasCommitted: bool }
+
+let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (database: string) tableName (values: Value list) =
+    match snapshot.TransactionLocks, tableAt snapshot database tableName with
+    | Some context, Some observed ->
+        let tableKey = normalizeTableName tableName
+        let database = database.ToLowerInvariant()
+        let signed column =
+            match observed.Columns.[column].Type with
+            | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false -> true
+            | _ -> false
+
+        uniqueKeyGroups observed
+        |> List.tryFind (fun group ->
+            group.Name = "PRIMARY" && indexesWholeColumns group
+            && group.Indices.Length = values.Length && List.forall signed group.Indices)
+        |> Option.iter (fun group ->
+            let encode (table: Table) values =
+                primaryLockKeyPrefix + encodeEqualityValues table.Columns group.Indices values
+            let collations = group.Indices |> List.map (fun column -> observed.Columns.[column].Collation)
+            let compare = compareIndexedKeys collations group.Directions
+            let contains (table: Table) (key: string) =
+                table.UniqueIndex |> Map.tryFind "PRIMARY"
+                |> Option.exists (Map.containsKey (key.Substring(primaryLockKeyPrefix.Length)))
+            let current () =
+                tableAt live database tableKey |> Option.filter (fun table -> table.SchemaRevision = observed.SchemaRevision)
+            let cache = keyLockCache live (lockNamespaceKey database tableKey)
+            let probe = encode observed values
+            let readTables () =
+                live.ConsistentReadViews
+                |> Seq.choose (fun (KeyValue(_, catalog)) ->
+                    Map.tryFind database catalog |> Option.bind (Map.tryFind tableKey)
+                    |> Option.filter (fun table -> table.SchemaRevision = observed.SchemaRevision))
+
+            let pending () =
+                if Threading.Interlocked.Read(&cache.Activity.Owners) = 0L then Seq.empty
+                else
+                    cache.Entries |> Seq.choose (fun (KeyValue(key, weak)) ->
+                        if primaryLockKey key then
+                            match weak.TryGetTarget() with
+                            | true, stripe when stripe.ExclusiveOwner.IsSome -> trySignedPrimaryLockValues values.Length key
+                            | _ -> None
+                        else None)
+
+            let neighbor lower pivot (table: Table) =
+                table.SecondaryOrder |> Map.tryFind "PRIMARY"
+                |> Option.bind (fun entries ->
+                    let first, after = orderedPrefixBounds entries pivot
+                    let index = if lower then first - 1 else after
+                    if index >= 0 && index < entries.Count then Some entries.[index].Values else None)
+
+            let nearest lower pivot table =
+                let improves candidate bound =
+                    let order = compare candidate bound
+                    if lower then order > 0 else order < 0
+                seq {
+                    yield! neighbor lower pivot table |> Option.toList
+                    yield! readTables () |> Seq.choose (neighbor lower pivot)
+                    yield! pending () |> Seq.filter (fun key -> improves pivot key)
+                }
+                |> Seq.fold (fun best candidate ->
+                    if best |> Option.forall (improves candidate) then Some candidate else best) None
+
+            let isCommittedOrPinned table key =
+                contains table key || (readTables () |> Seq.exists (fun version -> contains version key))
+
+            let install () =
+                match current () with
+                | Some table when not (contains table probe || contains observed probe) ->
+                    let mutable alreadyHeld = false
+                    visitLivePrimaryGaps cache (fun stripe ->
+                        if stripe.SharedOwners.Contains context.Owner
+                           && (stripe.Gap |> Option.exists (fun (key, _) -> key = probe)) then
+                            alreadyHeld <- true)
+                    if not alreadyHeld then
+                        let boundary key =
+                            let encoded = encode table key
+                            { Values = key
+                              LockKey = encoded
+                              WasCommitted = isCommittedOrPinned table encoded }
+                        let mutable lower = nearest true values table |> Option.map boundary
+                        let mutable upper = nearest false values table |> Option.map boundary
+
+                        let blocks key =
+                            match current (), trySignedPrimaryLockValues values.Length key with
+                            | Some table, Some candidate ->
+                                match lower with
+                                // A rolled-back insertion can remove a provisional predecessor.
+                                | Some bound when not bound.WasCommitted ->
+                                    if isCommittedOrPinned table bound.LockKey then
+                                        lower <- Some { bound with WasCommitted = true }
+                                    elif (exactKeyOwner cache bound.LockKey).IsNone then
+                                        lower <- nearest true bound.Values table |> Option.map boundary
+                                | _ -> ()
+                                match upper with
+                                // A deleted successor stays available to read views until they end.
+                                | Some bound when not (isCommittedOrPinned table bound.LockKey)
+                                                  && (exactKeyOwner cache bound.LockKey).IsNone ->
+                                    upper <- nearest false bound.Values table |> Option.map boundary
+                                | _ -> ()
+                                not (contains table key)
+                                && (lower |> Option.forall (fun bound -> compare bound.Values candidate < 0))
+                                && (upper |> Option.forall (fun bound -> compare candidate bound.Values < 0))
+                            | _ -> false
+
+                        let stripe =
+                            { SyncRoot = cache.SyncRoot
+                              ExclusiveOwner = None
+                              SharedOwners = HashSet([ context.Owner ])
+                              KeyActivity = None
+                              Gap = Some(probe, blocks) }
+                        cache.Gaps.Add(WeakReference<RowLockStripe>(stripe))
+                        lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe |> ignore)
+                | _ -> ()
+
+            if not (contains observed probe) then
+                let blockers () =
+                    let owners = HashSet<int64>()
+                    exactKeyOwner cache probe |> Option.filter ((<>) context.Owner) |> Option.iter (fun owner -> owners.Add owner |> ignore)
+                    owners
+                let available () = exactKeyOwner cache probe |> Option.forall ((=) context.Owner)
+                let installed =
+                    lock cache.SyncRoot (fun () ->
+                        if available () then
+                            install ()
+                            true
+                        else false)
+                if not installed then
+                    awaitLock (DateTime.UtcNow + timeout) live.LockWaits database context
+                        queryCancellation.Value cache.SyncRoot available blockers install)
+    | _ -> ()
 
 /// Read either side of an indexed NULL test after any exact bound leading key
 /// parts. The NULL slice is contiguous in both ascending and descending keys.
@@ -11944,6 +12179,9 @@ let prepareXa
 
             // The prepared XID stays recoverable even when there is no work left to lock.
             if events.IsEmpty then releaseTransactionLocks snapshot
+            else
+                transactionLocks |> Option.iter (fun context ->
+                    store.ConsistentReadViews.TryRemove context.Owner |> ignore)
             true
         else
             false)
@@ -12063,6 +12301,7 @@ let private withPointUpdateDatabase
     (tableName: string)
     (rowIds: RowId list)
     (eventsOf: 'a -> CommitEvent list)
+    (claimKeys: 'a -> (unit -> Result<'a, StorageError>) -> Result<'a, StorageError>)
     (operation: Database -> Result<Database * 'a, StorageError>)
     : Result<'a, StorageError> =
     match store.Databases.TryGetValue dbName with
@@ -12072,8 +12311,10 @@ let private withPointUpdateDatabase
         let tableKey = normalizeTableName tableName
         let baseDb = slot.Value
 
+        // The destination key may wait for another transaction. Claim it
+        // before taking the database cell needed by that transaction's commit.
         operation baseDb
-        |> Result.bind (fun (batchDb, result) ->
+        |> Result.bind (fun (batchDb, result) -> claimKeys result (fun () ->
             let published =
                 lock slot (fun () ->
                     let attached =
@@ -12107,7 +12348,34 @@ let private withPointUpdateDatabase
             published
             |> Result.map (fun acknowledge ->
                 acknowledge ()
-                result))
+                result)))
+
+let private withMovedPrimaryKeys (store: Store) dbName tableName
+    (changes: RowUpdate list, cascaded: Map<TableAddress, RowUpdate list>, catalog: Catalog) publish =
+    let groups =
+        Map.add (tableAddress dbName tableName) changes cascaded
+        |> Map.toList
+        |> List.choose (fun (address, rows) ->
+            let database, tableName = catalogTableIdentity catalog address
+            let keys =
+                tryCatalogTable address catalog
+                |> Option.bind (fun table ->
+                    uniqueKeyGroups table
+                    |> List.tryFind (fun group -> group.Name = "PRIMARY")
+                    |> Option.map (fun primary ->
+                        rows |> List.choose (fun change ->
+                            if primary.Indices |> List.exists (fun index -> change.Before.[index] <> change.After.[index]) then
+                                let before = encodeUniqueKey table.Columns primary change.Before
+                                let after = encodeUniqueKey table.Columns primary change.After
+                                if before = after then None else after |> Option.map (fun key -> primaryLockKeyPrefix + key)
+                            else None)))
+                |> Option.defaultValue []
+            if keys.IsEmpty then None else Some(database, tableName, keys))
+    let rec claim = function
+        | [] -> publish ()
+        | (database, table, keys) :: remaining ->
+            withInsertLocks store database table [] keys (fun () -> claim remaining)
+    claim groups
 
 let internal tryIgnoreUpdateConstraintError = function
     | (ForeignKeyParentMissing _ | ForeignKeyRestrict _ | DuplicateKey _) as error ->
@@ -12227,10 +12495,20 @@ let private updateRowsCore
                 setCatalogTable address updated cascadeCatalog, (List.rev changesRev, cascaded, catalog)))
 
     let publish () =
+        let qualifiedForeignKeys = catalogHasQualifiedForeignKeys store.Catalog
+        let publishPrepared rowIds applyRows =
+            let operation db =
+                let catalog = setCatalogDatabase dbName db store.Catalog
+                applyRows catalog db
+                |> Result.map (fun (updatedCatalog, result) -> tryCatalogDatabase dbName updatedCatalog |> Option.get, result)
+            withPointUpdateDatabase store dbName tableName rowIds eventsOf (withMovedPrimaryKeys store dbName tableName) operation
+
         match candidates with
         | None ->
             withFullScanRowLocks store dbName tableName (fun () ->
-                withReferentialCatalogPublishing store dbName SharedAccess eventsOf (apply None))
+                if qualifiedForeignKeys then
+                    withReferentialCatalogPublishing store dbName SharedAccess eventsOf (apply None)
+                else publishPrepared [] (apply None))
         | Some rows ->
             let rowIds = rows |> List.map fst
             let refreshCandidates (db: Database) =
@@ -12244,16 +12522,11 @@ let private updateRowsCore
             let applyRefreshed catalog db = apply (Some(refreshCandidates db)) catalog db
 
             // Refresh only inside publication locks, retaining the requested row order.
-            let qualifiedForeignKeys = catalogHasQualifiedForeignKeys store.Catalog
             withRowLocks store dbName tableName rowIds (fun () ->
                 if qualifiedForeignKeys then
                     withReferentialCatalogPublishing store dbName SharedAccess eventsOf applyRefreshed
                 else
-                    let operation db =
-                        let catalog = setCatalogDatabase dbName db store.Catalog
-                        applyRefreshed catalog db
-                        |> Result.map (fun (updatedCatalog, result) -> tryCatalogDatabase dbName updatedCatalog |> Option.get, result)
-                    withPointUpdateDatabase store dbName tableName rowIds eventsOf operation)
+                    publishPrepared rowIds applyRefreshed)
 
     let result = captureIndexExpressionError (fun () -> withIndexExpressionDiagnostics store publish)
 

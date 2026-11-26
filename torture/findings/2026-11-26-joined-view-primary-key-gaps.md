@@ -7,10 +7,12 @@ and a separate `gate` table. The update probes `gate.id=3` while
 writing through a joined view. The key is absent, and the update
 affects zero rows.
 
-MySQL matched all 58 checks. Fsdb matched 37. The remaining differences
-are insertions and primary-key moves that succeed on Fsdb while
-MySQL returns lock wait timeout 1205. The oracle rolls back each
-test insert so the next attempt sees the same data.
+Fsdb progressed from 37 to 58 matches on the original 58 checks.
+The earlier differences were insertions and key moves that succeeded
+on Fsdb while MySQL returned lock wait timeout 1205. The oracle
+rolls back each test insert so the next attempt sees the same data.
+The expanded purge checks bring the result to 66 of 68 on Fsdb
+and 68 of 68 on MySQL.
 
 ## Isolation and transaction lifetime
 
@@ -38,7 +40,7 @@ before the missing-key lookup releases the gap in this fixture.
 
 | Gate change while the missing lookup is protected | Observed MySQL behavior |
 | --- | --- |
-| Delete the lower record at `1` | Inserts at `0` and `1` succeed. Inserts at `2`, `3`, and `4` still time out. |
+| Delete the lower record at `1` | The first inserts at `0` and `1` succeed. Inserts at `2`, `3`, and `4` still time out. Later probes can observe the wider gap after purge. |
 | Delete the upper record at `5` | Inserts at `2` through `6` time out as protection reaches the next record at `9`. |
 | Insert `6` before the lookup and keep the insertion pending, starting from keys `0` and `10` | The missing-key lookup proceeds. Inserts at `2` and `4` time out, and an insert at `7` succeeds. |
 | Commit the pending `6` | The insert at `7` still succeeds. |
@@ -49,9 +51,11 @@ before the missing-key lookup releases the gap in this fixture.
 
 A pending insertion can bound the gap on either side. When it rolls
 back, protection extends to the next surviving record on that side.
-A deletion of a previously committed lower record follows the narrower
-boundary observed above. The Fsdb joined-read path tracks retained row
-IDs and waits on the exact probed key.
+A deletion of a previously committed lower record initially follows
+the narrower boundary observed above. Fsdb coordinates missing-key
+interval claims and primary-key writes under the same table monitor. The signed
+composite-key probes also matched MySQL with both ascending and
+descending order on the second key part.
 
 ### Consistent read views
 
@@ -63,6 +67,14 @@ session owns it. After the independent session ends, the insert at `6`
 eventually times out while the gap holder stays open. The oracle allows
 purge time after the reader ends.
 [InnoDB multi-versioning and purge](https://dev.mysql.com/doc/refman/8.4/en/innodb-multi-versioning.html).
+
+The lower boundary can also widen after purge. With a lookup for `3`
+and a lower record at `2`, a separate snapshot can keep `2` in place
+after its deletion. Inserting `1` succeeds while that snapshot is
+open. In MySQL, the insert of `1` eventually waits after the reader
+ends. This also applies when the lower record was pending at lookup
+time and committed before deletion. Fsdb still retains the committed
+lower boundary after the reader ends.
 
 ## Prepared XA and restart
 
@@ -85,8 +97,9 @@ after SIGKILL. `XA RECOVER` listed the branch after both restarts.
 | `INSERT INTO gate VALUES (2,0)` | 1205 | One row inserted |
 | `UPDATE parent SET n=99 WHERE id=3` | 1205 | 1205 |
 
-The recovered branch retains its written-row protection. The
-gap from the read probe has process lifetime in this fixture.
+Fsdb matched both restart checks. The recovered branch retains its
+written-row protection. The gap from the read probe has process
+lifetime in this fixture.
 
 Run the live schedules against disposable native servers. Omit
 `FSDB_PORT` for the MySQL reference alone.

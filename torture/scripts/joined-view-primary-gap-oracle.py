@@ -111,6 +111,14 @@ def check(port, mysql):
         def insert(keys):
             return tuple(attempt(f"INSERT INTO gate VALUES ({key},0)") for key in keys)
 
+        def insert_after_purge(key):
+            deadline = monotonic() + 4
+            result = insert((key,))
+            while result == (1,) and monotonic() < deadline:
+                sleep(0.05)
+                result = insert((key,))
+            return result
+
         reset_gate()
         for level, expected in (
             ("READ UNCOMMITTED", (1, 1, 1, 1, 1)),
@@ -200,14 +208,37 @@ def check(port, mysql):
             )
             if reader is not writer:
                 execute(reader, "ROLLBACK")
-                deadline = monotonic() + 4
-                result = insert((6,))
-                while result == (1,) and monotonic() < deadline:
-                    sleep(0.05)
-                    result = insert((6,))
                 expect(
-                    "insert at 6 after the independent reader ends", result, (TIMEOUT,)
+                    "insert at 6 after the independent reader ends",
+                    insert_after_purge(6),
+                    (TIMEOUT,),
                 )
+            execute(writer, "ROLLBACK")
+
+        for pending_predecessor in (False, True):
+            reset_gate("(0,7),(10,13)")
+            if pending_predecessor:
+                execute(owner, "START TRANSACTION")
+            execute(owner, "INSERT INTO gate VALUES (2,0)")
+            execute(writer, "START TRANSACTION")
+            label = (
+                "pending predecessor"
+                if pending_predecessor
+                else "committed predecessor"
+            )
+            expect(f"lookup with {label} at 2", outcome(writer, update), 0)
+            if pending_predecessor:
+                execute(owner, "COMMIT")
+            execute(admin, "START TRANSACTION")
+            expect(
+                f"read view includes {label}",
+                scalar(admin, "SELECT COUNT(*) FROM gate"),
+                3,
+            )
+            expect(f"delete {label}", outcome(owner, "DELETE FROM gate WHERE id=2"), 1)
+            expect(f"insert while the old {label} is pinned", insert((1,)), (1,))
+            execute(admin, "ROLLBACK")
+            expect(f"insert after purge of {label}", insert_after_purge(1), (TIMEOUT,))
             execute(writer, "ROLLBACK")
 
         for label, rows, expected in (

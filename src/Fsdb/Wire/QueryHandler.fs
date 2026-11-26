@@ -2997,6 +2997,11 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
                 if claims.PrimaryProbes.IsEmpty then None
                 else Some(database, table, claims.PrimaryProbes, Set.ofList claims.RetainedRows))
 
+        let retainPrimaryGaps remaining (transaction: Transaction) database table values =
+            if transaction.Isolation = RepeatableRead || transaction.Isolation = Serializable then
+                for key in values do
+                    Storage.acquireMissingPrimaryGap remaining session.Store transaction.Snapshot database table key
+
         let acquireReadRows remaining (transaction: Transaction) database table rows =
             if not (List.isEmpty rows) then
                 Storage.acquireTransactionReadTargets remaining transaction.Snapshot database table ShareLock WaitForLocks rows |> ignore
@@ -3037,6 +3042,7 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
                         |> List.map (fun (database, table, values, held) ->
                             match tableAt database table snapshot with
                             | Some current when changed database table ->
+                                retainPrimaryGaps (remaining database) snapshot database table values
                                 let claims =
                                     values
                                     |> List.choose (Storage.tryPrimaryWriteLockTargets snapshot.Snapshot current)
@@ -3073,6 +3079,9 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
 
                 stabilize transaction refreshed primaryProbes scans
 
+        for database, table, keys, _ in primaryProbes do
+            retainPrimaryGaps timeout transaction database table keys
+
         let readTargets = readTargets |> List.filter (fun (_, _, claims) -> not claims.RetainedRows.IsEmpty || claims.Materialized.IsSome)
         let targets =
             Executor.transactionWriteTargets transaction.Snapshot registry dbName statement
@@ -3080,7 +3089,7 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
 
         match targets, readTargets with
         | [], [] ->
-            if pendingReads.IsEmpty then session
+            if pendingReads.IsEmpty && primaryProbes.IsEmpty then session
             else
                 let snapshot =
                     if transaction.Isolation = ReadUncommitted || not primaryProbes.IsEmpty then refreshReadRows transaction
@@ -3145,7 +3154,8 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
                                   BaseCatalog = tx.BaseCatalog
                                   Catalog = if tx.Seeded then tx.Snapshot.Catalog else Map.empty
                                   PendingEventCount = eventCount
-                                  RollbackWork = Storage.transactionRollbackWork tx.Snapshot }
+                                  RollbackWork = Storage.transactionRollbackWork tx.Snapshot
+                                  GapLocks = Storage.transactionGapLocks tx.Snapshot }
                                 tx.Savepoints
                         NextSavepointSeq = seq + 1 } },
         Affected 0UL
@@ -3154,6 +3164,7 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
 let private rollbackToSavepoint (name: string) (session: Session) : Session * QueryResult =
     match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
     | Some(tx, savepoint) ->
+        Storage.releaseLaterGapLocks tx.Snapshot savepoint.GapLocks
         // Real MySQL never rolls back a burned AUTO_INCREMENT id — not even
         // a savepoint rollback (`bumpAutoIncrementsInto`'s doc covers the
         // full-ROLLBACK case, which is a separate code path from this one).
@@ -3649,7 +3660,15 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             match access with
             | Error _ -> execute session
             | Ok() ->
-                (if insideFunctionOrTrigger session then session else startTransactionStatement session)
+                let started = if insideFunctionOrTrigger session then session else startTransactionStatement session
+                match stmt, started.Tx with
+                | Select select, Some transaction when transaction.Isolation = RepeatableRead
+                                                       && select.From.IsSome && select.Locking.IsEmpty
+                                                       && retainsTransactionAfterStatement started ->
+                    Storage.recordConsistentReadView started.Store transaction.Snapshot
+                | _ -> ()
+
+                started
                 |> prepareTransactionWrite stmt
                 |> syncTransactionView
                 |> execute

@@ -291,7 +291,8 @@ type Savepoint =
       BaseCatalog: Catalog
       Catalog: Catalog
       PendingEventCount: int
-      RollbackWork: int64 }
+      RollbackWork: int64
+      GapLocks: Storage.RowLockStripe list }
 
 type TransportMetrics =
     { mutable BytesReceived: int64
