@@ -2963,13 +2963,14 @@ let startTransactionStatement (session: Session) : Session =
     | Some _ -> session
     | None -> session
 
-let private prepareTransactionWrite claimReadPartners (statement: Statement) (session: Session) : Session =
+let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statement: Statement) (session: Session) : Session =
     match session.Tx with
     | None -> session
     | Some transaction ->
         let dbName = session.Database |> Option.defaultValue defaultDatabase
         let registry = registryFor session
         let timeout = lockWaitTimeout session
+        let claimReadPartners = temporaryCatalog.IsNone
         // Functions share the invoking statement's private view and publication boundary.
         let canRefresh = not (insideFunctionOrTrigger session)
         let lowerJoined =
@@ -3131,8 +3132,12 @@ let private prepareTransactionWrite claimReadPartners (statement: Statement) (se
             retainPrimaryGaps timeout transaction database table keys
 
         let readTargets = readTargets |> List.filter (fun (_, _, claims) -> not claims.RetainedRows.IsEmpty || claims.Materialized.IsSome)
+        let planTargets =
+            match temporaryCatalog with
+            | Some catalog -> Executor.transactionWriteTargetsWithTemporaryCatalog catalog
+            | None -> Executor.transactionWriteTargets
         let targets =
-            Executor.transactionWriteTargets transaction.Snapshot registry dbName statement
+            planTargets transaction.Snapshot registry dbName statement
             |> List.filter (fun (_, _, target) -> not target.RowIds.IsEmpty || not target.Keys.IsEmpty)
 
         match targets, readTargets with
@@ -3765,7 +3770,7 @@ let private executeParsedStatement accesses (session: Session) (stmt: Statement)
                 let executed, result =
                     try
                         started
-                        |> prepareTransactionWrite true stmt
+                        |> prepareTransactionWrite None stmt
                         |> syncTransactionView
                         |> execute
                     with
@@ -4298,19 +4303,14 @@ let private permanentJoinedWrite (session: Session) dbName statement =
             | _ -> None)
         |> Map.ofList
 
-    // Claim permanent write targets before binding the actual join to the overlay.
-    let ignoreJoinConditions = List.map (Join.mapConditions (fun _ -> Lit(VInt 1L)))
+    // Only permanent targets need a row claim. The planner still uses the
+    // temporary sources' visible types to infer bounds through equality joins.
     match statement with
     | Delete delete when not delete.Joins.IsEmpty ->
         let temporaryAliases = temporarySources delete.Ctes delete.From delete.Joins
         let targets = delete.Targets |> List.filter (fun name -> not (temporaryAliases.ContainsKey(name.ToLowerInvariant())))
         if targets.IsEmpty then None
-        else
-            Some(Delete
-                { delete with
-                    Targets = targets
-                    Where = None
-                    Joins = ignoreJoinConditions delete.Joins })
+        else Some(Delete { delete with Targets = targets })
     | Update update when not update.Joins.IsEmpty ->
         let temporary = temporarySources update.Ctes update.From update.Joins
         let isTemporary (assignment: Assignment) =
@@ -4321,12 +4321,7 @@ let private permanentJoinedWrite (session: Session) dbName statement =
                     table.Columns |> List.exists (fun column -> column.Name.Equals(assignment.Column, StringComparison.OrdinalIgnoreCase)))
         let assignments = update.Assignments |> List.filter (isTemporary >> not)
         if assignments.IsEmpty then None
-        else
-            Some(Update
-                { update with
-                    Assignments = assignments
-                    Where = None
-                    Joins = ignoreJoinConditions update.Joins })
+        else Some(Update { update with Assignments = assignments })
     | _ -> None
 
 let private executeTemporaryStatement (action: TemporaryAction option) dbName (session: Session) stmt =
@@ -4351,7 +4346,7 @@ let private executeTemporaryStatement (action: TemporaryAction option) dbName (s
                 | Error(code, message) -> working, Err(code, message)
                 | Ok () ->
                     working <- startTransactionStatement working
-                    working <- prepareTransactionWrite false plan working
+                    working <- prepareTransactionWrite (Some working.TemporaryCatalog) plan working
                     executeWithTemporaryCatalog action working stmt
             working <- executed
             if publish then

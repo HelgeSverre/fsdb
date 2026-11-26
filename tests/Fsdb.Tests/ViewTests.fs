@@ -409,6 +409,56 @@ let tests =
               Expect.equal (rows store "SELECT id,n FROM wait_base")
                   [ [ Some "1"; Some "0" ] ] "the permanent row survives"
 
+          testCase "mixed joined writes claim complete primary keys through the temporary partner"
+          <| fun _ ->
+              for keyType, key in [ "INT", "1"; "BIGINT UNSIGNED", "9223372036854775813" ] do
+                  let store = Fsdb.Storage.create ()
+                  for sql in
+                      [ $"CREATE TABLE keyed_base(a {keyType},b INT,n INT,PRIMARY KEY(a,b))"
+                        $"INSERT INTO keyed_base VALUES({key},1,10),({key},2,20)"
+                        "CREATE VIEW keyed_view AS SELECT a AS x,b AS y,n FROM keyed_base"
+                        $"CREATE TABLE keyed_lookup(a {keyType},b INT,PRIMARY KEY(a,b))"
+                        $"INSERT INTO keyed_lookup VALUES({key},1),({key},2)"
+                        "CREATE VIEW keyed_joined AS SELECT b.a AS x,b.b AS y,b.n FROM keyed_base b JOIN keyed_lookup p ON p.a=b.a AND p.b=b.b" ] do
+                      expectOk (run store sql) sql
+
+                  let handle = Fsdb.QueryHandler.handle
+                  let writer, _ = handle (Fsdb.Session.create 1 store) "START TRANSACTION"
+                  let writer, locked = handle writer $"UPDATE keyed_base SET n=21 WHERE a={key} AND b=2"
+                  Expect.equal locked (Affected 1UL) "a competing writer holds the other composite key"
+                  let other, created = handle (Fsdb.Session.create 2 store) $"CREATE TEMPORARY TABLE keyed_base(p {keyType},q INT,PRIMARY KEY(p,q))"
+                  expectOk created "the temporary columns differ from the permanent columns"
+                  let other, inserted = handle other $"INSERT INTO keyed_base VALUES({key},1),({key},3)"
+                  expectOk inserted "temporary partner keys"
+                  let other, _ = handle other "SET innodb_lock_wait_timeout=1"
+
+                  let other, updated =
+                      handle other $"UPDATE keyed_view v JOIN keyed_base t ON t.p=v.x AND t.q=v.y SET v.n=v.n+5 WHERE t.p={key} AND t.q=1"
+                  let other, joinedUpdate =
+                      handle other $"UPDATE keyed_joined v JOIN keyed_base t ON t.p=v.x AND t.q=v.y SET v.n=v.n+7 WHERE v.x={key} AND v.y=1"
+                  let other, deleted =
+                      handle other $"DELETE v FROM keyed_base t JOIN keyed_view v ON t.p=v.x AND t.q=v.y WHERE v.x={key} AND v.y=1"
+                  expectOk (handle writer "COMMIT" |> snd) "release the competing writer"
+                  Expect.equal updated (Affected 1UL) "UPDATE follows the full key inferred from the temporary partner"
+                  Expect.equal joinedUpdate (Affected 1UL) "a joined view preserves the physical key mapping"
+                  Expect.equal deleted (Affected 1UL) "DELETE claims only the complete view key"
+
+                  let writer, _ = handle (Fsdb.Session.create 1 store) "START TRANSACTION"
+                  let writer, moved = handle writer $"UPDATE keyed_base SET b=3 WHERE a={key} AND b=2"
+                  Expect.equal moved (Affected 1UL) "the writer moves a row into a key absent from the snapshot"
+                  use started = new ManualResetEventSlim()
+                  let waiting =
+                      Task.Run(fun () ->
+                          started.Set()
+                          handle other $"DELETE v FROM keyed_view v JOIN keyed_base t ON t.p=v.x AND t.q=v.y WHERE t.p={key} AND t.q=3")
+                  Expect.isTrue (started.Wait 5000) "the delete starts"
+                  let blocked = not (waiting.Wait 100)
+                  expectOk (handle writer "COMMIT" |> snd) "publish the key move"
+                  Expect.isTrue blocked "the missing key still waits for the pending writer"
+                  Expect.isTrue (waiting.Wait 5000) "the delete resumes"
+                  Expect.equal (waiting.GetAwaiter().GetResult() |> snd) (Affected 1UL) "the newly matching row is deleted"
+                  Expect.isEmpty (rows store "SELECT a,b FROM keyed_base") "both permanent keys were deleted"
+
           testCase "joined DELETE uses ngram scores in a nested view"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -35174,7 +35174,8 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                       ReadRangeLimit = limit }))
     | _ -> None
 
-let transactionWriteTargets
+let private transactionWriteTargetsIn
+    (temporaryCatalog: Catalog option)
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -35186,10 +35187,14 @@ let transactionWriteTargets
         | Delete delete -> delete.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
         | _ -> Set.empty
 
+    let tableQualifier (source: TableRef) = source.Alias |> Option.defaultValue source.Table
+    let isCte (source: TableRef) =
+        source.Database.IsNone && Set.contains (source.Table.ToLowerInvariant()) cteNames
+
     let targets (tableRef: TableRef) predicate =
         let database = tableRef.Database |> Option.defaultValue dbName
 
-        if tableRef.Database.IsNone && Set.contains (tableRef.Table.ToLowerInvariant()) cteNames then
+        if isCte tableRef then
             None
         else
             tryPhysicalCandidates store registry dbName tableRef predicate
@@ -35701,6 +35706,81 @@ let transactionWriteTargets
             { claims with RowIds = table.RowsArray.Indexed |> Seq.map fst |> Seq.toList }
         else claims
 
+    let viewBaseReference (view: UpdatableView) = { view.UpdateFrom with Database = Some view.Database }
+
+    let joinedPrimaryBounds from joins where =
+        let innerConditions =
+            if joins |> List.forall (fun (join: Join) -> join.Kind = InnerJoin || join.Kind = StraightJoin) then
+                joins |> List.collect (_.On >> conjuncts)
+            else []
+        let conditions = optionalConjuncts where @ innerConditions
+        let sources = FromTable from :: List.map (fun (join: Join) -> join.Table) joins |> List.collect FromItem.leaves
+        let names = sources |> List.choose FromItem.tryQualifier |> List.map _.ToLowerInvariant()
+        // A duplicate alias has no unique visible schema.
+        if (qualifiedLiteralEqualities conditions).IsEmpty || (Set.ofList names).Count <> names.Length then Map.empty
+        else
+            let projectedTypes (view: UpdatableView) =
+                view.Targets
+                |> Map.toList
+                |> List.groupBy (fun (_, target) -> target.Database, target.Table)
+                |> List.collect (fun ((database, name), projected) ->
+                    match InformationSchema.findTable store.Catalog database name with
+                    | Error _ -> []
+                    | Ok table ->
+                        projected
+                        |> List.choose (fun (name, target) ->
+                            table.Columns
+                            |> List.tryFind (fun column -> equalsIgnoreCase column.Name target.Column)
+                            |> Option.map (fun column -> name, column.Type)))
+
+            let visibleColumns (source: TableRef) =
+                let database = source.Database |> Option.defaultValue dbName
+                let temporaryTable =
+                    temporaryCatalog
+                    |> Option.bind (fun catalog -> InformationSchema.findTable catalog database source.Table |> Result.toOption)
+                match temporaryTable |> Option.orElseWith (fun () -> physicalFastPathTable store dbName source) with
+                | Some table -> table.Columns |> List.map (fun column -> column.Name, column.Type)
+                | None ->
+                    tryUpdatableView store database source.Table
+                    |> Option.map projectedTypes
+                    |> Option.defaultValue []
+
+            let columnTypes =
+                sources
+                |> List.collect (function
+                    | FromTable source when not (isCte source) ->
+                        let qualifier = tableQualifier source
+                        visibleColumns source |> List.map (fun (name, columnType) -> mutationColumnKey (qualifier, name), columnType)
+                    | _ -> [])
+                |> Map.ofList
+
+            let equalities = qualifiedColumnEqualities conditions
+            if temporaryCatalog.IsSome then
+                joinBounds Storage.isIntegerPrimaryKeyType isIntegerJoinLiteral columnTypes equalities conditions
+            else
+                signedJoinBounds columnTypes equalities conditions
+
+    let primaryTarget (bounds: Lazy<Map<string * string, Value>>) qualifier reference exposedNames =
+        physicalFastPathTable store dbName reference
+        |> Option.bind (fun table ->
+            Storage.primaryKeyColumns table
+            |> List.map (fun column ->
+                exposedNames column
+                |> List.tryPick (fun name -> Map.tryFind (mutationColumnKey (qualifier, name)) bounds.Value))
+            |> tryAllSome
+            |> Option.bind (Storage.tryPrimaryWriteLockTargets store table)
+            |> Option.map (fun claims -> reference.Database |> Option.defaultValue dbName, reference.Table, protectKeyMove table claims))
+
+    let primaryViewTarget bounds qualifier reference (view: UpdatableView) isTarget =
+        let exposedNames column =
+            view.Targets |> Map.toList |> List.choose (fun (name, mapped) ->
+                if isTarget mapped && equalsIgnoreCase column mapped.Column then Some name else None)
+        primaryTarget bounds qualifier reference exposedNames
+
+    let mixedPhysicalTarget bounds (source: TableRef) _ =
+        primaryTarget bounds (tableQualifier source) source List.singleton
+        |> Option.orElseWith (fun () -> targets source None)
+
     let joinedUpdateTargets from joins names predicate =
         let bound = lazy (if cteNames.IsEmpty then boundUpdateJoinKeys store dbName from joins predicate else None)
         let resolve (source: TableRef) where =
@@ -35747,6 +35827,7 @@ let transactionWriteTargets
             |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
             |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
+        let primaryBounds = lazy (joinedPrimaryBounds update.From update.Joins update.Where)
         let update = writableViewFirst store dbName update
         let allSourceItems =
             FromTable update.From
@@ -35844,13 +35925,19 @@ let transactionWriteTargets
 
                         // A matching physical equality narrows the row claim.
                         // Without one, claim the table before taking the snapshot.
-                        targets
+                        let reference =
                             { Database = Some first.Database
                               Table = first.Table
                               Alias = Some first.Qualifier
                               Partitions = []
                               IndexHints = [] }
-                            physicalPredicate
+                        let target =
+                            match temporaryCatalog with
+                            | Some _ ->
+                                primaryViewTarget primaryBounds viewQualifier reference view (sameViewTarget first)
+                                |> Option.orElseWith (fun () -> targets reference None)
+                            | None -> targets reference physicalPredicate
+                        target
                         |> Option.map (fun target -> view, target)
                     | _ -> None))
 
@@ -35884,7 +35971,8 @@ let transactionWriteTargets
                             match owners with
                             | [ (table, _) ] -> Some(table.Alias |> Option.defaultValue table.Table)
                             | _ -> None)
-            target :: (otherViewTargets @ joinedTargets targets update.From update.Joins externalNames None)
+            let resolve = if temporaryCatalog.IsSome then mixedPhysicalTarget primaryBounds else targets
+            target :: (otherViewTargets @ joinedTargets resolve update.From update.Joins externalNames None)
             |> combineTargets
         | None ->
             let projectedNames body =
@@ -35964,7 +36052,10 @@ let transactionWriteTargets
                             | _ -> None)
                     |> function Some name -> Ok name | None -> Error())
             |> Result.toOption
-            |> Option.map (fun names -> joinedUpdateTargets update.From update.Joins names update.Where)
+            |> Option.map (fun names ->
+                if temporaryCatalog.IsSome then
+                    joinedTargets (mixedPhysicalTarget primaryBounds) update.From update.Joins names None
+                else joinedUpdateTargets update.From update.Joins names update.Where)
             |> Option.defaultValue []
     | Delete delete when delete.Joins.IsEmpty ->
         let viewDatabase = delete.From.Database |> Option.defaultValue dbName
@@ -35983,46 +36074,7 @@ let transactionWriteTargets
             |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
             |> Option.toList
     | Delete delete when not delete.Joins.IsEmpty ->
-        let tableQualifier (source: TableRef) = source.Alias |> Option.defaultValue source.Table
-        let isCte (source: TableRef) =
-            source.Database.IsNone && Set.contains (source.Table.ToLowerInvariant()) cteNames
-        let baseReference (view: UpdatableView) = { view.UpdateFrom with Database = Some view.Database }
-        let primaryBounds =
-            lazy (
-                let columnTypes =
-                    (FromTable delete.From :: (delete.Joins |> List.map _.Table))
-                    |> List.collect FromItem.leaves
-                    |> List.collect (function
-                        | FromTable source when not (isCte source) ->
-                            let qualifier = tableQualifier source
-                            match physicalFastPathTable store dbName source with
-                            | Some table ->
-                                table.Columns |> List.map (fun column -> mutationColumnKey (qualifier, column.Name), column.Type)
-                            | None ->
-                                let database = source.Database |> Option.defaultValue dbName
-                                match tryUpdatableView store database source.Table with
-                                | Some view when view.UpdateJoins.IsEmpty ->
-                                    physicalFastPathTable store dbName (baseReference view)
-                                    |> Option.map (fun table ->
-                                        view.Targets
-                                        |> Map.toList
-                                        |> List.choose (fun (name, target) ->
-                                            table.Columns
-                                            |> List.tryFind (fun column -> equalsIgnoreCase column.Name target.Column)
-                                            |> Option.map (fun column -> mutationColumnKey (qualifier, name), column.Type)))
-                                    |> Option.defaultValue []
-                                | _ -> []
-                        | _ -> [])
-                    |> Map.ofList
-
-                let innerConditions =
-                    if delete.Joins |> List.forall (fun join -> join.Kind = InnerJoin || join.Kind = StraightJoin) then
-                        delete.Joins |> List.collect (_.On >> conjuncts)
-                    else
-                        []
-
-                let conditions = optionalConjuncts delete.Where @ innerConditions
-                signedJoinBounds columnTypes (qualifiedColumnEqualities conditions) conditions)
+        let primaryBounds = lazy (joinedPrimaryBounds delete.From delete.Joins delete.Where)
 
         let resolveDeleteTarget (source: TableRef) predicate =
             if isCte source then
@@ -36031,26 +36083,10 @@ let transactionWriteTargets
                 let database = source.Database |> Option.defaultValue dbName
                 match tryUpdatableView store database source.Table with
                 | Some view when view.UpdateJoins.IsEmpty ->
-                    let reference = baseReference view
-                    let qualifier = tableQualifier source
-
-                    physicalFastPathTable store dbName reference
-                    |> Option.bind (fun table ->
-                        // A partial key could become a match after a writer
-                        // commits. Narrow only when every PK part is fixed.
-                        Storage.primaryKeyColumns table
-                        |> List.map (fun key ->
-                            view.Targets
-                            |> Map.toList
-                            |> List.tryPick (fun (name, target) ->
-                                if equalsIgnoreCase key target.Column then
-                                    Map.tryFind (mutationColumnKey (qualifier, name)) primaryBounds.Value
-                                else
-                                    None))
-                        |> tryAllSome
-                        |> Option.bind (Storage.tryPrimaryWriteLockTargets store table)
-                        |> Option.map (fun claims -> view.Database, view.Table, protectKeyMove table claims))
+                    let reference = viewBaseReference view
+                    primaryViewTarget primaryBounds (tableQualifier source) reference view (fun _ -> true)
                     |> Option.orElseWith (fun () -> targets reference None)
+                | _ when temporaryCatalog.IsSome -> mixedPhysicalTarget primaryBounds source predicate
                 | _ -> targets source predicate
 
         joinedTargets resolveDeleteTarget delete.From delete.Joins delete.Targets delete.Where
@@ -36068,6 +36104,12 @@ let transactionWriteTargets
             insertTargets tableName columns [ row ])
         |> Option.toList
     | _ -> []
+
+let transactionWriteTargets store registry dbName statement =
+    transactionWriteTargetsIn None store registry dbName statement
+
+let internal transactionWriteTargetsWithTemporaryCatalog catalog store registry dbName statement =
+    transactionWriteTargetsIn (Some catalog) store registry dbName statement
 
 [<RequireQualifiedAccess>]
 type internal WriteReadScope =

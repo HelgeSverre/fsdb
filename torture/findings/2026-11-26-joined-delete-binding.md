@@ -49,8 +49,8 @@ engines waited and returned zero affected rows after the writer
 committed. A separate mixed DELETE removed two rows and explicit
 rollback restored both. The WAL-backed Fsdb server recovered the
 expected permanent base and child rows after an abrupt stop. The
-mixed path still claims permanent rows conservatively before binding
-the join against the temporary catalog.
+[primary-key follow-up](2026-11-26-joined-update-shadow.md#primary-key-locking-follow-up)
+covers narrower claims for complete integer key bounds.
 
 ## Remaining view cases
 
