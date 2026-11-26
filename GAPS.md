@@ -2834,8 +2834,11 @@ implementation effort:
    [Projected aggregate wire metadata](benchmarks/results/2026-11-25-correlated-integer-range-count.md#projected-aggregate-wire-metadata)
    preserves the audited numeric descriptors for scalar aggregates over
    derived tables and CTEs. [Binding checks for projected aggregates](benchmarks/results/2026-11-25-correlated-integer-range-count.md#reuse-of-derived-aggregate-bindings)
-   are reused across rows of the same enclosing scope. Other residual
-   predicates, broader aggregate shapes, and computed projection planning
+   are reused across rows of the same enclosing scope.
+   [Bounded computed payloads](benchmarks/results/2026-11-26-computed-projection-ranges.md)
+   retain direct composite keys through nested derived tables and CTEs.
+   They can be used in a residual filter on the index slice. Computed
+   lookup keys, other residual predicates, and broader aggregate shapes
    still need work.
 
 2. Transaction scheduling. [Readers behind waiting writers under a global

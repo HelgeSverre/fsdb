@@ -439,20 +439,43 @@ type private MaterializedEqualityLookup = Value list -> Value[] list option
 type private MaterializedRangeLookup =
     (Value * bool) option -> (Value * bool) option -> Value[] list option
 
+type private PhysicalProjectionColumn =
+    | ProjectColumn of index: int
+    | CalculateColumn of read: (Value[] -> Value) * bounds: (bigint * bigint)
+
+let private readProjectionColumn (row: Value[]) = function
+    | ProjectColumn index -> row.[index]
+    | CalculateColumn(read, _) -> read row
+
+let private projectedColumnIndex = function
+    | ProjectColumn index -> Some index
+    | CalculateColumn _ -> None
+
 type private PhysicalProjectionStep =
     { InputColumns: ColumnDef list
       InputQualifier: string
       Predicate: Expr option
-      OutputIndices: int list }
+      Outputs: PhysicalProjectionColumn array }
 
 type private PhysicalProjection =
     { OutputColumns: ColumnDef list
       PhysicalTableRef: TableRef
       PhysicalTable: Table
-      PhysicalColumnIndices: int list
+      PhysicalOutputs: PhysicalProjectionColumn array
       // These predicates can run against stored rows selected by a later probe.
       SilentFilters: (Value[] -> bool) list option
       Steps: PhysicalProjectionStep list }
+
+let private projectionFilterColumn (projection: PhysicalProjection) index =
+    let column = projection.PhysicalOutputs.[index]
+    let signed =
+        match column with
+        | CalculateColumn _ -> true
+        | ProjectColumn physicalIndex ->
+            match projection.PhysicalTable.Columns.[physicalIndex].Type with
+            | TTinyInt false | TSmallInt false | TMediumInt false | TInt false -> true
+            | _ -> false
+    (fun row -> readProjectionColumn row column), signed
 
 let private tryDuplicateIgnoreCase nameOf values =
     let seen = HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
@@ -17148,7 +17171,7 @@ and private tryPhysicalProjection
                 Dictionary<obj, PhysicalProjection option>(HashIdentity.Reference))
         getMemoized byScope (box scope) compute
 
-and private trySilentIntegerFilter (columns: ColumnDef list) resolveIndex outerValue predicate =
+and private trySilentIntegerFilter readColumn outerValue predicate =
     let operand = function
         | LiteralValue VNull -> Some(fun _ -> VNull)
         | expression ->
@@ -17157,12 +17180,9 @@ and private trySilentIntegerFilter (columns: ColumnDef list) resolveIndex outerV
                 let value = VInt literal
                 Some(fun _ -> value)
             | None ->
-                match resolveIndex expression with
-                | Some index ->
-                    match columns.[index].Type with
-                    | TTinyInt false | TSmallInt false | TMediumInt false | TInt false ->
-                        Some(fun (row: Value[]) -> row.[index])
-                    | _ -> None
+                match readColumn expression with
+                | Some(read, true) -> Some read
+                | Some(_, false) -> None
                 | None -> outerValue expression |> Option.map (fun value _ -> value)
 
     let comparison op left right =
@@ -17191,8 +17211,8 @@ and private trySilentIntegerFilter (columns: ColumnDef list) resolveIndex outerV
             if right row = ValueSome decisive then ValueSome decisive else ValueNone
 
     let nullTest expectNull value =
-        resolveIndex value
-        |> Option.map (fun index (row: Value[]) -> ValueSome((row.[index] = VNull) = expectNull))
+        readColumn value
+        |> Option.map (fun (read, _) row -> ValueSome((read row = VNull) = expectNull))
 
     let membership value candidates =
         let apply readValue readCandidates row =
@@ -17254,7 +17274,7 @@ and private tryPhysicalProjectionUncached
             { OutputColumns = table.Columns
               PhysicalTableRef = tableRef
               PhysicalTable = table
-              PhysicalColumnIndices = [ 0 .. table.Columns.Length - 1 ]
+              PhysicalOutputs = Array.init table.Columns.Length ProjectColumn
               SilentFilters = Some []
               Steps = [] })
 
@@ -17312,55 +17332,123 @@ and private tryPhysicalProjectionUncached
                     directColumn expression
                     |> Option.bind (resolveColumn input.OutputColumns >> Result.toOption)
 
-                let physicalIndex expression =
-                    directIndex expression |> Option.map (fun index -> input.PhysicalColumnIndices.[index])
+                let readFilterColumn expression =
+                    directIndex expression
+                    |> Option.map (projectionFilterColumn input)
+
+                let signedBounds columnType =
+                    let bits =
+                        match columnType with
+                        | TTinyInt false -> Some 8
+                        | TSmallInt false -> Some 16
+                        | TMediumInt false -> Some 24
+                        | TInt false -> Some 32
+                        | TBigInt false -> Some 64
+                        | _ -> None
+                    bits |> Option.map (fun bits ->
+                        let limit = 1I <<< (bits - 1)
+                        -limit, limit - 1I)
+
+                let rec compileArithmetic expression =
+                    let combine evaluate bounds left right =
+                        Option.map2 (fun (readLeft, physicalLeft, leftBounds) (readRight, physicalRight, rightBounds) ->
+                            let read first second row = evaluate (first row) (second row)
+                            read readLeft readRight, read physicalLeft physicalRight, bounds leftBounds rightBounds)
+                            (compileArithmetic left) (compileArithmetic right)
+                        |> Option.filter (fun (_, _, (lower, upper)) ->
+                            lower >= bigint System.Int64.MinValue && upper <= bigint System.Int64.MaxValue)
+
+                    match expression with
+                    | BinOp(Add, left, right) ->
+                        combine Value.add (fun (a, b) (c, d) -> a + c, b + d) left right
+                    | BinOp(Sub, left, right) ->
+                        combine Value.sub (fun (a, b) (c, d) -> a - d, b - c) left right
+                    | BinOp(Mul, left, right) ->
+                        combine Value.mul (fun (a, b) (c, d) ->
+                            let products = [ a * c; a * d; b * c; b * d ]
+                            List.min products, List.max products) left right
+                    | _ ->
+                        match correlatedSignedIntegerLiteral expression with
+                        | Some value ->
+                            let read _ = VInt value
+                            Some(read, read, (bigint value, bigint value))
+                        | None ->
+                            directIndex expression
+                            |> Option.bind (fun index ->
+                                let physical = input.PhysicalOutputs.[index]
+                                let bounds =
+                                    match physical with
+                                    | CalculateColumn(_, bounds) -> Some bounds
+                                    | ProjectColumn _ -> signedBounds input.OutputColumns.[index].Type
+                                bounds
+                                |> Option.map (fun bounds ->
+                                    (fun (row: Value[]) -> row.[index]), (fun row -> readProjectionColumn row physical), bounds))
+
+                let metadataContext =
+                    lazy (contextFactory store registry dbName
+                            (columnIndexOf input.OutputColumns) (singleQualifier sourceQualifier input.OutputColumns)
+                            None (probeRow input.OutputColumns))
+
+                let project ({ Expression = expression } as projection: Projection) =
+                    let name = projectionLabel projection
+                    match directIndex expression with
+                    | Some index ->
+                        Some(derivedColumn input.OutputColumns.[index] name, ProjectColumn index, input.PhysicalOutputs.[index])
+                    | None ->
+                        match expression with
+                        | BinOp((Add | Sub | Mul), _, _) ->
+                            // Only bounded signed arithmetic can be skipped on
+                            // unselected rows without losing an error or warning.
+                            compileArithmetic expression
+                            |> Option.bind (fun (read, physicalRead, bounds) ->
+                                let ctx = metadataContext.Value
+                                metadataOfExpr ctx expression
+                                |> Option.bind (fun metadata ->
+                                    let collation =
+                                        metadata.CollationId |> Option.bind (int >> Collation.tryFindById)
+                                        |> Option.defaultWith (fun () -> keyCollation ctx (Col name))
+                                    match deriveColumns [ name ] [ collation ] [ metadata ] with
+                                    | [ column ] when column.Type = TBigInt false ->
+                                        Some(column, CalculateColumn(read, bounds), CalculateColumn(physicalRead, bounds))
+                                    | _ -> None))
+                        | _ -> None
 
                 if not predicateIsStable then
                     None
                 else
                     select.Projections
-                    |> traverse (fun ({ Expression = expression } as projection) ->
-                        match
-                            directIndex expression |> Option.map (fun index -> index, projectionLabel projection)
-                        with
-                        | Some projected -> Ok projected
-                        | None -> Error())
-                    |> Result.toOption
+                    |> List.map project
+                    |> tryAllSome
                     |> Option.bind (fun projected ->
-                        let names = projected |> List.map snd
-                        if names |> tryDuplicateIgnoreCase id |> Option.isSome then
+                        let columns, outputs, physicalOutputs = List.unzip3 projected
+                        if columns |> tryDuplicateIgnoreCase (fun (column: ColumnDef) -> column.Name) |> Option.isSome then
                             None
                         else
-                            let outputIndices = projected |> List.map fst
-
                             Some
                                 { input with
-                                    OutputColumns =
-                                        projected
-                                        |> List.map (fun (index, name) -> derivedColumn input.OutputColumns.[index] name)
-                                    PhysicalColumnIndices =
-                                        outputIndices |> List.map (fun index -> input.PhysicalColumnIndices.[index])
+                                    OutputColumns = columns
+                                    PhysicalOutputs = List.toArray physicalOutputs
                                     SilentFilters =
                                         match select.Where with
                                         | None -> input.SilentFilters
                                         | Some predicate ->
                                             Option.map2 (fun filters filter -> filters @ [ filter ])
-                                                input.SilentFilters (trySilentIntegerFilter input.PhysicalTable.Columns physicalIndex (fun _ -> None) predicate)
+                                                input.SilentFilters (trySilentIntegerFilter readFilterColumn (fun _ -> None) predicate)
                                     Steps =
                                         input.Steps
                                         @ [ { InputColumns = input.OutputColumns
                                               InputQualifier = sourceQualifier
                                               Predicate = select.Where
-                                              OutputIndices = outputIndices } ] }))
+                                              Outputs = List.toArray outputs } ] }))
         | _ -> None
     | _ -> None
 
 and private tryPhysicalProjectionColumn (projection: PhysicalProjection) columnName : ColumnDef option =
     resolveColumn projection.OutputColumns columnName
     |> Result.toOption
-    |> Option.map (fun outputIndex ->
-        let physicalIndex = projection.PhysicalColumnIndices.[outputIndex]
-        projection.PhysicalTable.Columns.[physicalIndex])
+    |> Option.bind (fun outputIndex ->
+        projectedColumnIndex projection.PhysicalOutputs.[outputIndex]
+        |> Option.map (fun physicalIndex -> projection.PhysicalTable.Columns.[physicalIndex]))
 
 and private tryPhysicalFunctionalColumn
     (projection: PhysicalProjection)
@@ -17394,7 +17482,7 @@ and private projectPhysicalRows
                     predicate
                     rows
             | None -> Ok rows)
-        |> Result.map (Seq.map (fun row -> step.OutputIndices |> List.map (fun index -> row.[index]) |> Array.ofList))
+        |> Result.map (Seq.map (fun row -> Array.map (readProjectionColumn row) step.Outputs))
 
     rows
     |> prepareVirtualRows
@@ -19581,10 +19669,10 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
         |> Option.bind (fun (projection, sourceFilters) ->
             let table = projection.PhysicalTable
             let scope = correlatedProbeSource qualifier projection.OutputColumns
-            let resolveIndex expression =
+            let readFilterColumn expression =
                 tryCorrelatedInnerColumn scope expression
                 |> Option.bind (resolveColumn projection.OutputColumns >> Result.toOption)
-                |> Option.map (fun index -> projection.PhysicalColumnIndices.[index])
+                |> Option.map (projectionFilterColumn projection)
 
             let signedColumn = tryCorrelatedSignedIntegerColumn scope projection.OutputColumns
             let innerColumn =
@@ -19632,7 +19720,7 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                 |> List.map (fun predicate ->
                     match rangePredicatesFor innerColumn bound predicate with
                     | [] ->
-                        trySilentIntegerFilter table.Columns resolveIndex filterBound predicate
+                        trySilentIntegerFilter readFilterColumn filterBound predicate
                         |> Option.map (fun keep -> [], Some keep)
                     | bounds -> Some(bounds, None))
                 |> tryAllSome
@@ -19697,9 +19785,8 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                     let rows =
                         if projection.Steps.IsEmpty then filtered
                         else
-                            let indices = List.toArray projection.PhysicalColumnIndices
                             filtered
-                            |> Seq.map (fun row -> indices |> Array.map (fun index -> row.[index]))
+                            |> Seq.map (fun row -> Array.map (readProjectionColumn row) projection.PhysicalOutputs)
                     { Columns = projection.OutputColumns
                       Rows = rows
                       RowCount = if filters.IsEmpty then Some lookup.OrderedRowCount else None

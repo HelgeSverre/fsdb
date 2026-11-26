@@ -17,6 +17,7 @@ let modes =
       "projected-range-controls"
       "projected-filter-controls"
       "correlated-residual-controls"
+      "computed-projection-controls"
       "overlay-controls"
       "edge-controls" ]
 
@@ -171,6 +172,15 @@ let readProjectedRanges () =
               "nested-or-sum", residual "c.payload = 1 OR c.payload IS NULL" "" nested "SUM(c.sequence_no)", 525250L
               "cte-not-in-count", residual "c.payload NOT IN (0,2)" cte "child_rows" "COUNT(*)", 400L
               "outer-comparison-or-sum", residual "c.payload >= p.id OR c.payload IS NULL" "" nested "SUM(c.sequence_no)", 226754L ]
+        elif mode = "computed-projection-controls" then
+            let calculated = "(SELECT id + bucket AS payload, id AS sequence_no, parent_id AS parent_key FROM child)"
+            let nested = $"(SELECT payload * 2 - 3 AS payload, sequence_no, parent_key FROM {calculated} calculated)"
+            let cte = "WITH child_rows(payload, sequence_no, parent_key) AS (SELECT bucket * 2 - 1, id, parent_id FROM child)"
+            [ "derived-count", projected "" filtered "COUNT(*)", 1200L
+              "computed-count", projected "" calculated "COUNT(c.payload)", 1200L
+              "nested-computed-sum", projected "" nested "SUM(c.payload)", 1798800L
+              "computed-cte-sum", projected cte "child_rows" "SUM(c.payload)", 1200L
+              "computed-where-count", projectedWhere "AND c.payload > 1000" "" calculated "COUNT(*)", 400L ]
         elif mode = "projected-filter-controls" then
             let equality = $"({projection} WHERE bucket = 1)"
             let nestedFilter =
@@ -384,7 +394,8 @@ try
 
         let workloads =
             if mode = "range-controls" then [ readRangeControls ]
-            elif mode = "projected-range-controls" || mode = "projected-filter-controls" || mode = "correlated-residual-controls" then [ readProjectedRanges ]
+            elif List.contains mode [ "projected-range-controls"; "projected-filter-controls"; "correlated-residual-controls"; "computed-projection-controls" ] then
+                [ readProjectedRanges ]
             elif mode = "nullable-count-controls" || mode = "expression-count-controls" then [ readCountArguments ]
             elif mode = "exact-aggregate-controls" then [ readExactAggregates ]
             elif mode = "prefix-controls" then

@@ -16106,6 +16106,19 @@ let tests =
                         let allocated = measureWhere $"AND ({predicate})" "" fromDerived aggregate expected
                         Expect.isLessThan allocated 8000000L $"the WHERE filter reuses the composite slice for {predicate}"
 
+                    let calculated =
+                        "(SELECT score AS payload, k AS sequence_no, owner AS parent_key FROM "
+                        + "(SELECT id + bucket AS score, parent_id AS owner, id AS k FROM children) projected)"
+                    let calculatedBytes = measure "" calculated "COUNT(c.payload)" 240M
+                    Expect.isLessThan calculatedBytes 8000000L "a calculated payload preserves the composite slice"
+                    let calculatedFilterBytes = measureWhere "AND (c.payload > 200 OR c.payload IS NULL)" "" calculated "COUNT(*)" 140M
+                    Expect.isLessThan calculatedFilterBytes 8000000L "a predicate on the calculated payload reuses the slice"
+
+                    let calculatedCte =
+                        "WITH projected(payload, sequence_no, parent_key) AS (SELECT bucket * 2 - 1, id, parent_id FROM children)"
+                    let calculatedCteBytes = measure calculatedCte "projected" "SUM(c.payload)" 240M
+                    Expect.isLessThan calculatedCteBytes 8000000L "a named CTE uses the slice before calculating payloads"
+
                 testCase "correlated integer count uses the equality prefix and range together"
                 <| fun _ ->
                     let store = newStore ()
