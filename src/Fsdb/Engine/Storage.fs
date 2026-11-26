@@ -438,7 +438,7 @@ type TransactionLockContext =
 type LockWait =
     { Blockers: HashSet<int64>
       Context: TransactionLockContext
-      Stripe: RowLockStripe }
+      SyncRoot: obj }
 
 type LockWaitGraph =
     { SyncRoot: obj
@@ -4115,7 +4115,7 @@ let private stripeBlockers owner mode (stripe: RowLockStripe) =
 type private LockWaitDecision =
     | WaitRegistered
     | CurrentDeadlockVictim
-    | WakeDeadlockVictim of RowLockStripe
+    | WakeDeadlockVictim of obj
 
 let internal tryFindLockWaitPath target (starts: seq<int64>) (successors: int64 -> seq<int64>) =
     let visited = HashSet<int64>()
@@ -4152,12 +4152,12 @@ let internal tryFindLockWaitPath target (starts: seq<int64>) (successors: int64 
 
         path |> Seq.rev |> List.ofSeq |> Some
 
-let private registerLockWait (graph: LockWaitGraph) (context: TransactionLockContext) stripe blockers =
+let private registerLockWait (graph: LockWaitGraph) (context: TransactionLockContext) syncRoot blockers =
     lock graph.SyncRoot (fun () ->
         graph.Edges.[context.Owner] <-
             { Blockers = blockers
               Context = context
-              Stripe = stripe }
+              SyncRoot = syncRoot }
 
         let cycle =
             tryFindLockWaitPath context.Owner blockers (fun owner ->
@@ -4184,17 +4184,70 @@ let private registerLockWait (graph: LockWaitGraph) (context: TransactionLockCon
             if victim = context.Owner then
                 CurrentDeadlockVictim
             else
-                WakeDeadlockVictim victimWait.Stripe)
+                WakeDeadlockVictim victimWait.SyncRoot)
 
 let private clearLockWait (graph: LockWaitGraph) owner =
     lock graph.SyncRoot (fun () -> graph.Edges.Remove owner |> ignore)
 
-let private wakeLockWaiter (stripe: RowLockStripe) =
+let private wakeLockWaiter syncRoot =
     Threading.ThreadPool.QueueUserWorkItem(
         Threading.WaitCallback(fun _ ->
-            lock stripe.SyncRoot (fun () -> Threading.Monitor.PulseAll stripe.SyncRoot))
+            lock syncRoot (fun () -> Threading.Monitor.PulseAll syncRoot))
     )
     |> ignore
+
+// The condition, blocker list, and claim must all be inspected under the
+// same monitor so releasing a blocker cannot race with entering the wait.
+let private awaitLock
+    (deadline: DateTime)
+    (waits: LockWaitGraph)
+    (dbName: string)
+    (context: TransactionLockContext)
+    (cancellation: Threading.CancellationToken)
+    syncRoot
+    available
+    blockers
+    claim
+    =
+    use cancellationWake =
+        if cancellation.CanBeCanceled then
+            cancellation.Register(fun () ->
+                lock syncRoot (fun () -> Threading.Monitor.PulseAll syncRoot))
+        else
+            Unchecked.defaultof<Threading.CancellationTokenRegistration>
+
+    lock syncRoot (fun () ->
+        let rec acquire () =
+            Limits.checkQueryInterruption cancellation
+
+            if available () then
+                claim ()
+            else
+                let remaining = deadline - DateTime.UtcNow
+
+                if remaining <= TimeSpan.Zero then
+                    raise (LockWaitTimeout dbName)
+
+                match registerLockWait waits context syncRoot (blockers ()) with
+                | CurrentDeadlockVictim -> raise (DeadlockVictim dbName)
+                | WakeDeadlockVictim victimMonitor -> wakeLockWaiter victimMonitor
+                | WaitRegistered -> ()
+
+                let signaled =
+                    try Threading.Monitor.Wait(syncRoot, remaining)
+                    finally clearLockWait waits context.Owner
+
+                Limits.checkQueryInterruption cancellation
+
+                if context.DeadlockVictim then
+                    raise (DeadlockVictim dbName)
+
+                if not signaled then
+                    raise (LockWaitTimeout dbName)
+
+                acquire ()
+
+        acquire ())
 
 let private acquireStripe
     (deadline: DateTime)
@@ -4244,50 +4297,8 @@ let private acquireStripe
             else Some(claim ())) with
         | Some acquired -> acquired
         | None ->
-            use cancellationWake =
-                if cancellation.CanBeCanceled then
-                    cancellation.Register(fun () ->
-                        lock stripe.SyncRoot (fun () -> Threading.Monitor.PulseAll stripe.SyncRoot))
-                else
-                    Unchecked.defaultof<Threading.CancellationTokenRegistration>
-
-            lock stripe.SyncRoot (fun () ->
-                let rec acquire () =
-                    Limits.checkQueryInterruption cancellation
-
-                    if available () then
-                        claim ()
-                    else
-                        let remaining = deadline - DateTime.UtcNow
-
-                        if remaining <= TimeSpan.Zero then
-                            raise (LockWaitTimeout dbName)
-
-                        let blockers = stripeBlockers context.Owner mode stripe
-
-                        match registerLockWait waits context stripe blockers with
-                        | CurrentDeadlockVictim -> raise (DeadlockVictim dbName)
-                        | WakeDeadlockVictim victimStripe -> wakeLockWaiter victimStripe
-                        | WaitRegistered -> ()
-
-                        let mutable signaled = false
-
-                        try
-                            signaled <- Threading.Monitor.Wait(stripe.SyncRoot, remaining)
-                        finally
-                            clearLockWait waits context.Owner
-
-                        Limits.checkQueryInterruption cancellation
-
-                        if context.DeadlockVictim then
-                            raise (DeadlockVictim dbName)
-
-                        if not signaled then
-                            raise (LockWaitTimeout dbName)
-
-                        acquire ()
-
-                acquire ())
+            awaitLock deadline waits dbName context cancellation stripe.SyncRoot available
+                (fun () -> stripeBlockers context.Owner mode stripe) claim
 
 let private withWriteLocksFor
     (timeout: TimeSpan)
