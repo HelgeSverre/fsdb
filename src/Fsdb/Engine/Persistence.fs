@@ -42,7 +42,8 @@ let private partitionTablespaceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Duy
 let private generatedForeignKeySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Euy |] // "FSNN" (format 23)
 let private previousSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x4Fuy |] // "FSNO" (format 24)
 let private tableStatisticsSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x50uy |] // "FSNP" (format 25)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x51uy |] // "FSNQ" (format 26)
+let private indexCardinalitySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x51uy |] // "FSNQ" (format 26)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x52uy |] // "FSNR" (format 27)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -65,6 +66,7 @@ type private SnapshotFormat =
       FullTextTokenizers: bool
       FullTextStopwords: bool
       FullTextDocumentRules: bool
+      FullTextDocumentOrder: bool
       FullTextStopwordSources: bool
       TableStatistics: bool
       IndexCardinality: bool }
@@ -90,6 +92,7 @@ let private legacySnapshotFormat =
       FullTextTokenizers = false
       FullTextStopwords = false
       FullTextDocumentRules = false
+      FullTextDocumentOrder = false
       FullTextStopwordSources = false
       TableStatistics = false
       IndexCardinality = false }
@@ -154,8 +157,11 @@ let private partitionTablespaceSnapshotFormat =
 let private generatedForeignKeySnapshotFormat =
     { partitionTablespaceSnapshotFormat with GeneratedForeignKeyIndexes = true }
 
-let private currentSnapshotFormat =
+let private indexCardinalitySnapshotFormat =
     { generatedForeignKeySnapshotFormat with PreparedXaCatalogRefs = true; TableStatistics = true; IndexCardinality = true }
+
+let private currentSnapshotFormat =
+    { indexCardinalitySnapshotFormat with FullTextDocumentOrder = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -164,10 +170,12 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = indexCardinalitySnapshotMagic then
+        Some indexCardinalitySnapshotFormat
     elif header = tableStatisticsSnapshotMagic then
-        Some { currentSnapshotFormat with IndexCardinality = false }
+        Some { indexCardinalitySnapshotFormat with IndexCardinality = false }
     elif header = previousSnapshotMagic then
-        Some { currentSnapshotFormat with TableStatistics = false; IndexCardinality = false }
+        Some { indexCardinalitySnapshotFormat with TableStatistics = false; IndexCardinality = false }
     elif header = generatedForeignKeySnapshotMagic then
         Some generatedForeignKeySnapshotFormat
     elif header = partitionTablespaceSnapshotMagic then
@@ -1954,16 +1962,23 @@ let private decodeRuleTable rowCount (r: #IReader) =
         let stopwords = decodeStopwordPolicy r
         ({ Tokenizer = tokenizer; Stopwords = stopwords }: FullText.IndexingRules))
 
-let private encodeDocumentRules (w: Writer) rowId indexes =
+let private encodeFullTextDocuments (w: Writer) rowId indexes =
     for index, ruleIds in indexes do
-        match FullText.documentRules rowId index with
-        | Some rules -> w.WriteLenEncInt(Map.find rules ruleIds)
+        match FullText.documentSnapshotState rowId index with
+        | Some(rules, order) ->
+            w.WriteLenEncInt(Map.find rules ruleIds)
+            w.WriteLenEncInt(uint64 order)
         | None -> invalidOp "Persistence: missing full-text document rules"
 
 let private decodeDocumentRules (rules: FullText.IndexingRules[]) (r: #IReader) =
     match r.ReadLenEncInt() with
     | Some id when id < uint64 rules.Length -> rules.[int id]
     | _ -> failwith "Persistence: invalid full-text document rule reference"
+
+let private decodeDocumentOrder (r: #IReader) =
+    match r.ReadLenEncInt() with
+    | Some order when order < uint64 Int64.MaxValue -> int64 order
+    | _ -> failwith "Persistence: invalid full-text document order"
 
 let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : unit =
     writeStr w t.OriginalName
@@ -2041,7 +2056,7 @@ let private writeStore (s: FileStream) (store: Store) : unit =
                         w.WriteInt32LE(RowId.value rowId)
 
                     encodeRowBin w row
-                    encodeDocumentRules w rowId indexesWithRules
+                    encodeFullTextDocuments w rowId indexesWithRules
 
                     if w.Count >= (1 <<< 20) then
                         flush ()))
@@ -2136,11 +2151,18 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
             fullTextNames |> List.map (fun name -> name, decodeRuleTable rowCount r)
         else []
     let mutable documents = Map.empty
+    let mutable documentOrders = Map.empty
     let readRow rowId =
         let row = decodeRowBin r
         let rules =
             if format.FullTextDocumentRules then
-                ruleTables |> List.map (fun (name, rules) -> name, decodeDocumentRules rules r)
+                ruleTables |> List.map (fun (name, rules) ->
+                    let rules = decodeDocumentRules rules r
+                    if format.FullTextDocumentOrder then
+                        let order = decodeDocumentOrder r
+                        documentOrders <- documentOrders |> Map.change name (fun existing ->
+                            existing |> Option.defaultValue Map.empty |> Map.add rowId order |> Some)
+                    name, rules)
             elif format.FullTextTokenizers then
                 fullTextNames |> List.map (fun name ->
                     let tokenizer = decodeTokenizer r
@@ -2183,7 +2205,10 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
 
     let fullTextIndexes =
         restoreFullTextIndexesWithRules stopwords documents table
-        |> Map.map (fun name index -> FullText.withStopwordSource (sources |> Map.tryFind name |> Option.flatten) index)
+        |> Map.map (fun name index ->
+            index
+            |> FullText.restoreDocumentOrder (Map.tryFind name documentOrders |> Option.defaultValue Map.empty)
+            |> FullText.withStopwordSource (sources |> Map.tryFind name |> Option.flatten))
     reindexTableWithFullTextIndexes fullTextIndexes table
 
 /// Rejects a `snapshot.fsdb`/`.new` whose magic, claimed payload length, or

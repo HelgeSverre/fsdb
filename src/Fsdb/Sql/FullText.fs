@@ -134,19 +134,27 @@ type private Document =
     { Fields: Token[][]
       Rules: IndexingRules }
 
+[<Struct>]
+type private IndexedDocument =
+    { Content: Document
+      Order: int64 }
+
 type private PrefixPosting<'id when 'id: comparison> =
     { Rows: Map<'id, int>
       GramDocumentCount: int64 }
 
 type Index<'id when 'id: comparison> =
     private
-        { Documents: Map<'id, Document>
+        { Documents: Map<'id, IndexedDocument>
           Postings: Map<string, Map<'id, int>>
           PrefixPostings: Map<string, PrefixPosting<'id>>
           Collation: Collation
           Rules: IndexingRules
           StopwordSource: string option
-          StopwordReload: Lazy<StopwordPolicy> option }
+          StopwordReload: Lazy<StopwordPolicy> option
+          NextDocumentOrder: int64
+          DocumentOrderFollowsIds: bool
+          HasDocumentOrder: bool }
 
 /// Inspects cached rules without loading a remembered stopword source.
 let internal storedRules (index: Index<'id>) =
@@ -170,13 +178,15 @@ let internal deferStopwords reload (index: Index<'id>) =
 /// Query state is separate from the index maintained for future commits.
 type internal ReadView<'id when 'id: comparison> =
     private
-        { Documents: Map<'id, Document>
+        { Documents: Map<'id, IndexedDocument>
           Postings: Map<string, Map<'id, int>>
           PrefixPostings: Map<string, PrefixPosting<'id>>
           Collation: Collation
           Rules: IndexingRules
           DocumentCount: int
-          VisibleDocumentIds: Set<'id> option }
+          VisibleDocumentIds: Set<'id> option
+          DocumentOrderFollowsIds: bool
+          HasDocumentOrder: bool }
 
 let internal readView (index: Index<'id>) : ReadView<'id> =
     { Documents = index.Documents
@@ -185,7 +195,9 @@ let internal readView (index: Index<'id>) : ReadView<'id> =
       Collation = index.Collation
       Rules = activeRules index
       DocumentCount = index.Documents.Count
-      VisibleDocumentIds = None }
+      VisibleDocumentIds = None
+      DocumentOrderFollowsIds = index.DocumentOrderFollowsIds
+      HasDocumentOrder = index.HasDocumentOrder }
 
 let private intersectCandidates left right =
     match left, right with
@@ -343,7 +355,10 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       Collation = collation
       Rules = { Tokenizer = tokenizer; Stopwords = policy }
       StopwordSource = None
-      StopwordReload = None }
+      StopwordReload = None
+      NextDocumentOrder = 1L
+      DocumentOrderFollowsIds = true
+      HasDocumentOrder = true }
 
 let emptyIndex collation = emptyIndexWith StopwordPolicy.BuiltIn defaultTokenizer collation
 
@@ -385,7 +400,8 @@ let internal withWordLengths lengths (index: Index<'id>) =
 let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
     match Map.tryFind id index.Documents with
     | None -> index
-    | Some document ->
+    | Some indexed ->
+        let document = indexed.Content
         let tokens = indexedTokens document
         let words = tokens |> Array.groupBy _.Key
         let prefixes = documentPrefixes index.Collation document.Rules.Tokenizer tokens words
@@ -434,9 +450,14 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
             index.PrefixPostings
 
     { index with
-        Documents = Map.add id document index.Documents
+        Documents = Map.add id { Content = document; Order = index.NextDocumentOrder } index.Documents
         Postings = postings
-        PrefixPostings = prefixPostings }
+        PrefixPostings = prefixPostings
+        NextDocumentOrder = index.NextDocumentOrder + 1L
+        HasDocumentOrder = index.HasDocumentOrder || index.Documents.IsEmpty
+        DocumentOrderFollowsIds =
+            index.Documents.IsEmpty
+            || (index.DocumentOrderFollowsIds && id > fst (Map.maxKeyValue index.Documents)) }
 
 let internal addDocumentFieldsWithRules rules id texts (index: Index<'id>) =
     // Phrase positions retain tokens omitted from ngram postings.
@@ -445,7 +466,7 @@ let internal addDocumentFieldsWithRules rules id texts (index: Index<'id>) =
 
 let internal sameDocument id (left: Index<'id>) (right: Index<'id>) =
     match Map.tryFind id left.Documents, Map.tryFind id right.Documents with
-    | Some left, Some right -> obj.ReferenceEquals(left, right)
+    | Some left, Some right -> obj.ReferenceEquals(left.Content, right.Content)
     | _ -> false
 
 let internal mergeDocuments sourceRowIds (baseline: Index<'id>) (source: Index<'id>) (target: Index<'id>) =
@@ -453,13 +474,15 @@ let internal mergeDocuments sourceRowIds (baseline: Index<'id>) (source: Index<'
     else
         let targetId sourceId = Map.tryFind sourceId sourceRowIds |> Option.defaultValue sourceId
         let ids = Set.union (baseline.Documents |> Map.keys |> Set.ofSeq) (source.Documents |> Map.keys |> Set.ofSeq)
-        (target, ids)
-        ||> Set.fold (fun target id ->
-            if sameDocument id baseline source then target
-            else
-                match Map.tryFind id source.Documents with
-                | Some document -> addDocumentData (targetId id) document target
-                | None -> removeDocument (targetId id) target)
+        let changes = ids |> Seq.filter (fun id -> not (sameDocument id baseline source))
+                           |> Seq.map (fun id -> id, Map.tryFind id source.Documents)
+                           |> Seq.toList
+        let removed, written = changes |> List.partition (snd >> Option.isNone)
+        let target = removed |> List.fold (fun index (id, _) -> removeDocument (targetId id) index) target
+        written
+        |> List.choose (fun (id, document) -> document |> Option.map (fun value -> targetId id, value))
+        |> List.sortBy (snd >> _.Order)
+        |> List.fold (fun index (id, document) -> addDocumentData id document.Content index) target
 
 let addDocumentFields id texts (index: Index<'id>) =
     addDocumentFieldsWithRules (activeRules index) id texts index
@@ -471,13 +494,45 @@ let internal buildIndexWithStopwords policy tokenizer collation documents =
     |> Seq.fold (fun index (id, fields) -> addDocumentFields id fields index) (emptyIndexWith policy tokenizer collation)
 
 let internal documentRules id (index: Index<'id>) =
-    index.Documents |> Map.tryFind id |> Option.map _.Rules
+    index.Documents |> Map.tryFind id |> Option.map (fun document -> document.Content.Rules)
+
+let internal documentSnapshotState id (index: Index<'id>) =
+    index.Documents |> Map.tryFind id
+    |> Option.map (fun document ->
+        document.Content.Rules, (if index.HasDocumentOrder then document.Order else 0L))
+
+let internal restoreDocumentOrder order (index: Index<'id>) =
+    if index.Documents.IsEmpty then index
+    elif Map.isEmpty order || (order |> Map.forall (fun _ position -> position = 0L)) then
+        // Older snapshots preserve postings, without their relative write order.
+        { index with HasDocumentOrder = false }
+    else
+        let ordered =
+            index.Documents
+            |> Map.map (fun id document ->
+                match Map.tryFind id order with
+                | Some position when position > 0L && position < Int64.MaxValue -> { document with Order = position }
+                | _ -> invalidOp "Persistence: invalid full-text document order")
+        let positions = ordered |> Map.values |> Seq.map _.Order |> Seq.toArray
+        if (Array.distinct positions).Length <> positions.Length then
+            invalidOp "Persistence: repeated full-text document order"
+        { index with
+            Documents = ordered
+            NextDocumentOrder = 1L + Array.max positions
+            DocumentOrderFollowsIds = positions |> Array.pairwise |> Array.forall (fun (first, last) -> first < last) }
+
+let internal withDocumentOrderFrom (source: Index<'id>) (target: Index<'id>) =
+    { target with
+        Documents = target.Documents |> Map.map (fun id document -> { document with Order = source.Documents.[id].Order })
+        NextDocumentOrder = source.NextDocumentOrder
+        DocumentOrderFollowsIds = source.DocumentOrderFollowsIds
+        HasDocumentOrder = source.HasDocumentOrder }
 
 let internal rulesInUse (index: Index<'id>) =
     seq {
         yield storedRules index
         for KeyValue(_, document) in index.Documents do
-            yield document.Rules
+            yield document.Content.Rules
     }
     |> Seq.distinct
     |> Seq.toArray
@@ -550,7 +605,7 @@ let private booleanPostingRows (view: ReadView<'id>) (token: Token) =
             let length = runeLength token.Text
             rows
             |> Map.filter (fun id _ ->
-                match view.Documents.[id].Rules.Tokenizer with
+                match view.Documents.[id].Content.Rules.Tokenizer with
                 | Words _ -> true
                 | Ngrams size -> length >= size))
 
@@ -684,7 +739,7 @@ let private naturalClauseDocuments (view: ReadView<'id>) = function
     | NaturalPhrase words ->
         phraseCandidates view words
         |> Set.filter (fun id ->
-            view.Documents.[id].Fields |> Array.exists (fun field -> exactPhraseMatches view.Collation field words))
+            view.Documents.[id].Content.Fields |> Array.exists (fun field -> exactPhraseMatches view.Collation field words))
 
 /// Matching terms retain their row sets separately from query occurrence counts.
 /// Repeated query words increase MySQL's document frequency, not a row's TF.
@@ -1220,7 +1275,7 @@ let rec private evalTerm
 
         candidates
         |> Seq.choose (fun id ->
-            let fields = view.Documents.[id].Fields
+            let fields = view.Documents.[id].Content.Fields
             let matches =
                 match proximity with
                 | None -> fields |> Array.exists (fun tokens -> exactPhraseMatches view.Collation tokens words)
@@ -1328,7 +1383,14 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
 
         let frequencies = leaves nodes |> Seq.collect (snd >> keys) |> Seq.countBy id |> Map.ofSeq
 
-        if frequencies |> Map.forall (fun _ count -> count = 1) && not (hasRankAdjustments nodes) then
+        let tracksPostingBounds =
+            view.HasDocumentOrder
+            && (nodes |> List.exists (function _, BGroup _ -> true | _ -> false))
+            && (leaves nodes |> Seq.exists (function Must, BWord(_, true) -> true | _ -> false))
+
+        if not tracksPostingBounds
+           && (frequencies |> Map.forall (fun _ count -> count = 1))
+           && not (hasRankAdjustments nodes) then
             None
         else
             // A wildcard exclusion visits postings only if its group has matches.
@@ -1339,13 +1401,35 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                     | MustNot, BWord(word, true) -> frequencies.[NgramPrefix word.Key] > 1
                     | _ -> false)
 
-            let scope = if fullScope then None else candidateIds
+            let scope =
+                if tracksPostingBounds then view.VisibleDocumentIds
+                elif fullScope then None
+                else candidateIds
             let visits = Collections.Generic.Dictionary<NgramScoringKey, int>()
+            let mutable postingBounds = None
+
+            let documentBounds rows =
+                let order id = view.Documents.[id].Order
+                if view.DocumentOrderFollowsIds then
+                    order (fst (Map.minKeyValue rows)), order (fst (Map.maxKeyValue rows))
+                else
+                    rows |> Map.fold (fun (lower, upper) id _ ->
+                        let position = order id
+                        min lower position, max upper position) (Int64.MaxValue, 0L)
+
+            let outsideBounds lower upper = function
+                | ExactNgram key ->
+                    view.Postings
+                    |> Map.tryFind key
+                    |> Option.forall (fun rows ->
+                        let first, last = documentBounds rows
+                        first > upper || last < lower)
+                | NgramPrefix _ -> false
 
             let adjustmentSteps term id =
                 match term with
                 | BWord(word, true) ->
-                    indexedTokens view.Documents.[id]
+                    indexedTokens view.Documents.[id].Content
                     |> Seq.filter (prefixKeys view.Collation >> Array.contains word.Key)
                     |> Seq.distinctBy _.Key
                     |> Seq.truncate 2
@@ -1357,18 +1441,27 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 let steps = if current = -delta then adjustmentSteps term id else 1
                 Math.Clamp(current + steps * delta, -1, 1)
 
-            let rec matchTerm = function
+            let rec matchTerm isRequired = function
                 | BGroup children -> matchNodes children
                 | term ->
                     let found = keys term
-                    for key in found do
+                    let firstOutside =
+                        match isRequired, postingBounds with
+                        | true, Some(lower, upper) -> Array.tryFindIndex (outsideBounds lower upper) found
+                        | _ -> None
+                    // InnoDB counts the skipped gram's frequency before testing
+                    // its posting bounds, then stops at that gram.
+                    let visited = firstOutside |> Option.map (fun index -> Array.take (index + 1) found) |> Option.defaultValue found
+                    for key in visited do
                         match visits.TryGetValue key with
                         | true, count -> visits.[key] <- count + 1
                         | false, _ -> visits.Add(key, 1)
 
-                    let terms = Set.ofArray found
-                    evalTerm scope view term
-                    |> Map.map (fun _ _ -> { Terms = terms; Adjustment = 0 })
+                    if firstOutside.IsSome then Map.empty
+                    else
+                        let terms = Set.ofArray found
+                        evalTerm scope view term
+                        |> Map.map (fun _ _ -> { Terms = terms; Adjustment = 0 })
 
             and matchNodes nodes =
                 // Ordinary terms seed the group before required terms and exclusions.
@@ -1376,7 +1469,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 let required, excluded = filters |> List.partition (fun (op, _) -> op = Must)
 
                 let union matches (operator, term) =
-                    matchTerm term
+                    matchTerm false term
                     |> Map.fold (fun matches id incoming ->
                         matches
                         |> Map.change id (fun existing ->
@@ -1394,7 +1487,18 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                                        Adjustment = adjustment })) matches
 
                 let intersect first matches (_, term) =
-                    matchTerm term
+                    let requiredMatches =
+                        match term with
+                        | BWord(_, true) when tracksPostingBounds ->
+                            if not first && Map.isEmpty matches then Map.empty
+                            else
+                                // Required prefixes set query-wide posting bounds.
+                                // Leaving a group preserves those bounds for later phrases.
+                                postingBounds <- if first then None else Some(documentBounds matches)
+                                matchTerm true term
+                        | _ -> matchTerm true term
+
+                    requiredMatches
                     |> Map.fold (fun narrowed id incoming ->
                         match Map.tryFind id matches with
                         | Some current ->
@@ -1415,7 +1519,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 ||> List.fold (fun matches (_, term) ->
                     match term with
                     | BWord(_, true) when matches.IsEmpty -> matches
-                    | _ -> matchTerm term |> Map.fold (fun matches id _ -> Map.remove id matches) matches)
+                    | _ -> matchTerm false term |> Map.fold (fun matches id _ -> Map.remove id matches) matches)
 
             let scoreTerm id term =
                 let count = visits.[term]
@@ -1431,7 +1535,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 float rows.[id] * weight * weight
 
             matchNodes nodes
-            |> (if fullScope then restrictScores candidateIds else id)
+            |> (if fullScope || tracksPostingBounds then restrictScores candidateIds else id)
             |> Map.map (fun id matched -> float matched.Adjustment + (matched.Terms |> Seq.sumBy (scoreTerm id)))
             // A rank modifier can cancel the final relevance. MATCH then returns zero.
             |> Map.filter (fun _ score -> score <> 0.0)
@@ -1643,7 +1747,7 @@ let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: st
         firstPass
         |> Map.toArray
         |> Array.collect (fun (id, _) ->
-            let document = view.Documents.[id]
+            let document = view.Documents.[id].Content
             // Seed words are extracted again using the current length settings.
             let rules =
                 match view.Rules.Tokenizer with

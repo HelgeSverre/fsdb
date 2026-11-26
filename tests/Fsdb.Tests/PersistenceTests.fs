@@ -2488,6 +2488,34 @@ let tests =
               verify replayed
               Expect.equal replayed.Catalog.[defaultDatabase].["docs"].RowsArray.Length 4 "WAL tail survives recovery"
 
+          testCase "ngram posting bounds survive indexed updates and recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+              handle session "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin" |> ignore
+              handle session "INSERT INTO docs VALUES(1,'서울역'),(2,'서울역'),(3,'快乐'),(4,'京都')" |> ignore
+              let check expected (store: Store) =
+                  let table = store.Catalog.[defaultDatabase].["docs"]
+                  let ids =
+                      Fsdb.FullText.booleanScores table.FullTextIndexes.["ft"] "+서울역 (+快乐 +京*)"
+                      |> Map.keys
+                      |> Seq.map (fun rowId -> (table.RowsArray.TryFind rowId |> Option.get).[0])
+                      |> Seq.toList
+                  Expect.equal ids expected "the required phrase uses the index's document order"
+              check [] store
+              snapshotNow dir store
+              handle session "UPDATE docs SET body='서울역 서울역' WHERE id=1" |> ignore
+              let expected = [ VInt 1L; VInt 2L ]
+              check expected store
+              handle session "ALTER TABLE docs COMMENT='indexed documents'" |> ignore
+              check expected store
+              let replayed = load dir
+              check expected replayed
+              snapshotNow dir replayed
+              load dir |> check expected
+
           testCase "scheduled events execute after WAL recovery"
           <| fun _ ->
               let dir = tempDataDir ()

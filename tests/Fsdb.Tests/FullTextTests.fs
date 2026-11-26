@@ -342,6 +342,32 @@ let tests =
                   let scores = tryFlatBooleanScoresDictionary index query |> Option.get
                   Expect.equal (Seq.toList scores.Keys) [ 2 ] "dictionary candidates exclude the zero score"
 
+          testCase "required ngram prefixes keep their posting bounds across groups"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_bin" |> Option.get
+              let build documents =
+                  documents
+                  |> List.mapi (fun index text -> index + 1, [ text ])
+                  |> buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation
+              let ids = Map.keys >> Seq.toList
+              let outside = build [ "快乐"; "京都"; "서울역"; "大阪" ]
+              let surrounding = build [ "서울역"; "快乐"; "京都"; "서울역" ]
+              let inside = build [ "快乐"; "서울역"; "快乐"; "京都" ]
+              for query in [ "+서울역 (+快乐 +京*)"; "+서울역 ((+快乐 +京*))" ] do
+                  Expect.isEmpty (booleanScores outside query) "the required phrase's postings lie beyond the retained bounds"
+                  Expect.equal (booleanScores surrounding query |> ids) [ 1; 4 ] "the entire overlapping posting remains available"
+                  Expect.equal (booleanScores inside query |> ids) [ 2 ] "a posting inside the bounds remains available"
+                  Expect.isEmpty (booleanScoresWithin (Set.singleton 3) outside query) "outer candidates retain the same group bounds"
+                  Expect.equal (booleanScoresWithin (Set.singleton 4) surrounding query |> ids) [ 4 ] "candidate narrowing follows the posting check"
+              for query in [ "서울역 (+快乐 +京*)"; "+서울역 (+京* +快乐)"; "+서울역 (+快乐 +京都)" ] do
+                  Expect.equal (booleanScores outside query |> ids) [ 3 ] query
+
+              let query = "+서울역 (+快乐 +京*)"
+              let original = build [ "서울역"; "서울역"; "快乐"; "京都" ]
+              Expect.isEmpty (booleanScores original query) "the original phrase posting is disjoint"
+              let updated = addDocument 1 "서울역 서울역" original
+              Expect.equal (booleanScores updated query |> ids) [ 1; 2 ] "the updated document extends the posting across the bounds"
+
           testCase "general Unicode ngrams retain halfwidth voicing marks in relevance"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 6; Stopwords = StopwordPolicy.BuiltIn }

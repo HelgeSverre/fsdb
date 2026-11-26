@@ -8928,9 +8928,12 @@ let private reindexAfterAlter size lengths settings actions preserveFullText bef
             fullTextKeyGroups before
             |> List.tryHead
             |> Option.bind (fun group -> before.FullTextIndexes |> Map.tryFind group.Name)
-        let sourceFor name =
+        let retainedSource name =
             sourceNames |> Map.tryFind name
             |> Option.bind (fun sourceName -> before.FullTextIndexes |> Map.tryFind sourceName)
+
+        let sourceFor name =
+            retainedSource name
             |> Option.orElse inheritedIndex
         let settingsFor name =
             sourceFor name |> Option.map FullText.stopwordBuildSettings |> Option.defaultValue settings
@@ -8939,6 +8942,7 @@ let private reindexAfterAlter size lengths settings actions preserveFullText bef
             buildFullTextIndexesWithStopwords (fun name -> (settingsFor name).Policy) rulesFor after
             |> Map.map (fun name index ->
                 let index = index |> FullText.withNgramTokenSize size |> FullText.withWordLengths lengths |> FullText.withStopwordSource (settingsFor name).Source
+                let index = retainedSource name |> Option.fold (fun target source -> FullText.withDocumentOrderFrom source target) index
                 sourceFor name
                 |> Option.map (fun source -> FullText.withStopwordStateFrom source index)
                 |> Option.defaultValue index)

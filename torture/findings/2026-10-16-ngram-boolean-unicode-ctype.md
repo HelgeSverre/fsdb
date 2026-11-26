@@ -243,3 +243,29 @@ For example, the fresh index returned eight IDs for `東京 東*`, and
 the optimized index returned eleven. The membership changes were
 repeatable across the insertion orders, and the number of score
 differences ranged from 60 to 177. Cache-dependent results remain open.
+
+## Required prefix bounds across Boolean groups
+
+In `+서울역 (+快乐 +京*)`, the required prefix intersects the group's
+existing `快乐` matches and leaves their document-ID bounds in the
+query state. A later required phrase skips any posting entirely outside
+those bounds. An overlapping posting remains available in full. Putting
+`+京*` first in the group resets the bounds. Making the outer phrase
+optional lets it run before the group can set them.
+[InnoDB full-text query source](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc).
+
+After full-text optimization on MySQL 8.4.11, the nested-group matrix
+matches in both membership and relevance. Each of the binary and
+accent-insensitive optimized bigram corpora went from nine differences
+to zero across 1,934 queries. The binary trigram corpus still has one
+query with a membership and relevance difference around a zero score.
+
+Changing an indexed document can move its position in the full-text
+index while keeping its primary key. Fsdb preserves this position
+through metadata-only ALTER, checkpoints, and WAL replay. Snapshots from
+older versions continue to use the previous lookup behavior until the
+index is rebuilt or emptied because they lack the original document
+order. Fsdb uses one posting per gram. InnoDB can split a gram across
+multiple on-disk nodes and keep separate in-memory postings, so the
+document bounds verified here do not establish parity across those
+storage states.
