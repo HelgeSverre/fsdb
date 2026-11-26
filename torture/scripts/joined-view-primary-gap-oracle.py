@@ -1199,6 +1199,73 @@ def check(port, mysql):
             expect("drop keeps its earlier reservation", dropping.result(2), 0)
             expect("later DDL sees the missing table", altering.result(2), 1146)
 
+    savepoint_setup = metadata_setup + ("INSERT INTO sibling VALUES (1)",)
+    for earlier, later, drop in (
+        (None, "SELECT id FROM gate", 0),
+        (None, "SELECT id FROM gate FOR UPDATE", 0),
+        (None, "UPDATE gate SET v=11 WHERE id=1", 0),
+        ("SELECT 1", "SELECT id FROM gate FOR UPDATE", 0),
+        ("SELECT id FROM sibling", "SELECT id FROM gate", 0),
+        ("SELECT id FROM sibling LIMIT 0", "SELECT id FROM gate FOR UPDATE", TIMEOUT),
+        (
+            "SELECT id FROM sibling",
+            "SELECT id FROM gate WHERE id=99 FOR UPDATE",
+            TIMEOUT,
+        ),
+        ("SELECT id FROM sibling", "UPDATE gate SET v=11 WHERE id=99", TIMEOUT),
+        ("SELECT id FROM sibling FOR UPDATE", "SELECT id FROM gate", TIMEOUT),
+        ("UPDATE sibling SET id=id WHERE id=1", "SELECT id FROM gate", TIMEOUT),
+        ("SELECT id FROM gate", "SELECT id FROM gate", TIMEOUT),
+    ):
+        with fixture(port, schema, mysql, savepoint_setup) as (
+            _,
+            _,
+            holder,
+            ddl,
+            probe,
+        ):
+            execute(ddl, "SET SESSION lock_wait_timeout=1")
+            execute(holder, "BEGIN")
+            if earlier:
+                execute(holder, earlier)
+            execute(holder, "SAVEPOINT before_gate")
+            execute(holder, later)
+            execute(holder, "ROLLBACK TO SAVEPOINT before_gate")
+            if earlier is None:
+                expect(
+                    f"{later} before storage joined leaves the row writable",
+                    rolled_back_outcome(probe, "UPDATE gate SET v=12 WHERE id=1"),
+                    1,
+                )
+            expect(
+                f"savepoint after {earlier}, then {later}",
+                outcome(ddl, "DROP TABLE gate"),
+                drop,
+            )
+            execute(holder, "ROLLBACK")
+
+    for earlier, expected in (
+        (None, 22),
+        ("SELECT 1", 22),
+        ("SELECT id FROM sibling", 10),
+    ):
+        with fixture(port, schema, mysql, savepoint_setup) as (_, admin, holder, _, _):
+            execute(holder, "BEGIN")
+            if earlier:
+                execute(holder, earlier)
+            execute(holder, "SAVEPOINT before_read")
+            expect(
+                "first read before rollback", scalar(holder, "SELECT v FROM gate"), 10
+            )
+            execute(admin, "UPDATE gate SET v=22 WHERE id=1")
+            execute(holder, "ROLLBACK TO SAVEPOINT before_read")
+            expect(
+                f"read view after savepoint with {earlier}",
+                scalar(holder, "SELECT v FROM gate"),
+                expected,
+            )
+            execute(holder, "ROLLBACK")
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 

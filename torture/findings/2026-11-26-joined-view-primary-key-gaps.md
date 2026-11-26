@@ -395,13 +395,30 @@ claim and released it on rollback.
 
 MySQL and both Fsdb storage modes passed all 390 maintained checks.
 
-The remaining differences include XA and statement failures. A query
-with an unknown column held a metadata lock on MySQL and released it on
-Fsdb. When a transaction only read a table after a savepoint, rollback
-to the savepoint let MySQL drop that table while Fsdb kept the claim
-until transaction end. InnoDB checks whether the transaction still has
-engine locks before it releases metadata after a savepoint rollback.
+The remaining differences include XA and statement failures. MySQL
+retains metadata for an unknown or ambiguous column and a duplicate
+key error in the audited statements. Fsdb releases those claims.
+Both engines allow DDL after the tested syntax and missing-table errors.
+
+#### Metadata locks at savepoints
+
+Both engines release metadata claims acquired after a savepoint when
+the storage engine has no locks to preserve. Claims the transaction
+already held at the savepoint survive. A savepoint established before
+the first storage-engine access can also roll back the engine work
+that followed. In that case a subsequent `REPEATABLE READ` statement
+gets a fresh read view. A view established before the savepoint stays
+in use.
+
+An ordinary read can enlist the engine even when it has `LIMIT 0` or
+finds no rows. An empty locking read and a no-op update can hold engine
+locks in an already active transaction. The audited savepoint rollback
+keeps the later metadata claims in those cases.
 [MySQL 8.4.11 savepoint implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/handler/ha_innodb.cc#L6306-L6321).
+
+MySQL and both Fsdb storage modes matched all 434 maintained checks.
+A separate matrix matched 55 savepoint schedules. A WAL restart
+confirmed the later commit survived and the rolled-back rows stayed absent.
 
 #### Metadata queue order
 

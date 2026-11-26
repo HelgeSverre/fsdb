@@ -2668,6 +2668,7 @@ let private beginTransaction kind characteristics (readOnly: bool) (session: Ses
                       Isolation = isolation
                       ReadOnly = readOnly
                       Seeded = false
+                      EngineAccess = UnusedEngine
                       Savepoints = Map.empty
                       NextSavepointSeq = 0
                       Xa = None } }
@@ -3164,7 +3165,10 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
                                   Catalog = if tx.Seeded then tx.Snapshot.Catalog else Map.empty
                                   PendingEventCount = eventCount
                                   RollbackWork = Storage.transactionRollbackWork tx.Snapshot
-                                  GapLocks = Storage.transactionGapLocks tx.Snapshot }
+                                  GapLocks = Storage.transactionGapLocks tx.Snapshot
+                                  EngineActive = tx.EngineAccess <> UnusedEngine || eventCount > 0
+                                                 || Storage.transactionLockStructCount tx.Snapshot <> 0UL
+                                  MetadataTables = TableLocks.transactionAccesses session.Store session.ConnectionId }
                                 tx.Savepoints
                         NextSavepointSeq = seq + 1 } },
         Affected 0UL
@@ -3173,14 +3177,24 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
 let private rollbackToSavepoint (name: string) (session: Session) : Session * QueryResult =
     match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
     | Some(tx, savepoint) ->
-        Storage.releaseLaterGapLocks tx.Snapshot savepoint.GapLocks
+        let resetEngine = tx.Xa.IsNone && not savepoint.EngineActive
+        let engineLocked = tx.EngineAccess = LockedEngine || Storage.transactionLockStructCount tx.Snapshot <> 0UL
+                           || Storage.transactionRollbackWork tx.Snapshot > 0L
         // Real MySQL never rolls back a burned AUTO_INCREMENT id — not even
         // a savepoint rollback (`bumpAutoIncrementsInto`'s doc covers the
         // full-ROLLBACK case, which is a separate code path from this one).
         // `catalog` is the savepoint's own stale copy of every `NextAutoId`,
         // so bump it back up to whatever this transaction ran ahead to
         // since, before wholesale-replacing the snapshot's catalog with it.
-        if savepoint.Seeded then
+        if resetEngine then
+            if tx.Seeded then
+                Storage.bumpAutoIncrementsIntoChanged session.Store tx.BaseCatalog tx.Snapshot.Catalog
+            Storage.releaseTransactionLocks tx.Snapshot
+            removeTransactionView session
+        else
+            Storage.releaseLaterGapLocks tx.Snapshot savepoint.GapLocks
+
+        if not resetEngine && savepoint.Seeded then
             let catalog = Storage.bumpAutoIncrements tx.Snapshot.Catalog savepoint.Catalog
             Storage.setCatalog tx.Snapshot catalog
             Storage.restoreTransactionRollbackWork tx.Snapshot savepoint.RollbackWork
@@ -3192,17 +3206,26 @@ let private rollbackToSavepoint (name: string) (session: Session) : Session * Qu
                 if buffer.Count > savepoint.PendingEventCount then
                     buffer.RemoveRange(savepoint.PendingEventCount, buffer.Count - savepoint.PendingEventCount))
 
+        if tx.Xa.IsNone && (resetEngine || not engineLocked) then
+            TableLocks.releaseLaterTransactionAccess session.Store session.ConnectionId savepoint.MetadataTables
+
         // Real MySQL also destroys every savepoint established *after* the
         // one rolled back to — the named savepoint itself survives (a
         // second `ROLLBACK TO` naming it again is legal).
         let survivors = tx.Savepoints |> Map.filter (fun _ candidate -> candidate.Sequence <= savepoint.Sequence)
 
-        { session with
-            Tx =
-                Some
-                    { tx with
-                        BaseCatalog = savepoint.BaseCatalog
-                        Savepoints = survivors } },
+        let restored =
+            if resetEngine then
+                { tx with
+                    Snapshot = Storage.beginTransactionContext session.Store
+                    BaseCatalog = Map.empty
+                    Seeded = false
+                    EngineAccess = UnusedEngine
+                    Savepoints = survivors }
+            else
+                { tx with BaseCatalog = savepoint.BaseCatalog; Savepoints = survivors }
+
+        { session with Tx = Some restored },
         Affected 0UL
     | None -> session, savepointNotFound name
 
@@ -3774,6 +3797,24 @@ let private isReplicationUnsafe statement =
         | _ -> false)
         statement
 
+let private trackTableEngineAccess stmt (accesses: TableLocks.Access list) (session: Session) =
+    match session.Tx with
+    | Some tx when tx.EngineAccess <> LockedEngine && retainsTransactionAfterStatement session ->
+        let rowAccess, locking =
+            let locks (select: SelectStmt) = tx.Isolation = Serializable || not select.Locking.IsEmpty
+            match stmt with
+            | Select select -> true, locks select
+            | Union(first, rest, _, _, _) -> true, locks first || List.exists (snd >> locks) rest
+            | Do _ -> true, false
+            | _ -> isDataChangeStatement stmt, true
+        if rowAccess && (locking || tx.EngineAccess = UnusedEngine)
+           && (accesses |> List.exists (fun access ->
+            Storage.tableSnapshot tx.Snapshot access.Database access.Table |> Result.isOk)) then
+            let kind = if locking then LockedEngine else ReadEngine
+            { session with Tx = Some { tx with EngineAccess = kind } }
+        else session
+    | _ -> session
+
 let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Statement) : Session * QueryResult =
     let store = Session.currentStore session
     let database = session.Database |> Option.defaultValue defaultDatabase
@@ -3841,6 +3882,7 @@ let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Stateme
                     wroteTransactional
                     (isReplicationUnsafe stmt)
                     executed
+                |> trackTableEngineAccess stmt accesses
 
         executed, result
 

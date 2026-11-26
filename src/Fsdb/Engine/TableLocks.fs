@@ -486,18 +486,30 @@ let private retainTransactionAccess owner (manager: Manager) physical =
             if tables.Add key then
                 (stateFor manager key).TransactionReaders.Add owner |> ignore
 
-let internal releaseTransactionAccess store owner =
+let internal transactionAccesses store owner =
+    let manager = managerFor store
+    lock manager.SyncRoot (fun () ->
+        match manager.TransactionTables.TryGetValue owner with
+        | false, _ -> Set.empty
+        | true, tables -> Set.ofSeq tables)
+
+let internal releaseLaterTransactionAccess store owner retained =
     let manager = managerFor store
     lock manager.SyncRoot (fun () ->
         match manager.TransactionTables.TryGetValue owner with
         | false, _ -> ()
         | true, tables ->
-            for key in tables do
+            let released = tables |> Seq.filter (fun key -> not (Set.contains key retained)) |> Seq.toArray
+            for key in released do
+                tables.Remove key |> ignore
                 let state = manager.Tables.[key]
                 state.TransactionReaders.Remove owner |> ignore
                 removeIdleState manager key state
-            manager.TransactionTables.Remove owner |> ignore
-            Monitor.PulseAll manager.SyncRoot)
+            if tables.Count = 0 then manager.TransactionTables.Remove owner |> ignore
+            if released.Length > 0 then Monitor.PulseAll manager.SyncRoot)
+
+let internal releaseTransactionAccess store owner =
+    releaseLaterTransactionAccess store owner Set.empty
 
 let internal withMetadataWrite timeout store owner targets accesses body =
     let manager = managerFor store

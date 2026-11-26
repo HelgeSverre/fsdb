@@ -292,7 +292,9 @@ type Savepoint =
       Catalog: Catalog
       PendingEventCount: int
       RollbackWork: int64
-      GapLocks: Storage.RowLockStripe list }
+      GapLocks: Storage.RowLockStripe list
+      EngineActive: bool
+      MetadataTables: Set<string> }
 
 type TransportMetrics =
     { mutable BytesReceived: int64
@@ -339,6 +341,8 @@ let private emptyTransactionTracking =
       Characteristics = ""
       CharacteristicsVersion = 0L }
 
+type TransactionEngineAccess = UnusedEngine | ReadEngine | LockedEngine
+
 /// One open transaction. `Snapshot` is private until COMMIT. `BaseCatalog`
 /// distinguishes its concrete changes from visible rows: fixed views retain
 /// one base, while statement-scoped isolation replaces both when it refreshes.
@@ -349,6 +353,7 @@ type Transaction =
       ReadOnly: bool
       /// Set after the first database statement seeds a repeatable-read view.
       Seeded: bool
+      EngineAccess: TransactionEngineAccess
       /// Sequence numbers preserve establishment order independently of writes.
       Savepoints: Map<string, Savepoint>
       /// Monotonic and never reused after a savepoint is dropped.

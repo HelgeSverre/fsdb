@@ -1074,6 +1074,36 @@ let tests =
               | Err(1146, _) -> ()
               | actual -> failtestf "new reader must see the drop, got %A" actual
 
+          testCase "savepoint rollback releases only eligible table metadata claims"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for earlier, later, dropWaits in
+                  [ None, "SELECT id FROM gate FOR UPDATE", false
+                    Some "SELECT id FROM sibling", "SELECT id FROM gate", false
+                    Some "SELECT id FROM sibling", "SELECT id FROM gate FOR UPDATE", true ] do
+                  let rows = ResultSet([ "id" ], [ [ Some "1" ] ])
+                  let store = Fsdb.Storage.create ()
+                  let admin = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY)" (Affected 0UL)
+                  let admin = run admin "INSERT INTO gate VALUES (1)" (Affected 1UL)
+                  let admin = run admin "CREATE TABLE sibling(id INT PRIMARY KEY)" (Affected 0UL)
+                  let admin = run admin "INSERT INTO sibling VALUES (1)" (Affected 1UL)
+                  let admin = run admin "SET SESSION lock_wait_timeout=1" (Affected 0UL)
+                  let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let holder = earlier |> Option.map (fun sql -> run holder sql rows) |> Option.defaultValue holder
+                  let holder = run holder "SAVEPOINT before_gate" (Affected 0UL)
+                  let holder = run holder later rows
+                  let holder = run holder "ROLLBACK TO SAVEPOINT before_gate" (Affected 0UL)
+                  try
+                      match dropWaits, handle admin "DROP TABLE gate" |> snd with
+                      | false, Affected 0UL | true, Err(1205, _) -> ()
+                      | expected, actual -> failtestf "dropWaits=%b with %A and %s: %A" expected earlier later actual
+                  finally
+                      run holder "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "serializable primary ranges ignore snapshots of replaced tables"
           <| fun _ ->
               let run session sql expected =
