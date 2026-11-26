@@ -18597,11 +18597,11 @@ let tests =
                     runDefault store "CREATE TABLE hinted_other(id INT PRIMARY KEY,v INT,KEY ix_v(v))" |> ignore
                     match runDefault store "UPDATE hinted_name h JOIN hinted_other o USE INDEX(no_such_index) ON o.v=h.v SET h.v=1" with
                     | Err(1176, message) ->
-                        Expect.equal message "Key 'no_such_index' doesn't exist in table 'hinted_other'" "joined UPDATE validates the key"
+                        Expect.equal message "Key 'no_such_index' doesn't exist in table 'o'" "joined UPDATE uses the table alias"
                     | other -> failtestf "expected missing joined UPDATE key error, got %A" other
                     match runDefault store "DELETE h FROM hinted_name h JOIN hinted_other o USE INDEX(no_such_index) ON o.v=h.v" with
                     | Err(1176, message) ->
-                        Expect.equal message "Key 'no_such_index' doesn't exist in table 'hinted_other'" "joined DELETE validates the key"
+                        Expect.equal message "Key 'no_such_index' doesn't exist in table 'o'" "joined DELETE uses the table alias"
                     | other -> failtestf "expected missing joined DELETE key error, got %A" other
 
                 testCase "table index hints control index ordering"

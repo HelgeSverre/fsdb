@@ -1318,7 +1318,10 @@ Other set-operation compositions and layered security contexts remain open.
 now requires SELECT on the view when it serves as a read source. Naming a
 join view as a delete target returns 1395, and naming a read-only view
 returns 1288. A leading CTE now remains bound, including when it shadows
-a stored relation. [Mergeable single-table view targets](torture/findings/2026-11-25-joined-delete-view-targets.md#writable-target-follow-up)
+a stored relation. [Target binding](torture/findings/2026-11-26-joined-delete-binding.md)
+now rejects invalid targets before binding the outer `ON`, `USING`, and
+WHERE clauses, while preserving earlier source errors.
+[Mergeable single-table view targets](torture/findings/2026-11-25-joined-delete-view-targets.md#writable-target-follow-up)
 now carry physical row identity through nested projections, computed
 columns, and multiple targets. The audited delete waits for a competing
 base-row writer and rechecks view visibility after the wait. A view layer
@@ -1328,7 +1331,10 @@ score. A [bound integer primary key](torture/findings/2026-11-25-joined-delete-v
 now avoids locking disjoint base rows. The audited cases cover a literal on
 the view column and an equality propagated from its joined table. Missing
 keys still claim existing rows to wait for primary-key moves.
-Temporary-table shadowing and broader lock narrowing remain open.
+[Mixed permanent and temporary sources](torture/findings/2026-11-26-joined-delete-binding.md#remaining-view-cases)
+still diverge when a temporary table shadows the base table reached through
+a view. Joined DELETE can return 1146, and joined UPDATE can write the
+temporary row instead of the permanent row. Broader lock narrowing remains open.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
 now has a native MySQL contract and fsdb regression: duplicate derived rows

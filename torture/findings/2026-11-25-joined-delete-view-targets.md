@@ -34,9 +34,9 @@ even when a stored table or view has the same name. The regressions pin
 those errors, required and missing grants, both supported DELETE
 spellings, and preservation of the base rows after a refusal.
 Writable single-table view targets in multi-table DELETE still
-returned 1146 on the baseline when their rows matched. MySQL's precedence
-when both the target and the JOIN condition are invalid still needs
-separate coverage.
+returned 1146 on the baseline when their rows matched. The
+[target-binding follow-up](2026-11-26-joined-delete-binding.md)
+covers errors when both the target and the JOIN condition are invalid.
 
 ## Writable target follow-up
 

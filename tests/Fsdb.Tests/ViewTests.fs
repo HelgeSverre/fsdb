@@ -67,23 +67,60 @@ let tests =
                     "CREATE VIEW delete_joined AS SELECT l.id FROM delete_left l JOIN delete_right r ON l.id=r.id"
                     "CREATE VIEW delete_layered AS SELECT id FROM delete_joined"
                     "CREATE VIEW delete_outer AS SELECT l.id FROM delete_left l LEFT JOIN delete_right r ON l.id=r.id"
-                    "CREATE ALGORITHM=TEMPTABLE VIEW delete_materialized AS SELECT id FROM delete_left" ] do
+                    "CREATE ALGORITHM=TEMPTABLE VIEW delete_materialized AS SELECT id FROM delete_left"
+                    "CREATE VIEW delete_writable AS SELECT id FROM delete_left"
+                    "CREATE TABLE delete_invalid_base(id INT)"
+                    "CREATE VIEW delete_invalid AS SELECT id FROM delete_invalid_base"
+                    "DROP TABLE delete_invalid_base" ] do
                   expectOk (run store sql) sql
 
               for sql, expected in
                   [ "DELETE v FROM delete_joined v JOIN delete_right r ON r.id=v.id", Err(1395, "Can not delete from join view 'fsdb.delete_joined'")
                     "DELETE v FROM delete_right r JOIN delete_layered v ON r.id=v.id WHERE 1=0", Err(1395, "Can not delete from join view 'fsdb.delete_layered'")
                     "DELETE v FROM delete_right r JOIN delete_joined v ON r.id=v.id WHERE missing=0", Err(1395, "Can not delete from join view 'fsdb.delete_joined'")
+                    "DELETE r,v FROM delete_right r JOIN delete_joined v ON r.id=v.missing", Err(1395, "Can not delete from join view 'fsdb.delete_joined'")
+                    "DELETE FROM v USING delete_layered v JOIN delete_right r USING(missing)", Err(1395, "Can not delete from join view 'fsdb.delete_layered'")
+                    "DELETE v FROM delete_joined v JOIN (delete_right r JOIN delete_left l ON r.missing=l.id) ON TRUE", Err(1395, "Can not delete from join view 'fsdb.delete_joined'")
+                    "DELETE v,unknown_target FROM delete_joined v JOIN delete_right r ON r.id=v.missing", Err(1109, "Unknown table 'unknown_target' in MULTI DELETE")
+                    "WITH bad AS (SELECT missing FROM delete_right) DELETE unknown_target,v FROM delete_joined v JOIN bad b ON TRUE",
+                        Err(1109, "Unknown table 'unknown_target' in MULTI DELETE")
+                    "DELETE v FROM delete_joined v JOIN delete_missing r ON v.missing=r.id", Err(1146, "Table 'fsdb.delete_missing' doesn't exist")
+                    "DELETE v FROM delete_joined v JOIN (SELECT missing FROM delete_right) d ON d.missing=v.id", Err(1054, "Unknown column 'missing' in 'field list'")
+                    "DELETE v FROM delete_joined v JOIN delete_invalid r ON r.id=v.missing", Err(1356, invalidViewError "fsdb" "delete_invalid" |> snd)
+                    "DELETE v FROM delete_joined v JOIN delete_right r FORCE INDEX(missing) ON r.id=v.missing", Err(1176, "Key 'missing' doesn't exist in table 'r'")
+                    "DELETE v FROM delete_writable v JOIN delete_right r ON r.id=v.missing", Err(1054, "Unknown column 'v.missing' in 'on clause'")
                     "DELETE v FROM delete_right r JOIN delete_outer v ON r.id=v.id", Err(1288, "The target table v of the DELETE is not updatable")
+                    "DELETE v FROM delete_right r JOIN delete_outer v ON r.id=v.missing", Err(1288, "The target table v of the DELETE is not updatable")
+                    "DELETE y,x FROM delete_joined x JOIN delete_outer y ON TRUE", Err(1395, "Can not delete from join view 'fsdb.delete_joined'")
+                    "DELETE x,y FROM delete_outer y JOIN delete_joined x ON TRUE", Err(1288, "The target table y of the DELETE is not updatable")
                     "DELETE v FROM delete_right r JOIN delete_materialized v ON r.id=v.id", Err(1288, "The target table v of the DELETE is not updatable")
+                    "DELETE d FROM delete_right r JOIN (SELECT id FROM delete_left) d ON r.missing=d.id", Err(1288, "The target table d of the DELETE is not updatable")
                     "WITH delete_joined AS (SELECT id FROM delete_left) DELETE v FROM delete_right r JOIN delete_joined v ON r.id=v.id",
                         Err(1288, "The target table v of the DELETE is not updatable")
+                    "EXPLAIN DELETE v FROM delete_joined v JOIN delete_right r ON r.id=v.missing", Err(1395, "Can not delete from join view 'fsdb.delete_joined'")
                     "WITH delete_left AS (SELECT id FROM delete_right) DELETE FROM delete_left WHERE id=1",
                         Err(1288, "The target table delete_left of the DELETE is not updatable") ] do
                   Expect.equal (run store sql) expected sql
 
               Expect.equal (rows store "SELECT id FROM delete_left") [ [ Some "1" ] ] "the left base row remains"
               Expect.equal (rows store "SELECT id FROM delete_right") [ [ Some "1" ] ] "the right base row remains"
+
+              let session, _ = Fsdb.QueryHandler.handle (Fsdb.Session.create 1 store) "USE fsdb"
+              match Fsdb.QueryHandler.prepareStatementForSession session "DELETE v FROM delete_joined v JOIN delete_right r ON r.id=v.missing" with
+              | Error(1395, _) -> ()
+              | other -> failtestf "expected PREPARE to reject the join view target, got %A" other
+
+              let mutable calls = 0
+              let registry =
+                  Fsdb.Functions.builtins
+                  |> Fsdb.Functions.registerScalar "TOUCH" (fun _ ->
+                      calls <- calls + 1
+                      Fsdb.Value.VInt 1L)
+              let result =
+                  TestSupport.Sql.execute store registry
+                      "DELETE v FROM delete_joined v JOIN (SELECT TOUCH(id) AS n FROM delete_right) r ON r.n=1"
+              Expect.equal result (Err(1395, "Can not delete from join view 'fsdb.delete_joined'")) "derived source binds before target rejection"
+              Expect.equal calls 0 "binding the source does not call its custom function"
 
           testCase "joined DELETE maps nested view projections to distinct base rows"
           <| fun _ ->

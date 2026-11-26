@@ -10522,7 +10522,7 @@ and private validateTableIndexHints (tableRef: TableRef) (table: Table) : Result
         (table.Indexes |> List.exists (fun index -> equalsIgnoreCase index.Name name))
         || (equalsIgnoreCase name "PRIMARY" && not (Storage.primaryKeyColumns table).IsEmpty)
 
-    validateIndexHintNames tableRef table.OriginalName known
+    validateIndexHintNames tableRef (tableRef.Alias |> Option.defaultValue table.OriginalName) known
 
 /// Resolves one `TableRef` (a real table, or `information_schema`'s virtual
 /// one) to its columns and rows — the one place both the base `FROM` and
@@ -26132,6 +26132,88 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
         | Ok(Select select) -> updatableViewOfSelect store view select
         | _ -> None
 
+let private bindJoinedDeleteTargetNames dbName (delete: DeleteStmt) =
+    let cteNames =
+        (currentCteScope () |> Map.keys |> Set.ofSeq, delete.Ctes)
+        ||> List.fold (fun names cte -> Set.add (cte.CteName.ToLowerInvariant()) names)
+    if delete.Joins.IsEmpty then Ok(cteNames, [])
+    else
+        let from = FromTable delete.From
+        let sources =
+            (from :: (delete.Joins |> List.map _.Table))
+            |> List.collect FromItem.leaves
+            |> List.choose (fun source ->
+                FromItem.tryQualifier source
+                |> Option.map (fun qualifier -> qualifier, source))
+
+        validateRelationNames dbName cteNames delete.Ctes (Some from) delete.Joins
+        |> Result.bind (fun () ->
+            let known = sources |> List.map (fun (name, _) -> name.ToLowerInvariant()) |> Set.ofList
+            match delete.Targets |> List.tryFind (fun name -> not (Set.contains (name.ToLowerInvariant()) known)) with
+            | Some target -> Error(Err(1109, sprintf "Unknown table '%s' in MULTI DELETE" target))
+            | None ->
+                let named = delete.Targets |> List.map (fun name -> name.ToLowerInvariant(), name) |> Map.ofList
+                sources
+                |> List.choose (fun (qualifier, source) ->
+                    Map.tryFind (qualifier.ToLowerInvariant()) named |> Option.map (fun name -> name, source))
+                |> fun targets -> Ok(cteNames, targets))
+
+let private validateJoinedDeleteTargets store registry dbName (delete: DeleteStmt) =
+    let targetError cteNames (target, source) =
+        match source with
+        | FromTable table when table.Database.IsSome || not (Set.contains (table.Table.ToLowerInvariant()) cteNames) ->
+            let schema = table.Database |> Option.defaultValue dbName
+            match tryStoredView store schema table.Table with
+            | None -> None
+            | Some _ ->
+                match tryUpdatableView store schema table.Table with
+                | Some view when not view.UpdateJoins.IsEmpty -> Some(joinViewDeleteError view)
+                | Some _ -> None
+                | None -> Some(nonUpdatableTarget "DELETE" target)
+        | _ -> Some(nonUpdatableTarget "DELETE" target)
+
+    let rec withoutJoinConditions (join: Join) =
+        let rec source = function
+            | FromJoinGroup(first, joins) -> FromJoinGroup(source first, List.map withoutJoinConditions joins)
+            | other -> other
+        let kind =
+            match join.Kind with
+            | NaturalJoin -> InnerJoin
+            | NaturalLeftJoin -> LeftJoin
+            | NaturalRightJoin -> RightJoin
+            | other -> other
+        { join with Kind = kind; Table = source join.Table; On = Lit(VInt 1L); Using = [] }
+
+    // Resolve sources before rejecting a named target, but leave this
+    // query block's join predicates and WHERE until after that decision.
+    let checkSources () =
+        let bindingRegistry =
+            { registry with
+                Scalars =
+                    registry.Scalars
+                    |> Map.map (fun name scalar ->
+                        if name = "CURRENT_USER" || Functions.isUnmodifiedBuiltinScalar name registry then scalar
+                        else fun _ -> VNull)
+                Aggregates =
+                    registry.Aggregates
+                    |> Map.map (fun name aggregate ->
+                        if Functions.isUnmodifiedBuiltinAggregate name registry then aggregate
+                        else fun _ -> VNull) }
+        let query = mutationSourceQuery (Some(FromTable delete.From)) (List.map withoutJoinConditions delete.Joins) delete.Ctes [ Lit(VInt 1L) ]
+        let result, _, _ =
+            DynamicScope.withValue statementMemo (freshStatementMemo ()) (fun () ->
+                withPlanningProbe (fun () ->
+                    withSourceMetadataProbe (fun () -> runSelectStmt store bindingRegistry dbName query None)))
+        match result with
+        | Err _ -> Error result
+        | _ -> Ok()
+
+    bindJoinedDeleteTargetNames dbName delete
+    |> Result.bind (fun (cteNames, targets) ->
+        match List.tryPick (targetError cteNames) targets with
+        | None -> Ok()
+        | Some error -> checkSources () |> Result.bind (fun () -> Error(Err error)))
+
 /// Carry a statement-local row ordinal through each view projection so equal
 /// projected values still identify different rows in a keyless base table.
 let private prepareDeleteViewSource store registry (stored: StoredView) (view: UpdatableView) =
@@ -28480,8 +28562,11 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 explainJoinBlock store registry dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs 0 None consumption)
             |> finish
     | Delete d when not d.Ctes.IsEmpty ->
-        let ctes = referencedDeleteCtes d
-        withCteQueryResult store registry dbName ctes (fun () -> explainStatement format store registry account dbName (Delete { d with Ctes = [] }))
+        match validateJoinedDeleteTargets store registry dbName d with
+        | Error error -> error
+        | Ok _ ->
+            let ctes = referencedDeleteCtes d
+            withCteQueryResult store registry dbName ctes (fun () -> explainStatement format store registry account dbName (Delete { d with Ctes = [] }))
     | Delete d ->
         let id = nextId ()
         let extra = [ if d.Where.IsSome then "Using where"
@@ -28489,7 +28574,8 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         let subqueryExprs = d.Where |> Option.toList
 
         finish (
-            checkMutationWhere d.From d.Joins (d.Where |> Option.toList)
+            validateJoinedDeleteTargets store registry dbName d
+            |> Result.bind (fun () -> checkMutationWhere d.From d.Joins (d.Where |> Option.toList))
             |> Result.bind (fun () ->
                 let consumption = joinConsumptionFor d.Limit
 
@@ -28666,8 +28752,13 @@ let private validateBindingsWith describeColumns validateFunction store registry
             mutationSourceQuery (Some(FromTable update.From)) update.Joins update.Ctes expressions
             |> PlainSelect |> validateBody
         | Delete delete ->
-            mutationSourceQuery (Some(FromTable delete.From)) delete.Joins delete.Ctes (Option.toList delete.Where)
-            |> PlainSelect |> validateBody
+            validateJoinedDeleteTargets store registry schema delete
+            |> Result.mapError (function
+                | Err(code, message) -> code, message
+                | _ -> 1105, "Failed to validate DELETE targets")
+            |> Result.bind (fun () ->
+                mutationSourceQuery (Some(FromTable delete.From)) delete.Joins delete.Ctes (Option.toList delete.Where)
+                |> PlainSelect |> validateBody)
         | InsertSelect(_, _, select, assignments, _) ->
             validateBody (PlainSelect select)
             |> Result.bind (fun () -> validateExpressions (assignments |> List.map snd))
@@ -31841,9 +31932,9 @@ let rec executeAs
 
         executeWithMutationCtes ctes (Update { update with Ctes = [] })
     | Delete delete when not delete.Ctes.IsEmpty ->
-        let ctes = referencedDeleteCtes delete
-
-        executeWithMutationCtes ctes (Delete { delete with Ctes = [] })
+        match validateJoinedDeleteTargets store registry dbName delete with
+        | Error error -> ids, error
+        | Ok _ -> executeWithMutationCtes (referencedDeleteCtes delete) (Delete { delete with Ctes = [] })
     | SetTriggerNew _ -> ids, Err(1064, "SET NEW is only valid in a trigger body")
 
     | CreateDatabase(name, ifNotExists, _) ->
@@ -34302,10 +34393,11 @@ let rec executeAs
             @ (deleteStmt.Joins |> List.collect (Join.conditions >> List.collect collectMatchAgainst))
             |> List.distinct
 
-        let viewSources = prepareDeleteViewSources store registry dbName deleteStmt
         let prepared =
-            fullTextMutationSources store dbName deleteStmt.From deleteStmt.Joins matchNodes
+            validateJoinedDeleteTargets store registry dbName deleteStmt
+            |> Result.bind (fun () -> fullTextMutationSources store dbName deleteStmt.From deleteStmt.Joins matchNodes)
             |> Result.bind (fun (sourceOverrides, rewrite) ->
+                let viewSources = prepareDeleteViewSources store registry dbName deleteStmt
                 let sources = Map.fold (fun sources name source -> Map.add name source sources) sourceOverrides viewSources
                 let rewritten =
                     { deleteStmt with
@@ -34334,23 +34426,8 @@ let rec executeAs
                 deleteStmt.Targets
                 |> traverse (fun t ->
                     match Map.tryFind (t.ToLowerInvariant()) sourceIndex with
-                    | Some i ->
-                        match sources.[i].PhysicalTable with
-                        | None -> Error(nonUpdatableTarget "DELETE" t)
-                        | Some tableRef when tableRef.Database.IsNone
-                                             && (currentCteScope () |> Map.containsKey (tableRef.Table.ToLowerInvariant())) ->
-                            Error(nonUpdatableTarget "DELETE" t)
-                        | Some tableRef ->
-                            let database = tableRef.Database |> Option.defaultValue dbName
-
-                            match tryStoredView store database tableRef.Table with
-                            | None -> Ok i
-                            | Some _ ->
-                                match tryUpdatableView store database tableRef.Table with
-                                | None -> Error(nonUpdatableTarget "DELETE" t)
-                                | Some view when not view.UpdateJoins.IsEmpty ->
-                                    Error(joinViewDeleteError view)
-                                | Some _ -> Ok i
+                    | Some i when sources.[i].PhysicalTable.IsSome -> Ok i
+                    | Some _ -> Error(nonUpdatableTarget "DELETE" t)
                     | None -> Error(1109, sprintf "Unknown table '%s' in MULTI DELETE" t))
             with
             | Error(code, message) -> ids, Err(code, message)
