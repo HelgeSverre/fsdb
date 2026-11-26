@@ -215,3 +215,31 @@ With the same grouped corpus and refreshed statistics on a fresh
 MySQL index, the comparison still found 314 membership and 345
 relevance differences at sizes 2 and 3. This index-state-dependent
 behavior remains open. [MySQL full-text query source](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc).
+
+## Boolean rank cancellation
+
+In a 20-document binary bigram index, `快乐` occurs once in one
+document and twice in another. Its unweighted scores are 1 and 2.
+The `<快乐` penalty cancels the first score exactly and leaves the
+second at 1. MySQL 8.4.11 omits the first row from `WHERE MATCH`.
+Fsdb now preserves that outcome on both its dictionary and map
+paths, including quoted, grouped, and short-prefix forms. The
+IDF floor still applies while scoring ubiquitous terms.
+[InnoDB full-text ranking](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc).
+
+A separate 1,934-query binary bigram corpus with optimization and
+refreshed table statistics went from 31 membership and 34 relevance
+differences to 3 and 6. The remaining cases involve nested groups
+and wildcard ranking. For example, the optimized MySQL fixture
+returns no rows for `+서울역 ((+快乐 +京*))`, while Fsdb returns the
+two rows containing `서울역`. The maintained two-column corpus
+still matches all 3,870 queries at token sizes 1–10.
+
+A native-only control on the same 20 stored rows compared 440
+Boolean queries before and after full-text optimization. MySQL's
+cache held 46 distinct tokens before the operation and zero after it.
+Membership changed for 54 queries in each of three insertion orders.
+For example, the fresh index returned eight IDs for `東京 東*`, and
+the optimized index returned eleven. The membership changes were
+repeatable across the insertion orders, and the number of score
+differences ranged from 60 to 177. Cache-dependent results remain open.

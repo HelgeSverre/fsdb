@@ -1737,6 +1737,10 @@ matched term contributes its relevance.
 [Adjacent ngram Boolean modifiers](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#adjacent-boolean-modifiers)
 now follow the ASCII space boundary, including repeated and opposing
 modifiers and punctuation between CJK terms.
+[Boolean ngram rank cancellation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#boolean-rank-cancellation)
+now treats a final score of zero as a nonmatch in the audited weighted
+term, phrase, group, and prefix cases. Nested group and cache-dependent
+wildcard differences remain open.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.

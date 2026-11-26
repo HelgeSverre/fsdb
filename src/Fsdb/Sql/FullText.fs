@@ -1433,6 +1433,8 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             matchNodes nodes
             |> (if fullScope then restrictScores candidateIds else id)
             |> Map.map (fun id matched -> float matched.Adjustment + (matched.Terms |> Seq.sumBy (scoreTerm id)))
+            // A rank modifier can cancel the final relevance. MATCH then returns zero.
+            |> Map.filter (fun _ score -> score <> 0.0)
             |> Some
 
 let internal booleanScoresInView candidateIds (view: ReadView<'id>) (query: string) =

@@ -330,6 +330,18 @@ let tests =
               Expect.equal (scores "生日 +快乐" |> Map.keys |> Seq.toList) [ 2; 3 ] "a modifier after ASCII space remains active"
               Expect.equal (scores "生日 -快乐" |> Map.keys |> Seq.toList) [ 1 ] "a separated exclusion remains active"
 
+          testCase "Boolean ngram ranking drops rows whose weights cancel to zero"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_bin" |> Option.get
+              let documents = [ 1, [ "快乐"; "中文" ]; 2, [ "快乐"; "快乐" ] ] @ [ for id in 3..20 -> id, [ "中文" ] ]
+              let index = buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation documents
+              Expect.equal (booleanScores index "快乐") (Map.ofList [ 1, 1.0; 2, 2.0 ]) "unweighted term frequencies"
+              for query in [ "<快乐"; "<\"快乐\""; "<(快乐)"; "<快*" ] do
+                  Expect.equal (booleanScores index query) (Map.ofList [ 2, 1.0 ]) query
+                  Expect.isEmpty (booleanScoresWithin (Set.singleton 1) index query) "restriction keeps the corpus IDF"
+                  let scores = tryFlatBooleanScoresDictionary index query |> Option.get
+                  Expect.equal (Seq.toList scores.Keys) [ 2 ] "dictionary candidates exclude the zero score"
+
           testCase "general Unicode ngrams retain halfwidth voicing marks in relevance"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 6; Stopwords = StopwordPolicy.BuiltIn }
