@@ -34676,6 +34676,59 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
         check delete.From delete.Joins delete.Where delete.Limit singleTarget
     | _ -> Ok()
 
+let internal tryExactIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
+    match select.From with
+    | Some(FromTable source) when
+        select.Joins.IsEmpty && select.Ctes.IsEmpty && select.Locking.IsEmpty
+        && select.GroupBy.IsEmpty && select.Having.IsNone && select.Windows.IsEmpty
+        && select.OrderBy.IsEmpty && select.Limit.IsNone && select.Offset.IsNone
+        && not (SelectStmt.hasDestination select) && source.IndexHints.IsEmpty ->
+        let database = source.Database |> Option.defaultValue dbName
+        let qualifier = source.Alias |> Option.defaultValue source.Table
+        let columnName = function
+            | Col column -> Some column
+            | QualifiedCol(owner, column) when equalsIgnoreCase owner qualifier -> Some column
+            | _ -> None
+
+        physicalFastPathTable store dbName source
+        |> Option.bind (fun table ->
+            let simpleProjection (projection: Projection) =
+                match projection.Expression with
+                | Lit _ | Star None -> true
+                | Star(Some owner) -> equalsIgnoreCase owner qualifier
+                | expression ->
+                    columnName expression
+                    |> Option.exists (fun column -> resolveColumn table.Columns column |> Result.isOk)
+
+            let keys = Storage.primaryKeyColumns table
+            let conditions = optionalConjuncts select.Where
+            if keys.IsEmpty || keys.Length <> conditions.Length
+               || not (List.forall simpleProjection select.Projections) then None
+            else
+                let equality = function
+                    | BinOp(Eq, expression, LiteralValue((VInt _ | VUInt _) as value))
+                    | BinOp(Eq, LiteralValue((VInt _ | VUInt _) as value), expression) ->
+                        columnName expression |> Option.map (fun column -> column, value)
+                    | _ -> None
+
+                conditions
+                |> List.map equality
+                |> tryAllSome
+                |> Option.bind (fun equalities ->
+                    keys
+                    |> List.map (fun key ->
+                        resolveColumn table.Columns key
+                        |> Result.toOption
+                        |> Option.filter (fun index -> Storage.isIntegerPrimaryKeyType table.Columns.[index].Type)
+                        |> Option.bind (fun _ ->
+                            equalities
+                            |> List.tryPick (fun (column, value) -> if equalsIgnoreCase key column then Some value else None)))
+                    |> tryAllSome
+                    |> Option.bind (fun values ->
+                        Storage.tryPrimaryWriteLockTargets store table values
+                        |> Option.map (fun _ -> database, source.Table, values))))
+    | _ -> None
+
 let transactionWriteTargets
     (store: Store)
     (registry: Registry)

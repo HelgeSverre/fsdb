@@ -742,6 +742,45 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected only the serialized commit, got %A" result
 
+          testCase "serializable point reads protect existing rows and missing integer keys"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate (id BIGINT UNSIGNED PRIMARY KEY,n INT)" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES (9223372036854775809,7),(9223372036854775813,13)" (Affected 2UL) |> ignore
+              let probe = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let attempt sql =
+                  let transaction = run probe "START TRANSACTION" (Affected 0UL)
+                  let transaction, result = handle transaction sql
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  result
+
+              let replace = "UPDATE gate SET n=9 WHERE id=9223372036854775809"
+              let insert = "INSERT INTO gate VALUES (9223372036854775811,0)"
+              for isolation, beginSql, finish in
+                  [ "SERIALIZABLE", "BEGIN", [ "ROLLBACK" ]
+                    "SERIALIZABLE", "XA START 'point'", [ "XA END 'point'"; "XA ROLLBACK 'point'" ]
+                    "REPEATABLE READ", "BEGIN", [ "ROLLBACK" ] ] do
+                  let reader = run (create 3 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let reader = run reader beginSql (Affected 0UL)
+                  let reader = run reader "SELECT g.n FROM gate AS g WHERE g.id=9223372036854775809"
+                                   (ResultSet([ "n" ], [ [ Some "7" ] ]))
+                  let reader = run reader "SELECT n FROM gate WHERE id=9223372036854775811" (ResultSet([ "n" ], []))
+                  try
+                      for sql in [ replace; insert ] do
+                          match attempt sql, isolation with
+                          | Err(1205, _), "SERIALIZABLE" | Affected 1UL, "REPEATABLE READ" -> ()
+                          | actual, _ -> failtestf "%s %s: unexpected concurrent result %A" isolation sql actual
+                      Expect.equal (attempt "UPDATE gate SET n=0 WHERE id=9223372036854775813") (Affected 1UL) "the neighboring row stays writable"
+                  finally
+                      finish |> List.fold (fun state sql -> run state sql (Affected 0UL)) reader |> ignore
+                  Expect.equal (attempt replace) (Affected 1UL) "completion releases the row"
+                  Expect.equal (attempt insert) (Affected 1UL) "completion releases the gap"
+
           testCase "SERIALIZABLE read-only snapshots do not conflict with later writes"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

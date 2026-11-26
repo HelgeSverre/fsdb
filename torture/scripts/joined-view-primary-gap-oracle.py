@@ -453,6 +453,46 @@ def check(port, mysql):
         )
         execute(writer, "ROLLBACK")
 
+    with fixture(port, schema, mysql) as (_, admin, reader, _, probe):
+        execute(admin, "INSERT INTO gate VALUES (1,7),(5,13)")
+        for level, start, finish, blocking in (
+            ("REPEATABLE READ", "BEGIN", ("ROLLBACK",), 1),
+            ("SERIALIZABLE", "BEGIN", ("ROLLBACK",), TIMEOUT),
+            ("SERIALIZABLE", "START TRANSACTION READ ONLY", ("ROLLBACK",), TIMEOUT),
+            (
+                "SERIALIZABLE",
+                "XA START 'point_read'",
+                ("XA END 'point_read'", "XA ROLLBACK 'point_read'"),
+                TIMEOUT,
+            ),
+            ("SERIALIZABLE", None, (), 1),
+        ):
+            execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL " + level)
+            if start is not None:
+                execute(reader, start)
+            label = f"{level} {start or 'autocommit'}"
+            expect(
+                f"{label} exact row",
+                scalar(reader, "SELECT delta FROM gate WHERE id=1"),
+                7,
+            )
+            expect(
+                f"{label} missing key",
+                outcome(reader, "SELECT delta FROM gate WHERE id=3"),
+                0,
+            )
+            expect(
+                f"{label} point read locks",
+                (
+                    rolled_back_outcome(probe, "UPDATE gate SET delta=9 WHERE id=1"),
+                    rolled_back_outcome(probe, "INSERT INTO gate VALUES (3,0)"),
+                    rolled_back_outcome(probe, "UPDATE gate SET delta=9 WHERE id=5"),
+                ),
+                (blocking, blocking, 1),
+            )
+            for sql in finish:
+                execute(reader, sql)
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 

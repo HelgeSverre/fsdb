@@ -3546,7 +3546,21 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                 match stmt with
                 | Select select ->
                     let result, types, calculatedFoundRows, rows =
-                        withExecutionLimits (fun () -> Executor.runTopLevelSelect store registry dbName select)
+                        withExecutionLimits (fun () ->
+                            let readStore =
+                                match session.Tx with
+                                | Some transaction when transaction.Isolation = Serializable
+                                                        && retainsTransactionAfterStatement session ->
+                                    Executor.tryExactIntegerPrimaryRead store dbName select
+                                    |> Option.filter (fun (database, table, _) ->
+                                        CatalogOverlay.tryTable session.TemporaryCatalog (database.ToLowerInvariant(), table.ToLowerInvariant())
+                                        |> Option.isNone)
+                                    |> Option.map (fun (database, table, values) ->
+                                        let refresh () = rebaseTransactionSnapshot session transaction |> snd
+                                        Storage.lockPrimaryPointRead (lockWaitTimeout session) session.Store refresh database table values)
+                                    |> Option.defaultValue store
+                                | _ -> store
+                            Executor.runTopLevelSelect readStore registry dbName select)
 
                     let result, types = consumeSelectDestination select result types rows
                     let result = formatResultForProtocol types rows result

@@ -179,6 +179,33 @@ Fsdb matched both restart checks. The recovered branch retains its
 written-row protection. The gap from the read probe has process
 lifetime in this fixture.
 
+## Serializable point reads
+
+The digest-pinned MySQL 8.4.11 image takes a shared row lock for a
+plain exact primary-key `SELECT` in an open `SERIALIZABLE`
+transaction. A missing key protects its gap. Fsdb previously allowed
+both the competing row update and the gap insertion. Both now wait
+and return 1205 at the contender's lock-wait timeout. A neighboring
+row remains writable. The checks cover local and XA transactions,
+explicit read-only transactions, and autocommit disabled. A standalone
+autocommit read and the audited `REPEATABLE READ` reads leave both
+writes free. [MySQL transaction isolation levels](https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html).
+
+The expanded oracle matches all 114 checks in both Fsdb modes.
+
+A point read waits for an owner already updating, inserting, or
+deleting the looked-up key. After publication it reads the committed
+value, or protects the newly missing gap after a deletion. If the
+logical key moves to a different row identity, Fsdb rechecks the key
+before returning the row. Prepared statements also acquire the row
+and gap locks for bound keys. The lock releases with the transaction.
+Preparing a read-only XA branch releases both locks.
+
+The supported path proves a complete integer primary-key equality
+on one physical table. Wider scans and dependent expressions still
+use the snapshot path. In WAL-backed XA, conservative snapshot
+validation can still reject a commit after disjoint writes.
+
 Run the live schedules against disposable servers. Use `--data-dir`
 to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.
 

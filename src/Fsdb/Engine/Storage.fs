@@ -6516,6 +6516,28 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
                         queryCancellation.Value cache.SyncRoot available blockers install)
     | _ -> ()
 
+let internal lockPrimaryPointRead timeout (live: Store) (refresh: unit -> Store) database tableName values =
+    let deadline = DateTime.UtcNow + timeout
+    let targets snapshot =
+        tableAt snapshot database tableName
+        |> Option.bind (fun table -> tryPrimaryWriteLockTargets snapshot table values)
+    let rec acquire snapshot (target: WriteLockTargets) =
+        let remaining = deadline - DateTime.UtcNow
+        if remaining <= TimeSpan.Zero then raise (LockWaitTimeout database)
+        match target.RowIds with
+        | [] -> acquireMissingPrimaryGap remaining live snapshot database tableName values
+        | rows -> acquireTransactionReadTargets remaining snapshot database tableName ShareLock WaitForLocks rows |> ignore
+        // A writer can publish a new row identity for the key while the read waits.
+        let current = refresh ()
+        match targets current with
+        | Some next when next.RowIds <> target.RowIds -> acquire current next
+        | _ -> current
+
+    let initial = refresh ()
+    match targets initial with
+    | Some target -> withTransactionLockCheckpoint initial (fun () -> acquire initial target)
+    | None -> initial
+
 /// Read either side of an indexed NULL test after any exact bound leading key
 /// parts. The NULL slice is contiguous in both ascending and descending keys.
 type private IndexedNullTest = NullRows | NonNullRows
