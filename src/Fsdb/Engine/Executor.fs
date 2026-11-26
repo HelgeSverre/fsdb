@@ -155,9 +155,14 @@ type private CorrelatedSourceCandidate =
       SourceRows: Value[] list
       RangeAccesses: (TableRef * PhysicalRangeSelection * CorrelatedRangePhase) list }
 
+type private CorrelatedIntegerRangeLookup =
+    { Columns: ColumnDef list
+      Rows: Value[] seq
+      RowCount: int option
+      CoversWhere: bool }
+
 type private CorrelatedAggregateRange =
-    { Lookup: Storage.OrderedLookup
-      CoversWhere: bool
+    { Lookup: CorrelatedIntegerRangeLookup
       Qualifier: string
       Name: string
       Argument: Expr }
@@ -445,6 +450,8 @@ type private PhysicalProjection =
       PhysicalTableRef: TableRef
       PhysicalTable: Table
       PhysicalColumnIndices: int list
+      // Available when every projection filter is a direct null test.
+      NullTests: (int * bool) list option
       Steps: PhysicalProjectionStep list }
 
 let private tryDuplicateIgnoreCase nameOf values =
@@ -9590,19 +9597,33 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
 
         let rangeAccess () = tryCorrelatedIntegerRangeAccess outer source select.Where
 
-        let countRangeCandidates countsRow (lookup: Storage.OrderedLookup) =
-            Some { SourceColumns = lookup.OrderedColumns
-                   SourceRows = Seq.toList lookup.OrderedRows
+        let countRangeCandidates countsRow (lookup: CorrelatedIntegerRangeLookup) =
+            Some { SourceColumns = lookup.Columns
+                   SourceRows = Seq.toList lookup.Rows
                    RangeAccesses = [] }
             |> countCandidates countsRow
+
+        let countRangeRows countsRow (lookup: CorrelatedIntegerRangeLookup) =
+            let mutable count = 0L
+            let mutable processed = 0
+            for row in lookup.Rows do
+                Limits.checkQueryCancellation processed
+                processed <- processed + 1
+                if countsRow row then count <- count + 1L
+            count
 
         if isPlainCountRowsSelect outer.Store outer.DbName outer.Registry select then
             match tryCorrelatedEqualityCount outer source select.Where with
             | Some count -> Some(Ok(VInt(int64 count)))
             | None ->
                 match rangeAccess () with
-                | Some(lookup, true) -> Some(Ok(VInt(int64 lookup.OrderedRowCount)))
-                | Some(lookup, false) -> countRangeCandidates (fun _ -> true) lookup
+                | Some lookup when lookup.CoversWhere ->
+                    let count =
+                        lookup.RowCount
+                        |> Option.map int64
+                        |> Option.defaultWith (fun () -> countRangeRows (fun _ -> true) lookup)
+                    Some(Ok(VInt count))
+                | Some lookup -> countRangeCandidates (fun _ -> true) lookup
                 | None ->
                     tryCorrelatedSourceAccess outer.Store outer.Registry outer.DbName source select.Where (Some outer)
                     |> countCandidates (fun _ -> true)
@@ -9617,21 +9638,15 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
 
                 localColumn |> Option.bind (fun column ->
                     rangeAccess ()
-                    |> Option.bind (fun (lookup, covered) ->
-                        resolveColumn lookup.OrderedColumns column
+                    |> Option.bind (fun lookup ->
+                        resolveColumn lookup.Columns column
                         |> Result.toOption
-                        |> Option.map (fun index -> lookup, covered, index))
-                    |> Option.bind (fun (lookup, covered, index) ->
+                        |> Option.map (fun index -> lookup, index))
+                    |> Option.bind (fun (lookup, index) ->
                         let countsRow (row: Value[]) = row[index] <> VNull
 
-                        if covered then
-                            let mutable count = 0L
-                            let mutable processed = 0
-                            for row in lookup.OrderedRows do
-                                Limits.checkQueryCancellation processed
-                                processed <- processed + 1
-                                if countsRow row then count <- count + 1L
-                            Some(Ok(VInt count))
+                        if lookup.CoversWhere then
+                            Some(Ok(VInt(countRangeRows countsRow lookup)))
                         else
                             countRangeCandidates countsRow lookup))
             | _ -> None
@@ -9649,14 +9664,14 @@ and private tryFoldCorrelatedRangeAggregate (outer: EvalContext) (select: Select
                 None
             else
                 if not classified then memo.[select] <- UnmemoizedSubquery
-                let columns = range.Lookup.OrderedColumns
+                let columns = range.Lookup.Columns
                 let context =
                     contextFactory outer.Store outer.Registry outer.DbName
                         (columnIndexOf columns) (singleQualifier range.Qualifier columns) (Some outer)
 
-                let rows = range.Lookup.OrderedRows
+                let rows = range.Lookup.Rows
                 let filtered =
-                    if range.CoversWhere then Ok(Seq.toList rows)
+                    if range.Lookup.CoversWhere then Ok(Seq.toList rows)
                     else
                         let matches = prepareWhereMatches context select.Where
                         rows
@@ -17084,6 +17099,7 @@ and private tryPhysicalProjectionUncached
               PhysicalTableRef = tableRef
               PhysicalTable = table
               PhysicalColumnIndices = [ 0 .. table.Columns.Length - 1 ]
+              NullTests = Some []
               Steps = [] })
 
     let tableProjection (tableRef: TableRef) =
@@ -17136,6 +17152,19 @@ and private tryPhysicalProjectionUncached
                         Some name
                     | _ -> None
 
+                let nullTest expectNull expression =
+                    directColumn expression
+                    |> Option.bind (resolveColumn input.OutputColumns >> Result.toOption)
+                    |> Option.map (fun index -> [ input.PhysicalColumnIndices.[index], expectNull ])
+
+                // These tests are silent even on rows outside a later range.
+                // Resolve them against the input of this projection step.
+                let rec nullTests = function
+                    | IsNull value -> nullTest true value
+                    | IsNotNull value -> nullTest false value
+                    | BinOp(And, left, right) -> Option.map2 (@) (nullTests left) (nullTests right)
+                    | _ -> None
+
                 if not predicateIsStable then
                     None
                 else
@@ -17165,6 +17194,9 @@ and private tryPhysicalProjectionUncached
                                         |> List.map (fun (index, name) -> derivedColumn input.OutputColumns.[index] name)
                                     PhysicalColumnIndices =
                                         outputIndices |> List.map (fun index -> input.PhysicalColumnIndices.[index])
+                                    NullTests =
+                                        let ownTests = select.Where |> Option.map nullTests |> Option.defaultValue (Some [])
+                                        Option.map2 (@) input.NullTests ownTests
                                     Steps =
                                         input.Steps
                                         @ [ { InputColumns = input.OutputColumns
@@ -19211,13 +19243,12 @@ and private tryPlanCorrelatedAggregateRange registry source (select: SelectStmt)
             | _ -> None
         | _ -> None
 
-    match source, outer, aggregate with
-    | FromTable tableRef, Some context, Some(name, argument)
+    match FromItem.tryQualifier source, outer, aggregate with
+    | Some qualifier, Some context, Some(name, argument)
         when select.Joins.IsEmpty && hasPlainAggregateShape select ->
         tryCorrelatedIntegerRangeAccess context source select.Where
-        |> Option.bind (fun (lookup, covered) ->
-            let columns = lookup.OrderedColumns
-            let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+        |> Option.bind (fun lookup ->
+            let columns = lookup.Columns
             let scope = correlatedProbeSource qualifier columns
             let innerColumn expression =
                 match expression with
@@ -19268,7 +19299,6 @@ and private tryPlanCorrelatedAggregateRange registry source (select: SelectStmt)
 
             if safeArgument then
                 Some { Lookup = lookup
-                       CoversWhere = covered
                        Qualifier = qualifier
                        Name = name
                        Argument = argument }
@@ -19278,8 +19308,8 @@ and private tryPlanCorrelatedAggregateRange registry source (select: SelectStmt)
 and private tryCorrelatedSourceLookup store registry dbName source select outer =
     tryPlanCorrelatedAggregateRange registry source select outer
     |> Option.map (fun range ->
-        { SourceColumns = range.Lookup.OrderedColumns
-          SourceRows = Seq.toList range.Lookup.OrderedRows
+        { SourceColumns = range.Lookup.Columns
+          SourceRows = Seq.toList range.Lookup.Rows
           RangeAccesses = [] })
     |> Option.orElseWith (fun () -> tryCorrelatedSourceAccess store registry dbName source select.Where outer)
     |> Option.map (fun candidate ->
@@ -19392,14 +19422,24 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
             | Col name -> (tryRoutineVariable name).IsSome
             | _ -> false)))
 
-    match source with
-    | FromTable tableRef when hasRange && not equalities.IsEmpty && not hasRoutineVariable && (tryLockingReadRows tableRef).IsNone ->
-        physicalFastPathTable outer.Store outer.DbName tableRef
-        |> Option.filter (fun table -> storedRowsMatchReadRows outer.Store table.Columns)
-        |> Option.bind (fun table ->
-            let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
-            let scope = correlatedProbeSource qualifier table.Columns
-            let innerColumn = tryCorrelatedSignedIntegerColumn scope table.Columns
+    match FromItem.tryQualifier source with
+    | Some qualifier when hasRange && not equalities.IsEmpty && not hasRoutineVariable ->
+        tryPhysicalProjection outer.Store outer.Registry outer.DbName source
+        |> Option.filter (fun projection ->
+            (tryLockingReadRows projection.PhysicalTableRef).IsNone
+            && storedRowsMatchReadRows outer.Store projection.PhysicalTable.Columns)
+        |> Option.bind (fun projection -> projection.NullTests |> Option.map (fun tests -> projection, tests))
+        |> Option.bind (fun (projection, nullTests) ->
+            let table = projection.PhysicalTable
+            let scope = correlatedProbeSource qualifier projection.OutputColumns
+            let signedColumn = tryCorrelatedSignedIntegerColumn scope projection.OutputColumns
+            let innerColumn =
+                if projection.Steps.IsEmpty then signedColumn
+                else
+                    fun expression ->
+                        signedColumn expression
+                        |> Option.bind (tryPhysicalProjectionColumn projection)
+                        |> Option.map _.Name
 
             let bound = function
                 | LiteralValue(VInt _ as value) -> Some value
@@ -19444,7 +19484,7 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                     |> List.map (fun (name: string, value) -> name.ToLowerInvariant(), value)
                     |> Map.ofList
                 let pinned = values |> Map.keys |> Set.ofSeq
-                let allowed = indexHintsFor IndexJoin tableRef |> indexAllowedBy
+                let allowed = indexHintsFor IndexJoin projection.PhysicalTableRef |> indexAllowedBy
                 let indexes = orderedIndexCandidates table |> List.filter (fun candidate -> allowed candidate.Name)
 
                 let intervals =
@@ -19483,6 +19523,26 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                             |> Option.map (fun lookup -> lookup, allRangesCovered && matched.PinnedCount = pins.Length))))
                 |> List.sortBy (fun (lookup, covered) -> lookup.OrderedRowCount, not covered)
                 |> List.tryHead
+                |> Option.map (fun (lookup, covered) ->
+                    let filtered =
+                        if nullTests.IsEmpty then lookup.OrderedRows
+                        else
+                            lookup.OrderedRows
+                            |> Seq.mapi (fun index row ->
+                                Limits.checkQueryCancellation index
+                                row)
+                            |> Seq.filter (fun row ->
+                                nullTests |> List.forall (fun (index, expectNull) -> (row.[index] = VNull) = expectNull))
+                    let rows =
+                        if projection.Steps.IsEmpty then filtered
+                        else
+                            let indices = List.toArray projection.PhysicalColumnIndices
+                            filtered
+                            |> Seq.map (fun row -> indices |> Array.map (fun index -> row.[index]))
+                    { Columns = projection.OutputColumns
+                      Rows = rows
+                      RowCount = if nullTests.IsEmpty then Some lookup.OrderedRowCount else None
+                      CoversWhere = covered })
             | _ -> None)
     | _ -> None
 

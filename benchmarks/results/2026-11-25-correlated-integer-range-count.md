@@ -401,3 +401,42 @@ Other comparison diagnostics remain open, including top-level reads,
 `BIGINT` binding-time conversion, computed operands, `BETWEEN`, and
 warning timing for an empty outer range and a zero-limit `IN` list.
 [MySQL comparison binding](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item_cmpfunc.cc).
+
+### Composite ranges through projections
+
+A direct projection can rename or reorder the columns of a physical
+composite index. The correlated range planner resolves those output
+columns back to the stored key for nested derived tables and
+statement-stable CTEs. It reads the range count directly for a covered
+`COUNT(*)` over an unfiltered projection. Counts and numeric folds can
+also apply source `IS NULL` and `IS NOT NULL` tests and their
+conjunctions before mapping the selected rows to the output columns.
+Computed projections, limited sources, and richer source filters use
+the general paths.
+
+The MySQL 8.4.11 comparison matched all 1,604 ordered rows across
+401 statements. It covered renamed and reordered columns, CTEs, nested
+null tests, descending and ignored keys, reversed ranges, nullable
+arguments, residual comparisons, duplicate aliases for one physical
+column, and computed and limited sources as controls. Wire column
+types matched the Fsdb baseline in every case. Both Fsdb builds had
+126 type differences from MySQL. A prepared CTE count with a source
+null test matched at widths 999, 1000, and −1. The cast-filter control
+matched MySQL's results, warning count, and sampled warning text.
+
+Native Release Fsdb before (`af712139`) and after, with WAL, ran against
+native MySQL on the same host over loopback TCP. The fixture has 500
+parents and 10,000 children. Results are medians in milliseconds from
+nine calls after three warmups per lane, alternating engine order.
+The first physical-only batch on freshly restarted Fsdb processes
+measured 10.72 ms before and 12.22 ms after. The two physical controls
+on the warmed run were 3.19 ms and 3.40 ms in the candidate.
+
+| Query | Fsdb before | Fsdb after | MySQL 8.4.11 |
+| --- | ---: | ---: | ---: |
+| Physical `COUNT(*)` control | 3.71 | 3.19 | 1.55 |
+| Nested derived `COUNT(*)` | 388.61 | 3.70 | 1.81 |
+| Nested derived `COUNT(payload)` | 433.82 | 13.63 | 2.19 |
+| Nested derived `SUM(sequence_no)` | 442.70 | 14.82 | 1.83 |
+| CTE `COUNT(*)` | 401.05 | 3.62 | 1.76 |
+| Derived `COUNT(*)` with a source null test | 387.27 | 3.85 | 2.17 |

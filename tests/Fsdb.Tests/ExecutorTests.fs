@@ -16037,6 +16037,45 @@ let tests =
 
                     Expect.isLessThan calls 20 "the direct lookup intersects two individually broad range candidates"
 
+                testCase "correlated composite ranges pass through renamed physical columns"
+                <| fun _ ->
+                    let store = newStore ()
+                    let run sql = runDefault store sql
+                    run "CREATE TABLE parents (id INT PRIMARY KEY)" |> ignore
+                    run "CREATE TABLE children (id INT PRIMARY KEY, parent_id INT, bucket INT, KEY ix_child(parent_id,id))" |> ignore
+                    let insert table rows =
+                        let values = String.concat "," rows
+                        run $"INSERT INTO {table} VALUES {values}" |> ignore
+                    insert "parents" [ for id in 1..100 -> $"({id})" ]
+                    insert "children"
+                        [ for id in 1..4000 do
+                            let parent = (id - 1) % 100 + 1
+                            let bucket = if id % 5 = 0 then "NULL" else string (id % 3)
+                            yield $"({id},{parent},{bucket})" ]
+                    let fromDerived =
+                        "(SELECT b AS payload, k AS sequence_no, owner AS parent_key FROM "
+                        + "(SELECT bucket AS b, parent_id AS owner, id AS k FROM children) reordered)"
+                    let measure prefix source aggregate expected =
+                        let sql =
+                            $"{prefix} SELECT SUM((SELECT {aggregate} FROM {source} c WHERE c.parent_key=p.id AND c.sequence_no BETWEEN p.id AND p.id+200)) FROM parents p"
+                        let before = System.GC.GetAllocatedBytesForCurrentThread()
+                        match run sql with
+                        | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal (decimal actual) expected sql
+                        | other -> failtestf "expected a correlated aggregate, got %A" other
+                        System.GC.GetAllocatedBytesForCurrentThread() - before
+                    let derived = measure "" fromDerived "COUNT(*)" 300M
+                    measure "" fromDerived "COUNT(c.payload)" 240M |> ignore
+                    measure "" fromDerived "SUM(c.sequence_no)" 45150M |> ignore
+                    let prefix = "WITH projected AS (SELECT bucket AS payload, id AS sequence_no, parent_id AS parent_key FROM children)"
+                    measure prefix "projected" "COUNT(*)" 300M |> ignore
+                    match run "SELECT SUM((SELECT COUNT(*) FROM children c WHERE c.parent_id=p.id AND c.id BETWEEN p.id AND p.id+200)) FROM parents p" with
+                    | ResultSet(_, [ [ Some "300" ] ]) -> ()
+                    | other -> failtestf "expected the physical control to count 300 rows, got %A" other
+                    Expect.isLessThan derived 4000000L "column aliases preserve the composite slice"
+                    let filtered = "(SELECT bucket AS payload, id AS sequence_no, parent_id AS parent_key FROM children WHERE bucket IS NOT NULL)"
+                    let filteredBytes = measure "" filtered "COUNT(*)" 240M
+                    Expect.isLessThan filteredBytes 4000000L "a null-test filter reuses the slice"
+
                 testCase "correlated integer count uses the equality prefix and range together"
                 <| fun _ ->
                     let store = newStore ()

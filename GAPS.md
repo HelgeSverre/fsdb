@@ -2777,8 +2777,11 @@ implementation effort:
    [COUNT metadata and comparison warnings](benchmarks/results/2026-11-25-correlated-integer-range-count.md#count-metadata-and-comparison-warnings)
    cover scalar count descriptors and truncated narrow-integer bounds in
    the audited correlated predicates.
-   Other residual predicates, broader aggregates, and projected sources
-   still need broader access planning.
+   [Projected composite ranges](benchmarks/results/2026-11-25-correlated-integer-range-count.md#composite-ranges-through-projections)
+   follow direct column aliases through nested derived tables and
+   statement-stable CTEs. Direct source null tests can filter the slice.
+   Other residual predicates, broader aggregates, computed projections,
+   and derived-source wire metadata still need work.
 
 2. Transaction scheduling. [Readers behind waiting writers under a global
    read lock](torture/findings/2026-11-06-global-read-waiting-writer-gate.md)
