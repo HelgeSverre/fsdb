@@ -305,6 +305,36 @@ let tests =
                   Expect.equal (ids "\"AB\"") [ 1; 3; 4 ] $"{name} retains the uppercase gram in the index"
                   Expect.equal (ids "abc'def") [ 5 ] $"{name} matches the lowercase phrases"
 
+          testCase "full-text query boundaries at embedded NUL follow the indexed collation"
+          <| fun _ ->
+              let documents =
+                  [ 1, "生日"; 2, "快乐"; 3, "生日快乐"; 4, "生日\u0000快乐"; 5, "大阪" ]
+              let build collation =
+                  buildIndexWithTokenizer (Ngrams 2) (tryFind collation |> Option.get) documents
+              let query = "生日\u0000快乐"
+              for collation in [ "utf8mb4_0900_ai_ci"; "utf8mb4_unicode_520_ci"; "utf8mb3_unicode_ci" ] do
+                  let index = build collation
+                  for scores in [ naturalScores index; booleanScores index; expansionScores index ] do
+                      Expect.isNonEmpty (scores "生日") "the first term is indexed"
+                      Expect.equal (scores query) (scores "生日") collation
+                      Expect.isEmpty (scores "\u0000生日") "leading NUL leaves no search terms"
+                  let fastScores text =
+                      tryNaturalSingleTermScoresDictionary index text
+                      |> Option.map (fun scores -> scores |> Seq.map (fun pair -> pair.Key, pair.Value) |> Map.ofSeq)
+                  Expect.equal (fastScores query) (Some(naturalScores index "生日")) "single-term scoring trims the same suffix"
+                  Expect.equal (booleanScores index "\"生日\u0000快乐\"") (booleanScores index "\"生日") "trim before reading the quote"
+                  Expect.equal (booleanScores index "生日\u0000)") (booleanScores index "生日") "trim before checking the group"
+                  Expect.isTrue ((naturalScores index "快乐").ContainsKey 4) "both sides of NUL remain indexed in the document"
+              for collation in [ "utf8mb4_bin"; "utf8mb4_0900_bin"; "utf8mb4_turkish_ci" ] do
+                  let index = build collation
+                  for scores in [ naturalScores index; booleanScores index; expansionScores index ] do
+                      Expect.equal (scores query) (scores "生日 快乐") collation
+                  Expect.equal (booleanScores index "\"生日\u0000快乐\"" |> Map.keys |> Seq.toList) [ 4 ] "quoted terms still search both sides"
+
+              let words = buildIndexWithTokenizer defaultTokenizer defaultCollation [ 1, "生日会"; 2, "庆祝会"; 3, "大阪府" ]
+              Expect.equal (naturalScores words "生日会\u0000庆祝会") (naturalScores words "生日会") "word queries use the same input boundary"
+              Expect.isNone (booleanSyntaxErrorInView (readView words) "生日会\u0000)") "the discarded suffix cannot introduce a syntax error"
+
           testCase "Boolean ngram modifiers follow ASCII space boundaries"
           <| fun _ ->
               let collation = tryFind "utf8mb4_bin" |> Option.get

@@ -268,9 +268,24 @@ type Corpus =
 let private isBinaryCollation (collation: Collation) =
     collation.Name = "binary" || collation.Name.EndsWith("_bin", StringComparison.Ordinal)
 
+let private isUtf8Collation (collation: Collation) =
+    collation.Name.StartsWith("utf8", StringComparison.Ordinal)
+
+let private fullTextQueryText collation (query: string) =
+    // InnoDB's in-place UTF-8 lowercase conversion stops at NUL.
+    // The legacy Turkish mappings can expand and use a length-aware conversion.
+    let terminator = query.IndexOf('\u0000')
+    if terminator >= 0
+       && isUtf8Collation collation
+       && not (isBinaryCollation collation)
+       && not (collation.Name.EndsWith("_turkish_ci", StringComparison.Ordinal)) then
+        query.Substring(0, terminator)
+    else
+        query
+
 let private usesUtf8WordParser tokenizer (collation: Collation) =
     match tokenizer with
-    | Words _ -> collation.Name.StartsWith("utf8", StringComparison.Ordinal)
+    | Words _ -> isUtf8Collation collation
     | Ngrams _ -> false
 
 let private foldFullText (collation: Collation) text =
@@ -1065,7 +1080,7 @@ let private scoreNaturalWordMatches (view: ReadView<'id>) matches =
             let contribution = float rows.[id] * weight * weight
             Map.change id (fun current -> Some(contribution + Option.defaultValue 0.0 current)) scores) scores) Map.empty
 
-let internal naturalScoresInView candidateIds (view: ReadView<'id>) query =
+let private naturalScoresForQueryText candidateIds (view: ReadView<'id>) query =
     let candidateIds = candidatesInView candidateIds view
     if needsNaturalWordEvaluation view query then
         naturalWordClauses view query
@@ -1079,6 +1094,9 @@ let internal naturalScoresInView candidateIds (view: ReadView<'id>) query =
             else indexedWordWeight view
         sumTermScoresWithin weightFor candidateIds view terms
 
+let internal naturalScoresInView candidateIds (view: ReadView<'id>) query =
+    naturalScoresForQueryText candidateIds view (fullTextQueryText view.Collation query)
+
 let naturalScores (index: Index<'id>) (query: string) : Map<'id, float> =
     naturalScoresInView None (readView index) query
 
@@ -1090,6 +1108,7 @@ let internal tryNaturalSingleTermScoresDictionaryInView
     (view: ReadView<'id>)
     (query: string)
     : Collections.Generic.Dictionary<'id, float> option =
+    let query = fullTextQueryText view.Collation query
     let candidateIds = candidatesInView candidateIds view
     match naturalTerms view query with
     | [| term |] when not (needsNaturalWordEvaluation view query) ->
@@ -1218,7 +1237,7 @@ let private booleanGroupSyntaxError (query: string) =
 
 let internal booleanSyntaxErrorInView (view: ReadView<'id>) query =
     match view.Rules.Tokenizer with
-    | Words _ -> booleanGroupSyntaxError query
+    | Words _ -> booleanGroupSyntaxError (fullTextQueryText view.Collation query)
     | Ngrams _ -> None
 
 // These are the BMP word-boundary changes after MySQL's collation-specific
@@ -1237,6 +1256,7 @@ let private isUnicode900BooleanNgramChar c =
 let private parseBooleanQuery rules (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
     let policy, tokenizer = rules.Stopwords, rules.Tokenizer
     let utf8Words = usesUtf8WordParser tokenizer collation
+    let query = fullTextQueryText collation query
     let query = if utf8Words then foldFullText collation query else query
     let isWord =
         match tokenizer with
@@ -2225,6 +2245,7 @@ let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
 // ---------------------------------------------------------------------------
 
 let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: string) =
+    let query = fullTextQueryText view.Collation query
     let candidateIds = candidatesInView candidateIds view
     let clauseQuery =
         if needsNaturalWordEvaluation view query then
@@ -2236,7 +2257,7 @@ let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: st
     let firstPass =
         match clauseQuery with
         | Some(_, matches) -> scoreNaturalWordMatches view matches
-        | None -> naturalScoresInView None view query
+        | None -> naturalScoresForQueryText None view query
 
     let seedTerms =
         firstPass
