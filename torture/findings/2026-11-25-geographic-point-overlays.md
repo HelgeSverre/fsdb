@@ -83,3 +83,28 @@ unsupported. In the audited cases MySQL reverses the disjoint polygons,
 dissolves the shared edge of the touching pair, and collapses duplicate
 polygons. Overlays involving collections that contain linework or polygons
 still need their own dimensional dispatch.
+
+## Points against mixed collections
+
+A point or multipoint can intersect a geographic collection containing
+nested points, lines, and polygons. Intersection visits the areas first,
+then line portions outside those areas, then isolated collection points.
+The normalized collection determines the result type. A single surviving
+dimension can produce a multipoint, while several dimensions preserve
+a geometry collection if more than one result point survives. The
+intersection has the same order in both operand orders.
+
+Subtracting a collection from a point or multipoint visits its original
+members in sequence. Covered shell and hole boundary points are removed.
+Points strictly inside holes survive unless another collection member
+covers them.
+[MySQL intersection dispatcher](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/intersection_functor.cc)
+· [MySQL difference dispatcher](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/difference_functor.cc).
+
+Native MySQL 8.4.11 and Fsdb matched all 918 checked WKT and SRID
+results across EPSG 4326, 4258, and 4267. The matrix covers both
+intersection orders, point difference, duplicate points, nesting,
+polygon holes and boundaries, fully covered and clipped lines,
+touching and overlapping polygons, and an antimeridian line. General
+mixed-collection overlays and geographic polygon dissolution for
+collection union remain open.

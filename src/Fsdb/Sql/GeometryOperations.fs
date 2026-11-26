@@ -2625,20 +2625,19 @@ let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygon
                     | _ -> [ oriented ]
                 Some(compose (areas @ List.map GLineString outside))
 
-let private geographicCoveredPoint referenceSystem =
-    let onLinework lines point =
-        geographicPointLinePosition referenceSystem point lines <> GeographicPointLinePosition.Outside
+let private geographicLineworkCoversPoint referenceSystem lines point =
+    geographicPointLinePosition referenceSystem point lines <> GeographicPointLinePosition.Outside
 
-    let inArea polygons point =
-        match geographicPointPolygonPosition referenceSystem point polygons with
-        | GeographicPointPolygonPosition.Outside _ -> false
-        | _ -> true
+let private geographicAreaCoversPoint referenceSystem polygons point =
+    match geographicPointPolygonPosition referenceSystem point polygons with
+    | GeographicPointPolygonPosition.Outside _ -> false
+    | _ -> true
 
-    function
-    | GLineString line -> Some(onLinework [ line ])
-    | GMultiLineString lines -> Some(onLinework lines)
-    | GPolygon polygon -> Some(inArea [ polygon ])
-    | GMultiPolygon polygons -> Some(inArea polygons)
+let private geographicCoveredPoint referenceSystem = function
+    | GLineString line -> Some(geographicLineworkCoversPoint referenceSystem [ line ])
+    | GMultiLineString lines -> Some(geographicLineworkCoversPoint referenceSystem lines)
+    | GPolygon polygon -> Some(geographicAreaCoversPoint referenceSystem [ polygon ])
+    | GMultiPolygon polygons -> Some(geographicAreaCoversPoint referenceSystem polygons)
     | _ -> None
 
 let rec private tryGeographicPointTree = function
@@ -2681,6 +2680,63 @@ let private cleanGeographicPointTree shape =
         | shape -> narrowGeographicOverlayShape shape
 
     shape |> removeDuplicates |> narrow
+
+let private intersectGeographicCollectionWithPoints referenceSystem srid collection pointShape points =
+    let prependAll retained values = List.fold (fun rest value -> value :: rest) retained values
+    let rec split (points, lines, polygons) = function
+        | GEmpty -> points, lines, polygons
+        | GPoint(latitude, longitude) -> (latitude, longitude) :: points, lines, polygons
+        | GMultiPoint members -> prependAll points members, lines, polygons
+        | GLineString line -> points, line :: lines, polygons
+        | GMultiLineString members -> points, prependAll lines members, polygons
+        | GPolygon polygon -> points, lines, polygon :: polygons
+        | GMultiPolygon members -> points, lines, prependAll polygons members
+        | GGeometryCollection members -> List.fold (fun parts geometry -> split parts geometry.Shape) (points, lines, polygons) members
+
+    let memberPoints, lines, polygons = split ([], [], []) collection
+    let lines, polygons = List.rev lines, List.rev polygons
+    let area = GMultiPolygon polygons
+    let exteriorLines =
+        match lines, polygons with
+        | [], _
+        | _, [] -> Some lines
+        | _ ->
+            tryGeographicLineAreaOverlay referenceSystem OverlayKind.Difference srid lines polygons area
+            |> Option.bind (function
+                | GLineString line -> Some [ line ]
+                | GMultiLineString lines -> Some lines
+                | GEmpty -> Some []
+                | _ -> None)
+
+    exteriorLines
+    |> Option.map (fun exterior ->
+        let onLine = geographicLineworkCoversPoint referenceSystem exterior
+        let inArea = geographicAreaCoversPoint referenceSystem polygons
+        let memberPoints =
+            memberPoints
+            |> List.rev
+            |> List.filter (fun point -> not (onLine point || inArea point))
+            |> distinctGeographicPoints
+
+        let fromArea = if List.isEmpty polygons then [] else List.filter inArea points
+        let fromLine = if List.isEmpty exterior then [] else List.filter onLine points
+        let fromPoints =
+            overlayGeographicPoints OverlayKind.Intersection (GMultiPoint memberPoints) memberPoints pointShape points
+            |> geographicPointMembers
+            |> Option.defaultValue []
+
+        let matches = geographicPointResult (fromArea @ fromLine @ fromPoints)
+        let dimensions =
+            [ List.isEmpty polygons; List.isEmpty exterior; List.isEmpty memberPoints ]
+            |> List.filter not
+
+        // Mixed dimensions retain a collection when several points survive.
+        match dimensions, matches with
+        | _ :: _ :: _, GMultiPoint points ->
+            points
+            |> List.map (fun (latitude, longitude) -> { Srid = srid; Shape = GPoint(latitude, longitude) })
+            |> GGeometryCollection
+        | _ -> matches)
 
 let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second: Geometry) =
     let result shape = { Srid = first.Srid; Shape = shape }
@@ -2772,6 +2828,10 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
                 match geographicPointMembers shape, geographicPointMembers other with
                 | Some points, Some otherPoints ->
                     overlayGeographicPoints OverlayKind.Difference shape points other otherPoints
+                | Some points, None ->
+                    match geographicCoveredPoint referenceSystem other with
+                    | Some covered -> points |> List.filter (covered >> not) |> geographicPointResult
+                    | None -> shape
                 | _ -> shape
 
         match tryGeographicPointTree left, tryGeographicPointTree right with
@@ -2805,7 +2865,16 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
             | _ -> Some(overlayGeographicPoints kind leftShape leftPoints rightShape rightPoints)
         | Some points, None when leftCollection && not rightCollection -> withNonpoint left true points right
         | None, Some points when rightCollection && not leftCollection -> withNonpoint right false points left
-        | _ -> None
+        | _ ->
+            match kind, left, right with
+            | OverlayKind.Intersection, GGeometryCollection _, pointShape
+            | OverlayKind.Intersection, pointShape, GGeometryCollection _ ->
+                let collection = if leftCollection then left else right
+                geographicPointMembers pointShape
+                |> Option.bind (intersectGeographicCollectionWithPoints referenceSystem first.Srid collection pointShape)
+            | OverlayKind.Difference, pointShape, GGeometryCollection _ ->
+                geographicPointMembers pointShape |> Option.map (fun _ -> subtractPointTree pointShape right)
+            | _ -> None
 
     let shape =
         match first.Shape, second.Shape with

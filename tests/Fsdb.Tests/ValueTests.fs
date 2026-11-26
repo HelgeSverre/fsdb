@@ -645,6 +645,31 @@ let tests =
                         Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "collection overlays retain the SRID"
                         Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{name} of {left} and {right}"
 
+                testCase "geographic mixed collections intersect and subtract points by dimension"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let polygon = "POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,3 1,3 3,1 3,1 1))"
+                    let mixed = $"GEOMETRYCOLLECTION(POINT(7 0),GEOMETRYCOLLECTION(LINESTRING(8 0,12 0),{polygon},POINT(2 2)),LINESTRING(179 0,-179 0),POINT(0 0))"
+                    let points = "MULTIPOINT((11 0),(7 0),(2 2),(0 0),(2 0),(1 1),(180 0),(90 0),(7 0),(10 0),(0 0))"
+                    let intersection = "GEOMETRYCOLLECTION(POINT(0 0),POINT(2 0),POINT(1 1),POINT(11 0),POINT(180 0),POINT(10 0),POINT(7 0),POINT(2 2))"
+                    let boundaryPoints = "MULTIPOINT((3 0),(1 0),(0 0),(2 2))"
+                    let coveredLine = $"GEOMETRYCOLLECTION({polygon},LINESTRING(0 0,4 0),POINT(2 0))"
+                    let outsideLine = $"GEOMETRYCOLLECTION({polygon},LINESTRING(8 0,12 0))"
+
+                    for name, left, right, expected in
+                        [ "ST_Intersection", mixed, points, intersection
+                          "ST_Intersection", points, mixed, intersection
+                          "ST_Intersection", mixed, "POINT(8 0)", "POINT(8 0)"
+                          "ST_Intersection", mixed, "POINT(2.5 2)", "GEOMETRYCOLLECTION EMPTY"
+                          "ST_Intersection", coveredLine, boundaryPoints, "MULTIPOINT((3 0),(1 0),(0 0))"
+                          "ST_Intersection", outsideLine, boundaryPoints, "GEOMETRYCOLLECTION(POINT(3 0),POINT(1 0),POINT(0 0))"
+                          "ST_Difference", points, mixed, "POINT(90 0)"
+                          "ST_Difference", "MULTIPOINT((2.5 2),(90 0),(90 0))", mixed, "MULTIPOINT((2.5 2),(90 0))" ] do
+                        let result = call name [ geometry left; geometry right ]
+                        Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "point overlays retain the collection SRID"
+                        Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{name} of {left} and {right}"
+
                 testCase "geographic line overlays split shared spans and retain input direction"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"
