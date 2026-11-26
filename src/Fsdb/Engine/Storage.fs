@@ -6732,7 +6732,7 @@ let private primaryRangeRows (table: Table) lower upper limit =
             [ for index in start .. after - 1 do entries.[index].RowId ],
             (stop |> Option.map (fun _ -> entries.[after - 1].Values))
 
-let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Store) (plan: IntegerPrimaryReadPlan) =
+let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Store) strength (plan: IntegerPrimaryReadPlan) =
     let deadline = DateTime.UtcNow + timeout
     let database, tableName = plan.ReadDatabase, plan.ReadTableName
     let remaining () =
@@ -6741,7 +6741,7 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
         duration
     let lockRows snapshot rowIds =
         if not (List.isEmpty rowIds) then
-            acquireTransactionReadTargets (remaining ()) snapshot database tableName ShareLock WaitForLocks rowIds |> ignore
+            acquireTransactionReadTargets (remaining ()) snapshot database tableName strength WaitForLocks rowIds |> ignore
     let rows snapshot =
         tableAt snapshot database tableName
         |> Option.filter (fun table -> table.SchemaRevision = plan.ReadSchemaRevision)

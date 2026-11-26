@@ -781,6 +781,59 @@ let tests =
                   Expect.equal (attempt replace) (Affected 1UL) "completion releases the row"
                   Expect.equal (attempt insert) (Affected 1UL) "completion releases the gap"
 
+          testCase "explicit primary-key locking reads protect gaps and stop at ordered limits"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate (id INT PRIMARY KEY,n INT)" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES (10,1),(20,2),(30,3),(40,4)" (Affected 4UL) |> ignore
+              let writer = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let attempt sql =
+                  let transaction = run writer "BEGIN" (Affected 0UL)
+                  let transaction, result = handle transaction sql
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  result
+
+              let insert key = attempt $"INSERT INTO gate VALUES ({key},0)"
+              let read key lockMode = attempt $"SELECT id FROM gate WHERE id={key} {lockMode} NOWAIT"
+              let row key = ResultSet([ "id" ], [ [ Some(string key) ] ])
+              let reader = create 3 store
+              for isolation, suffix, ids, lockedRow, exclusive, blockedGap, freeGap in
+                  [ "REPEATABLE READ", "WHERE id=25 FOR UPDATE", [], None, false, Some 25, 35
+                    "REPEATABLE READ", "WHERE id BETWEEN 12 AND 28 FOR SHARE OF g", [ 20 ], Some 20, false, Some 25, 35
+                    "REPEATABLE READ", "WHERE id BETWEEN 12 AND 38 ORDER BY id LIMIT 1 FOR UPDATE", [ 20 ], Some 20, true, Some 11, 25
+                    "REPEATABLE READ", "WHERE id BETWEEN 12 AND 38 ORDER BY id DESC LIMIT 1 FOR SHARE", [ 30 ], Some 30, false, Some 35, 11
+                    "READ COMMITTED", "WHERE id BETWEEN 12 AND 28 FOR UPDATE", [ 20 ], Some 20, true, None, 25
+                    "SERIALIZABLE", "WHERE id BETWEEN 12 AND 28 FOR UPDATE", [ 20 ], Some 20, true, Some 25, 35 ] do
+                  let reader = run reader $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let expected = ResultSet([ "id" ], List.map (fun id -> [ Some(string id) ]) ids)
+                  let transaction = run transaction ("SELECT g.id FROM gate AS g " + suffix) expected
+                  try
+                      for key in [ 10; 20; 30; 40 ] do
+                          match read key "FOR UPDATE", lockedRow = Some key with
+                          | Err(3572, _), true -> ()
+                          | result, false -> Expect.equal result (row key) suffix
+                          | result, true -> failtestf "%s: row %d should be locked, got %A" suffix key result
+                      for key in Option.toList lockedRow do
+                          match read key "FOR SHARE", exclusive with
+                          | Err(3572, _), true -> ()
+                          | result, false -> Expect.equal result (row key) suffix
+                          | result, true -> failtestf "%s: row %d should be exclusively locked, got %A" suffix key result
+                      for key in Option.toList blockedGap do
+                          match insert key with
+                          | Err(1205, _) -> ()
+                          | result -> failtestf "%s: insert at %d should wait, got %A" suffix key result
+                      Expect.equal (insert freeGap) (Affected 1UL) suffix
+                  finally
+                      run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  for key in Option.toList blockedGap do
+                      Expect.equal (insert key) (Affected 1UL) "rollback releases the gap"
+
           testCase "serializable limited primary-key reads lock only when they seek the key"
           <| fun _ ->
               let run session sql expected =

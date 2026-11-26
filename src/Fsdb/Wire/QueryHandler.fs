@@ -3449,6 +3449,23 @@ let private retainsTransactionAfterStatement (session: Session) =
 let private retainsTransactionMetadata session =
     retainsTransactionAfterStatement session && session.Tx.IsSome
 
+let private primaryLockingSelect isolation (select: SelectStmt) =
+    match isolation, select.Locking, select.From with
+    | Serializable, [], _ -> Some(ShareLock, select)
+    | (RepeatableRead | Serializable), [ { Wait = WaitForLocks } as locking ], Some(FromTable source) ->
+        let qualifier = source.Alias |> Option.defaultValue source.Table
+        let targetsSource =
+            match locking.Tables with
+            | [] -> true
+            | [ target ] -> String.Equals(target, qualifier, StringComparison.OrdinalIgnoreCase)
+            | _ -> false
+
+        // The primary-key path already acquires the requested locks.
+        // Evaluate its rows without preparing a second locking scan.
+        if targetsSource then Some(locking.Strength, { select with Locking = [] })
+        else None
+    | _ -> None
+
 let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) =
     match session.Tx with
     | Some transaction when retainsTransactionAfterStatement session && not (Storage.dynamicWriteRebaseActive store) ->
@@ -3632,20 +3649,22 @@ let private executeParsedStatement accesses (session: Session) (stmt: Statement)
                 | Select select ->
                     let result, types, calculatedFoundRows, rows =
                         withExecutionLimits (fun () ->
-                            let readStore =
+                            let readStore, readSelect =
                                 match session.Tx with
-                                | Some transaction when transaction.Isolation = Serializable
-                                                        && retainsTransactionAfterStatement session ->
-                                    Executor.tryIntegerPrimaryRead store dbName select
-                                    |> Option.filter (fun plan ->
-                                        CatalogOverlay.tryTable session.TemporaryCatalog (plan.ReadDatabase.ToLowerInvariant(), plan.ReadTableName.ToLowerInvariant())
-                                        |> Option.isNone)
-                                    |> Option.map (fun plan ->
-                                        let refresh () = rebaseTransactionSnapshot session transaction |> snd
-                                        Storage.lockIntegerPrimaryRead (lockWaitTimeout session) session.Store refresh plan)
-                                    |> Option.defaultValue store
-                                | _ -> store
-                            Executor.runTopLevelSelect readStore registry dbName select)
+                                | Some transaction when retainsTransactionAfterStatement session ->
+                                    primaryLockingSelect transaction.Isolation select
+                                    |> Option.bind (fun (strength, readSelect) ->
+                                        Executor.tryIntegerPrimaryRead store dbName readSelect
+                                        |> Option.filter (fun plan ->
+                                            CatalogOverlay.tryTable session.TemporaryCatalog (plan.ReadDatabase.ToLowerInvariant(), plan.ReadTableName.ToLowerInvariant())
+                                            |> Option.isNone)
+                                        |> Option.map (fun plan ->
+                                            let refresh () = rebaseTransactionSnapshot session transaction |> snd
+                                            let readStore = Storage.lockIntegerPrimaryRead (lockWaitTimeout session) session.Store refresh strength plan
+                                            readStore, readSelect))
+                                    |> Option.defaultValue (store, select)
+                                | _ -> store, select
+                            Executor.runTopLevelSelect readStore registry dbName readSelect)
 
                     let result, types = consumeSelectDestination select result types rows
                     let result = formatResultForProtocol types rows result
