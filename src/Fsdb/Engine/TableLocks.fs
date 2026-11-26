@@ -1004,6 +1004,19 @@ let accessesForStatement store temporaryCatalog defaultDb statement =
     |> mergeAccesses
     |> expandDependencies store temporaryCatalog
 
+// The caller still holds the statement's access while checking an execution failure.
+let internal retainOpenedStatementAccess live snapshot owner accesses =
+    if not (List.isEmpty accesses) then
+        let views = lazy (viewEntries snapshot)
+        let resolved (access: Access) =
+            match tableSnapshot snapshot access.Database access.Table with
+            | Ok _ -> true
+            | Error _ -> Map.containsKey (tableKey access.Database access.Table) views.Value
+
+        if List.forall resolved accesses then
+            let manager = managerFor live
+            lock manager.SyncRoot (fun () -> retainTransactionAccess owner manager (physicalAccesses accesses))
+
 let private resolveExplicitAccesses ignoreTemporary store temporaryCatalog defaultDb locks =
     let views = lazy (viewEntries store)
 

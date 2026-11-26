@@ -1104,6 +1104,34 @@ let tests =
                   finally
                       run holder "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "failed statements retain metadata after opening their tables"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for sql, code, dropWaits in
+                  [ "SELECT missing FROM gate", 1054, true
+                    "INSERT INTO gate VALUES (1)", 1062, true
+                    "SELECT * FROM gate, missing", 1146, false
+                    "SELECT FROM gate", 1064, false ] do
+                  let store = Fsdb.Storage.create ()
+                  let admin = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY)" (Affected 0UL)
+                  let admin = run admin "INSERT INTO gate VALUES (1)" (Affected 1UL)
+                  let admin = run admin "SET SESSION lock_wait_timeout=1" (Affected 0UL)
+                  let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let holder, failed = handle holder sql
+                  try
+                      match failed with
+                      | Err(actual, _) -> Expect.equal actual code sql
+                      | actual -> failtestf "expected %d for %s, got %A" code sql actual
+                      match dropWaits, handle admin "DROP TABLE gate" |> snd with
+                      | true, Err(1205, _) | false, Affected 0UL -> ()
+                      | expected, actual -> failtestf "dropWaits=%b after %s: %A" expected sql actual
+                  finally
+                      run holder "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "serializable primary ranges ignore snapshots of replaced tables"
           <| fun _ ->
               let run session sql expected =

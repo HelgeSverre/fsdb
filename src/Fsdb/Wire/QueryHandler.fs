@@ -3400,6 +3400,10 @@ let private retainsTransactionAfterStatement (session: Session) =
     session.TransactionTracking.State.Kind = ExplicitTrackedTransaction
     || sessionValue session "autocommit" = Some "0"
 
+let private retainsTransactionMetadata session =
+    retainsTransactionAfterStatement session
+    && (session.Tx |> Option.exists (fun tx -> tx.Xa.IsNone))
+
 let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) =
     match session.Tx with
     | Some transaction when retainsTransactionAfterStatement session && not (Storage.dynamicWriteRebaseActive store) ->
@@ -3434,7 +3438,7 @@ let private formatResultForProtocol metadata (typedRows: Value[] list) result =
         ResultSetWithValues(columns, rows, rawResultColumns result, typedRows)
     | _ -> result
 
-let private executeParsedStatement (session: Session) (stmt: Statement) : Session * QueryResult =
+let private executeParsedStatement accesses (session: Session) (stmt: Statement) : Session * QueryResult =
     let stmt = withSqlSelectLimit session stmt
     stmt
     |> statementStatusCommand
@@ -3477,6 +3481,10 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
         statementAccess
         |> Result.bind transactionAccess
+
+    let retainOpenedAccess current =
+        if retainsTransactionMetadata current then
+            TableLocks.retainOpenedStatementAccess current.Store (Session.currentStore current) current.ConnectionId accesses
 
     let execute session =
         let store = Session.currentStore session
@@ -3714,10 +3722,22 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                     Storage.recordConsistentReadView started.Store transaction.Snapshot
                 | _ -> ()
 
-                started
-                |> prepareTransactionWrite stmt
-                |> syncTransactionView
-                |> execute
+                let executed, result =
+                    try
+                        started
+                        |> prepareTransactionWrite stmt
+                        |> syncTransactionView
+                        |> execute
+                    with
+                    | Storage.LockWaitTimeout _ | Storage.LockNowait _ ->
+                        retainOpenedAccess started
+                        reraise ()
+
+                match terminalErrorInfo result with
+                // Syntax and duplicate table aliases fail before open-table resolution.
+                | Some { Code = (1064 | 1066) } | None -> ()
+                | Some _ -> retainOpenedAccess executed
+                executed, result
 
         let canAllocateAutoIncrement =
             match stmt with
@@ -3750,8 +3770,7 @@ let private lockedExecutionResult session = function
 
 let private retainsMetadata (session: Session, result) =
     terminalErrorInfo result |> Option.isNone
-    && retainsTransactionAfterStatement session
-    && (session.Tx |> Option.exists (fun tx -> tx.Xa.IsNone))
+    && retainsTransactionMetadata session
 
 let private executeWithStatementAccess session accesses execute =
     TableLocks.withStatementAccessRetaining
@@ -3863,7 +3882,7 @@ let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Stateme
                     session.ActiveRoles
                     (fun () ->
                         Limits.withLockWaitTimeout (lockWaitTimeout session)
-                            (fun () -> executeParsedStatement session stmt)))
+                            (fun () -> executeParsedStatement accesses session stmt)))
 
         let executed, result =
             match lockBoundary with
@@ -3999,7 +4018,8 @@ let private metadataWriteTargets dbName stmt =
         | CreateTable table -> [ table.Name ]
         | CreateTableLike(table, _, _)
         | Truncate table | CreateIndex(_, table, _, _, _, _) | DropIndexStmt(_, table, _) -> [ table ]
-        | DropTable(tables, _) -> tables
+        | DropTable(tables, _) | DropView(tables, _) -> tables
+        | CreateView view -> [ view.Name ]
         | AlterTable(table, actions) ->
             table :: (actions |> List.choose (function RenameTo target -> Some target | _ -> None))
         | RenameTable pairs -> pairs |> List.collect (fun (source, target) -> [ source; target ])

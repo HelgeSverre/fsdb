@@ -1266,6 +1266,119 @@ def check(port, mysql):
             )
             execute(holder, "ROLLBACK")
 
+    failure_setup = (
+        "CREATE TABLE gate(id INT PRIMARY KEY,v INT NOT NULL)",
+        "INSERT INTO gate VALUES (1,10)",
+        "CREATE TABLE sibling(id INT PRIMARY KEY)",
+        "INSERT INTO sibling VALUES (1)",
+        "CREATE VIEW visible AS SELECT id,v FROM gate",
+    )
+    for statement, error, ddl, waits in (
+        ("SELECT missing FROM gate", 1054, "DROP TABLE gate", True),
+        ("SELECT FROM gate", 1064, "DROP TABLE gate", False),
+        ("SELECT * FROM gate,missing", 1146, "DROP TABLE gate", False),
+        ("SELECT * FROM missing,gate", 1146, "DROP TABLE gate", False),
+        (
+            "SELECT * FROM gate JOIN gate ON gate.id=gate.id",
+            1066,
+            "DROP TABLE gate",
+            False,
+        ),
+        (
+            "SELECT id FROM gate JOIN sibling ON gate.id=sibling.id",
+            1052,
+            "DROP TABLE sibling",
+            True,
+        ),
+        ("SELECT nonexistent_fn(id) FROM gate", 1305, "DROP TABLE gate", True),
+        ("SELECT missing FROM visible", 1054, "DROP TABLE gate", True),
+        ("SELECT missing FROM visible", 1054, "DROP VIEW visible", True),
+        ("INSERT INTO gate VALUES (1,20)", 1062, "DROP TABLE gate", True),
+        ("INSERT INTO gate VALUES (2,NULL)", 1048, "DROP TABLE gate", True),
+        ("INSERT INTO gate VALUES (2)", 1136, "DROP TABLE gate", True),
+        ("EXPLAIN SELECT missing FROM gate", 1054, "DROP TABLE gate", True),
+    ):
+        with fixture(port, schema, mysql, failure_setup) as (
+            _,
+            _,
+            holder,
+            ddl_session,
+            _,
+        ):
+            execute(ddl_session, "SET SESSION lock_wait_timeout=1")
+            execute(holder, "BEGIN")
+            expect(statement, outcome(holder, statement), error)
+            expect(
+                f"{ddl} after {statement}",
+                outcome(ddl_session, ddl),
+                TIMEOUT if waits else 0,
+            )
+            execute(holder, "ROLLBACK")
+
+    with fixture(port, schema, mysql, failure_setup) as (_, _, holder, ddl_session, _):
+        execute(ddl_session, "SET SESSION lock_wait_timeout=1")
+        execute(holder, "START TRANSACTION READ ONLY")
+        expect(
+            "read-only authorization error",
+            outcome(holder, "UPDATE gate SET v=20 WHERE id=1"),
+            1792,
+        )
+        expect(
+            "authorization rejection leaves no metadata claim",
+            outcome(ddl_session, "DROP TABLE gate"),
+            0,
+        )
+        execute(holder, "ROLLBACK")
+
+    with fixture(port, schema, mysql, failure_setup) as (_, _, holder, ddl_session, _):
+        execute(ddl_session, "SET SESSION lock_wait_timeout=1")
+        execute(holder, "BEGIN")
+        execute(holder, "SAVEPOINT before_error")
+        expect(
+            "failed column binding", outcome(holder, "SELECT missing FROM gate"), 1054
+        )
+        expect(
+            "failed binding holds metadata",
+            outcome(ddl_session, "DROP TABLE gate"),
+            TIMEOUT,
+        )
+        execute(holder, "ROLLBACK TO SAVEPOINT before_error")
+        expect(
+            "savepoint rollback releases failed statement metadata",
+            outcome(ddl_session, "DROP TABLE gate"),
+            0,
+        )
+        execute(holder, "ROLLBACK")
+
+    for statement, error in (
+        ("SELECT v FROM gate WHERE id=1 FOR UPDATE NOWAIT", 3572),
+        ("UPDATE gate SET v=12 WHERE id=1", TIMEOUT),
+    ):
+        with fixture(port, schema, mysql, failure_setup) as (
+            _,
+            _,
+            writer,
+            holder,
+            ddl_session,
+        ):
+            execute(ddl_session, "SET SESSION lock_wait_timeout=1")
+            execute(writer, "BEGIN")
+            execute(writer, "UPDATE gate SET v=11 WHERE id=1")
+            execute(holder, "BEGIN")
+            expect(statement, outcome(holder, statement), error)
+            execute(writer, "COMMIT")
+            expect(
+                f"{statement} holds metadata after row lock failure",
+                outcome(ddl_session, "DROP TABLE gate"),
+                TIMEOUT,
+            )
+            execute(holder, "ROLLBACK")
+            expect(
+                "rollback releases failed row wait metadata",
+                outcome(ddl_session, "DROP TABLE gate"),
+                0,
+            )
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 

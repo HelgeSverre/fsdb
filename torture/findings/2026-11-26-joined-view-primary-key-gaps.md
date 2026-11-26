@@ -395,10 +395,36 @@ claim and released it on rollback.
 
 MySQL and both Fsdb storage modes passed all 390 maintained checks.
 
-The remaining differences include XA and statement failures. MySQL
-retains metadata for an unknown or ambiguous column and a duplicate
-key error in the audited statements. Fsdb releases those claims.
-Both engines allow DDL after the tested syntax and missing-table errors.
+XA and other metadata-lock modes remain open.
+
+#### Metadata locks after statement failures
+
+Both engines retain table metadata after the audited column and routine
+resolution errors, constraint errors, and safe-update rejection. They
+allow DDL after the tested syntax errors, duplicate aliases, incomplete
+table resolution, and writes rejected by a read-only transaction.
+The audited failures through a stored view hold both the view and its
+base table when the sources exist. `DROP VIEW` takes an exclusive claim
+on the view name.
+
+A timed-out row write and a `FOR UPDATE NOWAIT` failure retain table
+metadata after the competing writer commits. The failed transaction's
+rollback releases that claim. The audited column binding failure also
+releases its claim when the transaction rolls back to an earlier
+savepoint that permits release.
+
+The 21-case comparison matched every metadata-lock outcome. Two SQL
+diagnostics differ. The aggregate in `WHERE` returned 1305 on Fsdb and
+1111 on MySQL. With `sql_safe_updates=1`, updating an unknown column
+without a key predicate returned 1175 on Fsdb and 1054 on MySQL.
+
+Savepoint rollback still differs when Fsdb acquires write locks before
+rejecting certain writes. In the audited `NOT NULL` and unknown update
+column failures, MySQL let a second session drop the affected table
+after rollback to a savepoint. Fsdb retained the claim. The audited
+duplicate-key failures matched, including savepoint rollback.
+
+MySQL and both Fsdb storage modes matched all 471 maintained checks.
 
 #### Metadata locks at savepoints
 
