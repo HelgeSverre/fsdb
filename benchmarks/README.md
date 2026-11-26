@@ -266,13 +266,14 @@ These tables summarize immutable, linked result artifacts. They are historical
 measurements, not claims about the current branch; use a fresh run for a current
 comparison.
 
-The [native peer benchmark at `cc2cb5f6`](results/cc2cb5f6-peer-comparison.md)
-records checked point reads, durable updates, joined views, correlated
-aggregates, geographic turns, and CJK phrase and operator searches. The
-[later SQL refresh](results/2026-11-26-spatial-cjk-refresh.md) reruns
-the correlated, view, spatial, and CJK fixtures against MySQL. The
-[previous native run](results/d11c7f65-peer-comparison.md) includes the
+The [native peer benchmark at `ddbd4602`](results/ddbd4602-peer-comparison.md)
+records verified point reads, durable updates, joined views, correlated
+aggregates, geographic turns, and CJK searches. It also compares point
+reads with and without WAL on the same Fsdb build. The
+[previous native run](results/cc2cb5f6-peer-comparison.md) includes the
 same load fixtures. The
+[intermediate SQL refresh](results/2026-11-26-spatial-cjk-refresh.md)
+covers the geographic and ngram changes against MySQL. The
 [local TiDB comparison](results/eeced6b1-peer-refresh.md#other-topologies) and
 [matched ARM64 container run with Percona](results/2026-11-25-peer-comparison.md)
 cover additional topologies.
