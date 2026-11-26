@@ -781,6 +781,41 @@ let tests =
                   Expect.equal (attempt replace) (Affected 1UL) "completion releases the row"
                   Expect.equal (attempt insert) (Affected 1UL) "completion releases the gap"
 
+          testCase "serializable primary ranges lock qualifying rows and surrounding gaps"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate (id INT PRIMARY KEY,n INT)" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES (10,1),(20,2),(30,3),(40,4)" (Affected 4UL) |> ignore
+              let probe = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let attempt sql =
+                  let transaction = run probe "START TRANSACTION" (Affected 0UL)
+                  let transaction, result = handle transaction sql
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  result
+
+              let reader = run (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+              let reader = run reader "BEGIN" (Affected 0UL)
+              let reader = run reader "SELECT id FROM gate WHERE id BETWEEN 12 AND 28" (ResultSet([ "id" ], [ [ Some "20" ] ]))
+              try
+                  match attempt "SELECT id FROM gate WHERE id=20 FOR UPDATE NOWAIT" with
+                  | Err(3572, _) -> ()
+                  | actual -> failtestf "the qualifying row must be locked, got %A" actual
+                  for key in [ 11; 29 ] do
+                      match attempt $"INSERT INTO gate VALUES ({key},0)" with
+                      | Err(1205, _) -> ()
+                      | actual -> failtestf "the insert at %d must wait, got %A" key actual
+                  for key in [ 10; 30 ] do
+                      Expect.equal (attempt $"UPDATE gate SET n=0 WHERE id={key}") (Affected 1UL) "neighboring rows stay writable"
+                  Expect.equal (attempt "INSERT INTO gate VALUES (35,0)") (Affected 1UL) "the next gap stays writable"
+              finally
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+              Expect.equal (attempt "INSERT INTO gate VALUES (15,0)") (Affected 1UL) "rollback releases the range"
+
           testCase "SERIALIZABLE read-only snapshots do not conflict with later writes"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

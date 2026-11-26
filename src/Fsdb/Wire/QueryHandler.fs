@@ -3551,13 +3551,13 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                                 match session.Tx with
                                 | Some transaction when transaction.Isolation = Serializable
                                                         && retainsTransactionAfterStatement session ->
-                                    Executor.tryExactIntegerPrimaryRead store dbName select
-                                    |> Option.filter (fun (database, table, _) ->
-                                        CatalogOverlay.tryTable session.TemporaryCatalog (database.ToLowerInvariant(), table.ToLowerInvariant())
+                                    Executor.tryIntegerPrimaryRead store dbName select
+                                    |> Option.filter (fun plan ->
+                                        CatalogOverlay.tryTable session.TemporaryCatalog (plan.ReadDatabase.ToLowerInvariant(), plan.ReadTableName.ToLowerInvariant())
                                         |> Option.isNone)
-                                    |> Option.map (fun (database, table, values) ->
+                                    |> Option.map (fun plan ->
                                         let refresh () = rebaseTransactionSnapshot session transaction |> snd
-                                        Storage.lockPrimaryPointRead (lockWaitTimeout session) session.Store refresh database table values)
+                                        Storage.lockIntegerPrimaryRead (lockWaitTimeout session) session.Store refresh plan)
                                     |> Option.defaultValue store
                                 | _ -> store
                             Executor.runTopLevelSelect readStore registry dbName select)

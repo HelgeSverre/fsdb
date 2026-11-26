@@ -34676,13 +34676,18 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
         check delete.From delete.Joins delete.Where delete.Limit singleTarget
     | _ -> Ok()
 
-let internal tryExactIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
+let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
+    let primaryHint = function
+        | [] -> true
+        | [ { Kind = ForceIndex; Scope = (None | Some IndexJoin); Indexes = [ index ] } ] ->
+            equalsIgnoreCase "PRIMARY" index
+        | _ -> false
     match select.From with
     | Some(FromTable source) when
         select.Joins.IsEmpty && select.Ctes.IsEmpty && select.Locking.IsEmpty
         && select.GroupBy.IsEmpty && select.Having.IsNone && select.Windows.IsEmpty
         && select.OrderBy.IsEmpty && select.Limit.IsNone && select.Offset.IsNone
-        && not (SelectStmt.hasDestination select) && source.IndexHints.IsEmpty ->
+        && not (SelectStmt.hasDestination select) && primaryHint source.IndexHints ->
         let database = source.Database |> Option.defaultValue dbName
         let qualifier = source.Alias |> Option.defaultValue source.Table
         let columnName = function
@@ -34702,31 +34707,79 @@ let internal tryExactIntegerPrimaryRead (store: Store) dbName (select: SelectStm
 
             let keys = Storage.primaryKeyColumns table
             let conditions = optionalConjuncts select.Where
-            if keys.IsEmpty || keys.Length <> conditions.Length
-               || not (List.forall simpleProjection select.Projections) then None
-            else
+            let isIntegerColumn column =
+                resolveColumn table.Columns column
+                |> Result.toOption
+                |> Option.exists (fun index -> Storage.isIntegerPrimaryKeyType table.Columns.[index].Type)
+            let point values =
+                Storage.tryPrimaryWriteLockTargets store table values
+                |> Option.map (fun _ -> Storage.PrimaryPoint values)
+
+            let exact () =
                 let equality = function
                     | BinOp(Eq, expression, LiteralValue((VInt _ | VUInt _) as value))
                     | BinOp(Eq, LiteralValue((VInt _ | VUInt _) as value), expression) ->
                         columnName expression |> Option.map (fun column -> column, value)
                     | _ -> None
 
-                conditions
-                |> List.map equality
-                |> tryAllSome
-                |> Option.bind (fun equalities ->
-                    keys
-                    |> List.map (fun key ->
-                        resolveColumn table.Columns key
-                        |> Result.toOption
-                        |> Option.filter (fun index -> Storage.isIntegerPrimaryKeyType table.Columns.[index].Type)
-                        |> Option.bind (fun _ ->
-                            equalities
-                            |> List.tryPick (fun (column, value) -> if equalsIgnoreCase key column then Some value else None)))
+                if keys.Length <> conditions.Length then None
+                else
+                    conditions
+                    |> List.map equality
                     |> tryAllSome
-                    |> Option.bind (fun values ->
-                        Storage.tryPrimaryWriteLockTargets store table values
-                        |> Option.map (fun _ -> database, source.Table, values))))
+                    |> Option.bind (fun equalities ->
+                        keys
+                        |> List.map (fun key ->
+                            equalities
+                            |> List.tryPick (fun (column, value) -> if equalsIgnoreCase key column then Some value else None))
+                        |> tryAllSome
+                        |> Option.bind point)
+
+            let range () =
+                let ascending =
+                    table.Indexes
+                    |> List.tryFind (fun index -> equalsIgnoreCase "PRIMARY" index.Name)
+                    |> Option.forall (fun index -> index.KeyColumns |> List.forall (fun column -> column.Direction = Asc))
+                match keys with
+                | [ key ] when ascending ->
+                    let keyColumn = columnName >> Option.filter (equalsIgnoreCase key)
+                    let integer = function
+                        | LiteralValue((VInt _ | VUInt _) as value) -> Some value
+                        | _ -> None
+                    let predicates = conditions |> List.map (rangePredicatesFor keyColumn integer)
+                    if List.exists List.isEmpty predicates then None
+                    else
+                        let bounds = List.concat predicates
+                        let compare = Storage.compareIntegerPrimaryValues
+                        let strongest direction =
+                            List.fold (fun current ((value, inclusive) as candidate) ->
+                                match current with
+                                | Some(bound, boundInclusive) ->
+                                    let order = compare value bound
+                                    if order * direction > 0 || (order = 0 && boundInclusive && not inclusive) then Some candidate
+                                    else current
+                                | None -> Some candidate) None
+                        let lower = bounds |> List.choose _.Lower |> strongest 1
+                        let upper = bounds |> List.choose _.Upper |> strongest -1
+                        let exactBound = Option.forall (fun (value, _) -> (point [ value ]).IsSome)
+                        if not (exactBound lower && exactBound upper) then None
+                        else
+                            match lower, upper with
+                            | Some(low, includeLow), Some(high, includeHigh) when compare low high = 0 ->
+                                if includeLow && includeHigh then point [ low ] else None
+                            | Some(low, _), Some(high, _) when compare low high > 0 -> None
+                            | _ -> Some(Storage.PrimaryRange(lower, upper))
+                | _ -> None
+
+            if keys.IsEmpty || conditions.IsEmpty || not (List.forall isIntegerColumn keys)
+               || not (List.forall simpleProjection select.Projections) then None
+            else
+                exact () |> Option.orElseWith range
+                |> Option.map (fun read ->
+                    { ReadDatabase = database
+                      ReadTableName = source.Table
+                      ReadSchemaRevision = table.SchemaRevision
+                      ReadAccess = read }))
     | _ -> None
 
 let transactionWriteTargets

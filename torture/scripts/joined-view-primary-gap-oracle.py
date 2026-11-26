@@ -493,6 +493,51 @@ def check(port, mysql):
             for sql in finish:
                 execute(reader, sql)
 
+    with fixture(port, schema, mysql) as (_, admin, reader, _, probe):
+        execute(admin, "INSERT INTO gate VALUES (10,1),(20,2),(30,3),(40,4)")
+        execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        for predicate, selected, row_locks, gap_locks in (
+            ("id BETWEEN 10 AND 30", (10, 20, 30), (10, 20, 30), (15, 25)),
+            ("id BETWEEN 12 AND 28", (20,), (20,), (15, 25)),
+            ("id BETWEEN 12 AND 18", (), (), (15,)),
+            ("id > 10 AND id < 30", (20,), (20,), (15, 25)),
+            ("id >= 10 AND id < 30", (10, 20), (10, 20), (15, 25)),
+            ("id > 30", (40,), (40,), (35, 45)),
+            ("id < 20", (10,), (10,), (5, 15)),
+            ("id BETWEEN 30 AND 10", (), (), ()),
+        ):
+            execute(reader, "BEGIN")
+            with reader.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id FROM gate FORCE INDEX (PRIMARY) WHERE " + predicate
+                )
+                expect(
+                    predicate + " selected rows",
+                    tuple(sorted(row[0] for row in cursor.fetchall())),
+                    selected,
+                )
+            expect(
+                predicate + " row locks",
+                tuple(
+                    rolled_back_outcome(
+                        probe, f"SELECT id FROM gate WHERE id={key} FOR UPDATE NOWAIT"
+                    )
+                    for key in (10, 20, 30, 40)
+                ),
+                tuple(3572 if key in row_locks else 1 for key in (10, 20, 30, 40)),
+            )
+            expect(
+                predicate + " gap locks",
+                tuple(
+                    rolled_back_outcome(probe, f"INSERT INTO gate VALUES ({key},0)")
+                    for key in (5, 15, 25, 35, 45)
+                ),
+                tuple(
+                    TIMEOUT if key in gap_locks else 1 for key in (5, 15, 25, 35, 45)
+                ),
+            )
+            execute(reader, "ROLLBACK")
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 

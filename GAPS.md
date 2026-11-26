@@ -835,9 +835,10 @@ fresh statement view without publishing them; rolled-back deltas disappear on
 the next statement, while stronger isolation levels never consult that view.
 
 `SERIALIZABLE` uses conservative whole-catalog validation for writing
-transactions. In open transactions, audited [plain integer primary-key
-point reads](torture/findings/2026-11-26-joined-view-primary-key-gaps.md#serializable-point-reads)
-also hold shared row locks or protect missing-key gaps.
+transactions. In open transactions, audited [integer primary-key point
+reads](torture/findings/2026-11-26-joined-view-primary-key-gaps.md#serializable-point-reads)
+and [single-column primary-key ranges](torture/findings/2026-11-26-joined-view-primary-key-gaps.md#serializable-primary-key-ranges)
+hold shared row locks and protect the relevant gaps.
 
 Queued table writers close the reader gate until acquisition and release,
 preventing later readers from starving them.
@@ -860,7 +861,7 @@ truncation waits until every prepared branch has resolved.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | audited plain exact integer primary-key reads take row or gap locks in open transactions. Broader reads retain snapshot semantics. Conservative snapshot validation can reject disjoint commits with 1205 when the transaction writes | low | divergence |
+| SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | audited integer primary-key point reads and ascending single-column integer primary-key ranges take row or gap locks in open transactions. Broader reads retain snapshot semantics. Conservative snapshot validation can reject disjoint commits with 1205 when the transaction writes | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed and single-table full-scan UPDATE/DELETE paths coordinate row stripes; full scans conservatively claim current rows but not gaps or later inserts; insert, upsert, and replacement candidates are prepared once, then claim supplied, generated, or defaulted unique keys and refresh existing duplicate rows before publication, including SELECT sources; [unique-key locks use exact keys](torture/findings/2026-10-15-exact-key-locks.md), so unrelated keys no longer wait because their old hash stripes collided; AUTO_INCREMENT identities are reserved across transaction snapshots; joined writes claim [physical targets inside nested join groups](torture/findings/2026-10-14-grouped-joined-write-rebase.md) and [bare assignments beside derived sources](torture/findings/2026-10-14-derived-joined-write-rebase.md); [keyless inserts](benchmarks/results/2026-10-12-keyless-insert-load.md), CTE writes without inferable physical targets, and other multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced; a [durability-matched keyless-insert run](benchmarks/results/2026-10-14-durable-keyless-scale.md) confirms the worker-scaling gap but does not isolate its cause | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize catalog-wide referential actions, and recorded campaigns show CPU saturation limiting higher worker counts | medium | partial |
 

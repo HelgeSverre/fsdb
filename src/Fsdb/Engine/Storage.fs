@@ -6396,17 +6396,30 @@ type private PrimaryGapBoundary =
     { Values: Value list
       LockKey: string }
 
-let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (database: string) tableName (values: Value list) =
+type internal IntegerPrimaryRead =
+    | PrimaryPoint of Value list
+    | PrimaryRange of lower: (Value * bool) option * upper: (Value * bool) option
+
+type internal IntegerPrimaryReadPlan =
+    { ReadDatabase: string
+      ReadTableName: string
+      ReadSchemaRevision: int64
+      ReadAccess: IntegerPrimaryRead }
+
+let internal compareIntegerPrimaryValues = compareIndexedValues None
+
+let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (database: string) tableName read =
     match snapshot.TransactionLocks, tableAt snapshot database tableName with
     | Some context, Some observed ->
         let tableKey = normalizeTableName tableName
         let database = database.ToLowerInvariant()
         let integer column = isIntegerPrimaryKeyType observed.Columns.[column].Type
+        let width = match read with PrimaryPoint values -> values.Length | PrimaryRange _ -> 1
 
         uniqueKeyGroups observed
         |> List.tryFind (fun group ->
             group.Name = "PRIMARY" && indexesWholeColumns group
-            && group.Indices.Length = values.Length && List.forall integer group.Indices)
+            && group.Indices.Length = width && List.forall integer group.Indices)
         |> Option.iter (fun group ->
             let encode (table: Table) values =
                 primaryLockKeyPrefix + encodeEqualityValues table.Columns group.Indices values
@@ -6418,7 +6431,16 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
             let current () =
                 tableAt live database tableKey |> Option.filter (fun table -> table.SchemaRevision = observed.SchemaRevision)
             let cache = keyLockCache live (lockNamespaceKey database tableKey)
-            let probe = encode observed values
+            let probe, lower, upper, includeEdges =
+                match read with
+                | PrimaryPoint values -> encode observed values, Some values, Some values, false
+                | PrimaryRange(lower, upper) ->
+                    let identity = function
+                        | Some(value, inclusive) -> encode observed [ value ] + (if inclusive then "i" else "e")
+                        | None -> "-"
+                    "range:" + identity lower + ":" + identity upper,
+                    Option.map (fst >> List.singleton) lower, Option.map (fst >> List.singleton) upper, true
+            let needsGap table = includeEdges || not (contains table probe)
             let readTables () =
                 live.ConsistentReadViews
                 |> Seq.choose (fun (KeyValue(_, catalog)) ->
@@ -6431,25 +6453,34 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
                     cache.Entries |> Seq.choose (fun (KeyValue(key, weak)) ->
                         if primaryLockKey key then
                             match weak.TryGetTarget() with
-                            | true, stripe when stripe.ExclusiveOwner.IsSome -> tryIntegerPrimaryLockValues values.Length key
+                            | true, stripe ->
+                                stripe.ExclusiveOwner
+                                |> Option.bind (fun owner -> tryIntegerPrimaryLockValues width key |> Option.map (fun key -> owner, key))
                             | _ -> None
                         else None)
 
-            let neighbor lower pivot (table: Table) =
+            let neighbor lower inclusive pivot (table: Table) =
                 table.SecondaryOrder |> Map.tryFind "PRIMARY"
                 |> Option.bind (fun entries ->
                     let first, after = orderedPrefixBounds entries pivot
-                    let index = if lower then first - 1 else after
+                    let index =
+                        match lower, inclusive with
+                        | true, true -> after - 1
+                        | true, false -> first - 1
+                        | false, true -> first
+                        | false, false -> after
                     if index >= 0 && index < entries.Count then Some entries.[index].Values else None)
 
-            let nearest lower pivot table =
+            let nearest lower inclusive pivot table =
                 let improves candidate bound =
                     let order = compare candidate bound
                     if lower then order > 0 else order < 0
+                let qualifies candidate =
+                    (inclusive && compare pivot candidate = 0) || improves pivot candidate
                 seq {
-                    yield! neighbor lower pivot table |> Option.toList
-                    yield! readTables () |> Seq.choose (neighbor lower pivot)
-                    yield! pending () |> Seq.filter (fun key -> improves pivot key)
+                    yield! neighbor lower inclusive pivot table |> Option.toList
+                    yield! readTables () |> Seq.choose (neighbor lower inclusive pivot)
+                    yield! pending () |> Seq.map snd |> Seq.filter qualifies
                 }
                 |> Seq.fold (fun best candidate ->
                     if best |> Option.forall (improves candidate) then Some candidate else best) None
@@ -6459,7 +6490,7 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
 
             let install () =
                 match current () with
-                | Some table when not (contains table probe || contains observed probe) ->
+                | Some table when needsGap table && needsGap observed ->
                     let mutable alreadyHeld = false
                     visitLivePrimaryGaps cache (fun stripe ->
                         if stripe.SharedOwners.Contains context.Owner
@@ -6467,8 +6498,8 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
                             alreadyHeld <- true)
                     if not alreadyHeld then
                         let boundary key = { Values = key; LockKey = encode observed key }
-                        let mutable lower = nearest true values table |> Option.map boundary
-                        let mutable upper = nearest false values table |> Option.map boundary
+                        let mutable lower = lower |> Option.bind (fun pivot -> nearest true includeEdges pivot table) |> Option.map boundary
+                        let mutable upper = upper |> Option.bind (fun pivot -> nearest false includeEdges pivot table) |> Option.map boundary
 
                         // A key can bound the gap while an active writer owns it
                         // or an older consistent read still sees its deleted row.
@@ -6476,11 +6507,11 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
                             match current with
                             | Some bound when not (isVisibleInAnyReadView table bound.LockKey)
                                               && (exactKeyOwner cache bound.LockKey).IsNone ->
-                                nearest lower bound.Values table |> Option.map boundary
+                                nearest lower false bound.Values table |> Option.map boundary
                             | _ -> current
 
                         let blocks key =
-                            match current (), tryIntegerPrimaryLockValues values.Length key with
+                            match current (), tryIntegerPrimaryLockValues width key with
                             | Some table, Some candidate ->
                                 lower <- refreshBoundary true table lower
                                 upper <- refreshBoundary false table upper
@@ -6499,12 +6530,26 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
                         lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe |> ignore)
                 | _ -> ()
 
-            if not (contains observed probe) then
+            if needsGap observed then
                 let blockers () =
                     let owners = HashSet<int64>()
-                    exactKeyOwner cache probe |> Option.filter ((<>) context.Owner) |> Option.iter (fun owner -> owners.Add owner |> ignore)
+                    let add owner = if owner <> context.Owner then owners.Add owner |> ignore
+                    match read with
+                    | PrimaryPoint _ -> exactKeyOwner cache probe |> Option.iter add
+                    | PrimaryRange(lower, upper) ->
+                        let within direction bound value =
+                            bound |> Option.forall (fun (limit, inclusive) ->
+                                let order = compareIntegerPrimaryValues value limit
+                                order * direction > 0 || (inclusive && order = 0))
+                        for owner, values in pending () do
+                            match values with
+                            | [ value ] when within 1 lower value && within -1 upper value -> add owner
+                            | _ -> ()
                     owners
-                let available () = exactKeyOwner cache probe |> Option.forall ((=) context.Owner)
+                let available () =
+                    match read with
+                    | PrimaryPoint _ -> exactKeyOwner cache probe |> Option.forall ((=) context.Owner)
+                    | PrimaryRange _ -> (blockers ()).Count = 0
                 let installed =
                     lock cache.SyncRoot (fun () ->
                         if available () then
@@ -6516,26 +6561,54 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
                         queryCancellation.Value cache.SyncRoot available blockers install)
     | _ -> ()
 
-let internal lockPrimaryPointRead timeout (live: Store) (refresh: unit -> Store) database tableName values =
+let internal acquireMissingPrimaryGap timeout live snapshot database tableName values =
+    acquirePrimaryReadGap timeout live snapshot database tableName (PrimaryPoint values)
+
+let private primaryRangeRowIds (table: Table) lower upper =
+    match Map.tryFind "PRIMARY" table.SecondaryOrder with
+    | None -> []
+    | Some entries ->
+        let start =
+            lower |> Option.map (fun (value, inclusive) ->
+                let first, after = orderedPrefixBounds entries [ value ]
+                if inclusive then first else after)
+            |> Option.defaultValue 0
+        let finish =
+            upper |> Option.map (fun (value, inclusive) ->
+                let first, after = orderedPrefixBounds entries [ value ]
+                if inclusive then after else first)
+            |> Option.defaultValue entries.Count
+        [ for index in start .. finish - 1 do entries.[index].RowId ]
+
+let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Store) (plan: IntegerPrimaryReadPlan) =
     let deadline = DateTime.UtcNow + timeout
-    let targets snapshot =
+    let database, tableName = plan.ReadDatabase, plan.ReadTableName
+    let rows snapshot =
         tableAt snapshot database tableName
-        |> Option.bind (fun table -> tryPrimaryWriteLockTargets snapshot table values)
-    let rec acquire snapshot (target: WriteLockTargets) =
+        |> Option.filter (fun table -> table.SchemaRevision = plan.ReadSchemaRevision)
+        |> Option.bind (fun table ->
+            match plan.ReadAccess with
+            | PrimaryPoint values -> tryPrimaryWriteLockTargets snapshot table values |> Option.map _.RowIds
+            | PrimaryRange(lower, upper) -> Some(primaryRangeRowIds table lower upper))
+    let rec acquire snapshot rowIds =
         let remaining = deadline - DateTime.UtcNow
         if remaining <= TimeSpan.Zero then raise (LockWaitTimeout database)
-        match target.RowIds with
-        | [] -> acquireMissingPrimaryGap remaining live snapshot database tableName values
-        | rows -> acquireTransactionReadTargets remaining snapshot database tableName ShareLock WaitForLocks rows |> ignore
+        match plan.ReadAccess with
+        | PrimaryPoint _ when not (List.isEmpty rowIds) -> ()
+        | _ -> acquirePrimaryReadGap remaining live snapshot database tableName plan.ReadAccess
+        if not (List.isEmpty rowIds) then
+            let remaining = deadline - DateTime.UtcNow
+            if remaining <= TimeSpan.Zero then raise (LockWaitTimeout database)
+            acquireTransactionReadTargets remaining snapshot database tableName ShareLock WaitForLocks rowIds |> ignore
         // A writer can publish a new row identity for the key while the read waits.
         let current = refresh ()
-        match targets current with
-        | Some next when next.RowIds <> target.RowIds -> acquire current next
+        match rows current with
+        | Some next when next <> rowIds -> acquire current next
         | _ -> current
 
     let initial = refresh ()
-    match targets initial with
-    | Some target -> withTransactionLockCheckpoint initial (fun () -> acquire initial target)
+    match rows initial with
+    | Some rowIds -> withTransactionLockCheckpoint initial (fun () -> acquire initial rowIds)
     | None -> initial
 
 /// Read either side of an indexed NULL test after any exact bound leading key

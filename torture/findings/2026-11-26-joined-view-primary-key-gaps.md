@@ -191,7 +191,7 @@ explicit read-only transactions, and autocommit disabled. A standalone
 autocommit read and the audited `REPEATABLE READ` reads leave both
 writes free. [MySQL transaction isolation levels](https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html).
 
-The expanded oracle matches all 114 checks in both Fsdb modes.
+The point-read round matched all 114 checks in both Fsdb modes.
 
 A point read waits for an owner already updating, inserting, or
 deleting the looked-up key. After publication it reads the committed
@@ -201,10 +201,38 @@ before returning the row. Prepared statements also acquire the row
 and gap locks for bound keys. The lock releases with the transaction.
 Preparing a read-only XA branch releases both locks.
 
-The supported path proves a complete integer primary-key equality
-on one physical table. Wider scans and dependent expressions still
-use the snapshot path. In WAL-backed XA, conservative snapshot
-validation can still reject a commit after disjoint writes.
+The point path proves a complete integer primary-key equality on one
+physical table. In WAL-backed XA, conservative snapshot validation can
+still reject a commit after disjoint writes.
+
+## Serializable primary-key ranges
+
+For a plain query on one physical table, an ascending single-column
+integer primary-key range now shares the qualifying rows and protects
+the gaps it crosses. An absent endpoint expands protection to the next
+record on that side. An existing endpoint defines the gap boundary,
+and its inclusive or exclusive predicate determines whether the row
+itself is locked. Open-ended scans can protect the gap past the final
+row or before the first one.
+[InnoDB next-key locking](https://dev.mysql.com/doc/refman/8.4/en/innodb-next-key-locking.html).
+
+The digest-pinned MySQL 8.4.11 comparison uses keys `10, 20, 30, 40`
+and forces the primary index. With `BETWEEN 12 AND 28`, the query reads
+and locks row `20` and blocks inserts at `11` and `29`. Rows `10` and
+`30` remain writable. With `BETWEEN 12 AND 18`, the query returns zero
+rows and protects the single gap containing the range. A contradictory
+range leaves the sampled rows and gaps writable.
+
+Both Fsdb modes match all 138 checks in the expanded schedule oracle.
+
+A pending insertion in the predicate range makes the read wait.
+Once the owner commits, the returned row set includes the new key.
+The audited pending insertions outside the predicate do not delay
+the read. A separate unsigned XA fixture above `Int64.MaxValue`
+matches the gap boundaries and releases the locks when the read-only
+branch prepares. Wider scans, descending keys, composite ranges, and
+dependent predicates remain outside this path. MySQL can choose a
+full scan without an index hint, which can hold wider locks.
 
 Run the live schedules against disposable servers. Use `--data-dir`
 to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.
