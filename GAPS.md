@@ -2837,9 +2837,13 @@ implementation effort:
    are reused across rows of the same enclosing scope.
    [Bounded computed payloads](benchmarks/results/2026-11-26-computed-projection-ranges.md)
    retain direct composite keys through nested derived tables and CTEs.
-   They can be used in a residual filter on the index slice. Computed
-   lookup keys, other residual predicates, and broader aggregate shapes
-   still need work.
+   They can be used in a residual filter on the index slice.
+   [Shifted lookup keys](benchmarks/results/2026-11-26-offset-key-ranges.md)
+   translate a bounded signed integer offset on either composite key
+   part back into a stored bound. Correlated aggregate binding also
+   resolves enclosing CTEs referenced by a nested derived table.
+   Other computed lookup keys, residual predicates, and broader
+   aggregate shapes still need work.
 
 2. Transaction scheduling. [Readers behind waiting writers under a global
    read lock](torture/findings/2026-11-06-global-read-waiting-writer-gate.md)

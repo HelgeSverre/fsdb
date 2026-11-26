@@ -441,15 +441,19 @@ type private MaterializedRangeLookup =
 
 type private PhysicalProjectionColumn =
     | ProjectColumn of index: int
-    | CalculateColumn of read: (Value[] -> Value) * bounds: (bigint * bigint)
+    | CalculateColumn of read: (Value[] -> Value) * bounds: (bigint * bigint) * shiftedKey: (int * bigint) option
 
 let private readProjectionColumn (row: Value[]) = function
     | ProjectColumn index -> row.[index]
-    | CalculateColumn(read, _) -> read row
+    | CalculateColumn(read, _, _) -> read row
 
 let private projectedColumnIndex = function
     | ProjectColumn index -> Some index
     | CalculateColumn _ -> None
+
+let private projectedShiftedKey = function
+    | ProjectColumn index -> Some(index, 0I)
+    | CalculateColumn(_, _, key) -> key
 
 type private PhysicalProjectionStep =
     { InputColumns: ColumnDef list
@@ -828,7 +832,9 @@ type private AggregateBindingScope =
       Registry: Registry
       DbName: string
       ColumnIndex: Map<string, int list>
-      Qualifiers: Map<string, ColumnDef list * int> }
+      Qualifiers: Map<string, ColumnDef list * int>
+      CteScope: obj
+      DescribedCteScope: obj }
 
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
@@ -9612,19 +9618,23 @@ and private tryMissingCorrelatedAggregateArgument (outer: EvalContext) (select: 
         | _ -> None
     let derivedBindingError () =
         if outer.Outer.IsSome || not outer.ProjectionAliases.IsEmpty
-           || not (currentCteScope ()).IsEmpty || not (hasPlainAggregateShape select) then
+           || not (hasPlainAggregateShape select) then
             bindingError ignore
         else
             // Rows from one enclosing scope share their column bindings.
             // Keep only successful checks so errors still precede evaluation.
             let bindings = (currentStatementMemo ()).AggregateBindings
+            let ctes = box (currentCteScope ())
+            let describedCtes = box describedCteScope.Value
             match bindings.TryGetValue select with
             | true, scope
                 when obj.ReferenceEquals(scope.Store, outer.Store)
                      && obj.ReferenceEquals(scope.Registry, outer.Registry)
                      && scope.DbName = outer.DbName
                      && obj.ReferenceEquals(scope.ColumnIndex, outer.ColumnIndex)
-                     && obj.ReferenceEquals(scope.Qualifiers, outer.Qualifiers) -> None
+                     && obj.ReferenceEquals(scope.Qualifiers, outer.Qualifiers)
+                     && obj.ReferenceEquals(scope.CteScope, ctes)
+                     && obj.ReferenceEquals(scope.DescribedCteScope, describedCtes) -> None
             | _ ->
                 bindingError (fun () ->
                     bindings.[select] <-
@@ -9632,7 +9642,9 @@ and private tryMissingCorrelatedAggregateArgument (outer: EvalContext) (select: 
                           Registry = outer.Registry
                           DbName = outer.DbName
                           ColumnIndex = outer.ColumnIndex
-                          Qualifiers = outer.Qualifiers })
+                          Qualifiers = outer.Qualifiers
+                          CteScope = ctes
+                          DescribedCteScope = describedCtes })
     match select.Projections, select.From, select.Joins with
     | [ { Expression = FuncCall(name, [ argument ]) } ], Some source, []
         when isAggregateFunctionName outer.Registry name ->
@@ -11285,16 +11297,20 @@ and private describeQueryColumnDescriptorsInScope
                     ProjectionAliases = context.ProjectionAliases |> Map.map (fun _ binding -> binding |> Result.map fst) }
             scope :: enclosingScopes context.Outer
 
-    match source with
-    | StoredRelation name -> sourceColumns Set.empty schema Map.empty [] emptyScope (FromTable { Database = None; Table = name; Alias = None; Partitions = []; IndexHints = [] })
-    | QueryBody body -> describeBody Set.empty schema Map.empty (enclosingScopes outer) body
-    | SourceBody item ->
+    let enclosingCtes () =
         let ctes =
             currentCteScope ()
             |> Map.map (fun _ binding -> lazy (Ok(List.map describeColumn binding.Columns)))
         let lexical = DynamicScope.valueOrDefault Map.empty describedCteScope
-        let scope = lexical |> Map.fold (fun scope name columns -> Map.add name columns scope) ctes
-        sourceColumns Set.empty schema scope (enclosingScopes outer) emptyScope item
+        lexical |> Map.fold (fun scope name columns -> Map.add name columns scope) ctes
+
+    match source with
+    | StoredRelation name -> sourceColumns Set.empty schema Map.empty [] emptyScope (FromTable { Database = None; Table = name; Alias = None; Partitions = []; IndexHints = [] })
+    | QueryBody body ->
+        let ctes = if outer.IsSome then enclosingCtes () else Map.empty
+        describeBody Set.empty schema ctes (enclosingScopes outer) body
+    | SourceBody item ->
+        sourceColumns Set.empty schema (enclosingCtes ()) (enclosingScopes outer) emptyScope item
 
 and private describeQueryColumnsInScope store registry schema source outer validateCall =
     describeQueryColumnDescriptorsInScope store registry schema source outer validateCall
@@ -17378,11 +17394,24 @@ and private tryPhysicalProjectionUncached
                                 let physical = input.PhysicalOutputs.[index]
                                 let bounds =
                                     match physical with
-                                    | CalculateColumn(_, bounds) -> Some bounds
+                                    | CalculateColumn(_, bounds, _) -> Some bounds
                                     | ProjectColumn _ -> signedBounds input.OutputColumns.[index].Type
                                 bounds
                                 |> Option.map (fun bounds ->
                                     (fun (row: Value[]) -> row.[index]), (fun row -> readProjectionColumn row physical), bounds))
+
+                let rec shiftedKey expression =
+                    let shift offset = Option.map (fun (index, previous) -> index, previous + offset)
+                    match expression with
+                    | BinOp(Add, left, right) ->
+                        match correlatedSignedIntegerLiteral left, correlatedSignedIntegerLiteral right with
+                        | Some value, _ -> shiftedKey right |> shift (bigint value)
+                        | _, Some value -> shiftedKey left |> shift (bigint value)
+                        | _ -> None
+                    | BinOp(Sub, left, right) ->
+                        correlatedSignedIntegerLiteral right
+                        |> Option.bind (fun value -> shiftedKey left |> shift (-bigint value))
+                    | _ -> directIndex expression |> Option.bind (fun index -> projectedShiftedKey input.PhysicalOutputs.[index])
 
                 let metadataContext =
                     lazy (contextFactory store registry dbName
@@ -17409,7 +17438,9 @@ and private tryPhysicalProjectionUncached
                                         |> Option.defaultWith (fun () -> keyCollation ctx (Col name))
                                     match deriveColumns [ name ] [ collation ] [ metadata ] with
                                     | [ column ] when column.Type = TBigInt false ->
-                                        Some(column, CalculateColumn(read, bounds), CalculateColumn(physicalRead, bounds))
+                                        Some(column,
+                                             CalculateColumn(read, bounds, None),
+                                             CalculateColumn(physicalRead, bounds, shiftedKey expression))
                                     | _ -> None))
                         | _ -> None
 
@@ -19669,19 +19700,40 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
         |> Option.bind (fun (projection, sourceFilters) ->
             let table = projection.PhysicalTable
             let scope = correlatedProbeSource qualifier projection.OutputColumns
-            let readFilterColumn expression =
+            let outputIndex expression =
                 tryCorrelatedInnerColumn scope expression
                 |> Option.bind (resolveColumn projection.OutputColumns >> Result.toOption)
+
+            let readFilterColumn expression =
+                outputIndex expression
                 |> Option.map (projectionFilterColumn projection)
 
-            let signedColumn = tryCorrelatedSignedIntegerColumn scope projection.OutputColumns
-            let innerColumn =
-                if projection.Steps.IsEmpty then signedColumn
+            let innerKey expression =
+                outputIndex expression
+                |> Option.bind (fun index -> projectedShiftedKey projection.PhysicalOutputs.[index])
+                |> Option.bind (fun (index, offset) ->
+                    let name = table.Columns.[index].Name
+                    correlatedSignedIntegerBounds table.Columns name |> Option.map (fun _ -> name, offset))
+
+            let storedBound offset value =
+                if offset = 0I then Some value
                 else
-                    fun expression ->
-                        signedColumn expression
-                        |> Option.bind (tryPhysicalProjectionColumn projection)
-                        |> Option.map _.Name
+                    match value with
+                    | VInt integer ->
+                        let translated = bigint integer - offset
+                        if translated >= bigint System.Int64.MinValue && translated <= bigint System.Int64.MaxValue then
+                            Some(VInt(int64 translated))
+                        else None
+                    | _ -> None
+
+            let storedInterval (range: RangeLookupBounds<string * bigint, Value>) =
+                let name, offset = range.Column
+                let translate = function
+                    | Some(value, inclusive) ->
+                        storedBound offset value |> Option.map (fun value -> Some(value, inclusive))
+                    | None -> Some None
+                Option.map2 (fun lower upper -> { Column = name; Lower = lower; Upper = upper })
+                    (translate range.Lower) (translate range.Upper)
 
             let bound = function
                 | LiteralValue(VInt _ as value) -> Some value
@@ -19702,7 +19754,13 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                     outerInteger expression
                 | _ -> None
 
-            let pinResults = equalities |> List.map (fun expr -> expr, tryEqualityPredicate innerColumn bound expr)
+            let pinResults =
+                equalities
+                |> List.map (fun expr ->
+                    let pin =
+                        tryEqualityPredicate innerKey bound expr
+                        |> Option.bind (fun ((name, offset), value) -> storedBound offset value |> Option.map (fun value -> name, value))
+                    expr, pin)
             let pins = pinResults |> List.choose snd
             let unpinned = pinResults |> List.choose (function expr, None -> Some expr | _ -> None)
 
@@ -19718,11 +19776,11 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
             let classified =
                 ranges @ unpinned
                 |> List.map (fun predicate ->
-                    match rangePredicatesFor innerColumn bound predicate with
-                    | [] ->
+                    match rangePredicatesFor innerKey bound predicate |> List.map storedInterval |> tryAllSome with
+                    | None | Some [] ->
                         trySilentIntegerFilter readFilterColumn filterBound predicate
                         |> Option.map (fun keep -> [], Some keep)
-                    | bounds -> Some(bounds, None))
+                    | Some bounds -> Some(bounds, None))
                 |> tryAllSome
 
             match classified with

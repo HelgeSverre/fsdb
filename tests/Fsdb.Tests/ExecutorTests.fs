@@ -16119,6 +16119,20 @@ let tests =
                     let calculatedCteBytes = measure calculatedCte "projected" "SUM(c.payload)" 240M
                     Expect.isLessThan calculatedCteBytes 8000000L "a named CTE uses the slice before calculating payloads"
 
+                    let shifted =
+                        "WITH shifted(owner,seq,bucket) AS (SELECT parent_id-3,id+10,bucket FROM children) "
+                        + "SELECT SUM((SELECT COUNT(c.bucket) FROM (SELECT owner,5+seq AS seq,bucket FROM shifted) c "
+                        + "WHERE c.owner=p.id-3 AND p.id+15 <= c.seq AND c.seq <= p.id+215)) FROM parents p"
+                    let beforeShifted = System.GC.GetAllocatedBytesForCurrentThread()
+                    match run shifted with
+                    | ResultSet(_, [ [ Some "240" ] ]) -> ()
+                    | result -> failtestf "expected the shifted index to count 240 non-null rows, got %A" result
+                    let shiftedBytes = System.GC.GetAllocatedBytesForCurrentThread() - beforeShifted
+                    Expect.isLessThan shiftedBytes 8000000L "shifted prefix and suffix keys retain the stored index slice"
+                    match shifted.Replace("c.seq", "CAST(c.seq AS SIGNED)") |> run with
+                    | ResultSet(_, [ [ Some "240" ] ]) -> ()
+                    | result -> failtestf "the ordinary path must also bind the enclosing CTE, got %A" result
+
                 testCase "correlated integer count uses the equality prefix and range together"
                 <| fun _ ->
                     let store = newStore ()

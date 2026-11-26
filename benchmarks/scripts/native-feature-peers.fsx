@@ -18,6 +18,7 @@ let modes =
       "projected-filter-controls"
       "correlated-residual-controls"
       "computed-projection-controls"
+      "offset-key-controls"
       "overlay-controls"
       "edge-controls" ]
 
@@ -181,6 +182,16 @@ let readProjectedRanges () =
               "nested-computed-sum", projected "" nested "SUM(c.payload)", 1798800L
               "computed-cte-sum", projected cte "child_rows" "SUM(c.payload)", 1200L
               "computed-where-count", projectedWhere "AND c.payload > 1000" "" calculated "COUNT(*)", 400L ]
+        elif mode = "offset-key-controls" then
+            let offsetRange prefix source predicate aggregate =
+                $"{prefix} SELECT SUM((SELECT {aggregate} FROM {source} c WHERE {predicate})) FROM parent p"
+            let shifted = "(SELECT id+10 AS sequence_no, parent_id AS parent_key, bucket AS payload FROM child)"
+            let named = "WITH bounds(parent_key,sequence_no,payload) AS (SELECT parent_id-3,id+10,bucket FROM child)"
+            let nestedShift = "(SELECT parent_key,5+seq AS sequence_no,payload FROM (SELECT parent_id-3 AS parent_key,id+10 AS seq,bucket AS payload FROM child) b)"
+            [ "direct-count", projected "" $"({projection})" "COUNT(*)", 1500L
+              "shifted-suffix-count", offsetRange "" shifted "c.parent_key=p.id AND c.sequence_no BETWEEN p.id+10 AND p.id+1010" "COUNT(*)", 1500L
+              "shifted-prefix-suffix-count", offsetRange "" nestedShift "c.parent_key=p.id-3 AND p.id+15<=c.sequence_no AND c.sequence_no<=p.id+1015" "COUNT(c.payload)", 1200L
+              "shifted-prefix-suffix-filter", offsetRange named "bounds" "p.id-3=c.parent_key AND c.sequence_no BETWEEN p.id+10 AND p.id+1010 AND c.payload=1" "COUNT(*)", 400L ]
         elif mode = "projected-filter-controls" then
             let equality = $"({projection} WHERE bucket = 1)"
             let nestedFilter =
@@ -394,7 +405,7 @@ try
 
         let workloads =
             if mode = "range-controls" then [ readRangeControls ]
-            elif List.contains mode [ "projected-range-controls"; "projected-filter-controls"; "correlated-residual-controls"; "computed-projection-controls" ] then
+            elif List.contains mode [ "projected-range-controls"; "projected-filter-controls"; "correlated-residual-controls"; "computed-projection-controls"; "offset-key-controls" ] then
                 [ readProjectedRanges ]
             elif mode = "nullable-count-controls" || mode = "expression-count-controls" then [ readCountArguments ]
             elif mode = "exact-aggregate-controls" then [ readExactAggregates ]
