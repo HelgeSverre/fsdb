@@ -8704,7 +8704,7 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected the trigger row after unlock, got %A" other
 
-          testCase "LOCK TABLES acquisition is atomic and replaces prior locks"
+          testCase "LOCK TABLES queues its full list and replaces prior locks"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup = create 1 store
@@ -8721,9 +8721,10 @@ let tests =
 
               Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the combined lock waits for every table"
 
-              match handle (create 4 store) "UPDATE atomic_lock_first SET id=id WHERE id=1" |> snd with
-              | Affected _ -> ()
-              | other -> failtestf "expected the contender's prior lock to release before waiting, got %A" other
+              let late, _ = handle (create 4 store) "SET SESSION lock_wait_timeout=1"
+              match handle late "UPDATE atomic_lock_first SET id=id WHERE id=1" |> snd with
+              | Err(1205, _) -> ()
+              | other -> failtestf "the queued lock list must block late updates, got %A" other
 
               let _, _ = handle holder "UNLOCK TABLES"
               Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 2.0)) "the atomic lock list acquires after its blocker releases"
@@ -8744,7 +8745,7 @@ let tests =
               let _, _ = handle setup "INSERT INTO timeout_lock_second VALUES (1)"
               let holder, _ = handle (create 2 store) "LOCK TABLES timeout_lock_second WRITE"
               let contender, _ = handle (create 3 store) "LOCK TABLES timeout_lock_first READ"
-              let contender, _ = handle contender "SET innodb_lock_wait_timeout=1"
+              let contender, _ = handle contender "SET SESSION lock_wait_timeout=1"
 
               match handle contender "LOCK TABLES timeout_lock_first WRITE, timeout_lock_second WRITE" |> snd with
               | Err(1205, _) -> ()

@@ -12,6 +12,8 @@ open Fsdb.Storage
 
 type AccessMode =
     | ReadAccess
+    | UpdateSourceAccess
+    | UpdateReadAccess
     | WriteAccess
 
 type Access =
@@ -25,10 +27,12 @@ type private TableState =
       mutable ExplicitWriter: int option
       StatementReaders: HashSet<int>
       StatementWriters: HashSet<int>
-      TransactionReaders: HashSet<int>
+      TransactionAccesses: Dictionary<int, AccessMode>
       mutable PreparedReaders: int
+      mutable PreparedWriters: int
       mutable MetadataWriter: int option
       WaitingMetadataWriters: ResizeArray<int>
+      WaitingExplicit: ResizeArray<int * AccessMode>
       WaitingWriters: HashSet<int>
       PrioritizedWriters: HashSet<int> }
 
@@ -52,7 +56,7 @@ type private Manager =
       Tables: Dictionary<string, TableState>
       Explicit: Dictionary<int, ExplicitContext>
       TransactionTables: Dictionary<int, HashSet<string>>
-      PreparedTables: Dictionary<Xa.Xid, HashSet<string>>
+      PreparedTables: Dictionary<Xa.Xid, Map<string, AccessMode>>
       MetadataWaits: Dictionary<int64, MetadataWait>
       GlobalReaders: HashSet<int>
       WaitingGlobalReaders: HashSet<int> }
@@ -81,6 +85,10 @@ let private stronger left right =
     match left, right with
     | WriteAccess, _
     | _, WriteAccess -> WriteAccess
+    | UpdateReadAccess, _
+    | _, UpdateReadAccess -> UpdateReadAccess
+    | UpdateSourceAccess, _
+    | _, UpdateSourceAccess -> UpdateSourceAccess
     | _ -> ReadAccess
 
 let private physicalAccesses accesses =
@@ -92,6 +100,10 @@ let private physicalAccesses accesses =
             Map.add key mode result)
         Map.empty
 
+let private writesRows mode = mode = WriteAccess
+let private writesMetadata mode = mode <> ReadAccess
+let private requiresExplicitWrite mode = mode = WriteAccess || mode = UpdateReadAccess
+
 let private stateFor (manager: Manager) key =
     match manager.Tables.TryGetValue key with
     | true, state -> state
@@ -101,10 +113,12 @@ let private stateFor (manager: Manager) key =
               ExplicitWriter = None
               StatementReaders = HashSet()
               StatementWriters = HashSet()
-              TransactionReaders = HashSet()
+              TransactionAccesses = Dictionary()
               PreparedReaders = 0
+              PreparedWriters = 0
               MetadataWriter = None
               WaitingMetadataWriters = ResizeArray()
+              WaitingExplicit = ResizeArray()
               WaitingWriters = HashSet()
               PrioritizedWriters = HashSet() }
 
@@ -118,6 +132,7 @@ let private hasNoOtherOwner owner (owners: HashSet<int>) =
 
 let private readerGateOpen owner (manager: Manager) (state: TableState) =
     not (hasNoOwners manager.GlobalReaders)
+    || state.TransactionAccesses.ContainsKey owner
     || (hasNoOtherOwner owner state.WaitingWriters
         && hasNoOtherOwner owner state.PrioritizedWriters)
 
@@ -129,7 +144,7 @@ let private globalWriteAvailable policy (manager: Manager) =
         && hasNoOwners manager.WaitingGlobalReaders
 
 let private containsWrite physical =
-    physical |> Map.exists (fun _ mode -> mode = WriteAccess)
+    physical |> Map.exists (fun _ mode -> writesRows mode)
 
 let private conflictsWithOwnedGlobalRead owner (manager: Manager) physical =
     containsWrite physical && manager.GlobalReaders.Contains owner
@@ -140,7 +155,7 @@ let private blockedByOwnedGlobalRead policy owner manager physical =
     | RespectGlobalRead -> conflictsWithOwnedGlobalRead owner manager physical
 
 let private ownsSharedMetadata owner (state: TableState) =
-    state.TransactionReaders.Contains owner
+    state.TransactionAccesses.ContainsKey owner
     || state.StatementReaders.Contains owner
     || state.StatementWriters.Contains owner
     || state.ExplicitReaders.Contains owner
@@ -155,43 +170,30 @@ let private sharedMetadataBlocker owner (state: TableState) =
              && not (ownsSharedMetadata owner state) -> Some state.WaitingMetadataWriters.[0]
     | _ -> None
 
-let private explicitlyAvailable policy owner mode (manager: Manager) (state: TableState) =
-    (sharedMetadataBlocker owner state).IsNone &&
-    match mode with
-    | ReadAccess ->
-        state.ExplicitWriter |> Option.forall ((=) owner)
-        && hasNoOtherOwner owner state.StatementWriters
-        && readerGateOpen owner manager state
-    | WriteAccess ->
-        globalWriteAvailable policy manager
-        && (state.ExplicitWriter |> Option.forall ((=) owner))
-        && hasNoOtherOwner owner state.ExplicitReaders
-        && hasNoOtherOwner owner state.StatementReaders
-        && hasNoOtherOwner owner state.StatementWriters
+let private canReuseMetadata owner mode (state: TableState) =
+    match state.TransactionAccesses.TryGetValue owner with
+    | true, held -> not (writesMetadata mode) || writesMetadata held
+    | _ -> false
 
-let private explicitAvailable policy owner mode (manager: Manager) key =
-    match manager.Tables.TryGetValue key with
-    | false, _ -> mode = ReadAccess || globalWriteAvailable policy manager
-    | true, state -> explicitlyAvailable policy owner mode manager state
+let private blocksAccess lockMode mode = writesRows lockMode || writesMetadata mode
 
-let private statementAvailable policy owner mode (manager: Manager) (state: TableState) =
-    (sharedMetadataBlocker owner state).IsNone &&
-    match mode with
-    | ReadAccess -> state.ExplicitWriter.IsNone && readerGateOpen owner manager state
-    | WriteAccess ->
-        globalWriteAvailable policy manager
-        && state.ExplicitWriter.IsNone
-        && hasNoOwners state.ExplicitReaders
+let private pendingExplicitBlocker owner mode (state: TableState) =
+    if state.WaitingExplicit.Count = 0 || state.MetadataWriter = Some owner || canReuseMetadata owner mode state then None
+    else
+        state.WaitingExplicit
+        |> Seq.tryPick (fun (waiting, lockMode) ->
+            if waiting <> owner && blocksAccess lockMode mode then Some waiting else None)
 
 let private stateIsIdle (state: TableState) =
     state.ExplicitWriter.IsNone
     && hasNoOwners state.ExplicitReaders
     && hasNoOwners state.StatementReaders
     && hasNoOwners state.StatementWriters
-    && hasNoOwners state.TransactionReaders
+    && state.TransactionAccesses.Count = 0
     && state.PreparedReaders = 0
     && state.MetadataWriter.IsNone
     && state.WaitingMetadataWriters.Count = 0
+    && state.WaitingExplicit.Count = 0
     && hasNoOwners state.WaitingWriters
     && hasNoOwners state.PrioritizedWriters
 
@@ -231,8 +233,8 @@ let private acquirePhysical owner (manager: Manager) physical =
         let state = stateFor manager key
 
         match mode with
-        | ReadAccess -> state.ExplicitReaders.Add owner |> ignore
         | WriteAccess -> state.ExplicitWriter <- Some owner
+        | _ -> state.ExplicitReaders.Add owner |> ignore
 
 let private releasePhysical owner (manager: Manager) physical =
     for KeyValue(key, mode) in physical do
@@ -240,9 +242,9 @@ let private releasePhysical owner (manager: Manager) physical =
         | false, _ -> ()
         | true, state ->
             match mode with
-            | ReadAccess -> state.ExplicitReaders.Remove owner |> ignore
             | WriteAccess when state.ExplicitWriter = Some owner -> state.ExplicitWriter <- None
             | WriteAccess -> ()
+            | _ -> state.ExplicitReaders.Remove owner |> ignore
 
             removeIdleState manager key state
 
@@ -304,49 +306,93 @@ let private waitForMetadata timeout metadataTimeout owner exclusive (manager: Ma
         finally
             manager.MetadataWaits.Remove owner |> ignore
 
-let private waitForPhysical timeout owner (manager: Manager) physical =
-    waitUntil timeout manager.SyncRoot (fun () ->
-        physical
-        |> Map.forall (fun key mode -> explicitAvailable RespectGlobalRead owner mode manager key))
-
-let private statementMetadataBlockers owner (manager: Manager) physical =
+let private statementBlockers owner mode (state: TableState) =
     seq {
-        for KeyValue(key, _) in physical do
-            match manager.Tables.TryGetValue key with
-            | true, state -> yield! sharedMetadataBlocker owner state |> Option.map int64 |> Option.toList
-            | _ -> ()
+        yield! sharedMetadataBlocker owner state |> Option.toList
+        yield! pendingExplicitBlocker owner mode state |> Option.toList
+        yield! state.ExplicitWriter |> Option.toList
+        if writesMetadata mode then yield! state.ExplicitReaders
     }
+    |> Seq.filter ((<>) owner)
 
 let private waitForStatement policy timeout metadataTimeout owner (manager: Manager) physical =
+    let blockers () =
+        seq {
+            for KeyValue(key, mode) in physical do
+                match manager.Tables.TryGetValue key with
+                | true, state -> yield! statementBlockers owner mode state |> Seq.map int64
+                | _ -> ()
+        }
+
     let ready () =
         physical
         |> Map.forall (fun key mode ->
-            match manager.Tables.TryGetValue key with
-            | false, _ -> mode = ReadAccess || globalWriteAvailable policy manager
-            | true, state -> statementAvailable policy owner mode manager state)
+            (not (writesRows mode) || globalWriteAvailable policy manager)
+            && match manager.Tables.TryGetValue key with
+               | false, _ -> true
+               | true, state ->
+                   (sharedMetadataBlocker owner state).IsNone
+                   && (pendingExplicitBlocker owner mode state).IsNone
+                   && (state.ExplicitWriter |> Option.forall ((=) owner))
+                   && (if writesMetadata mode then hasNoOtherOwner owner state.ExplicitReaders
+                       else readerGateOpen owner manager state))
 
     let waited = not (ready ())
-    waitForMetadata timeout metadataTimeout owner false manager ready
-        (fun () -> statementMetadataBlockers owner manager physical), waited
+    waitForMetadata timeout metadataTimeout owner false manager ready blockers, waited
+
+let private waitForExplicit timeout owner (manager: Manager) physical =
+    let targets = physical |> Map.toList |> List.map (fun (key, mode) -> key, mode, stateFor manager key)
+    let blockers () =
+        seq {
+            for _, mode, state in targets do
+                yield! sharedMetadataBlocker owner state |> Option.toList
+                yield! state.ExplicitWriter |> Option.toList
+                yield! state.StatementWriters
+                for KeyValue(holder, held) in state.TransactionAccesses do
+                    if blocksAccess mode held then yield holder
+                if writesRows mode then
+                    yield! state.ExplicitReaders
+                    yield! state.StatementReaders
+                for waiting, earlierMode in state.WaitingExplicit |> Seq.takeWhile (fun (waiting, _) -> waiting <> owner) do
+                    if blocksAccess earlierMode mode then yield waiting
+        }
+        |> Seq.filter ((<>) owner)
+        |> Seq.map int64
+
+    let ready () =
+        (targets |> List.forall (fun (_, mode, state) ->
+            if writesRows mode then state.PreparedReaders = 0
+            else state.PreparedWriters = 0))
+        && (blockers () |> Seq.isEmpty)
+
+    for _, mode, state in targets do
+        state.WaitingExplicit.Add(owner, mode)
+
+    try
+        waitForMetadata timeout timeout owner (containsWrite physical) manager ready blockers
+    finally
+        for key, mode, state in targets do
+            state.WaitingExplicit.Remove(owner, mode) |> ignore
+            removeIdleState manager key state
+        Monitor.PulseAll manager.SyncRoot
 
 let private acquireStatement owner (manager: Manager) physical =
     physical |> Map.filter (fun key mode ->
         let state = stateFor manager key
 
-        match mode with
-        | ReadAccess -> state.StatementReaders.Add owner
-        | WriteAccess -> state.StatementWriters.Add owner)
+        if writesMetadata mode then state.StatementWriters.Add owner
+        else state.StatementReaders.Add owner)
 
 let private releaseStatement owner (manager: Manager) physical =
     for KeyValue(key, mode) in physical do
         match manager.Tables.TryGetValue key with
         | false, _ -> ()
         | true, state ->
-            match mode with
-            | ReadAccess -> state.StatementReaders.Remove owner |> ignore
-            | WriteAccess ->
+            if writesMetadata mode then
                 state.StatementWriters.Remove owner |> ignore
                 state.PrioritizedWriters.Remove owner |> ignore
+            else
+                state.StatementReaders.Remove owner |> ignore
 
             removeIdleState manager key state
 
@@ -393,16 +439,22 @@ let acquireExplicit timeout store owner accesses =
                 if released then
                     Monitor.PulseAll manager.SyncRoot
 
+                let deadline = DateTime.UtcNow + timeout
+                // A writer queues for table metadata only after passing the global read gate.
                 let acquired =
-                    trackWaitingWriter owner manager physical (fun () ->
-                        waitForPhysical timeout owner manager physical)
+                    if containsWrite physical
+                       && not (waitUntilDeadline manager.SyncRoot (fun () -> deadline) (fun () -> globalWriteAvailable RespectGlobalRead manager)) then
+                        TimedOut
+                    else
+                        trackWaitingWriter owner manager physical (fun () ->
+                            waitForExplicit (max TimeSpan.Zero (deadline - DateTime.UtcNow)) owner manager physical)
 
-                if acquired then
+                match acquired with
+                | Granted ->
                     acquirePhysical owner manager physical
                     manager.Explicit.[owner] <- { Names = names; Physical = physical }
                     Ok()
-                else
-                    Error(1205, "Lock wait timeout exceeded; try restarting transaction"))
+                | failure -> Error(metadataWaitError failure))
 
 let releaseExplicit store owner =
     let manager = managerFor store
@@ -419,7 +471,8 @@ let private globalReadAvailable (manager: Manager) =
     manager.Tables.Values
     |> Seq.forall (fun state ->
         state.ExplicitWriter.IsNone
-        && hasNoOwners state.StatementWriters)
+        && hasNoOwners state.StatementWriters
+        && not (state.WaitingExplicit |> Seq.exists (snd >> writesRows)))
 
 let acquireGlobalRead timeout store owner =
     let manager = managerFor store
@@ -472,9 +525,9 @@ let private validateExplicitAccess (context: ExplicitContext) (access: Access) =
             |> Option.map _.Mode
         | None -> context.Physical |> Map.tryFind requiredKey
 
-    match held, access.Mode with
-    | None, _ -> Error(1100, sprintf "Table '%s' was not locked with LOCK TABLES" (accessName access))
-    | Some ReadAccess, WriteAccess ->
+    match held with
+    | None -> Error(1100, sprintf "Table '%s' was not locked with LOCK TABLES" (accessName access))
+    | Some mode when not (requiresExplicitWrite mode) && requiresExplicitWrite access.Mode ->
         Error(1099, sprintf "Table '%s' was locked with a READ lock and can't be updated" (accessName access))
     | _ -> Ok()
 
@@ -487,9 +540,10 @@ let private retainTransactionAccess owner (manager: Manager) physical =
                 let tables = HashSet()
                 manager.TransactionTables.Add(owner, tables)
                 tables
-        for KeyValue(key, _) in physical do
-            if tables.Add key then
-                (stateFor manager key).TransactionReaders.Add owner |> ignore
+        for KeyValue(key, mode) in physical do
+            let accesses = (stateFor manager key).TransactionAccesses
+            if tables.Add key then accesses.Add(owner, mode)
+            elif writesMetadata mode then accesses.[owner] <- mode
 
 let internal transactionAccesses store owner =
     let manager = managerFor store
@@ -508,7 +562,7 @@ let internal releaseLaterTransactionAccess store owner retained =
             for key in released do
                 tables.Remove key |> ignore
                 let state = manager.Tables.[key]
-                state.TransactionReaders.Remove owner |> ignore
+                state.TransactionAccesses.Remove owner |> ignore
                 removeIdleState manager key state
             if tables.Count = 0 then manager.TransactionTables.Remove owner |> ignore
             if released.Length > 0 then Monitor.PulseAll manager.SyncRoot)
@@ -516,11 +570,12 @@ let internal releaseLaterTransactionAccess store owner retained =
 let internal releaseTransactionAccess store owner =
     releaseLaterTransactionAccess store owner Set.empty
 
-let private retainPreparedTables (manager: Manager) xid (tables: HashSet<string>) =
+let private retainPreparedTables (manager: Manager) xid tables =
     manager.PreparedTables.Add(xid, tables)
-    for key in tables do
+    for KeyValue(key, mode) in tables do
         let state = stateFor manager key
         state.PreparedReaders <- state.PreparedReaders + 1
+        if writesMetadata mode then state.PreparedWriters <- state.PreparedWriters + 1
 
 let internal detachTransactionAccess store owner xid =
     let manager = managerFor store
@@ -528,10 +583,12 @@ let internal detachTransactionAccess store owner xid =
         match manager.TransactionTables.TryGetValue owner with
         | false, _ -> ()
         | true, tables ->
-            retainPreparedTables manager xid tables
+            let prepared =
+                tables |> Seq.map (fun key -> key, manager.Tables.[key].TransactionAccesses.[owner]) |> Map.ofSeq
+            retainPreparedTables manager xid prepared
             manager.TransactionTables.Remove owner |> ignore
             for key in tables do
-                manager.Tables.[key].TransactionReaders.Remove owner |> ignore
+                manager.Tables.[key].TransactionAccesses.Remove owner |> ignore
             Monitor.PulseAll manager.SyncRoot)
 
 let internal releasePreparedAccess store xid =
@@ -541,9 +598,10 @@ let internal releasePreparedAccess store xid =
         | false, _ -> ()
         | true, tables ->
             manager.PreparedTables.Remove xid |> ignore
-            for key in tables do
+            for KeyValue(key, mode) in tables do
                 let state = manager.Tables.[key]
                 state.PreparedReaders <- state.PreparedReaders - 1
+                if writesMetadata mode then state.PreparedWriters <- state.PreparedWriters - 1
                 removeIdleState manager key state
             Monitor.PulseAll manager.SyncRoot)
 
@@ -562,7 +620,7 @@ let internal restorePreparedAccess store =
         | RowsUpdated(database, table, _)
         | RowsDeleted(database, table, _)
         | RowsUpdatedById(database, table, _)
-        | RowsDeletedById(database, table, _) -> Set.add (tableKey database table) tables
+        | RowsDeletedById(database, table, _) -> Map.add (tableKey database table) WriteAccess tables
         | _ -> tables
 
     let branches = preparedXas store
@@ -570,9 +628,9 @@ let internal restorePreparedAccess store =
         let manager = managerFor store
         lock manager.SyncRoot (fun () ->
             for xid, branch in branches do
-                let tables = List.fold writtenTables Set.empty branch.Events
+                let tables = List.fold writtenTables Map.empty branch.Events
                 if not tables.IsEmpty then
-                    retainPreparedTables manager xid (HashSet tables))
+                    retainPreparedTables manager xid tables)
 
 let internal withMetadataWrite timeout store owner targets accesses body =
     let manager = managerFor store
@@ -591,7 +649,7 @@ let internal withMetadataWrite timeout store owner targets accesses body =
                     yield! state.ExplicitReaders
                     yield! state.StatementReaders
                     yield! state.StatementWriters
-                    yield! state.TransactionReaders
+                    yield! state.TransactionAccesses.Keys
                     yield state.WaitingMetadataWriters.[0]
                 }
                 |> Seq.filter ((<>) owner)
@@ -730,13 +788,17 @@ and private optionalExpressionAccesses boundCtes defaultDb expression =
     |> Option.toList
     |> List.collect (expressionAccesses boundCtes defaultDb)
 
-and private sourceAccesses boundCtes defaultDb =
+and private sourceAccesses boundCtes defaultDb source =
+    queryBlockSourceAccesses boundCtes defaultDb (fun _ -> ReadAccess) source
+
+and private queryBlockSourceAccesses boundCtes defaultDb modeForTable =
     function
     | FromJoinGroup(source, joins) ->
-        sourceAccesses boundCtes defaultDb source
-        @ (joins |> List.collect (fun join -> sourceAccesses boundCtes defaultDb join.Table @ expressionAccesses boundCtes defaultDb join.On))
+        queryBlockSourceAccesses boundCtes defaultDb modeForTable source
+        @ (joins |> List.collect (fun join ->
+            queryBlockSourceAccesses boundCtes defaultDb modeForTable join.Table @ expressionAccesses boundCtes defaultDb join.On))
     | FromTable table when table.Database.IsNone && Set.contains (normalize table.Table) boundCtes -> []
-    | FromTable table -> [ tableReference defaultDb ReadAccess table ]
+    | FromTable table -> [ tableReference defaultDb (modeForTable table) table ]
     | FromSubquery(body, _)
     | FromLateral(body, _) -> selectOrUnionAccesses boundCtes defaultDb body
     | FromJsonTable(source, _, _, _) -> expressionAccesses boundCtes defaultDb source
@@ -762,12 +824,20 @@ and private cteAccesses boundCtes defaultDb ctes =
 
 and private selectAccesses boundCtes defaultDb (select: SelectStmt) =
     let ctes, localCtes = cteAccesses boundCtes defaultDb select.Ctes
+    let updateLocks = select.Locking |> List.filter (fun clause -> clause.Strength = UpdateLock)
+    let blockSource =
+        queryBlockSourceAccesses localCtes defaultDb (fun table ->
+            let qualifier = table.Alias |> Option.defaultValue table.Table
+            let matches (clause: LockingRead) =
+                clause.Tables.IsEmpty
+                || (clause.Tables |> List.exists (fun name -> name.Equals(qualifier, StringComparison.OrdinalIgnoreCase)))
+            if List.exists matches updateLocks then UpdateReadAccess else ReadAccess)
 
     ctes
-    @ (select.From |> Option.toList |> List.collect (sourceAccesses localCtes defaultDb))
+    @ (select.From |> Option.toList |> List.collect blockSource)
     @ (select.Joins
        |> List.collect (fun join ->
-           sourceAccesses localCtes defaultDb join.Table
+           blockSource join.Table
            @ expressionAccesses localCtes defaultDb join.On))
     @ (select.Projections |> List.collect (_.Expression >> expressionAccesses localCtes defaultDb))
     @ optionalExpressionAccesses localCtes defaultDb select.Where
@@ -815,7 +885,10 @@ let private updateAccesses defaultDb (update: UpdateStmt) =
             not (table.Database.IsNone && Set.contains (normalize table.Table) boundCtes))
         |> List.map (fun table ->
             let qualifier = table.Alias |> Option.defaultValue table.Table
-            tableReference defaultDb (if Set.contains (normalize qualifier) written then WriteAccess else ReadAccess) table)
+            let mode =
+                if Set.contains (normalize qualifier) written then WriteAccess
+                else UpdateSourceAccess
+            tableReference defaultDb mode table)
 
     ctes
     @ physicalSources
@@ -884,7 +957,10 @@ let rec private directStatementAccesses defaultDb =
     | Delete delete -> deleteAccesses defaultDb delete
     | Do expressions -> expressionsAccesses defaultDb expressions
     | ChecksumTables(tables, _) -> tables |> List.map (namedAccess defaultDb ReadAccess)
-    | Explain(_, statement) -> directStatementAccesses defaultDb statement
+    | Explain(_, statement) ->
+        directStatementAccesses defaultDb statement
+        |> List.map (fun access ->
+            if access.Mode = UpdateReadAccess then { access with Mode = ReadAccess } else access)
     | _ -> []
 
 let rec private directAccessesAreComplete =
@@ -1019,7 +1095,7 @@ let private expandDependencies store temporaryCatalog accesses =
                             |> expand visited)
 
             let triggerDependencies =
-                if access.Mode = ReadAccess then
+                if not (writesRows access.Mode) then
                     []
                 else
                     triggers.Value

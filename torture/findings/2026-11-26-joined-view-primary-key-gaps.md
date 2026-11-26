@@ -470,6 +470,43 @@ tested read-only, locking-read-only, no-op, and duplicate-key-only cases,
 MySQL stopped reporting the XIDs after restart. Fsdb continues to report them
 with no recovered table metadata claims.
 
+#### Explicit locks and transaction metadata
+
+An ordinary `SELECT` or `SELECT ... FOR SHARE` holds shared read metadata.
+`LOCK TABLES ... READ` and `READ LOCAL` can acquire alongside it. A
+`SELECT ... FOR UPDATE`, a no-op update, and a duplicate-key failure
+hold write-intent metadata and block both read-lock forms. `LOCK TABLES
+... WRITE` waits behind either kind of transaction claim. A detached
+XA branch preserves the same compatibility rules. These waits use
+`lock_wait_timeout`.
+
+After a restart with a prepared branch, both engines refused `READ` and
+`WRITE` table locks on its changed table until `XA COMMIT`. An independent
+`WRITE` table lock succeeded on the table the branch had only read with
+`FOR UPDATE`.
+
+A queued explicit writer blocks late access to the requested table.
+A transaction already holding read metadata can reread its table.
+Attempting to upgrade that claim for an update can create a cycle.
+Both engines return 1213 to the upgrading transaction and then grant
+the writer's `LOCK TABLES` request. A queued multi-table write-lock list
+also blocks a late update to its first table while it waits for the second.
+
+A writer blocked by `FLUSH TABLES WITH READ LOCK` waits at the global
+gate. Ordinary reads and explicit read locks can still proceed. Once
+the writer has passed that gate and queued for its table, a later global
+read-lock request waits behind it.
+
+`FOR UPDATE OF` marks the named source with write-intent metadata and
+leaves `FOR SHARE OF` sources in read mode. A joined `UPDATE` opens the
+audited physical source with write intent even when that source supplies
+only values. `EXPLAIN SELECT ... FOR UPDATE` holds read metadata.
+
+A competing `DROP TABLE` can still expose a difference. With both
+requests queued behind a transaction, MySQL completes the drop and
+returns 1146 to the explicit lock request. Fsdb can grant the request
+using the table name it resolved before waiting, even after the drop.
+
 #### Metadata queue order
 
 Both engines queue a new reader behind a waiting `DROP TABLE` and let

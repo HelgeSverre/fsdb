@@ -3908,7 +3908,7 @@ let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Stateme
             match terminalErrorInfo result with
             | Some _ -> executed
             | None ->
-                let readTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.ReadAccess)
+                let readTransactional = accesses |> List.exists (fun access -> access.Mode <> TableLocks.WriteAccess)
                 let wroteTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.WriteAccess)
 
                 Session.trackTransactionActivity
@@ -4900,7 +4900,7 @@ let private acquireResolvedTableAccesses (session: Session) (accesses: TableLock
     match checkSessionAccess session session.Store privileges with
     | Error(code, message) -> session, Err(code, message)
     | Ok() ->
-        match TableLocks.acquireExplicit (lockWaitTimeout session) session.Store session.ConnectionId accesses with
+        match TableLocks.acquireExplicit (metadataLockWaitTimeout session) session.Store session.ConnectionId accesses with
         | Ok() ->
             let readTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.ReadAccess)
             let wroteTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.WriteAccess)

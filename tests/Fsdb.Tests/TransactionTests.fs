@@ -1186,6 +1186,101 @@ let tests =
               run holder "XA COMMIT 'metadata' ONE PHASE" (Affected 0UL) |> ignore
               run admin "DROP TABLE gate" (Affected 0UL) |> ignore
 
+          testCase "explicit table locks respect transactional read and write metadata"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let admin = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let admin = run admin "INSERT INTO gate VALUES(1,10)" (Affected 1UL)
+              let admin = run admin "SET SESSION lock_wait_timeout=1" (Affected 0UL)
+              let read = ResultSet([ "id" ], [ [ Some "1" ] ])
+              let expectWait sql =
+                  match handle admin sql |> snd with
+                  | Err(1205, _) -> ()
+                  | actual -> failtestf "%s must wait on table metadata, got %A" sql actual
+
+              let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+              let holder = run holder "SELECT id FROM gate FOR SHARE" read
+              let admin = run admin "LOCK TABLES gate READ" (Affected 0UL)
+              run admin "UNLOCK TABLES" (Affected 0UL) |> ignore
+              expectWait "LOCK TABLES gate WRITE"
+              let holder = run holder "SELECT id FROM gate FOR UPDATE" read
+              expectWait "LOCK TABLES gate READ"
+              let holder = run holder "ROLLBACK" (Affected 0UL)
+
+              let holder = run holder "XA START 'explicit_metadata'" (Affected 0UL)
+              let holder = run holder "UPDATE gate SET v=v WHERE id=1" (Affected 0UL)
+              let holder = run holder "XA END 'explicit_metadata'" (Affected 0UL)
+              let holder = run holder "XA PREPARE 'explicit_metadata'" (Affected 0UL)
+              Fsdb.QueryHandler.closeSession holder
+              expectWait "LOCK TABLES gate READ LOCAL"
+              let admin = run admin "XA ROLLBACK 'explicit_metadata'" (Affected 0UL)
+              let admin = run admin "LOCK TABLES gate WRITE" (Affected 0UL)
+              run admin "UNLOCK TABLES" (Affected 0UL) |> ignore
+
+          testCase "queued explicit write lets a transaction reread but detects an upgrade cycle"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES(1,10)" (Affected 1UL) |> ignore
+              let holder = run (create 2 store) "SET SESSION lock_wait_timeout=1" (Affected 0UL)
+              let holder = run holder "BEGIN" (Affected 0UL)
+              let read = ResultSet([ "v" ], [ [ Some "10" ] ])
+              let holder = run holder "SELECT v FROM gate" read
+              let waiter = run (create 3 store) "SET SESSION lock_wait_timeout=4" (Affected 0UL)
+              let pending = Threading.Tasks.Task.Run(fun () -> handle waiter "LOCK TABLES gate WRITE")
+              try
+                  Expect.isTrue
+                      (Threading.SpinWait.SpinUntil(
+                          (fun () -> Fsdb.TableLocks.waitingWriterCount store Fsdb.Storage.defaultDatabase "gate" = 1),
+                          TimeSpan.FromSeconds 2.0))
+                      "the explicit writer is queued"
+                  let holder = run holder "SELECT v FROM gate" read
+                  match handle holder "UPDATE gate SET v=11 WHERE id=1" |> snd with
+                  | Err(1213, _) -> ()
+                  | actual -> failtestf "the metadata upgrade must detect a deadlock, got %A" actual
+                  Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 2.0)) "the explicit writer proceeds after the victim rolls back"
+              finally
+                  if not pending.IsCompleted then handle holder "ROLLBACK" |> ignore
+                  let acquired, result = pending.GetAwaiter().GetResult()
+                  Fsdb.QueryHandler.closeSession acquired
+                  Expect.equal result (Affected 0UL) "the writer acquired the table lock"
+
+          testCase "an explicit writer waiting for a global read lock leaves the table readable"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY)" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES(1)" (Affected 1UL) |> ignore
+              let holder = run (create 2 store) "SET SESSION lock_wait_timeout=1" (Affected 0UL)
+              let holder = run holder "FLUSH TABLES WITH READ LOCK" (Affected 0UL)
+              let waiter = run (create 3 store) "SET SESSION lock_wait_timeout=5" (Affected 0UL)
+              let pending = Threading.Tasks.Task.Run(fun () -> handle waiter "LOCK TABLES gate WRITE")
+              try
+                  Expect.isFalse (pending.Wait(TimeSpan.FromMilliseconds 150.0)) "the global read lock blocks the writer"
+                  run holder "SELECT id FROM gate" (ResultSet([ "id" ], [ [ Some "1" ] ])) |> ignore
+                  let reader = run (create 4 store) "SET SESSION lock_wait_timeout=1" (Affected 0UL)
+                  let reader = run reader "LOCK TABLES gate READ" (Affected 0UL)
+                  run reader "UNLOCK TABLES" (Affected 0UL) |> ignore
+              finally
+                  run holder "UNLOCK TABLES" (Affected 0UL) |> ignore
+                  let resolved, result = pending.GetAwaiter().GetResult()
+                  Fsdb.QueryHandler.closeSession resolved
+                  Expect.equal result (Affected 0UL) "the writer acquires after the global read lock releases"
+
           testCase "serializable primary ranges ignore snapshots of replaced tables"
           <| fun _ ->
               let run session sql expected =

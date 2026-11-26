@@ -1452,6 +1452,137 @@ def check(port, mysql):
                 0,
             )
 
+    for prepared in (False, True):
+        for statement, write_intent, code in (
+            ("SELECT id FROM gate FOR SHARE", False, 1),
+            ("SELECT id FROM gate FOR UPDATE", True, 1),
+            ("UPDATE gate SET v=v WHERE id=1", True, 0),
+            ("INSERT INTO gate VALUES (1,20)", True, DUPLICATE),
+        ):
+            with fixture(port, schema, mysql, failure_setup) as (
+                _,
+                _,
+                holder,
+                lock,
+                resolver,
+            ):
+                execute(lock, "SET SESSION lock_wait_timeout=1")
+                execute(lock, "SET SESSION innodb_lock_wait_timeout=4")
+                execute(holder, "XA START 'explicit_metadata'" if prepared else "BEGIN")
+                expect(statement, outcome(holder, statement), code)
+                if prepared:
+                    execute(holder, "XA END 'explicit_metadata'")
+                    execute(holder, "XA PREPARE 'explicit_metadata'")
+                for mode, waits in (("READ LOCAL", write_intent), ("WRITE", True)):
+                    expect(
+                        f"LOCK TABLES {mode} after {statement}, prepared={prepared}",
+                        outcome(lock, f"LOCK TABLES gate {mode}"),
+                        TIMEOUT if waits else 0,
+                    )
+                    execute(lock, "UNLOCK TABLES")
+                if prepared:
+                    execute(resolver, "XA ROLLBACK 'explicit_metadata'")
+                else:
+                    execute(holder, "ROLLBACK")
+                expect(
+                    "explicit locks after metadata release",
+                    outcome(lock, "LOCK TABLES gate WRITE"),
+                    0,
+                )
+                execute(lock, "UNLOCK TABLES")
+
+    with fixture(port, schema, mysql, failure_setup) as (_, _, holder, lock, late):
+        execute(holder, "SET SESSION lock_wait_timeout=1")
+        execute(lock, "SET SESSION lock_wait_timeout=5")
+        execute(late, "SET SESSION lock_wait_timeout=1")
+        execute(holder, "BEGIN")
+        execute(holder, "SELECT id FROM gate")
+        with ThreadPoolExecutor(1) as pool:
+            pending = pending_statement(pool, lock, "LOCK TABLES gate WRITE")
+            try:
+                expect(
+                    "explicit writer queues behind a transaction",
+                    blocked(pending),
+                    True,
+                )
+                expect(
+                    "late read waits behind explicit writer",
+                    outcome(late, "SELECT id FROM gate"),
+                    TIMEOUT,
+                )
+                expect(
+                    "existing transaction can reread",
+                    outcome(holder, "SELECT id FROM gate"),
+                    1,
+                )
+                expect(
+                    "metadata upgrade detects the explicit-lock cycle",
+                    outcome(holder, "UPDATE gate SET v=11 WHERE id=1"),
+                    1213,
+                )
+            finally:
+                execute(holder, "ROLLBACK")
+            expect("explicit writer acquires after deadlock", pending.result(5), 0)
+        execute(lock, "UNLOCK TABLES")
+
+    with fixture(port, schema, mysql, failure_setup) as (_, _, holder, lock, late):
+        for connection in (holder, late):
+            execute(connection, "SET SESSION lock_wait_timeout=1")
+        execute(lock, "SET SESSION lock_wait_timeout=5")
+        execute(holder, "FLUSH TABLES WITH READ LOCK")
+        with ThreadPoolExecutor(1) as pool:
+            pending = pending_statement(pool, lock, "LOCK TABLES gate WRITE")
+            try:
+                expect(
+                    "explicit writer waits at the global gate", blocked(pending), True
+                )
+                expect(
+                    "global read holder can read",
+                    outcome(holder, "SELECT id FROM gate"),
+                    1,
+                )
+                expect(
+                    "late ordinary reader can read",
+                    outcome(late, "SELECT id FROM gate"),
+                    1,
+                )
+                expect(
+                    "late explicit reader can acquire",
+                    outcome(late, "LOCK TABLES gate READ"),
+                    0,
+                )
+            finally:
+                execute(late, "UNLOCK TABLES")
+                execute(holder, "UNLOCK TABLES")
+            expect("explicit writer proceeds after global unlock", pending.result(5), 0)
+        execute(lock, "UNLOCK TABLES")
+
+    with fixture(port, schema, mysql, failure_setup) as (_, _, holder, lock, late):
+        execute(lock, "SET SESSION lock_wait_timeout=5")
+        execute(late, "SET SESSION lock_wait_timeout=1")
+        execute(holder, "BEGIN")
+        execute(holder, "SELECT id FROM gate")
+        with ThreadPoolExecutor(1) as pool:
+            pending = pending_statement(pool, lock, "LOCK TABLES gate WRITE")
+            try:
+                expect(
+                    "explicit writer waits at the table gate", blocked(pending), True
+                )
+                expect(
+                    "late global read waits behind the explicit writer",
+                    outcome(late, "FLUSH TABLES WITH READ LOCK"),
+                    TIMEOUT,
+                )
+            finally:
+                execute(late, "UNLOCK TABLES")
+                execute(holder, "ROLLBACK")
+            expect(
+                "explicit writer proceeds after the transaction ends",
+                pending.result(5),
+                0,
+            )
+        execute(lock, "UNLOCK TABLES")
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 
