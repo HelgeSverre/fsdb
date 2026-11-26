@@ -2782,8 +2782,10 @@ implementation effort:
    statement-stable CTEs. Direct source null tests can filter the slice.
    [Projected aggregate wire metadata](benchmarks/results/2026-11-25-correlated-integer-range-count.md#projected-aggregate-wire-metadata)
    preserves the audited numeric descriptors for scalar aggregates over
-   derived tables and CTEs. Other residual predicates, broader aggregate
-   shapes, and computed projection planning still need work.
+   derived tables and CTEs. [Binding checks for projected aggregates](benchmarks/results/2026-11-25-correlated-integer-range-count.md#reuse-of-derived-aggregate-bindings)
+   are reused across rows of the same enclosing scope. Other residual
+   predicates, broader aggregate shapes, and computed projection planning
+   still need work.
 
 2. Transaction scheduling. [Readers behind waiting writers under a global
    read lock](torture/findings/2026-11-06-global-read-waiting-writer-gate.md)

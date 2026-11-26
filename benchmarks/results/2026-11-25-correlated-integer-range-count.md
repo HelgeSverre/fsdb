@@ -455,3 +455,42 @@ scalar field descriptors in text results across the projection matrix
 above. The scalar field name, type, width, scale, and flags also matched
 in all 1,203 `COM_STMT_PREPARE` descriptors at session division precision
 increments 0, 4, and 12. [MySQL column definition packets](https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset_column_definition.html).
+
+### Reuse of derived aggregate bindings
+
+A qualified argument such as `c.payload` requires binding before any
+correlated comparison can emit a conversion warning. For a derived
+source, the binding check previously described the subquery again for
+each enclosing row. Successful checks now carry through the statement
+while the same top-level column and qualifier maps remain in scope.
+Nested outer scopes, active CTE scopes, and projected alias scopes keep
+their own binding checks. Binding failures retain their diagnostic order.
+
+In a warmed Release fixture with 100 parents and 4,000 children, calling
+thread allocations fell from 9.14 to 1.93 MB per projected `COUNT(payload)`
+and from 10.13 to 2.52 MB per projected `SUM(sequence_no)`. Projected
+`COUNT(*)` allocated 1.87 MB in both builds. The allocation regression
+fails on the baseline and passes with binding reuse. The native MySQL
+8.4.11 rerun matched all 1,604 rows, 401 text column descriptors, and
+1,203 prepared column descriptors in the matrix above.
+
+The native timing run used Fsdb Release with Server GC and WAL against
+MySQL 8.4.11 with commit flushing set to 1 and binary logging disabled.
+The Fsdb baseline was `93e993b8`. Each engine ran the entire
+`projected-range-controls` fixture once before the measured run. The
+measured fixture used 500 parents and 10,000 children with 30 checked
+calls per workload after four warmups. Pass 2 reversed engine and lane
+order. Results are the mean of the two p50 timings in milliseconds.
+
+| Workload | Fsdb before | Fsdb after | MySQL |
+| --- | ---: | ---: | ---: |
+| Physical `COUNT(*)` | 2.822 | 2.953 | 1.646 |
+| Nested derived `COUNT(*)` | 2.804 | 2.954 | 1.689 |
+| Nested derived `COUNT(payload)` | 13.232 | 3.413 | 2.407 |
+| Nested derived `SUM(sequence_no)` | 14.730 | 4.373 | 1.718 |
+| CTE `COUNT(*)` | 2.868 | 2.896 | 1.664 |
+| Derived `COUNT(*)` with a source null test | 3.170 | 3.185 | 2.397 |
+
+The projected count and sum ran 3.9 and 3.4 times faster. They took
+1.4 and 2.5 times MySQL's time, respectively. The four `COUNT(*)`
+controls moved by at most 0.15 ms. [Per-pass p50 and p95 measurements](2026-11-26-projected-aggregate-bindings.csv).

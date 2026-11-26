@@ -16064,8 +16064,10 @@ let tests =
                         | other -> failtestf "expected a correlated aggregate, got %A" other
                         System.GC.GetAllocatedBytesForCurrentThread() - before
                     let derived = measure "" fromDerived "COUNT(*)" 300M
-                    measure "" fromDerived "COUNT(c.payload)" 240M |> ignore
-                    measure "" fromDerived "SUM(c.sequence_no)" 45150M |> ignore
+                    let countPayload = measure "" fromDerived "COUNT(c.payload)" 240M
+                    let sumSequence = measure "" fromDerived "SUM(c.sequence_no)" 45150M
+                    Expect.isLessThan countPayload (derived * 2L) "binding a projected COUNT argument stays close to the indexed count"
+                    Expect.isLessThan sumSequence (derived * 2L) "binding a projected SUM argument stays close to the indexed count"
                     let prefix = "WITH projected AS (SELECT bucket AS payload, id AS sequence_no, parent_id AS parent_key FROM children)"
                     measure prefix "projected" "COUNT(*)" 300M |> ignore
                     match run "SELECT SUM((SELECT COUNT(*) FROM children c WHERE c.parent_id=p.id AND c.id BETWEEN p.id AND p.id+200)) FROM parents p" with

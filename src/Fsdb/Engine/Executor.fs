@@ -800,6 +800,13 @@ type private HavingCountSelects =
       Matched: SelectStmt
       FixedJoinGroup: bool }
 
+type private AggregateBindingScope =
+    { Store: Store
+      Registry: Registry
+      DbName: string
+      ColumnIndex: Map<string, int list>
+      Qualifiers: Map<string, ColumnDef list * int> }
+
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
       SharedDerivedGroups: Dictionary<string, (CteGroup * SelectOrUnion) list>
@@ -827,6 +834,7 @@ type private StatementMemo =
       PendingCorrelatedRangeSetups: Dictionary<Expr, (TableRef * PhysicalRangeSelection * CorrelatedRangePhase) list>
       HavingCountSelects: Dictionary<SelectStmt, HavingCountSelects>
       CountColumnPresence: Dictionary<SelectStmt, Dictionary<string * Expr, bool>>
+      AggregateBindings: Dictionary<SelectStmt, AggregateBindingScope>
       InnerExistsProjections: Dictionary<SelectStmt, bool>
       ScopedExistsProjections: Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>
       SourceFreeScalarShapes: Dictionary<SelectStmt, bool>
@@ -878,6 +886,7 @@ let private freshStatementMemo () =
       PendingCorrelatedRangeSetups = Dictionary<Expr, (TableRef * PhysicalRangeSelection * CorrelatedRangePhase) list>(HashIdentity.Reference)
       HavingCountSelects = Dictionary<SelectStmt, HavingCountSelects>(HashIdentity.Reference)
       CountColumnPresence = Dictionary<SelectStmt, Dictionary<string * Expr, bool>>(HashIdentity.Reference)
+      AggregateBindings = Dictionary<SelectStmt, AggregateBindingScope>(HashIdentity.Reference)
       InnerExistsProjections = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
       ScopedExistsProjections = Dictionary<SelectStmt, Dictionary<obj, HashSet<obj>>>(HashIdentity.Reference)
       SourceFreeScalarShapes = Dictionary<SelectStmt, bool>(HashIdentity.Reference)
@@ -9571,10 +9580,36 @@ and private tryMissingCorrelatedAggregateArgument (outer: EvalContext) (select: 
         | QualifiedCol(qualifier, columnName)
         | Distinct(QualifiedCol(qualifier, columnName)) -> Some(qualifier, columnName)
         | _ -> None
-    let bindingError () =
+    let bindingError onSuccess =
         match describeQueryColumnsInScope outer.Store outer.Registry outer.DbName (QueryBody(PlainSelect select)) (Some outer) (fun _ -> Ok()) with
         | Error(InvalidDescription(Err(code, message))) -> Some(Error(code, message))
+        | Ok _ ->
+            onSuccess ()
+            None
         | _ -> None
+    let derivedBindingError () =
+        if outer.Outer.IsSome || not outer.ProjectionAliases.IsEmpty
+           || not (currentCteScope ()).IsEmpty || not (hasPlainAggregateShape select) then
+            bindingError ignore
+        else
+            // Rows from one enclosing scope share their column bindings.
+            // Keep only successful checks so errors still precede evaluation.
+            let bindings = (currentStatementMemo ()).AggregateBindings
+            match bindings.TryGetValue select with
+            | true, scope
+                when obj.ReferenceEquals(scope.Store, outer.Store)
+                     && obj.ReferenceEquals(scope.Registry, outer.Registry)
+                     && scope.DbName = outer.DbName
+                     && obj.ReferenceEquals(scope.ColumnIndex, outer.ColumnIndex)
+                     && obj.ReferenceEquals(scope.Qualifiers, outer.Qualifiers) -> None
+            | _ ->
+                bindingError (fun () ->
+                    bindings.[select] <-
+                        { Store = outer.Store
+                          Registry = outer.Registry
+                          DbName = outer.DbName
+                          ColumnIndex = outer.ColumnIndex
+                          Qualifiers = outer.Qualifiers })
     match select.Projections, select.From, select.Joins with
     | [ { Expression = FuncCall(name, [ argument ]) } ], Some source, []
         when isAggregateFunctionName outer.Registry name ->
@@ -9585,9 +9620,9 @@ and private tryMissingCorrelatedAggregateArgument (outer: EvalContext) (select: 
             | Some (table: Table)
                 when table.Columns
                      |> List.exists (fun (column: ColumnDef) -> equalsIgnoreCase column.Name columnName)
-                     |> not -> bindingError ()
+                     |> not -> bindingError ignore
             | _ -> None
-        | Some _, FromSubquery _ -> bindingError ()
+        | Some _, FromSubquery _ -> derivedBindingError ()
         | _ -> None
     | _ -> None
 
