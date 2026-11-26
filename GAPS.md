@@ -3280,8 +3280,10 @@ implementation effort:
    also participate in geographic overlays, including nested members and
    operation-specific result order. [Mixed geographic collections](torture/findings/2026-11-25-geographic-point-overlays.md#points-against-mixed-collections)
    support intersections with points and multipoints and subtraction from
-   those point operands. General mixed-collection overlays and collection
-   unions that dissolve multiple polygons remain open.
+   those point operands. [Geographic polygon union](torture/findings/2026-11-26-geographic-polygon-union.md)
+   dissolves polygon and multipolygon boundaries, including in collections
+   with lines and points. Ring start and member order, near-degenerate
+   area turns, and other general mixed-collection overlays remain open.
    Broader geographic polygon relation and precision rules remain open;
    these samples do not establish general intersection parity.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)

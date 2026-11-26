@@ -718,6 +718,71 @@ let tests =
                         Expect.isLessThan (abs longitude) 1e-12 "longitude at the crossing"
                     | actual -> failtestf "expected a geographic crossing point, got %A" actual
 
+                testCase "geographic polygon unions dissolve intersecting boundaries"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let first = "POLYGON((0 0,4 0,4 4,0 4,0 0))"
+                    let second = "POLYGON((2 2,6 2,6 6,2 6,2 2))"
+                    let expected =
+                        [ 4.002446562605655, 1.999999982893048; 4.0, 0.0; 0.0, 0.0; 0.0, 4.0
+                          2.001226301164059, 3.999999999966283; 2.0, 6.0; 6.0, 6.0; 6.0, 2.0 ]
+                    let checkRing (expected: (float * float) list) ring =
+                        Expect.equal (List.last ring) (List.head ring) "the union closes its exterior ring"
+                        let vertices = List.take (ring.Length - 1) ring
+                        Expect.equal vertices.Length expected.Length "only the exterior geodesic pieces remain"
+                        let matches start =
+                            let rotated = List.skip start vertices @ List.take start vertices
+                            List.forall2 (fun (lat1, lon1) (lat2, lon2) ->
+                                abs (lat1 - lat2) <= 1e-8 && abs (lon1 - lon2) <= 1e-8) expected rotated
+                        Expect.isTrue (List.exists matches [ 0 .. vertices.Length - 1 ]) "the geodesic vertices match MySQL"
+                    let union left right = call "ST_Union" [ geometry left; geometry right ]
+                    for left, right in [ first, second; second, first ] do
+                        match union left right with
+                        | VGeometry { Srid = 4326; Shape = GPolygon [ ring ] } -> checkRing expected ring
+                        | value -> failtestf "expected one dissolved polygon, got %A" value
+
+                    let collection = $"GEOMETRYCOLLECTION({first},{second})"
+                    match union collection "POINT(9 9)" with
+                    | VGeometry { Srid = 4326
+                                  Shape = GGeometryCollection [ { Shape = GPolygon [ ring ] }; { Shape = GPoint(9.0, 9.0) } ] } ->
+                        checkRing expected ring
+                    | value -> failtestf "expected a dissolved area and one exterior point, got %A" value
+                    match union "POINT(3 3)" collection with
+                    | VGeometry { Srid = 4326; Shape = GPolygon [ ring ] } -> checkRing expected ring
+                    | value -> failtestf "expected the dissolved area to absorb the interior point, got %A" value
+
+                    let mixed = $"GEOMETRYCOLLECTION({first},{second},LINESTRING(-2 0,8 0),POINT(-1 0),POINT(9 9))"
+                    match union mixed "POINT(3 3)" with
+                    | VGeometry { Shape = GGeometryCollection [ area; left; right; point ] } ->
+                        match area.Shape with
+                        | GPolygon [ ring ] -> checkRing expected ring
+                        | shape -> failtestf "expected one dissolved area, got %A" shape
+                        Expect.equal
+                            [ left.Shape; right.Shape; point.Shape ]
+                            [ GLineString [ 0.0, -2.0; 0.0, 0.0 ]; GLineString [ 0.0, 4.0; 0.0, 8.0 ]; GPoint(9.0, 9.0) ]
+                            "the union keeps the exterior lines and drops covered points"
+                    | value -> failtestf "expected an area, two exterior lines, and one point, got %A" value
+
+                    let triple = $"GEOMETRYCOLLECTION({first},{second},POLYGON((1 3,5 3,5 7,1 7,1 3)))"
+                    match union triple "POINT(3 3)" with
+                    | VGeometry { Shape = GPolygon [ ring ] } ->
+                        checkRing
+                            [ 4.00183485610902, 0.9999999999998879; 4.0, 0.0; 0.0, 0.0; 0.0, 4.0
+                              2.001226301164059, 3.999999999966283; 2.0, 6.0; 6.0, 6.0
+                              6.002741046218122, 5.000000000001029; 7.0, 5.0; 7.0, 1.0 ] ring
+                    | value -> failtestf "expected the three member areas to dissolve, got %A" value
+
+                    let shell = "POLYGON((0 0,8 0,8 8,0 8,0 0),(2 2,6 2,6 6,2 6,2 2))"
+                    match union shell "POLYGON((2 2,6 2,6 6,2 6,2 2))" with
+                    | VGeometry { Shape = GPolygon [ ring ] } ->
+                        checkRing [ 0.0, 0.0; 0.0, 8.0; 8.0, 8.0; 8.0, 0.0 ] ring
+                    | value -> failtestf "expected the shared interior ring to disappear, got %A" value
+                    match union shell "POLYGON((3 3,5 3,5 5,3 5,3 3))" with
+                    | VGeometry { Shape = GMultiPolygon [ [ _; _ ]; [ island ] ] } ->
+                        checkRing [ 3.0, 3.0; 3.0, 5.0; 5.0, 5.0; 5.0, 3.0 ] island
+                    | value -> failtestf "expected the hole and its separate island to survive, got %A" value
+
                 testCase "geographic line and area overlays retain boundary pieces and source order"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

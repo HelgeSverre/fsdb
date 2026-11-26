@@ -3091,6 +3091,153 @@ let private geographicAreaCoversPoint referenceSystem polygons point =
     | GeographicPointPolygonPosition.Outside _ -> false
     | _ -> true
 
+type private GeographicUnionEdge =
+    { Polygon: int
+      Segment: (float * float) * (float * float)
+      Bounds: GeographicBounds
+      Cuts: ResizeArray<float * float> }
+
+let private splitGeographicUnionEdges referenceSystem flattening polygons =
+    let edges =
+        polygons
+        |> List.mapi (fun polygon rings ->
+            rings |> List.collect (List.pairwise >> List.choose (fun (start, endpoint) ->
+                if start = endpoint then None
+                else
+                    let segment = start, endpoint
+                    Some { Polygon = polygon
+                           Segment = segment
+                           Bounds = geographicSectionBounds flattening [ segment ]
+                           Cuts = ResizeArray() })))
+        |> List.concat
+        |> List.toArray
+
+    for index in 0 .. edges.Length - 1 do
+        let first = edges.[index]
+        for other in index + 1 .. edges.Length - 1 do
+            let second = edges.[other]
+            if first.Polygon <> second.Polygon && geographicBoundsIntersect first.Bounds second.Bounds then
+                let cuts =
+                    match geographicSharedSegmentEndpoints referenceSystem first.Segment second.Segment with
+                    | [] ->
+                        // The area overlay obtains turns from clockwise exteriors.
+                        let reverse (start, endpoint) = endpoint, start
+                        tryGeographicCrossingPoint normalizedLongitudeRadians referenceSystem (reverse first.Segment) (reverse second.Segment)
+                        |> Option.toList
+                    | shared -> shared
+                first.Cuts.AddRange cuts
+                second.Cuts.AddRange cuts
+
+    edges
+    |> Array.toList
+    |> List.collect (fun edge ->
+        let start, endpoint = edge.Segment
+        let distance = geographicVertexDistance referenceSystem start
+        let cuts =
+            edge.Cuts
+            |> Seq.filter (fun point -> point <> start && point <> endpoint)
+            |> Seq.distinct
+            |> Seq.sortBy distance
+            |> Seq.toList
+        start :: (cuts @ [ endpoint ])
+        |> List.pairwise
+        |> List.map (fun segment -> edge.Polygon, segment))
+
+let private geographicUnionRings flattening fragments =
+    let edges = List.toArray fragments
+    let outgoing =
+        edges
+        |> Array.mapi (fun index (start, _) -> start, index)
+        |> Array.groupBy fst
+        |> Array.map (fun (start, entries) -> start, Array.map snd entries)
+        |> Map.ofArray
+    let follows (start, endpoint) index =
+        let _, next = edges.[index]
+        let reverse = geographicSegmentAzimuths flattening endpoint start |> fst
+        let forward = geographicSegmentAzimuths flattening endpoint next |> fst
+        geographicBoundsLongitudeOffset reverse forward
+    let successors =
+        edges
+        |> Array.map (fun ((_, endpoint) as edge) ->
+            Map.tryFind endpoint outgoing |> Option.map (Array.minBy (follows edge)))
+
+    // A valid boundary is a set of cycles. Pair turns before walking so
+    // rings that meet at a vertex cannot claim each other's outgoing edge.
+    let targets = successors |> Array.choose id
+    if targets.Length <> edges.Length || (Array.distinct targets).Length <> edges.Length then None
+    else
+        let visited = Array.create edges.Length false
+        [ for start in 0 .. edges.Length - 1 do
+              if not visited.[start] then
+                  let mutable index = start
+                  let mutable vertices = []
+                  while not visited.[index] do
+                      visited.[index] <- true
+                      vertices <- fst edges.[index] :: vertices
+                      index <- targets.[index]
+                  yield List.rev (fst edges.[start] :: vertices) ]
+        |> Some
+
+let private assembleGeographicUnionPolygons referenceSystem rings =
+    let exteriors, holes =
+        rings
+        |> List.map (fun ring -> ring, geographicRingAreaSign referenceSystem ring)
+        |> List.partition (fun (_, area) -> area > 0.0)
+    let rankedExteriors = exteriors |> List.indexed |> List.sortBy (snd >> snd)
+    let parentOf (hole, area) =
+        if area = 0.0 then None
+        else
+            rankedExteriors
+            |> List.tryFind (fun (_, (ring, _)) ->
+                hole |> List.exists (fun point -> geographicRingContains referenceSystem false point ring))
+            |> Option.map (fun (index, _) -> index, hole)
+
+    holes
+    |> List.map parentOf
+    |> tryAllSome
+    |> Option.map (fun indexedHoles ->
+        let byExterior = indexedHoles |> List.groupBy fst |> Map.ofList
+        exteriors |> List.mapi (fun index (ring, _) ->
+            ring :: (Map.tryFind index byExterior |> Option.defaultValue [] |> List.map snd)))
+
+let private tryGeographicPolygonUnion referenceSystem polygons =
+    let orient = orientGeographicPolygonRings referenceSystem
+    match polygons with
+    | [] -> Some []
+    | [ ringSet ] -> Some [ orient ringSet ]
+    | _ ->
+        let flattening = 1.0 / referenceSystem.InverseFlattening.Value
+        let polygons =
+            polygons |> List.map (List.map geographicRingWithoutRepeatedNeighbors >> orient)
+        let indexedPolygons = List.indexed polygons
+        let inside point = function
+            | exterior :: holes ->
+                geographicRingContains referenceSystem false point exterior
+                && not (holes |> List.exists (geographicRingContains referenceSystem true point))
+            | [] -> false
+        if polygons |> List.collect id |> List.collect List.pairwise |> List.exists (supportedGeographicOverlaySegment >> not) then None
+        else
+            splitGeographicUnionEdges referenceSystem flattening polygons
+            |> List.groupBy (fun (_, (start, endpoint)) -> min start endpoint, max start endpoint)
+            |> List.choose (fun (_, coincident) ->
+                let _, ((start, endpoint) as segment) = List.head coincident
+                // Opposite coincident edges have fill on both sides.
+                if coincident |> List.exists (fun (_, other) -> segment <> other) then None
+                else
+                    let owners = coincident |> List.map fst |> Set.ofList
+                    let length = geographicVertexDistance referenceSystem start endpoint
+                    let midpoint = geographicPointAlong referenceSystem start endpoint (length / 2.0)
+                    if indexedPolygons |> List.exists (fun (index, polygon) -> not (owners.Contains index) && inside midpoint polygon)
+                    then None
+                    else Some segment)
+            |> geographicUnionRings flattening
+            |> Option.bind (assembleGeographicUnionPolygons referenceSystem)
+
+let private geographicAreaShape = function
+    | [] -> GEmpty
+    | [ polygon ] -> GPolygon polygon
+    | polygons -> GMultiPolygon polygons
+
 let private geographicCoveredPoint referenceSystem = function
     | GLineString line -> Some(geographicLineworkCoversPoint referenceSystem [ line ])
     | GMultiLineString lines -> Some(geographicLineworkCoversPoint referenceSystem lines)
@@ -3139,7 +3286,7 @@ let private cleanGeographicPointTree shape =
 
     shape |> removeDuplicates |> narrow
 
-let private intersectGeographicCollectionWithPoints referenceSystem srid collection pointShape points =
+let private geographicCollectionParts shape =
     let prependAll retained values = List.fold (fun rest value -> value :: rest) retained values
     let rec split (points, lines, polygons) = function
         | GEmpty -> points, lines, polygons
@@ -3151,28 +3298,29 @@ let private intersectGeographicCollectionWithPoints referenceSystem srid collect
         | GMultiPolygon members -> points, lines, prependAll polygons members
         | GGeometryCollection members -> List.fold (fun parts geometry -> split parts geometry.Shape) (points, lines, polygons) members
 
-    let memberPoints, lines, polygons = split ([], [], []) collection
-    let lines, polygons = List.rev lines, List.rev polygons
-    let area = GMultiPolygon polygons
-    let exteriorLines =
-        match lines, polygons with
-        | [], _
-        | _, [] -> Some lines
-        | _ ->
-            tryGeographicLineAreaOverlay referenceSystem OverlayKind.Difference srid lines polygons area
-            |> Option.bind (function
-                | GLineString line -> Some [ line ]
-                | GMultiLineString lines -> Some lines
-                | GEmpty -> Some []
-                | _ -> None)
+    let points, lines, polygons = split ([], [], []) shape
+    List.rev points, List.rev lines, List.rev polygons
 
-    exteriorLines
+let private subtractGeographicPolygonsFromLines referenceSystem srid lines polygons =
+    match lines, polygons with
+    | [], _
+    | _, [] -> Some lines
+    | _ ->
+        tryGeographicLineAreaOverlay referenceSystem OverlayKind.Difference srid lines polygons (GMultiPolygon polygons)
+        |> Option.bind (function
+            | GLineString line -> Some [ line ]
+            | GMultiLineString lines -> Some lines
+            | GEmpty -> Some []
+            | _ -> None)
+
+let private intersectGeographicCollectionWithPoints referenceSystem srid collection pointShape points =
+    let memberPoints, lines, polygons = geographicCollectionParts collection
+    subtractGeographicPolygonsFromLines referenceSystem srid lines polygons
     |> Option.map (fun exterior ->
         let onLine = geographicLineworkCoversPoint referenceSystem exterior
         let inArea = geographicAreaCoversPoint referenceSystem polygons
         let memberPoints =
             memberPoints
-            |> List.rev
             |> List.filter (fun point -> not (onLine point || inArea point))
             |> distinctGeographicPoints
 
@@ -3244,6 +3392,32 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
         let leftCollection = isCollection left
         let rightCollection = isCollection right
 
+        let unionAreas () =
+            let collection, other = if leftCollection then left, right else right, left
+            let points, lines, polygons = geographicCollectionParts collection
+            let otherPoints, otherLines, otherPolygons = geographicCollectionParts other
+            match polygons @ otherPolygons with
+            | [] -> None
+            | areas ->
+                // Each member is unioned with the accumulated area. The
+                // next turn uses the geodesics through those output vertices.
+                let dissolved =
+                    (Some [], areas)
+                    ||> List.fold (fun state polygon ->
+                        state |> Option.bind (fun existing -> tryGeographicPolygonUnion referenceSystem (polygon :: existing)))
+                dissolved
+                |> Option.bind (fun polygons ->
+                    subtractGeographicPolygonsFromLines referenceSystem first.Srid (lines @ otherLines) polygons
+                    |> Option.map (fun exteriorLines ->
+                        let covered point =
+                            geographicAreaCoversPoint referenceSystem polygons point
+                            || geographicLineworkCoversPoint referenceSystem exteriorLines point
+                        let outside = (points @ otherPoints) |> distinctGeographicPoints |> List.filter (covered >> not)
+                        if outside.IsEmpty && exteriorLines.IsEmpty then geographicAreaShape polygons
+                        else
+                            let shapes = List.map GPolygon polygons @ List.map GLineString exteriorLines @ List.map GPoint outside
+                            shapes |> List.map result |> GGeometryCollection))
+
         let removeRepeatedComponents = function
             | GMultiLineString lines ->
                 GMultiLineString(distinctGeographicLines referenceSystem lines) |> narrowGeographicOverlayShape
@@ -3259,8 +3433,7 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
 
         let withNonpoint pointShape pointsFirst points other =
             match kind, other, points with
-            // Collection union can dissolve the members of a multipolygon.
-            | OverlayKind.Union, GMultiPolygon (_ :: _ :: _), _ -> None
+            | OverlayKind.Union, GMultiPolygon (_ :: _ :: _), _ -> unionAreas ()
             | OverlayKind.Intersection, _, [] -> Some GEmpty
             | OverlayKind.Difference, _, [] when pointsFirst -> Some GEmpty
             | _, _, [] -> Some(normalize (removeRepeatedComponents other))
@@ -3332,6 +3505,7 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
                 |> Option.bind (intersectGeographicCollectionWithPoints referenceSystem first.Srid collection pointShape)
             | OverlayKind.Difference, pointShape, GGeometryCollection _ ->
                 geographicPointMembers pointShape |> Option.map (fun _ -> subtractPointTree pointShape right)
+            | OverlayKind.Union, _, _ -> unionAreas ()
             | _ -> None
 
     let shape =
@@ -3358,6 +3532,10 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
                 tryGeographicLineOverlay referenceSystem kind first.Srid [ right ] left
         | GMultiLineString left, GMultiLineString right ->
             tryGeographicLineOverlay referenceSystem kind first.Srid left right
+        | GMultiPolygon left, GPolygon right when kind = OverlayKind.Union ->
+            tryGeographicPolygonUnion referenceSystem (right :: left) |> Option.map geographicAreaShape
+        | Area left, Area right when kind = OverlayKind.Union ->
+            tryGeographicPolygonUnion referenceSystem (left @ right) |> Option.map geographicAreaShape
         | (Area _ as area), Linework _ when kind = OverlayKind.Difference -> Some(normalize area)
         | Linework lines, (Area polygons as area)
         | (Area polygons as area), Linework lines ->
