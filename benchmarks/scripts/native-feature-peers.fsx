@@ -13,7 +13,8 @@ let modes =
       "nullable-count-controls"
       "expression-count-controls"
       "exact-aggregate-controls"
-      "projected-range-controls" ]
+      "projected-range-controls"
+      "edge-controls" ]
 
 let engine, port, pass, mode =
     match arguments with
@@ -44,11 +45,14 @@ let execute sql =
 
 let write sql = execute sql |> ignore
 
+exception ResultMismatch of string
+
 let scalar sql =
     use statement = command sql
-    Convert.ToInt64(statement.ExecuteScalar())
-
-exception ResultMismatch of string
+    match statement.ExecuteScalar() with
+    | null
+    | :? DBNull -> raise (ResultMismatch "expected a non-null scalar")
+    | value -> Convert.ToInt64(value)
 
 let require label expected actual =
     if actual <> expected then
@@ -263,7 +267,30 @@ let spatial () =
 
         measure "spatial-geographic" 150 (fun () -> scalar query |> require "antimeridian distance in metres" 219278L))
 
-let fullText () =
+let geographicTurns () =
+    let geometry wkt = $"ST_GeomFromText('{wkt}',4326)"
+    let mixedHole =
+        geometry "POLYGON((63.49470848831635 -125.36064951331429,63.49470848831635 -123.07468354461439,63.75262171538674 -123.07468354461439,63.75262171538674 -125.36064951331429,63.49470848831635 -125.36064951331429),(63.55918679508395 -124.78915802113931,63.68814340861914 -124.78915802113931,63.68814340861914 -123.64617503678936,63.55918679508395 -123.64617503678936,63.55918679508395 -124.78915802113931))"
+
+    let nearHole =
+        geometry "POLYGON((5.41527870464324 12.88802131043172,5.41527870464324 12.96140523087901,5.67890365992841 12.96140523087901,5.67890365992841 12.88802131043172,5.41527870464324 12.88802131043172),(5.48118494346453 12.90636729054355,5.61299742110712 12.90636729054355,5.61299742110712 12.94305925076719,5.48118494346453 12.94305925076719,5.48118494346453 12.90636729054355))"
+
+    let cases =
+        [ "geographic-mixed-turn-forward", mixedHole, "63.55918679508395 -123.64617626538595,63.68814340861914 -123.64617626538595", 1010L
+          "geographic-mixed-turn-reverse", mixedHole, "63.68814340861914 -123.64617626538595,63.55918679508395 -123.64617626538595", 1100L
+          "geographic-near-hole-touch", nearHole, "5.48118494346453 12.94305729342880,5.61299742110712 12.94305729342880", 1010L
+          "geographic-near-hole-cross", nearHole, "5.48118494346453 12.94305734342880,5.61299742110712 12.94305734342880", 1100L ]
+
+    let ordered = if pass % 2 = 0 then List.rev cases else cases
+
+    for lane, area, coordinates, expected in ordered do
+        probe lane (fun () ->
+            let line = geometry $"LINESTRING({coordinates})"
+            // Encode intersects, crosses, touches and within as four decimal digits.
+            let query = $"SELECT 1000*ST_Intersects({line},{area}) + 100*ST_Crosses({line},{area}) + 10*ST_Touches({line},{area}) + ST_Within({line},{area})"
+            measure lane 150 (fun () -> scalar query |> require lane expected))
+
+let fullText cases =
     probe "cjk-ngram" (fun () ->
         write "CREATE TABLE articles (id INT PRIMARY KEY, body VARCHAR(100) NOT NULL, FULLTEXT KEY ix_body(body) WITH PARSER ngram) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
 
@@ -278,23 +305,30 @@ let fullText () =
 
             $"({id},'{body}')")
 
-        let search phrase expected () =
-            let query = $"SELECT COALESCE(SUM(id), 0) FROM articles WHERE MATCH(body) AGAINST ('\"{phrase}\"' IN BOOLEAN MODE)"
-            scalar query |> require phrase expected
+        for name, terms, expected in cases do
+            let lane = $"cjk-ngram-{name}"
+            let query = $"SELECT COALESCE(SUM(id), 0) FROM articles WHERE MATCH(body) AGAINST ('{terms}' IN BOOLEAN MODE)"
+            probe lane (fun () -> measure lane 100 (fun () -> scalar query |> require terms expected)))
 
-        for language, phrase, expected in
-            [ "japanese", "東京駅", 505000L
-              "chinese", "北京地铁", 495200L
-              "korean", "서울역", 495300L ] do
-            let lane = $"cjk-ngram-{language}"
-            probe lane (fun () -> measure lane 100 (search phrase expected)))
+let fullTextPhrases () =
+    fullText
+        [ "japanese", "\"東京駅\"", 505000L
+          "chinese", "\"北京地铁\"", 495200L
+          "korean", "\"서울역\"", 495300L ]
+
+let fullTextOperators () =
+    let cases =
+        [ "wildcard", "東京*", 1000100L
+          "exclude-phrase", "+東京 -\"東京駅\"", 495100L ]
+
+    fullText (if pass % 2 = 0 then List.rev cases else cases)
 
 try
     connection.Open()
     write $"CREATE DATABASE {database}"
     try
         write $"USE {database}"
-        seedAccounts ()
+        if mode <> "edge-controls" then seedAccounts ()
 
         let workloads =
             if mode = "range-controls" then [ readRangeControls ]
@@ -304,7 +338,8 @@ try
             elif mode = "prefix-controls" then
                 write "CREATE VIEW positive_parent AS SELECT id, value FROM parent WHERE value > 0 WITH CASCADED CHECK OPTION"
                 [ viewPrefixUpdates ]
-            else [ readQueries; viewUpdates; spatial; fullText ]
+            elif mode = "edge-controls" then [ geographicTurns; fullTextOperators ]
+            else [ readQueries; viewUpdates; spatial; fullTextPhrases ]
 
         let ordered = if pass % 2 = 0 then List.rev workloads else workloads
         for run in ordered do

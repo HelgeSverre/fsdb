@@ -266,11 +266,11 @@ These tables summarize immutable, linked result artifacts. They are historical
 measurements, not claims about the current branch; use a fresh run for a current
 comparison.
 
-The [native peer benchmark at `d11c7f65`](results/d11c7f65-peer-comparison.md)
-records checked point reads, durable updates, joined views, spatial and
-CJK probes, and correlated aggregates through derived tables and CTEs.
-The [previous native run](results/2e54f0c7-peer-refresh.md) includes the same
-fixtures before derived aggregate binding reuse. The
+The [native peer benchmark at `cc2cb5f6`](results/cc2cb5f6-peer-comparison.md)
+records checked point reads, durable updates, joined views, correlated
+aggregates, geographic turns, and CJK phrase and operator searches. The
+[previous native run](results/d11c7f65-peer-comparison.md) includes the
+same load fixtures. The
 [local TiDB comparison](results/eeced6b1-peer-refresh.md#other-topologies) and
 [matched ARM64 container run with Percona](results/2026-11-25-peer-comparison.md)
 cover additional topologies.
