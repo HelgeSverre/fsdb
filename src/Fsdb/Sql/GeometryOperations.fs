@@ -2494,7 +2494,9 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
         let distance = geographicPointDistance referenceSystem start
         // MySQL retains the solver's longitude in area overlay results,
         // even when a cut just beyond the antimeridian uses an extra turn.
-        let crossing = tryGeographicCrossingPoint id referenceSystem segment
+        let crossing boundary =
+            tryGeographicCrossingPoint id referenceSystem segment boundary
+            |> Option.filter (fun _ -> not (geographicTurnRejectsRoundedEndpoint referenceSystem segment boundary))
         let roundedVertex = tryGeographicRoundedBoundaryVertex referenceSystem segment
         let side = geographicTurnSide referenceSystem
         let sourceStart, sourceEnd = geographicPointRadians start, geographicPointRadians endpoint

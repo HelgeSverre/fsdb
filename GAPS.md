@@ -3206,9 +3206,11 @@ implementation effort:
    overlap, and disjointness](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#additional-mbr-index-predicates)
    can also use the spatial index. [Directed overlay turns](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#november-26-overlay-interval-classification)
    classify the clipped intervals near corners. [Rounded overlay vertices](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#rounded-overlay-vertices-and-source-order)
-   close the remaining structured line/area differences. A wider polar
-   sweep still finds clipping and isolated-contact differences. Spatial
-   cost estimates remain open.
+   close the remaining structured line/area differences.
+   [Rounded endpoint rejection](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#rejected-crossings-behind-rounded-endpoints)
+   closes the remaining difference, union, and symmetric difference cases
+   in the wider polar sweep. Intersection and spatial cost estimates
+   remain open.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
    [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)

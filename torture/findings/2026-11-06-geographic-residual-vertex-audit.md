@@ -1071,3 +1071,38 @@ and short clipped fragments.
 uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays --seeded-polar-overlays --seed 261184 --seeded-polygons 48
 uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays --seeded-polar-overlays --seed 261184 --seeded-polygons 48 --reverse-lines
 ```
+
+### Rejected crossings behind rounded endpoints
+
+The geographic segment strategy checks rounded endpoint coincidences
+before solving for a proper crossing. When the rounded contact points
+behind the latitude-ordered edge, the strategy rejects that turn.
+A level edge can reject the clipping turn in one direction while
+the other direction still contributes a point. Fsdb now applies
+the same endpoint rejection used by the line/area relation predicates
+to the two overlay passes.
+[Boost 1.84 geographic segment intersection](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp).
+
+In the seeded polar sweep above, intersection differences fell from
+208 to 68 of 768. Difference fell from 19 to zero. Union and symmetric
+difference each fell from 38 to zero. All previously matching results
+still match, including all 7,168 results in the structured comparison.
+The separate longitude-first checks retain their existing two seeded
+and twelve multipart intersection differences.
+
+The mixed-latitude sweep with seed `615801` used 400 polygons and
+12,800 overlay results across both source directions and operand orders.
+Its differences fell from 193 to 98. Intersection fell from 118 to 58,
+difference from 15 to 8, and union and symmetric difference from 30 to
+16 each. Every previously matching result still matches.
+
+Tracing four remaining polar intersections with Boost 1.84 showed
+three cases where the point pass reports the source line's terminal
+vertex at a rounded edge contact. Fsdb omits those points. The
+fourth trace showed that Fsdb retains an extra point beside the short
+clipped line.
+
+```sh
+uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays --seeded-relations --seed 615801 --seeded-polygons 400
+uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays --seeded-relations --seed 615801 --seeded-polygons 400 --reverse-lines
+```

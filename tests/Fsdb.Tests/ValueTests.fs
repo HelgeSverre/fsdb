@@ -821,6 +821,20 @@ let tests =
                         Expect.isLessThan (abs (contactLatitude - (-37.000000084254474))) 1e-10 "the point turn stays separate"
                     | actual -> failtestf "expected a short clipped line and a separate point, got %A" actual
 
+                testCase "geographic overlays discard crossings behind rounded edge endpoints"
+                <| fun _ ->
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]
+                    let line = geometry "LINESTRING(-81.70419159788311 -22.15504833410748,-84.74277272031811 -22.15504833410748)"
+                    let area = geometry "POLYGON((-86.2620632815356 -24.67064096505088,-86.2620632815356 -21.31651612379302,-80.18490103666562 -21.31651612379302,-80.18490103666562 -24.67064096505088,-86.2620632815356 -24.67064096505088),(-84.74277272031811 -23.83210975473642,-81.70419159788311 -23.83210975473642,-81.70419159788311 -22.15504733410748,-84.74277272031811 -22.15504733410748,-84.74277272031811 -23.83210975473642))"
+                    let overlay name = call name [ line; area ]
+                    Expect.equal (call "ST_IsEmpty" [ overlay "ST_Difference" ]) (VInt 1L) "the difference drops the line"
+                    match overlay "ST_Intersection" with
+                    | VGeometry { Shape = GGeometryCollection [ clipped; { Shape = GPoint(latitude, longitude) } ] } ->
+                        Expect.equal (VGeometry clipped) line "the linear pass retains the original line"
+                        Expect.isLessThan (abs (latitude - (-81.70419159998167))) 1e-10 "the point pass still reports a turn"
+                        Expect.isLessThan (abs (longitude - (-22.155048334107008))) 1e-10 "the contact longitude matches"
+                    | actual -> failtestf "expected the full line and a point, got %A" actual
+
                 testCase "geographic MBR predicates use geodesic, circular and degenerate bounds"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"
