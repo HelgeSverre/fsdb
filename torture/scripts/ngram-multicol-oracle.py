@@ -453,6 +453,72 @@ def verify_cache_lifecycle(mysql, fsdb):
     return failures
 
 
+def verify_posting_segments(mysql, fsdb):
+    connections = (mysql, fsdb)
+    for connection in connections:
+        query(connection, "CREATE TABLE probe.segmented(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin")
+    query(mysql, "SET SESSION information_schema_stats_expiry=0")
+    query(mysql, "SET GLOBAL innodb_ft_aux_table='probe/segmented'")
+
+    def add_rows(first, last, marker, suffix):
+        for start in range(first, last + 1, 30):
+            ids = range(start, min(start + 30, last + 1))
+            values = ",".join(f"({id},CONCAT(REPEAT('日',2048),%s))" for id in ids)
+            args = [suffix if id == marker else "" for id in ids]
+            for connection in connections:
+                query(connection, "INSERT INTO probe.segmented VALUES " + values, args)
+
+    def segments(source):
+        return query(mysql, f"""
+            SELECT COUNT(DISTINCT DOC_ID) FROM information_schema.INNODB_FT_INDEX_{source}
+            WHERE WORD='日日' GROUP BY FIRST_DOC_ID,LAST_DOC_ID ORDER BY FIRST_DOC_ID
+            """)
+
+    failures = 0
+
+    def compare(stage, marker, cases):
+        nonlocal failures
+        for connection in connections:
+            engine = "MySQL" if connection is mysql else "Fsdb"
+            if connection is mysql:
+                total = query(connection, """
+                    SELECT TABLE_ROWS FROM information_schema.TABLES
+                    WHERE TABLE_SCHEMA='probe' AND TABLE_NAME='segmented'
+                    """)[0][0]
+            else:
+                total = query(connection, "SELECT COUNT(*) FROM probe.segmented")[0][0]
+            for term, common_frequency, rare_terms in cases:
+                # InnoDB uses the table's row estimate even immediately after optimize.
+                idf = math.log10(1.0001 if total == common_frequency else total / common_frequency)
+                expected = 2047 * idf**2 + rare_terms * math.log10(total)**2
+                actual = query(connection, """
+                    SELECT MATCH(body) AGAINST(%s IN BOOLEAN MODE)
+                    FROM probe.segmented WHERE id=%s
+                    """, (term, marker))[0][0]
+                if not math.isclose(actual, expected, rel_tol=2e-6):
+                    print(f"{stage}: {engine} {term!r} rank {actual}, expected {expected} with {total} estimated rows")
+                    failures += 1
+
+    add_rows(1, 120, 88, " 東海 大阪")
+    assert segments("CACHE") == ((32,), (32,), (32,), (24,))
+    bounded = ("+大阪 +東* +日日", "+東* +大* +日日", "+日日 (+大阪 +東*)")
+    compare("four cached segments", 88, [(term, 32, 2) for term in bounded] + [("+東* +日日", 120, 1)])
+
+    for connection in connections:
+        query(connection, "SET GLOBAL innodb_optimize_fulltext_only=ON")
+        query(connection, "OPTIMIZE TABLE probe.segmented")
+        query(connection, "ANALYZE TABLE probe.segmented")
+    assert not segments("CACHE") and len(segments("TABLE")) == 4
+    compare("four disk segments", 88, [(term, 120, 2) for term in bounded])
+
+    add_rows(121, 184, 150, " 南京 上海")
+    assert segments("CACHE") == ((32,), (32,))
+    compare("disk and disjoint cache", 88, [(bounded[0], 120, 2)])
+    compare("disk and overlapping cache", 150, [("+上海 +南* +日日", 152, 2)])
+    print(f"segmented postings: {failures} relevance differences in 18 normalized comparisons")
+    return failures
+
+
 def verify_cache_pressure(mysql, fsdb):
     documents = [("東京", ""), ("東海", ""), ("大阪", "")]
     mode = "IN BOOLEAN MODE"
@@ -719,7 +785,7 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                 )
                 fsdb_connection = connect(host="127.0.0.1", port=port)
                 if cache_lifecycle:
-                    return verify_cache_lifecycle(mysql_connection, fsdb_connection)
+                    return verify_cache_lifecycle(mysql_connection, fsdb_connection) + verify_posting_segments(mysql_connection, fsdb_connection)
                 if cache_pressure:
                     return verify_cache_pressure(mysql_connection, fsdb_connection)
                 if shared_pressure:

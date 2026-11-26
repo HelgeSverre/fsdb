@@ -48,7 +48,8 @@ let private fullTextFlushSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x53uy |] //
 let private fullTextCacheSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x54uy |] // "FSNT" (format 29)
 let private fullTextDeletedSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x55uy |] // "FSNU" (format 30)
 let private fullTextCacheBudgetSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x56uy |] // "FSNV" (format 31)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x57uy |] // "FSNW" (format 32)
+let private fullTextOrderHighWatermarkSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x57uy |] // "FSNW" (format 32)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x58uy |] // "FSNX" (format 33)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -77,6 +78,7 @@ type private SnapshotFormat =
       FullTextDeletedPostings: bool
       FullTextCacheBudget: bool
       FullTextOrderHighWatermark: bool
+      FullTextCacheSegmentEnds: bool
       FullTextStopwordSources: bool
       TableStatistics: bool
       IndexCardinality: bool }
@@ -108,6 +110,7 @@ let private legacySnapshotFormat =
       FullTextDeletedPostings = false
       FullTextCacheBudget = false
       FullTextOrderHighWatermark = false
+      FullTextCacheSegmentEnds = false
       FullTextStopwordSources = false
       TableStatistics = false
       IndexCardinality = false }
@@ -190,8 +193,11 @@ let private fullTextDeletedSnapshotFormat =
 let private fullTextCacheBudgetSnapshotFormat =
     { fullTextDeletedSnapshotFormat with FullTextCacheBudget = true }
 
-let private currentSnapshotFormat =
+let private fullTextOrderHighWatermarkSnapshotFormat =
     { fullTextCacheBudgetSnapshotFormat with FullTextOrderHighWatermark = true }
+
+let private currentSnapshotFormat =
+    { fullTextOrderHighWatermarkSnapshotFormat with FullTextCacheSegmentEnds = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -200,6 +206,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = fullTextOrderHighWatermarkSnapshotMagic then
+        Some fullTextOrderHighWatermarkSnapshotFormat
     elif header = fullTextCacheBudgetSnapshotMagic then
         Some fullTextCacheBudgetSnapshotFormat
     elif header = fullTextDeletedSnapshotMagic then
@@ -2123,6 +2131,10 @@ let private writeStore (s: FileStream) (store: Store) : unit =
                             w.WriteInt64LE tail.LastDocument
                             w.WriteInt64LE tail.UsedBytes
                             w.WriteInt64LE tail.Capacity
+                            w.WriteLenEncInt(uint64 tail.EarlierSegmentEnds.Length)
+                            for order in tail.EarlierSegmentEnds do
+                                w.WriteInt64LE order
+                                if w.Count >= (1 <<< 20) then flush ()
                         if w.Count >= (1 <<< 20) then flush ()
                     w.WriteInt64LE((FullText.cacheBudget index).Bytes)
                     let deleted = FullText.deletedPostings index
@@ -2263,7 +2275,17 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
                                         let capacity = r.ReadInt64LE()
                                         if order < 0L || order = Int64.MaxValue || used <= 0L || capacity < used then
                                             failwith "Persistence: invalid full-text posting tail"
-                                        Some { LastDocument = order; UsedBytes = used; Capacity = capacity }
+                                        let earlierEnds =
+                                            if format.FullTextCacheSegmentEnds then
+                                                let mutable previous = order
+                                                List.init (readCount "posting segment") (fun _ ->
+                                                    let boundary = r.ReadInt64LE()
+                                                    if boundary < 1L || boundary >= previous then
+                                                        failwith "Persistence: invalid full-text posting segment order"
+                                                    previous <- boundary
+                                                    boundary)
+                                            else []
+                                        Some { LastDocument = order; UsedBytes = used; Capacity = capacity; EarlierSegmentEnds = earlierEnds }
                             spelling, tail)
                         let budget =
                             if not format.FullTextCacheBudget then None
@@ -2353,7 +2375,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
              | Some(nextOrder, through, terms, budget, deleted) ->
                  index
                  |> FullText.restoreDeletedPostings deleted
-                 |> FullText.restoreCache nextOrder through terms budget
+                 |> FullText.restoreCache nextOrder through terms budget format.FullTextCacheSegmentEnds
              | None -> FullText.flushPostings index)
             |> FullText.withStopwordSource (sources |> Map.tryFind name |> Option.flatten))
     reindexTableWithFullTextIndexes fullTextIndexes table

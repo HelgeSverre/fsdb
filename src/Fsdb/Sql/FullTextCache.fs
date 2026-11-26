@@ -61,7 +61,8 @@ let inInsertionOrder terms = List.rev terms.LastInserted
 type PostingTail =
     { LastDocument: int64
       UsedBytes: int64
-      Capacity: int64 }
+      Capacity: int64
+      EarlierSegmentEnds: int64 list }
 
 type Budget =
     { Bytes: int64
@@ -69,7 +70,7 @@ type Budget =
 
 let emptyBudget = { Bytes = 0L; Tails = Map.empty }
 
-let private emptyTail = { LastDocument = 0L; UsedBytes = 0L; Capacity = 0L }
+let private emptyTail = { LastDocument = 0L; UsedBytes = 0L; Capacity = 0L; EarlierSegmentEnds = [] }
 
 let rec encodedLength delta =
     if delta < 128L then 1L else 1L + encodedLength (delta >>> 7)
@@ -84,7 +85,8 @@ let addDocument order (words: (string * int * int64)[]) (budget: Budget) =
             let tail, overhead =
                 match Map.tryFind key current.Tails with
                 | None -> emptyTail, 336L + int64 spellingBytes + 56L
-                | Some tail when tail.UsedBytes > 65536L -> emptyTail, 56L
+                | Some tail when tail.UsedBytes > 65536L ->
+                    { emptyTail with EarlierSegmentEnds = tail.LastDocument :: tail.EarlierSegmentEnds }, 56L
                 | Some tail -> tail, 0L
             let size = encodedLength (order - tail.LastDocument) + positionBytes + 1L
             let used = tail.UsedBytes + size
@@ -94,7 +96,23 @@ let addDocument order (words: (string * int * int64)[]) (budget: Budget) =
                     let allocated = if used < 48L then (used / 16L + 1L) * 16L else used * 6L / 5L
                     allocated, allocated - tail.UsedBytes
             { Bytes = current.Bytes + overhead + growth
-              Tails = Map.add key { LastDocument = order; UsedBytes = used; Capacity = capacity } current.Tails })
+              Tails = Map.add key { tail with LastDocument = order; UsedBytes = used; Capacity = capacity } current.Tails })
+
+let boundedSegments lower upper earlierEnds (orders: int64 seq) =
+    let ends = earlierEnds |> List.rev |> List.toArray
+    let segments = Array.create (ends.Length + 1) (struct (Int64.MaxValue, 0L, 0L))
+    for order in orders do
+        let found = Array.BinarySearch(ends, order)
+        let segment = if found < 0 then ~~~found else found
+        let struct (first, last, count) = segments.[segment]
+        segments.[segment] <- struct (min first order, max last order, count + 1L)
+
+    // A bound reads each overlapping segment in full, including deleted postings.
+    (struct (Int64.MaxValue, 0L, 0L), segments)
+    ||> Array.fold (fun (struct (first, last, total)) (struct (start, finish, count)) ->
+        if start <= upper && finish >= lower then
+            struct (min first start, max last finish, total + count)
+        else struct (first, last, total))
 
 let prefixOrder comparePrefix terms =
     let rec pivot = function

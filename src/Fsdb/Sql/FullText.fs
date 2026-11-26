@@ -215,6 +215,7 @@ type internal ReadView<'id when 'id: comparison> =
           VisibleDocumentIds: Set<'id> option
           FlushedThrough: int64 option
           CachedTerms: FullTextCache.Terms
+          CachedPostingTails: Map<string, FullTextCache.PostingTail>
           Deleted: DeletedPostings
           DocumentOrderFollowsIds: bool
           HasDocumentOrder: bool }
@@ -237,6 +238,7 @@ let internal readView (index: Index<'id>) : ReadView<'id> =
               index.FlushedThrough |> Option.filter (fun through -> through < index.NextDocumentOrder - 1L)
           else None
       CachedTerms = index.CachedTerms
+      CachedPostingTails = index.CacheBudget.Tails
       Deleted = index.Deleted
       DocumentOrderFollowsIds = index.DocumentOrderFollowsIds
       HasDocumentOrder = index.HasDocumentOrder }
@@ -745,7 +747,7 @@ let private cacheDocumentsAfter through (index: Index<'id>) initial =
         let words = indexedTokens document.Content |> Array.groupBy _.Key
         cacheDocumentTerms words terms, chargeDocument document.Content.Rules.Tokenizer index.Collation document.Order words budget) initial
 
-let internal restoreCache nextOrder through saved savedBudget (index: Index<'id>) =
+let internal restoreCache nextOrder through saved savedBudget hasSegmentEnds (index: Index<'id>) =
     let next = nextOrder |> Option.defaultValue index.NextDocumentOrder
     if next < index.NextDocumentOrder then
         invalidOp "Persistence: full-text high-water mark precedes a document"
@@ -770,10 +772,25 @@ let internal restoreCache nextOrder through saved savedBudget (index: Index<'id>
             match savedBudget with
             | None -> snd rebuilt.Value
             | Some (bytes, tails) ->
+                // Older checkpoints can recover segment boundaries if every charged posting is still live.
+                let rebuiltTails =
+                    lazy (
+                        if hasSegmentEnds || not (tracksNgramPostingSources index) then Map.empty
+                        else (snd rebuilt.Value).Tails)
                 let tails = tails |> List.map (fun (spelling, tail: FullTextCache.PostingTail) ->
-                    if tail.LastDocument <= through || tail.LastDocument >= index.NextDocumentOrder then
+                    if tail.LastDocument <= through || tail.LastDocument >= index.NextDocumentOrder
+                       || (tail.EarlierSegmentEnds |> List.exists (fun order -> order <= through)) then
                         invalidOp "Persistence: full-text posting tail outside the cache"
-                    index.Collation.FullTextKeyOf spelling, tail) |> Map.ofList
+                    let key = index.Collation.FullTextKeyOf spelling
+                    let restored =
+                        match Map.tryFind key rebuiltTails.Value with
+                        | Some rebuilt when rebuilt.LastDocument = tail.LastDocument && rebuilt.UsedBytes = tail.UsedBytes ->
+                            let hasCachedDeletes =
+                                index.Deleted.Words |> Map.tryFind key
+                                |> Option.exists (fun orders -> fst (Map.maxKeyValue orders) > through)
+                            if hasCachedDeletes then tail else { tail with EarlierSegmentEnds = rebuilt.EarlierSegmentEnds }
+                        | _ -> tail
+                    key, restored) |> Map.ofList
                 { Bytes = bytes; Tails = tails }
         { index with CachedTerms = terms; CacheBudget = budget }
 
@@ -1816,13 +1833,27 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                         else min first (fst (Map.minKeyValue deleted)), max last (fst (Map.maxKeyValue deleted))
                     first <= upper && last >= lower
 
+                let readCache cache deletedCache =
+                    match Map.tryFind key view.CachedPostingTails with
+                    | Some tail when not tail.EarlierSegmentEnds.IsEmpty ->
+                        let order id = view.Documents.[id].Order
+                        let orders = Seq.append (Map.keys cache |> Seq.map order) (Map.keys deletedCache)
+                        let struct (first, last, frequency) =
+                            FullTextCache.boundedSegments lower upper tail.EarlierSegmentEnds orders
+                        let available =
+                            cache |> Map.filter (fun id _ ->
+                                let position = order id
+                                first <= position && position <= last)
+                        frequency, available, frequency > 0L
+                    | _ ->
+                        if overlaps cache deletedCache then int64 cache.Count + int64 deletedCache.Count, cache, true
+                        else 0L, Map.empty, false
+
                 match view.FlushedThrough with
                 | None ->
                     let read = overlaps rows deleted
                     int64 rows.Count + int64 deleted.Count, (if read then rows else Map.empty), read
-                | Some 0L ->
-                    if overlaps rows deleted then int64 rows.Count + int64 deleted.Count, rows, true
-                    else 0L, Map.empty, false
+                | Some 0L -> readCache rows deleted
                 | Some through ->
                     let disk, cache =
                         match exactSegments.TryGetValue key with
@@ -1833,16 +1864,15 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                             segments
                     let deletedDisk, deletedCache = deleted |> Map.partition (fun order _ -> order <= through)
                     let readDisk = overlaps disk deletedDisk
-                    let readCache = overlaps cache deletedCache
-                    // Disk counts all postings, and cache counts only the nodes it reads.
-                    let frequency =
-                        int64 disk.Count + int64 deletedDisk.Count
-                        + (if readCache then int64 cache.Count + int64 deletedCache.Count else 0L)
-                    match readDisk, readCache with
-                    | true, true -> frequency, rows, true
-                    | true, false -> frequency, disk, true
-                    | false, true -> frequency, cache, true
-                    | false, false -> frequency, Map.empty, false
+                    let cacheFrequency, available, readCached = readCache cache deletedCache
+                    // Disk counts all postings, and cache counts only the segments it reads.
+                    let frequency = int64 disk.Count + int64 deletedDisk.Count + cacheFrequency
+                    if readDisk then
+                        let available =
+                            if available.Count = cache.Count then rows
+                            else available |> Map.fold (fun combined id count -> Map.add id count combined) disk
+                        frequency, available, true
+                    else frequency, available, readCached
 
             let visitExactWords bounds found =
                 let rec visit offset candidates =

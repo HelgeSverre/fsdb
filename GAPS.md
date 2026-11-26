@@ -1767,7 +1767,11 @@ indexes alone and with both parsers. Word indexes contribute using
 the byte offsets of their postings. Idle tables remain cached until
 a committed indexed write requests sync for its table. Checkpoints
 keep the document order even after the newest indexed rows are
-deleted. Scoring across multiple disk segments per gram remains open.
+deleted. Bounded Boolean phrases count only the cached posting
+segments they visit and count all disk postings in the audited
+mixed cases. Rank differences caused by InnoDB's table row estimate
+and segment boundaries lost to deletions in older checkpoints
+remain open.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.

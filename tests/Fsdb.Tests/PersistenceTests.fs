@@ -2808,6 +2808,42 @@ let tests =
               snapshotNow dir replayed
               load dir |> check [ 1L; 2L; 5L ]
 
+          testCase "bounded ngram ranks retain their cached segment after replay and checkpoints"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let execute sql =
+                  let result = handle (Fsdb.Session.create 1 store) sql |> snd
+                  TestSupport.Sql.expectOk result sql
+              let score current =
+                  let sql =
+                      "SELECT MATCH(body) AGAINST('+大阪 +東* +日日' IN BOOLEAN MODE) FROM docs WHERE id=88"
+                  match handle (Fsdb.Session.create 2 current) sql |> snd with
+                  | ResultSet(_, [ [ Some value ] ]) -> Double.Parse(value, Globalization.CultureInfo.InvariantCulture)
+                  | result -> failtestf "unexpected bounded ngram score %A" result
+
+              execute "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,FULLTEXT ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin"
+              for first in 1 .. 30 .. 120 do
+                  let values =
+                      [ for id in first .. first + 29 do
+                            let suffix = if id = 88 then " 東海 大阪" else ""
+                            yield $"({id},CONCAT(REPEAT('日',2048),'{suffix}'))" ]
+                      |> String.concat ","
+                  execute ("INSERT INTO docs VALUES " + values)
+
+              let expected = 683.1568603515625
+              for current in [ store; load dir ] do
+                  Expect.floatClose Accuracy.high (score current) expected "only the overlapping cached segment contributes"
+              // The deleted row stays in the same physical segment and still contributes to its frequency.
+              execute "DELETE FROM docs WHERE id=87"
+              let scoreAfterDelete = score store
+              let expectedAfterDelete = 2047.0 * log10(119.0 / 32.0) ** 2.0 + 2.0 * log10(119.0) ** 2.0
+              Expect.floatClose Accuracy.medium scoreAfterDelete expectedAfterDelete "the segment still counts 32 postings"
+              Expect.equal (score (load dir)) scoreAfterDelete "WAL replay retains the deleted posting in its segment"
+              snapshotNow dir store
+              Expect.equal (score (load dir)) scoreAfterDelete "checkpoint restores the cached segment boundaries"
+
           testCase "ngram posting bounds survive indexed updates and recovery"
           <| fun _ ->
               let dir = tempDataDir ()

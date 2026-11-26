@@ -498,16 +498,28 @@ Both engines sync the first ngram table on its next indexed write and
 leave the second cached after the budget drops below the limit. Fsdb
 charges built-in word postings using their encoded byte positions and
 keeps the next document order in checkpoints, including after deleting
-the most recent row. Scoring across multiple segments of one disk gram
-remains open.
+the most recent row.
 [InnoDB word positions](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0fts.cc#L4335).
 
 A 120-row control gave `日日` four cache segments by repeating `日`
-2,048 times per row. Both engines agreed on the cached Boolean scores.
-After full-text optimize and then analyze, MySQL's uncached table row
-estimate was 2 and then 61. Its two scores for the single gram follow
-`2047 × log10(estimated rows / 120)²`. Use the MySQL row estimate
-when comparing scores from this fixture.
+2,048 times per row. The query `+大阪 +東* +日日` bounds the final
+term to one segment. MySQL counted 32 postings and scored the
+match 683.15686. Fsdb previously counted all 120 postings and
+scored it 8.64599. Both now count the overlapping segment in
+full. Checkpoints and WAL replay preserve the boundary after
+deletions. Older checkpoints can reconstruct boundaries from
+live postings. A deleted cached posting can prevent reconstructing
+its original boundary from an older checkpoint.
+[InnoDB cached posting bounds](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L817).
+
+After full-text optimize, both engines count all 120 disk
+postings. The mixed fixture adds two cache segments and tests
+bounds disjoint from both and bounds overlapping one. The
+comparison uses MySQL's current table row estimate and Fsdb's
+live row count to verify each rank. In a separate run, MySQL's
+estimate dropped from 120 to 2 after optimize and rose to 61
+after analyze, which changed its scores with the same posting
+count.
 [InnoDB inverse document frequency](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L2977).
 
 Fsdb's orderly CLI shutdown now closes accepted clients, waits for
