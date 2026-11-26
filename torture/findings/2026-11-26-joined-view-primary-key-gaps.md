@@ -205,6 +205,22 @@ The point path proves a complete integer primary-key equality on one
 physical table. In WAL-backed XA, conservative snapshot validation can
 still reject a commit after disjoint writes.
 
+### Limits and ordering
+
+An exact integer lookup still protects its existing row or missing gap
+with a positive `LIMIT` and direct-column `ORDER BY`. An `OFFSET` can
+discard the result after the key is sought. Ordinary `LIMIT 0` leaves
+the row and gap free. `SQL_CALC_FOUND_ROWS` still seeks the key with
+`LIMIT 0` and reports one found row for the hit and zero for the miss.
+[MySQL LIMIT optimization](https://dev.mysql.com/doc/refman/8.4/en/limit-optimization.html).
+
+SQL-prepared statements with bound keys, limits, and offsets follow
+these rules. An unqualified predicate name can bind to a routine
+parameter before it binds to a table column. For a procedure parameter
+`id` set to `99`, the predicate `WHERE id=20` is false, and the physical
+row with key `20` stays writable. MySQL and both Fsdb modes matched all
+177 checks in the expanded schedule oracle.
+
 ## Serializable primary-key ranges
 
 For a plain query on one physical table, an ascending single-column
@@ -243,6 +259,16 @@ all 152 checks in the expanded schedule oracle.
 
 Wider scans and dependent predicates remain outside this path. MySQL
 can choose a full scan without an index hint, which can hold wider locks.
+
+`ORDER BY id LIMIT 1` over `id BETWEEN 12 AND 39` has a shorter lock
+footprint on MySQL. With keys `10, 20, 30, 40`, it protects row `20`
+and the preceding gap. A pending insertion at `15` makes it wait and
+return `15` after commit. Pending insertions at `11` or `25` leave this
+read free to return `20`. If the pending writer deletes `20`, the
+reader waits and returns `30` after commit. Limited ranges remain open.
+At an exact inclusive start, MySQL can take a record-only lock. Reversing
+the scan can also lock a gap beyond the first returned row. A limited
+range needs to account for the actual scan direction and stop position.
 
 Run the live schedules against disposable servers. Use `--data-dir`
 to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.

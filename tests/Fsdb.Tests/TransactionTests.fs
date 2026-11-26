@@ -781,6 +781,64 @@ let tests =
                   Expect.equal (attempt replace) (Affected 1UL) "completion releases the row"
                   Expect.equal (attempt insert) (Affected 1UL) "completion releases the gap"
 
+          testCase "serializable limited primary-key reads lock only when they seek the key"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate (id INT PRIMARY KEY,n INT)" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES (10,1),(20,2),(30,3)" (Affected 3UL) |> ignore
+              let probe = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let attempt sql =
+                  let writer = run probe "BEGIN" (Affected 0UL)
+                  let writer, result = handle writer sql
+                  run writer "ROLLBACK" (Affected 0UL) |> ignore
+                  result
+
+              let reader = run (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+              for suffix, rows, rowLocked, gapLocked in
+                  [ "WHERE id=20 LIMIT 1", [ [ Some "20" ] ], true, false
+                    "WHERE id=25 ORDER BY id DESC LIMIT 1", [], false, true
+                    "WHERE id=20 ORDER BY n LIMIT 1 OFFSET 1", [], true, false
+                    "WHERE id=20 LIMIT 0", [], false, false
+                    "WHERE id=25 LIMIT 0", [], false, false ] do
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let transaction = run transaction ("SELECT id FROM gate FORCE INDEX (PRIMARY) " + suffix) (ResultSet([ "id" ], rows))
+                  try
+                      match attempt "SELECT id FROM gate WHERE id=20 FOR UPDATE NOWAIT", rowLocked with
+                      | Err(3572, _), true | ResultSet(_, [ [ Some "20" ] ]), false -> ()
+                      | actual, _ -> failtestf "%s: unexpected row lock result %A" suffix actual
+                      match attempt "INSERT INTO gate VALUES (25,0)", gapLocked with
+                      | Err(1205, _), true | Affected 1UL, false -> ()
+                      | actual, _ -> failtestf "%s: unexpected gap lock result %A" suffix actual
+                  finally
+                      run transaction "ROLLBACK" (Affected 0UL) |> ignore
+
+              let transaction = run reader "BEGIN" (Affected 0UL)
+              let transaction = run transaction "SELECT SQL_CALC_FOUND_ROWS id FROM gate WHERE id=20 LIMIT 0" (ResultSet([ "id" ], []))
+              try
+                  match attempt "SELECT id FROM gate WHERE id=20 FOR UPDATE NOWAIT" with
+                  | Err(3572, _) -> ()
+                  | actual -> failtestf "counting an exact row still locks it, got %A" actual
+              finally
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+
+              run setup "CREATE PROCEDURE pick(IN id INT) SELECT gate.id FROM gate WHERE id=20 LIMIT 1" (Affected 0UL) |> ignore
+              let transaction = run reader "BEGIN" (Affected 0UL)
+              let transaction, result = handle transaction "CALL pick(99)"
+              try
+                  match result with
+                  | MultipleResults [ (ResultSet([ "id" ], []), _); (Affected 0UL, []) ] -> ()
+                  | actual -> failtestf "the routine parameter makes the predicate false, got %A" actual
+                  match attempt "SELECT id FROM gate WHERE id=20 FOR UPDATE NOWAIT" with
+                  | ResultSet(_, [ [ Some "20" ] ]) -> ()
+                  | actual -> failtestf "a shadowed key must stay writable, got %A" actual
+              finally
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "serializable primary ranges lock qualifying rows and surrounding gaps"
           <| fun _ ->
               let run session sql expected =

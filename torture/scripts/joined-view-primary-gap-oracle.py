@@ -583,6 +583,80 @@ def check(port, mysql):
                 expect(label + " " + sql, rolled_back_outcome(probe, sql), expected)
             execute(reader, "ROLLBACK")
 
+    limited_points = (
+        ("SELECT id FROM gate WHERE id=20 LIMIT 1", ((20,),), 3572, 1, None),
+        (
+            "SELECT id FROM gate WHERE id=25 ORDER BY id DESC LIMIT 1",
+            (),
+            1,
+            TIMEOUT,
+            None,
+        ),
+        (
+            "SELECT id FROM gate WHERE id=20 ORDER BY n LIMIT 1 OFFSET 1",
+            (),
+            3572,
+            1,
+            None,
+        ),
+        ("SELECT id FROM gate WHERE id=20 LIMIT 0", (), 1, 1, None),
+        ("SELECT id FROM gate WHERE id=25 LIMIT 0", (), 1, 1, None),
+        ("SELECT SQL_CALC_FOUND_ROWS id FROM gate WHERE id=20 LIMIT 0", (), 3572, 1, 1),
+        (
+            "SELECT SQL_CALC_FOUND_ROWS id FROM gate WHERE id=25 LIMIT 0",
+            (),
+            1,
+            TIMEOUT,
+            0,
+        ),
+    )
+    setup = (
+        "CREATE TABLE gate(id INT PRIMARY KEY,n INT)",
+        "INSERT INTO gate VALUES (10,1),(20,2),(30,3)",
+        "CREATE PROCEDURE pick(IN id INT) SELECT gate.id FROM gate WHERE id=20 LIMIT 1",
+    )
+    with fixture(port, schema, mysql, setup) as (_, _, reader, _, probe):
+        execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        for sql, rows, row_lock, gap_lock, found in limited_points:
+            execute(reader, "BEGIN")
+            with reader.cursor() as cursor:
+                cursor.execute(sql)
+                expect(sql + " rows", tuple(cursor.fetchall()), rows)
+            if found is not None:
+                expect(
+                    sql + " found rows", scalar(reader, "SELECT FOUND_ROWS()"), found
+                )
+            expect(
+                sql + " row lock",
+                rolled_back_outcome(
+                    probe, "SELECT id FROM gate WHERE id=20 FOR UPDATE NOWAIT"
+                ),
+                row_lock,
+            )
+            expect(
+                sql + " gap lock",
+                rolled_back_outcome(probe, "INSERT INTO gate VALUES (25,0)"),
+                gap_lock,
+            )
+            execute(reader, "ROLLBACK")
+
+        execute(reader, "BEGIN")
+        with reader.cursor() as cursor:
+            cursor.execute("CALL pick(99)")
+            expect(
+                "the shadowing routine parameter filters the row", cursor.fetchall(), ()
+            )
+            while cursor.nextset():
+                cursor.fetchall()
+        expect(
+            "a shadowed key stays writable",
+            rolled_back_outcome(
+                probe, "SELECT id FROM gate WHERE id=20 FOR UPDATE NOWAIT"
+            ),
+            1,
+        )
+        execute(reader, "ROLLBACK")
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 

@@ -34686,7 +34686,6 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
     | Some(FromTable source) when
         select.Joins.IsEmpty && select.Ctes.IsEmpty && select.Locking.IsEmpty
         && select.GroupBy.IsEmpty && select.Having.IsNone && select.Windows.IsEmpty
-        && select.OrderBy.IsEmpty && select.Limit.IsNone && select.Offset.IsNone
         && not (SelectStmt.hasDestination select) && primaryHint source.IndexHints ->
         let database = source.Database |> Option.defaultValue dbName
         let qualifier = source.Alias |> Option.defaultValue source.Table
@@ -34695,15 +34694,33 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
             | QualifiedCol(owner, column) when equalsIgnoreCase owner qualifier -> Some column
             | _ -> None
 
+        let predicateColumn = function
+            | Col column when (tryRoutineVariable column).IsSome -> None
+            | expression -> columnName expression
+
         physicalFastPathTable store dbName source
         |> Option.bind (fun table ->
+            let isSourceColumn expression =
+                columnName expression
+                |> Option.exists (fun column -> resolveColumn table.Columns column |> Result.isOk)
+
             let simpleProjection (projection: Projection) =
                 match projection.Expression with
                 | Lit _ | Star None -> true
                 | Star(Some owner) -> equalsIgnoreCase owner qualifier
-                | expression ->
-                    columnName expression
-                    |> Option.exists (fun column -> resolveColumn table.Columns column |> Result.isOk)
+                | expression -> isSourceColumn expression
+
+            let literalRowCount = function
+                | Lit(VInt count) -> count >= 0L
+                | Lit(VUInt _) -> true
+                | _ -> false
+
+            let seeksPoint =
+                List.forall (fst >> isSourceColumn) select.OrderBy
+                && Option.forall literalRowCount select.Limit
+                && Option.forall literalRowCount select.Offset
+                // OFFSET can discard the result after the key has been sought.
+                && (select.CalculateFoundRows || Option.forall (fun limit -> rowCount limit > 0) select.Limit)
 
             let keys = Storage.primaryKeyColumns table
             let conditions = optionalConjuncts select.Where
@@ -34721,7 +34738,7 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
 
             let equality = function
                 | BinOp(Eq, left, right) ->
-                    let bound column literal = Option.map2 (fun name value -> name, value) (columnName column) (integer literal)
+                    let bound column literal = Option.map2 (fun name value -> name, value) (predicateColumn column) (integer literal)
                     bound left right |> Option.orElseWith (fun () -> bound right left)
                 | _ -> None
 
@@ -34731,7 +34748,7 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                 |> List.tryPick (fun (column, value) -> if equalsIgnoreCase key column then Some value else None)
 
             let exact () =
-                if keys.Length <> conditions.Length then None
+                if not seeksPoint || keys.Length <> conditions.Length then None
                 else
                     keys |> List.map boundFor |> tryAllSome |> Option.bind point
 
@@ -34740,7 +34757,7 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                     keys |> Seq.map boundFor |> Seq.takeWhile Option.isSome |> Seq.choose id |> List.ofSeq
                 match List.skip prefix.Length keys with
                 | key :: remaining when prefix.Length = equalities.Length ->
-                    let keyColumn = columnName >> Option.filter (equalsIgnoreCase key)
+                    let keyColumn = predicateColumn >> Option.filter (equalsIgnoreCase key)
                     let predicates =
                         conditions |> List.filter (equality >> Option.isNone)
                         |> List.map (rangePredicatesFor keyColumn integer)
@@ -34784,7 +34801,9 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
             if keys.IsEmpty || conditions.IsEmpty || not (List.forall isIntegerColumn keys)
                || not (List.forall simpleProjection select.Projections) then None
             else
-                exact () |> Option.orElseWith range
+                exact ()
+                |> Option.orElseWith (fun () ->
+                    if select.OrderBy.IsEmpty && select.Limit.IsNone && select.Offset.IsNone then range () else None)
                 |> Option.map (fun read ->
                     { ReadDatabase = database
                       ReadTableName = source.Table
