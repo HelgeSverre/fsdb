@@ -1510,6 +1510,9 @@ matches 27,648 standalone searches at token sizes 1 and 2 across two legacy
 collations and the default 0900 collation. Both legacy collations also match
 3,072 exact singleton weight checks. The default collation's raw
 `WEIGHT_STRING` bytes still differ, as described in section 6.
+The [U+4A00–U+4DBF follow-up](torture/findings/2026-11-08-extension-a-4700-49ff-ngram-audit.md#u4a00u4dbf-follow-up)
+matches 46,080 searches across four collations at sizes 1 and 2,
+including the Extension A tail, and 5,760 exact legacy singleton weights.
 An [exact-byte differential probe](torture/findings/2026-11-04-extension-a-exact-weights.md)
 originally found that all 256 single-character U+3B00–U+3BFF `WEIGHT_STRING`
 values differed from MySQL in each of three legacy collations. The later

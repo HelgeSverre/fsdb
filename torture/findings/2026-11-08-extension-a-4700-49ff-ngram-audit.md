@@ -35,3 +35,21 @@ uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py \
 
 Other token sizes, collations, combined-range searches, cross-form
 equivalence, and MeCab on a plugin-enabled server remain open.
+
+## U+4A00–U+4DBF follow-up
+
+The same native MySQL 8.4.11 comparison covered the rest of Extension A,
+including scalars omitted by Python's printable-character filter. Each
+collation matched all 5,760 queries per token size at sizes 1 and 2.
+The three legacy collations also matched all 960 singleton weight
+checks per size.
+
+| Collation | Searches matched | Singleton weights matched |
+| --- | ---: | ---: |
+| `utf8mb4_general_ci` | 11,520 | 1,920 |
+| `utf8mb4_unicode_ci` | 11,520 | 1,920 |
+| `utf8mb4_unicode_520_ci` | 11,520 | 1,920 |
+| `utf8mb4_0900_ai_ci` | 11,520 | — |
+
+Use `--legacy-range 4A00:4DC0 --all-range-scalars` with the commands
+above. Add `--weight-checks` for the three legacy collations.
