@@ -1704,12 +1704,15 @@ let private tryRepeatedWordScores candidateIds (view: ReadView<'id>) nodes =
         |> scoreNaturalWordMatches view
         |> Some
 
-type private NgramScoringKey =
+type private NgramLookup =
     | ExactNgram of string
     | NgramPrefix of string
 
+let private ngramLookupKey = function
+    | ExactNgram key | NgramPrefix key -> key
+
 type private NgramMatch =
-    { Terms: Set<NgramScoringKey>
+    { Terms: Set<string>
       Adjustment: int }
 
 let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
@@ -1743,6 +1746,10 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             | _ -> false
 
         let frequencies = leaves nodes |> Seq.collect (snd >> keys) |> Seq.countBy id |> Map.ofSeq
+        let sharedKeys =
+            frequencies |> Map.keys |> Seq.choose (function
+                | ExactNgram key when frequencies.ContainsKey(NgramPrefix key) -> Some key
+                | _ -> None) |> Set.ofSeq
 
         let tracksPostingBounds =
             let canVisitBoundedPhrase =
@@ -1752,7 +1759,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             && (leaves nodes |> Seq.exists (function Must, BWord(_, true) -> true | _ -> false))
 
         let weighted = hasRankAdjustments nodes
-        let repeated = frequencies |> Map.exists (fun _ count -> count > 1)
+        let repeated = not sharedKeys.IsEmpty || (frequencies |> Map.exists (fun _ count -> count > 1))
         let cacheSensitive =
             view.FlushedThrough.IsSome
             && (frequencies |> Map.exists (fun key _ -> match key with NgramPrefix _ -> true | _ -> false))
@@ -1775,7 +1782,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             let fullScope =
                 leaves nodes
                 |> Seq.exists (function
-                    | MustNot, BWord(word, true) -> frequencies.[NgramPrefix word.Key] > 1
+                    | MustNot, BWord(word, true) -> sharedKeys.Contains word.Key || frequencies.[NgramPrefix word.Key] > 1
                     | _ -> false)
 
             // In a weighted query, a repeated gram can get its first position
@@ -1786,14 +1793,30 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 if needsVisibleCorpus then view.VisibleDocumentIds
                 elif fullScope then None
                 else candidateIds
-            let exactCounts = Collections.Generic.Dictionary<string, int64>()
+            let documentCounts = Collections.Generic.Dictionary<string, int64>()
+            let sharedRowFrequencies = Collections.Generic.Dictionary<string, Collections.Generic.Dictionary<'id, int>>()
             let exactSegments = Collections.Generic.Dictionary<string, Map<'id, int> * Map<'id, int>>()
-            let prefixCounts = Collections.Generic.Dictionary<string, int64>()
             let diskPrefixes = Collections.Generic.Dictionary<string, PrefixPosting<'id> option>()
             let scoringPrefixes = Collections.Generic.Dictionary<string, Map<'id, int>>()
-            let contributionOrder = Collections.Generic.Dictionary<NgramScoringKey, int>()
+            let contributionOrder = Collections.Generic.Dictionary<string, int>()
             let mutable postingBounds = None
             let mutable inPhraseMode = false
+
+            let countDocuments key frequency =
+                let _, count = documentCounts.TryGetValue key
+                documentCounts.[key] <- count + frequency
+
+            let rememberRowFrequencies key rows =
+                // Exact and prefix lookups share rank state by collation key.
+                // The first posting read for a document supplies its term frequency.
+                let first =
+                    match sharedRowFrequencies.TryGetValue key with
+                    | true, first -> first
+                    | _ ->
+                        let first = Collections.Generic.Dictionary<'id, int>()
+                        sharedRowFrequencies.Add(key, first)
+                        first
+                rows |> Map.iter (fun id frequency -> first.TryAdd(id, frequency) |> ignore)
 
             let retainedPrefixFrequency diskOnly key =
                 match Map.tryFind key view.Deleted.Prefixes with
@@ -1903,8 +1926,9 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                                 | None ->
                                     let frequency = int64 rows.Count + int64 deleted.Count
                                     frequency, rows, frequency > 0L
-                            let _, count = exactCounts.TryGetValue word
-                            exactCounts.[word] <- count + frequency
+                            countDocuments word frequency
+                            if not available.IsEmpty && sharedKeys.Contains word then
+                                rememberRowFrequencies word (restrictScores scope available)
                             match bounds with
                             // MySQL stops a phrase at the first unread posting.
                             // Later grams must not change another phrase's rank.
@@ -1942,27 +1966,29 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                             // Required prefixes use the cache even after visiting a phrase.
                             let diskOnly = inPhraseMode && not isRequired
                             let posting = prefixPosting diskOnly word.Key
-                            let _, count = prefixCounts.TryGetValue word.Key
                             let frequency = posting |> Option.map _.GramDocumentCount |> Option.defaultValue 0L
-                            prefixCounts.[word.Key] <- count + frequency + retainedPrefixFrequency diskOnly word.Key
+                            countDocuments word.Key (frequency + retainedPrefixFrequency diskOnly word.Key)
                             match posting with
                             | None -> Map.empty
                             | Some posting ->
+                                if sharedKeys.Contains word.Key then
+                                    rememberRowFrequencies word.Key (prefixRowsWithCacheOrder scope word.Key view posting.Rows)
                                 posting.Rows |> restrictScores scope |> Map.map (fun _ _ -> 0.0)
                         | _ ->
                             let bounds = if isRequired then postingBounds else None
                             match visitExactWords bounds found with
                             | Some candidates -> evalTerm candidates view term
                             | None -> Map.empty
+                    let terms = found |> Array.map ngramLookupKey |> Set.ofArray
                     match contributes with
                     | Some accepts when
-                        (found |> Array.exists (contributionOrder.ContainsKey >> not))
+                        (terms |> Set.exists (contributionOrder.ContainsKey >> not))
                         && (matches |> Map.exists (fun id _ -> accepts id)) ->
                         // A gram gets its position when it first contributes to a document.
-                        for key in found do
+                        for lookup in found do
+                            let key = ngramLookupKey lookup
                             contributionOrder.TryAdd(key, contributionOrder.Count) |> ignore
                     | _ -> ()
-                    let terms = Set.ofArray found
                     matches |> Map.map (fun _ _ -> { Terms = terms; Adjustment = 0 })
 
             and matchNodes nodes =
@@ -2025,10 +2051,12 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                     | BWord(_, true) when matches.IsEmpty -> matches
                     | _ -> matchTerm false None term |> Map.fold (fun matches id _ -> Map.remove id matches) matches)
 
-            let scoreTerm id term =
-                let rows, weight =
-                    match term with
-                    | NgramPrefix key ->
+            let scoreTerm id key =
+                let frequency = float documentCounts.[key]
+                let occurrences, weight =
+                    if sharedKeys.Contains key then
+                        sharedRowFrequencies.[key].[id], ngramPrefixWeight view.DocumentCount frequency
+                    elif frequencies.ContainsKey(NgramPrefix key) then
                         let rows =
                             match scoringPrefixes.TryGetValue key with
                             | true, rows -> rows
@@ -2036,12 +2064,11 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                                 let rows = prefixRowsWithCacheOrder candidateIds key view view.PrefixPostings.[key].Rows
                                 scoringPrefixes.Add(key, rows)
                                 rows
-                        rows, ngramPrefixWeight view.DocumentCount (float prefixCounts.[key])
-                    | ExactNgram key ->
-                        let rows = view.Postings.[key]
-                        rows, wordFrequencyWeight view (float exactCounts.[key])
+                        rows.[id], ngramPrefixWeight view.DocumentCount frequency
+                    else
+                        view.Postings.[key].[id], wordFrequencyWeight view frequency
 
-                float rows.[id] * weight * weight
+                float occurrences * weight * weight
 
             matchNodes nodes
             |> (if fullScope || needsVisibleCorpus then restrictScores candidateIds else id)

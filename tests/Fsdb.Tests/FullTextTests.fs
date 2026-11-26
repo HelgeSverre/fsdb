@@ -899,6 +899,45 @@ let tests =
               let rebuilt = build [ 2, "東海 東南"; 3, "大阪"; 4, "札幌"; 5, "東京" ]
               Expect.equal (booleanScores replacement "東*") (booleanScores rebuilt "東*") "writes maintain the prefix posting counts"
 
+          testCase "Boolean exact ngrams and prefixes share relevance under the same collation key"
+          <| fun _ ->
+              let documents =
+                  [ 1, [ "生日\u034f快乐"; "生\u2060日" ]
+                    2, [ "𠮷野\u0000家"; "生a日" ]
+                    3, [ "①④ 中華"; "中国" ] ]
+              let index =
+                  buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) defaultCollation []
+                  |> flushPostings
+                  |> fun index -> List.fold (fun index (id, fields) -> addDocumentFields id fields index) index documents
+
+              let queries =
+                  [ "\"快\"", 0.22764469683170319
+                    "快*", 0.031008131802082062
+                    "\"快\" +快*", 1.885928302414186e-09
+                    "快* \"快\"", 1.885928302414186e-09
+                    "\"快\" 快*", 0.22764469683170319
+                    "生日 \"快\" +快*", 0.22764469683170319 ]
+              for query, expected in queries do
+                  let scores = booleanScores index query
+                  Expect.equal (scores |> Map.keys |> Seq.toList) [ 1 ] query
+                  closeTo expected scores.[1] query
+
+              let bounded = tryFlatBooleanScoresDictionaryWithin (Some(set [ 1 ])) index "\"快\" +快*" |> Option.get
+              closeTo 1.885928302414186e-09 bounded.[1] "candidate bounds preserve shared frequency"
+
+              let repeated =
+                  buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) defaultCollation []
+                  |> flushPostings
+                  |> addDocument 1 "生日\u034f快乐 快乐 快乐"
+                  |> addDocument 2 "\u034f快加 \u034f快加 \u034f快加"
+                  |> addDocument 3 "大阪"
+                  |> addDocument 4 "京都"
+                  |> addDocument 5 "東京"
+                  |> addDocument 6 "神戸"
+                  |> addDocument 7 "松山"
+              closeTo 0.004481872543692589 (booleanScores repeated "\"快\" +快*").[1] "the exact lookup visits the first row once"
+              closeTo 0.013445617631077766 (booleanScores repeated "快* \"快\"").[1] "the prefix lookup visits the first row three times"
+
           testCase "Boolean short ngrams do not reach collapsed current-size postings"
           <| fun _ ->
               let collation = tryFind "utf8mb4_general_ci" |> Option.get

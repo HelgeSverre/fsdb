@@ -1446,8 +1446,10 @@ of their posting and matched rows.
 
 [Embedded NUL in UTF-8 full-text queries](torture/findings/2026-11-26-fulltext-nul-query.md)
 now follows MySQL's collation-specific input boundary in natural language,
-Boolean mode, and query expansion. Boolean ngram relevance still differs in
-some queries that combine quoted terms with wildcard prefixes.
+Boolean mode, and query expansion. [Boolean exact ngrams and wildcard
+prefixes that share a collation key](torture/findings/2026-11-26-ngram-shared-relevance.md)
+now share relevance. All 8,787 searches in the audited bigram corpus
+match MySQL across the binary, UCA 9.0, and UCA 5.2 test collations.
 
 [Exact legacy `WEIGHT_STRING` bytes](torture/findings/2026-11-04-extension-a-exact-weights.md#implicit-ideograph-encoder-follow-up)
 now match all 137,910 adjacent-pair oracle cases across Extension A and the

@@ -42,3 +42,5 @@ and wildcard prefix overlap. A three-document probe under
 For the combined search, MySQL scored the row near zero and fsdb scored
 it at approximately 0.258653. The matching document had `生日\u034F快乐`
 in its first indexed column and `生\u2060日` in its second.
+The [shared-relevance follow-up](2026-11-26-ngram-shared-relevance.md)
+closed all 42 differences in this sweep.
