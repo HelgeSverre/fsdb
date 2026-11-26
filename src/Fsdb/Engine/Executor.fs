@@ -26924,21 +26924,30 @@ let private isSignedJoinKey = function
     | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false -> true
     | _ -> false
 
-let private signedJoinEdge columnTypes (left, right) =
+let private isSignedJoinLiteral = function VInt _ -> true | _ -> false
+
+let private isIntegerJoinLiteral = function VInt _ | VUInt _ -> true | _ -> false
+
+let private joinEdge isKey columnTypes (left, right) =
     let left, right = mutationColumnKey left, mutationColumnKey right
     match Map.tryFind left columnTypes, Map.tryFind right columnTypes with
-    | Some leftType, Some rightType when leftType = rightType && isSignedJoinKey leftType -> Some(left, right)
+    | Some leftType, Some rightType when leftType = rightType && isKey leftType -> Some(left, right)
     | _ -> None
 
-let private isSignedJoinPredicate columnTypes = function
-    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, column), LiteralValue(VInt _))
-    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue(VInt _), QualifiedCol(owner, column))
-    | Between(QualifiedCol(owner, column), LiteralValue(VInt _), LiteralValue(VInt _)) ->
-        Map.tryFind (mutationColumnKey (owner, column)) columnTypes |> Option.exists isSignedJoinKey
+let private isJoinPredicate isKey isLiteral columnTypes expression =
+    let isKeyColumn owner column =
+        Map.tryFind (mutationColumnKey (owner, column)) columnTypes |> Option.exists isKey
+
+    match expression with
+    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, column), LiteralValue value)
+    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue value, QualifiedCol(owner, column)) ->
+        isLiteral value && isKeyColumn owner column
+    | Between(QualifiedCol(owner, column), LiteralValue lower, LiteralValue upper) ->
+        isLiteral lower && isLiteral upper && isKeyColumn owner column
     | _ -> false
 
-let private signedJoinBounds columnTypes equalities conditions =
-    let edges = equalities |> List.choose (signedJoinEdge columnTypes)
+let private joinBounds isKey isLiteral columnTypes equalities conditions =
+    let edges = equalities |> List.choose (joinEdge isKey columnTypes)
 
     let rec reachable seen pending =
         match pending with
@@ -26955,14 +26964,17 @@ let private signedJoinBounds columnTypes equalities conditions =
 
     qualifiedLiteralEqualities conditions
     |> List.collect (function
-        | owner, name, LiteralValue(VInt _ as value) ->
+        | owner, name, LiteralValue value when isLiteral value ->
             let column = mutationColumnKey (owner, name)
             match Map.tryFind column columnTypes with
-            | Some columnType when isSignedJoinKey columnType ->
+            | Some columnType when isKey columnType ->
                 reachable Set.empty [ column ] |> Set.toList |> List.map (fun key -> key, value)
             | _ -> []
         | _ -> [])
     |> Map.ofList
+
+let private signedJoinBounds columnTypes equalities conditions =
+    joinBounds isSignedJoinKey isSignedJoinLiteral columnTypes equalities conditions
 
 type private BoundUpdateSource =
     { Reference: TableRef
@@ -27008,13 +27020,13 @@ let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list)
                         positions[left] <= index + 1 && positions[right] <= index + 1
 
                     if keys.Length = conditions.Length
-                       && keys |> List.forall (fun key -> signedJoinEdge columnTypes key |> Option.exists inScope) then Some keys
+                       && keys |> List.forall (fun key -> joinEdge isSignedJoinKey columnTypes key |> Option.exists inScope) then Some keys
                     else None)
                 |> tryAllSome
                 |> Option.map List.concat
 
             // Keep expressions that can fail or warn in the ordinary path.
-            if positions.Count <> operands.Length || not (List.forall (isSignedJoinPredicate columnTypes) whereConditions) then None
+            if positions.Count <> operands.Length || not (List.forall (isJoinPredicate isSignedJoinKey isSignedJoinLiteral columnTypes) whereConditions) then None
             else
                 joinKeys |> Option.bind (fun equalities ->
                     let bounds = signedJoinBounds columnTypes equalities whereConditions
@@ -35901,16 +35913,16 @@ let internal transactionWriteReadClaims
                     |> tryAllSome
 
                 let readBounds () =
+                    let isKey = Storage.isIntegerPrimaryKeyType
                     let columnTypes = outerColumnTypes.Value
                     let conditions = update.Joins |> List.collect (_.On >> conjuncts)
                     let edges = qualifiedColumnEqualities conditions
                     let where = optionalConjuncts update.Where
 
                     if edges.Length <> conditions.Length
-                       || not (edges |> List.forall (signedJoinEdge columnTypes >> Option.isSome))
-                       || not (where |> List.forall (isSignedJoinPredicate columnTypes)) then Map.empty
-                    elif allInner then outerSignedBounds.Value
-                    else signedJoinBounds columnTypes edges where
+                       || not (edges |> List.forall (joinEdge isKey columnTypes >> Option.isSome))
+                       || not (where |> List.forall (isJoinPredicate isKey isIntegerJoinLiteral columnTypes)) then Map.empty
+                    else joinBounds isKey isIntegerJoinLiteral columnTypes edges where
 
                 let planReads (sources: (string * PhysicalProjection) list) =
                     let written =
@@ -35930,7 +35942,7 @@ let internal transactionWriteReadClaims
                     let conflicts =
                         outerLiterals |> List.exists (fun (owner, column, literal) ->
                             match literal, Map.tryFind (mutationColumnKey (owner, column)) bounds with
-                            | LiteralValue(VInt _ as value), Some bound -> value <> bound
+                            | LiteralValue value, Some bound when isIntegerJoinLiteral value -> value <> bound
                             | _ -> false)
 
                     match written with

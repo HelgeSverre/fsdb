@@ -105,11 +105,45 @@ With Fsdb WAL enabled, a timed-out cascade left both keys at
 `5`. The subsequent successful cascade moved both to `4`.
 The committed values survived both a clean restart and a forced stop.
 
+## Unsigned primary keys
+
+The digest-pinned MySQL 8.4.11 image and Fsdb agree on direct and
+projected `BIGINT UNSIGNED` probes above the signed range, including a
+gap whose upper boundary is `18446744073709551615`. The planner carries
+exact integer equality bounds through same-typed join columns.
+Storage reads both signed and unsigned components from the existing
+numeric lock-key encoding before comparing the ordered key.
+[MySQL integer ranges](https://dev.mysql.com/doc/refman/8.4/en/integer-types.html).
+
+The maintained oracle matches all 99 schedules with Fsdb WAL enabled,
+including the original 75 signed-key checks.
+
+At REPEATABLE READ and SERIALIZABLE, an insert or key move into the
+missing interval returns 1205 while an exterior insert succeeds.
+READ UNCOMMITTED and READ COMMITTED allow both writes. A pending
+predecessor bounds the interval until rollback, after which the
+interval widens. Contradictory predicates leave the interval free.
+When the looked-up row exists, the update reads its current value and
+retains a shared row lock. A derived-table probe with a small integer
+literal also gives the same gap behavior as MySQL.
+
+A concurrent insert at the exact unsigned probe key makes the
+joined update wait. After commit, the update sees the published row
+and affects one target. After rollback, it affects zero targets.
+
+A separate composite check used an unsigned leading key above
+`Int64.MaxValue` and a signed trailing key, in both ASC and DESC
+order. Both engines blocked inserts and key moves between the
+neighbors and allowed inserts outside that interval.
+
 ## Prepared XA and restart
 
 A branch with only the zero-row update allows gap inserts after
 `XA PREPARE`. A branch that also changes `parent.id=3` retains
-the gap until `XA ROLLBACK` while the server runs.
+the gap until `XA ROLLBACK` in MySQL and WAL-backed Fsdb. In-memory
+Fsdb releases the gap at `XA PREPARE` for the writing branch too.
+The signed-key control reproduces this in-memory difference before
+and after unsigned probes were enabled.
 
 Separate row-lock checks at REPEATABLE READ and SERIALIZABLE matched
 on MySQL and Fsdb. A locking read and a matched no-op update both
@@ -130,7 +164,8 @@ Fsdb matched both restart checks. The recovered branch retains its
 written-row protection. The gap from the read probe has process
 lifetime in this fixture.
 
-Run the live schedules against disposable native servers. Omit
+Run the live schedules against disposable servers. Start Fsdb with
+`--data-dir` to include the WAL-backed XA comparison. Omit
 `FSDB_PORT` for the MySQL reference alone.
 
 ```sh

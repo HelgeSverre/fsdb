@@ -6359,7 +6359,11 @@ let private orderedPrefixBounds (entries: ImmutableSortedSet<SecondaryOrderEntry
 
         insertionIndex FirstEqual, insertionIndex AfterEqual
 
-let private trySignedPrimaryLockValues width (key: string) =
+let internal isIntegerPrimaryKeyType = function
+    | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
+    | _ -> false
+
+let private tryIntegerPrimaryLockValues width (key: string) =
     let rec read offset remaining reversed =
         if remaining = 0 then
             if offset = key.Length then Some(List.rev reversed) else None
@@ -6370,9 +6374,13 @@ let private trySignedPrimaryLockValues width (key: string) =
                 let start = separator + 1
                 match Int32.TryParse(key.AsSpan(offset, separator - offset)) with
                 | true, length when length >= 2 && length <= key.Length - start && key.[start] = 'I' ->
-                    match Int64.TryParse(key.AsSpan(start + 1, length - 1)) with
+                    let digits = key.AsSpan(start + 1, length - 1)
+                    match Int64.TryParse digits with
                     | true, value -> read (start + length) (remaining - 1) (VInt value :: reversed)
-                    | _ -> None
+                    | _ ->
+                        match UInt64.TryParse digits with
+                        | true, value -> read (start + length) (remaining - 1) (VUInt value :: reversed)
+                        | _ -> None
                 | _ -> None
     if primaryLockKey key then read primaryLockKeyPrefix.Length width [] else None
 
@@ -6393,15 +6401,12 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
     | Some context, Some observed ->
         let tableKey = normalizeTableName tableName
         let database = database.ToLowerInvariant()
-        let signed column =
-            match observed.Columns.[column].Type with
-            | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false -> true
-            | _ -> false
+        let integer column = isIntegerPrimaryKeyType observed.Columns.[column].Type
 
         uniqueKeyGroups observed
         |> List.tryFind (fun group ->
             group.Name = "PRIMARY" && indexesWholeColumns group
-            && group.Indices.Length = values.Length && List.forall signed group.Indices)
+            && group.Indices.Length = values.Length && List.forall integer group.Indices)
         |> Option.iter (fun group ->
             let encode (table: Table) values =
                 primaryLockKeyPrefix + encodeEqualityValues table.Columns group.Indices values
@@ -6426,7 +6431,7 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
                     cache.Entries |> Seq.choose (fun (KeyValue(key, weak)) ->
                         if primaryLockKey key then
                             match weak.TryGetTarget() with
-                            | true, stripe when stripe.ExclusiveOwner.IsSome -> trySignedPrimaryLockValues values.Length key
+                            | true, stripe when stripe.ExclusiveOwner.IsSome -> tryIntegerPrimaryLockValues values.Length key
                             | _ -> None
                         else None)
 
@@ -6475,7 +6480,7 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
                             | _ -> current
 
                         let blocks key =
-                            match current (), trySignedPrimaryLockValues values.Length key with
+                            match current (), tryIntegerPrimaryLockValues values.Length key with
                             | Some table, Some candidate ->
                                 lower <- refreshBoundary true table lower
                                 upper <- refreshBoundary false table upper

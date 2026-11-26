@@ -53,8 +53,16 @@ def outcome(connection, sql):
         return error.args[0]
 
 
+def rolled_back_outcome(connection, sql):
+    execute(connection, "START TRANSACTION")
+    try:
+        return outcome(connection, sql)
+    finally:
+        execute(connection, "ROLLBACK")
+
+
 @contextmanager
-def fixture(port, schema, mysql):
+def fixture(port, schema, mysql, setup=SETUP):
     with connect(port) as admin:
         version = scalar(admin, "SELECT VERSION()")
         if mysql:
@@ -64,7 +72,7 @@ def fixture(port, schema, mysql):
         execute(admin, f"CREATE DATABASE {schema}")
         try:
             execute(admin, f"USE {schema}")
-            for statement in SETUP:
+            for statement in setup:
                 execute(admin, statement)
             with ExitStack() as stack:
                 writer, owner, probe = (
@@ -102,11 +110,7 @@ def check(port, mysql):
             execute(connection, "SET SESSION TRANSACTION ISOLATION LEVEL " + level)
 
         def attempt(sql):
-            execute(probe, "START TRANSACTION")
-            try:
-                return outcome(probe, sql)
-            finally:
-                execute(probe, "ROLLBACK")
+            return rolled_back_outcome(probe, sql)
 
         def insert(keys):
             return tuple(attempt(f"INSERT INTO gate VALUES ({key},0)") for key in keys)
@@ -356,6 +360,99 @@ def check(port, mysql):
         finally:
             execute(admin, "DROP TABLE gate")
             execute(admin, f"DROP DATABASE {reference}")
+
+    base = (1 << 64) - 10
+    lower, lookup, upper = (base + offset for offset in (1, 5, 9))
+    unsigned_setup = (
+        "CREATE TABLE parent(id BIGINT UNSIGNED PRIMARY KEY,n INT)",
+        "CREATE TABLE partner(id BIGINT UNSIGNED,seq INT,delta INT,PRIMARY KEY(id,seq))",
+        "CREATE TABLE gate(id BIGINT UNSIGNED PRIMARY KEY,delta INT)",
+        f"INSERT INTO parent VALUES ({lookup},10)",
+        f"INSERT INTO partner VALUES ({lookup},20,3)",
+        "CREATE VIEW active AS SELECT p.id,p.n,s.seq,s.delta FROM parent p JOIN partner s ON p.id=s.id",
+    )
+    with fixture(port, schema, mysql, unsigned_setup) as (
+        _,
+        admin,
+        writer,
+        owner,
+        probe,
+    ):
+        execute(admin, f"INSERT INTO gate VALUES ({lower},7),({upper},13)")
+        direct = update_at(lookup)
+        projected = (
+            "WITH gate_rows(gate_id,amount) AS (SELECT id,delta FROM gate) "
+            "UPDATE active a JOIN gate_rows g ON g.gate_id=a.id "
+            f"SET a.n=a.n+a.delta+g.amount WHERE a.id={lookup} AND a.seq BETWEEN 20 AND 22"
+        )
+
+        def try_insert(key):
+            return rolled_back_outcome(probe, f"INSERT INTO gate VALUES ({key},0)")
+
+        for level, command, blocking in (
+            ("READ UNCOMMITTED", projected, 1),
+            ("READ COMMITTED", direct, 1),
+            ("REPEATABLE READ", direct, TIMEOUT),
+            ("SERIALIZABLE", projected, TIMEOUT),
+        ):
+            execute(writer, "SET SESSION TRANSACTION ISOLATION LEVEL " + level)
+            execute(writer, "START TRANSACTION")
+            expect(f"{level} unsigned lookup", outcome(writer, command), 0)
+            expect(
+                f"{level} unsigned interior and exterior inserts",
+                (try_insert(lookup), try_insert(lower - 1)),
+                (blocking, 1),
+            )
+            expect(
+                f"{level} unsigned move from UINT64_MAX",
+                rolled_back_outcome(
+                    probe, f"UPDATE gate SET id={upper - 1} WHERE id={upper}"
+                ),
+                blocking,
+            )
+            execute(writer, "ROLLBACK")
+            expect(f"{level} released unsigned gap", try_insert(lookup), 1)
+
+        execute(writer, "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        execute(owner, "START TRANSACTION")
+        execute(owner, f"INSERT INTO gate VALUES ({lower + 2},0)")
+        execute(writer, "START TRANSACTION")
+        expect(
+            "unsigned lookup beside pending predecessor", outcome(writer, projected), 0
+        )
+        expect("pending unsigned predecessor bounds the gap", try_insert(lower + 1), 1)
+        execute(owner, "ROLLBACK")
+        expect(
+            "unsigned gap widens after predecessor rollback",
+            try_insert(lower + 1),
+            TIMEOUT,
+        )
+        execute(writer, "ROLLBACK")
+
+        execute(writer, "START TRANSACTION")
+        expect(
+            "conflicting unsigned bounds",
+            outcome(writer, projected + f" AND g.gate_id={upper}"),
+            0,
+        )
+        expect("conflicting unsigned bounds claim no gap", try_insert(lookup), 1)
+        execute(writer, "ROLLBACK")
+
+        execute(admin, f"INSERT INTO gate VALUES ({lookup},1)")
+        execute(writer, "START TRANSACTION")
+        expect("unsigned lookup matches a visible row", outcome(writer, projected), 1)
+        expect(
+            "unsigned lookup reads the joined row",
+            scalar(writer, "SELECT n FROM parent"),
+            14,
+        )
+        expect(
+            "unsigned lookup retains a shared row lock",
+            rolled_back_outcome(probe, f"UPDATE gate SET delta=2 WHERE id={lookup}"),
+            TIMEOUT,
+        )
+        execute(writer, "ROLLBACK")
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 

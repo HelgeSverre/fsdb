@@ -3119,18 +3119,21 @@ implementation effort:
    now wait for an owning transaction and retain a shared lock on the
    published row, including after a delete and reinsert. The same holds
    through [unfiltered derived projections and simple CTEs](benchmarks/results/2026-11-25-bound-joined-view-update.md#locks-through-projected-outer-sources),
-   including renamed keys. [Audited materialized scans](benchmarks/results/2026-11-25-bound-joined-view-update.md#locks-through-materialized-outer-sources)
+   including renamed keys. Exact primary-key probes also support
+   [unsigned integer keys](torture/findings/2026-11-26-joined-view-primary-key-gaps.md#unsigned-primary-keys).
+   [Audited materialized scans](benchmarks/results/2026-11-25-bound-joined-view-update.md#locks-through-materialized-outer-sources)
    retain shared locks according to scan order, early termination, and
    isolation. At REPEATABLE READ and SERIALIZABLE, an absent fully bound
-   signed primary key now protects the interval between neighboring records
+   integer primary key now protects the interval between neighboring records
    in the audited joined-view updates. The
    [schedule oracle](torture/findings/2026-11-26-joined-view-primary-key-gaps.md)
    covers insertions, key moves, shared holders, open-ended intervals,
    changes to neighboring keys, savepoints, and the lifetime of live
-   prepared XA claims. Both boundaries widen once no writer or
-   consistent read view retains a deleted key. Direct updates and
+   prepared XA claims with WAL enabled. In-memory Fsdb releases the
+   tested writing branch's gap when it prepares. Both boundaries widen
+   once no writer or consistent read view retains a deleted key. Direct updates and
    `ON UPDATE CASCADE` across databases also wait on the destination
-   gap. Broader scans, other key types, and other join access paths
+   gap. Broader scans, noninteger key types, and other join access paths
    remain open. An audited
    [nested checked view LEFT JOINed to a window CTE](torture/findings/2026-11-17-nested-window-outer-view.md)
    correctly remains read only, matching MySQL's metadata, rows, CHECK OPTION

@@ -5872,6 +5872,45 @@ let tests =
                       | actual -> failtestf "%s should retain the published row lock (replacing=%b), got %A" isolation replacesExisting actual
                       run setup "UPDATE gate SET delta=7 WHERE id=1" (Affected 1UL) |> ignore
 
+          testCase "joined updates protect gaps in unsigned primary keys"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result (Affected expected) sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql, count in
+                  [ "CREATE TABLE parent (id BIGINT UNSIGNED PRIMARY KEY,n INT)", 0UL
+                    "CREATE TABLE partner (id BIGINT UNSIGNED,seq INT,PRIMARY KEY(id,seq))", 0UL
+                    "CREATE TABLE gate (id BIGINT UNSIGNED PRIMARY KEY,delta INT)", 0UL
+                    "INSERT INTO parent VALUES (9223372036854775811,10)", 1UL
+                    "INSERT INTO partner VALUES (9223372036854775811,20)", 1UL
+                    "INSERT INTO gate VALUES (9223372036854775809,7),(9223372036854775813,13)", 2UL
+                    "CREATE VIEW active AS SELECT p.id,p.n,s.seq FROM parent p JOIN partner s ON p.id=s.id", 0UL ] do
+                  run setup sql count |> ignore
+
+              let writer = run (create 2 store) "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ" 0UL
+              let writer = run writer "START TRANSACTION" 0UL
+              let update =
+                  "UPDATE active a JOIN (SELECT id AS gate_id,delta FROM gate) g ON g.gate_id=a.id SET a.n=a.n+g.delta WHERE a.id=9223372036854775811 AND a.seq BETWEEN 20 AND 22"
+              let writer = run writer update 0UL
+              let contender = run (create 3 store) "SET SESSION innodb_lock_wait_timeout=1" 0UL
+
+              try
+                  run contender "INSERT INTO gate VALUES (9223372036854775808,0)" 1UL |> ignore
+                  for sql in
+                      [ "INSERT INTO gate VALUES (9223372036854775812,0)"
+                        "UPDATE gate SET id=9223372036854775810 WHERE id=9223372036854775813" ] do
+                      match handle contender sql |> snd with
+                      | Err(1205, _) -> ()
+                      | actual -> failtestf "expected a lock wait for %s, got %A" sql actual
+              finally
+                  run writer "ROLLBACK" 0UL |> ignore
+
+              run contender "INSERT INTO gate VALUES (9223372036854775811,0)" 1UL |> ignore
+
           testCase "joined-view primary gaps follow savepoints and consistent read views"
           <| fun _ ->
               let run session sql expected =
