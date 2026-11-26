@@ -3722,6 +3722,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
 let private lockedExecutionResult session = function
     | Ok result -> result
+    | Error(1213, _) -> raise (Storage.DeadlockVictim (session.Database |> Option.defaultValue defaultDatabase))
     | Error(code, message) -> session, Err(code, message)
 
 let private retainsMetadata (session: Session, result) =
@@ -3732,6 +3733,7 @@ let private retainsMetadata (session: Session, result) =
 let private executeWithStatementAccess session accesses execute =
     TableLocks.withStatementAccessRetaining
         (lockWaitTimeout session)
+        (metadataLockWaitTimeout session)
         session.Store
         session.ConnectionId
         accesses
@@ -3742,6 +3744,7 @@ let private executeWithStatementAccess session accesses execute =
 let private executeWithTemporaryStatementAccess session accesses execute =
     TableLocks.withTemporaryStatementAccessRetaining
         (lockWaitTimeout session)
+        (metadataLockWaitTimeout session)
         session.Store
         session.ConnectionId
         accesses

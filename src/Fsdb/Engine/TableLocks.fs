@@ -27,6 +27,7 @@ type private TableState =
       StatementWriters: HashSet<int>
       TransactionReaders: HashSet<int>
       mutable MetadataWriter: int option
+      WaitingMetadataWriters: ResizeArray<int>
       WaitingWriters: HashSet<int>
       PrioritizedWriters: HashSet<int> }
 
@@ -38,11 +39,19 @@ type private GlobalReadPolicy =
     | RespectGlobalRead
     | IgnoreGlobalRead
 
+type private MetadataWait =
+    { Blockers: unit -> seq<int64>
+      Exclusive: bool
+      mutable Victim: bool }
+
+type private MetadataWaitResult = Granted | TimedOut | Deadlocked
+
 type private Manager =
     { SyncRoot: obj
       Tables: Dictionary<string, TableState>
       Explicit: Dictionary<int, ExplicitContext>
       TransactionTables: Dictionary<int, HashSet<string>>
+      MetadataWaits: Dictionary<int64, MetadataWait>
       GlobalReaders: HashSet<int>
       WaitingGlobalReaders: HashSet<int> }
 
@@ -57,6 +66,7 @@ let private managerFor (store: Store) =
               Tables = Dictionary(StringComparer.OrdinalIgnoreCase)
               Explicit = Dictionary()
               TransactionTables = Dictionary()
+              MetadataWaits = Dictionary()
               GlobalReaders = HashSet()
               WaitingGlobalReaders = HashSet() }
     )
@@ -90,6 +100,7 @@ let private stateFor (manager: Manager) key =
               StatementWriters = HashSet()
               TransactionReaders = HashSet()
               MetadataWriter = None
+              WaitingMetadataWriters = ResizeArray()
               WaitingWriters = HashSet()
               PrioritizedWriters = HashSet() }
 
@@ -124,8 +135,24 @@ let private blockedByOwnedGlobalRead policy owner manager physical =
     | IgnoreGlobalRead -> false
     | RespectGlobalRead -> conflictsWithOwnedGlobalRead owner manager physical
 
+let private ownsSharedMetadata owner (state: TableState) =
+    state.TransactionReaders.Contains owner
+    || state.StatementReaders.Contains owner
+    || state.StatementWriters.Contains owner
+    || state.ExplicitReaders.Contains owner
+    || state.ExplicitWriter = Some owner
+
+let private sharedMetadataBlocker owner (state: TableState) =
+    match state.MetadataWriter with
+    | Some writer when writer <> owner -> Some writer
+    | Some _ -> None
+    | _ when state.WaitingMetadataWriters.Count > 0
+             && state.WaitingMetadataWriters.[0] <> owner
+             && not (ownsSharedMetadata owner state) -> Some state.WaitingMetadataWriters.[0]
+    | _ -> None
+
 let private explicitlyAvailable policy owner mode (manager: Manager) (state: TableState) =
-    (state.MetadataWriter |> Option.forall ((=) owner)) &&
+    (sharedMetadataBlocker owner state).IsNone &&
     match mode with
     | ReadAccess ->
         state.ExplicitWriter |> Option.forall ((=) owner)
@@ -144,7 +171,7 @@ let private explicitAvailable policy owner mode (manager: Manager) key =
     | true, state -> explicitlyAvailable policy owner mode manager state
 
 let private statementAvailable policy owner mode (manager: Manager) (state: TableState) =
-    (state.MetadataWriter |> Option.forall ((=) owner)) &&
+    (sharedMetadataBlocker owner state).IsNone &&
     match mode with
     | ReadAccess -> state.ExplicitWriter.IsNone && readerGateOpen owner manager state
     | WriteAccess ->
@@ -159,6 +186,7 @@ let private stateIsIdle (state: TableState) =
     && hasNoOwners state.StatementWriters
     && hasNoOwners state.TransactionReaders
     && state.MetadataWriter.IsNone
+    && state.WaitingMetadataWriters.Count = 0
     && hasNoOwners state.WaitingWriters
     && hasNoOwners state.PrioritizedWriters
 
@@ -213,8 +241,7 @@ let private releasePhysical owner (manager: Manager) physical =
 
             removeIdleState manager key state
 
-let private waitUntil timeout syncRoot ready =
-    let deadline = DateTime.UtcNow + timeout
+let private waitUntilDeadline syncRoot deadline ready =
     let cancellation = Limits.queryCancellation.Value
     let maxWait = if cancellation.CanBeCanceled then 100 else Int32.MaxValue
 
@@ -223,7 +250,7 @@ let private waitUntil timeout syncRoot ready =
         if ready () then
             true
         else
-            let remaining = deadline - DateTime.UtcNow
+            let remaining = deadline () - DateTime.UtcNow
             if remaining <= TimeSpan.Zero then false
             else
                 Monitor.Wait(syncRoot, min remaining (TimeSpan.FromMilliseconds(float maxWait))) |> ignore
@@ -231,14 +258,61 @@ let private waitUntil timeout syncRoot ready =
 
     wait ()
 
+let private waitUntil timeout syncRoot ready =
+    let deadline = DateTime.UtcNow + timeout
+    waitUntilDeadline syncRoot (fun () -> deadline) ready
+
+let private metadataWaitError = function
+    | Deadlocked -> 1213, "Deadlock found when trying to get lock; try restarting transaction"
+    | _ -> 1205, "Lock wait timeout exceeded; try restarting transaction"
+
+let private waitForMetadata timeout metadataTimeout owner exclusive (manager: Manager) ready blockers =
+    Limits.queryCancellation.Value.ThrowIfCancellationRequested()
+    if ready () then Granted
+    else
+        let owner = int64 owner
+        let started = DateTime.UtcNow
+        let request = { Blockers = blockers; Exclusive = exclusive; Victim = false }
+        manager.MetadataWaits.Add(owner, request)
+        let successors id =
+            match manager.MetadataWaits.TryGetValue id with
+            | true, pending when not pending.Victim -> pending.Blockers ()
+            | _ -> Seq.empty
+        let canComplete () =
+            if request.Victim || ready () then true
+            else
+                match tryFindLockWaitPath owner (blockers ()) successors with
+                | None -> false
+                | Some cycle ->
+                    // A statement is cheaper to retry than an exclusive DDL request.
+                    let victim = cycle |> List.minBy (fun id -> manager.MetadataWaits.[id].Exclusive, id <> owner)
+                    manager.MetadataWaits.[victim].Victim <- true
+                    Monitor.PulseAll manager.SyncRoot
+                    request.Victim
+        let deadline () =
+            started + (if Seq.isEmpty (blockers ()) then timeout else metadataTimeout)
+        try
+            let completed = waitUntilDeadline manager.SyncRoot deadline canComplete
+            if request.Victim then Deadlocked
+            elif completed then Granted
+            else TimedOut
+        finally
+            manager.MetadataWaits.Remove owner |> ignore
+
 let private waitForPhysical timeout owner (manager: Manager) physical =
     waitUntil timeout manager.SyncRoot (fun () ->
         physical
         |> Map.forall (fun key mode -> explicitAvailable RespectGlobalRead owner mode manager key))
 
-let private waitForStatement policy timeout owner (manager: Manager) physical =
-    let deadline = DateTime.UtcNow + timeout
+let private statementMetadataBlockers owner (manager: Manager) physical =
+    seq {
+        for KeyValue(key, _) in physical do
+            match manager.Tables.TryGetValue key with
+            | true, state -> yield! sharedMetadataBlocker owner state |> Option.map int64 |> Option.toList
+            | _ -> ()
+    }
 
+let private waitForStatement policy timeout metadataTimeout owner (manager: Manager) physical =
     let ready () =
         physical
         |> Map.forall (fun key mode ->
@@ -247,7 +321,8 @@ let private waitForStatement policy timeout owner (manager: Manager) physical =
             | true, state -> statementAvailable policy owner mode manager state)
 
     let waited = not (ready ())
-    waitUntil (deadline - DateTime.UtcNow) manager.SyncRoot ready, waited
+    waitForMetadata timeout metadataTimeout owner false manager ready
+        (fun () -> statementMetadataBlockers owner manager physical), waited
 
 let private acquireStatement owner (manager: Manager) physical =
     physical |> Map.filter (fun key mode ->
@@ -428,50 +503,63 @@ let internal withMetadataWrite timeout store owner targets accesses body =
     let manager = managerFor store
     let keys = targets |> List.map (fun (database, table) -> tableKey database table) |> Set.ofList
     let physical = physicalAccesses accesses
-    let available key =
-        match manager.Tables.TryGetValue key with
-        | false, _ -> true
-        | true, state ->
-            (state.MetadataWriter |> Option.forall ((=) owner))
-            && (state.ExplicitWriter |> Option.forall ((=) owner))
-            && hasNoOtherOwner owner state.ExplicitReaders
-            && hasNoOtherOwner owner state.StatementReaders
-            && hasNoOtherOwner owner state.StatementWriters
-            && hasNoOtherOwner owner state.TransactionReaders
+    let reserved = ResizeArray<string>()
+    let reserve key =
+        let state = stateFor manager key
+        if state.MetadataWriter = Some owner then Granted
+        else
+            state.WaitingMetadataWriters.Add owner
+            let blockers () =
+                seq {
+                    yield! state.MetadataWriter |> Option.toList
+                    yield! state.ExplicitWriter |> Option.toList
+                    yield! state.ExplicitReaders
+                    yield! state.StatementReaders
+                    yield! state.StatementWriters
+                    yield! state.TransactionReaders
+                    yield state.WaitingMetadataWriters.[0]
+                }
+                |> Seq.filter ((<>) owner)
+                |> Seq.map int64
+            try
+                let result = waitForMetadata timeout timeout owner true manager (blockers >> Seq.isEmpty) blockers
+                if result = Granted then
+                    state.MetadataWriter <- Some owner
+                    reserved.Add key
+                result
+            finally
+                state.WaitingMetadataWriters.Remove owner |> ignore
+                removeIdleState manager key state
+                Monitor.PulseAll manager.SyncRoot
 
-    let ready () =
-        Set.forall available keys
-        && (physical |> Map.forall (fun key mode ->
-            match manager.Tables.TryGetValue key with
-            | false, _ -> true
-            | true, state -> statementAvailable IgnoreGlobalRead owner mode manager state))
-
-    let acquired =
-        lock manager.SyncRoot (fun () ->
-            if waitUntil timeout manager.SyncRoot ready then
-                let reserved = keys |> Set.filter (fun key ->
-                    let state = stateFor manager key
-                    if state.MetadataWriter.IsSome then false
-                    else
-                        state.MetadataWriter <- Some owner
-                        true)
-                Some(reserved, acquireStatement owner manager physical)
-            else None)
-
-    match acquired with
-    | None -> Error(1205, "Lock wait timeout exceeded; try restarting transaction")
-    | Some(reserved, statements) ->
-        try Ok(body ())
-        finally
+    let mutable statements = Map.empty
+    try
+        let result =
             lock manager.SyncRoot (fun () ->
-                releaseStatement owner manager statements
-                for key in reserved do
-                    let state = manager.Tables.[key]
-                    state.MetadataWriter <- None
-                    removeIdleState manager key state
-                Monitor.PulseAll manager.SyncRoot)
+                // A multi-table DDL establishes its reservations in name order.
+                let rec reserveAll = function
+                    | [] ->
+                        waitForStatement IgnoreGlobalRead timeout timeout owner manager physical |> fst
+                    | key :: rest ->
+                        match reserve key with
+                        | Granted -> reserveAll rest
+                        | failure -> failure
+                let result = reserveAll (Set.toList keys)
+                if result = Granted then statements <- acquireStatement owner manager physical
+                result)
+        match result with
+        | Granted -> Ok(body ())
+        | failure -> Error(metadataWaitError failure)
+    finally
+        lock manager.SyncRoot (fun () ->
+            releaseStatement owner manager statements
+            for key in reserved do
+                let state = manager.Tables.[key]
+                state.MetadataWriter <- None
+                removeIdleState manager key state
+            Monitor.PulseAll manager.SyncRoot)
 
-let private withStatementAccessUnder policy timeout store owner accesses retain body =
+let private withStatementAccessUnder policy timeout metadataTimeout store owner accesses retain body =
     let manager = managerFor store
     let physical = physicalAccesses accesses
 
@@ -488,19 +576,19 @@ let private withStatementAccessUnder policy timeout store owner accesses retain 
                         (Ok())
                     |> Result.map (fun () -> Map.empty)
                 | false, _ ->
-                    let acquired, waited =
+                    let result, waited =
                         trackWaitingWriter owner manager physical (fun () ->
-                            waitForStatement policy timeout owner manager physical)
+                            waitForStatement policy timeout metadataTimeout owner manager physical)
 
-                    if acquired then
+                    match result with
+                    | Granted ->
                         let acquired = acquireStatement owner manager physical
 
                         if waited then
                             markPrioritizedWriter owner manager acquired
 
                         Ok acquired
-                    else
-                        Error(1205, "Lock wait timeout exceeded; try restarting transaction"))
+                    | failure -> Error(metadataWaitError failure))
 
     match acquired with
     | Error error -> Error error
@@ -516,23 +604,23 @@ let private withStatementAccessUnder policy timeout store owner accesses retain 
                     releaseStatement owner manager acquired
                     Monitor.PulseAll manager.SyncRoot)
 
-let internal withStatementAccessRetaining timeout store owner accesses retain body =
-    withStatementAccessUnder RespectGlobalRead timeout store owner accesses retain body
+let internal withStatementAccessRetaining timeout metadataTimeout store owner accesses retain body =
+    withStatementAccessUnder RespectGlobalRead timeout metadataTimeout store owner accesses retain body
 
 let withStatementAccess timeout store owner accesses body =
-    withStatementAccessRetaining timeout store owner accesses (fun _ -> false) body
+    withStatementAccessRetaining timeout timeout store owner accesses (fun _ -> false) body
 
-let internal withTemporaryStatementAccessRetaining timeout store owner accesses retain body =
+let internal withTemporaryStatementAccessRetaining timeout metadataTimeout store owner accesses retain body =
     // Temporary sources have already been removed from `accesses`; a remaining
     // writer still changes shared state and must obey the global read lock.
     let policy =
         if accesses |> List.exists (fun access -> access.Mode = WriteAccess) then RespectGlobalRead
         else IgnoreGlobalRead
 
-    withStatementAccessUnder policy timeout store owner accesses retain body
+    withStatementAccessUnder policy timeout metadataTimeout store owner accesses retain body
 
 let withTemporaryStatementAccess timeout store owner accesses body =
-    withTemporaryStatementAccessRetaining timeout store owner accesses (fun _ -> false) body
+    withTemporaryStatementAccessRetaining timeout timeout store owner accesses (fun _ -> false) body
 
 let withGlobalWriteAccess timeout store owner body =
     let access =

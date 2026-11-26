@@ -403,10 +403,24 @@ until transaction end. InnoDB checks whether the transaction still has
 engine locks before it releases metadata after a savepoint rollback.
 [MySQL 8.4.11 savepoint implementation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/handler/ha_innodb.cc#L6306-L6321).
 
-MySQL queues a new reader behind an already waiting `DROP TABLE`. Once
-the original holder commits, the drop completes and the late reader
-receives 1146. The same late reader can currently read the table on
-Fsdb before the drop takes effect.
+#### Metadata queue order
+
+Both engines queue a new reader behind a waiting `DROP TABLE` and let
+the original transaction reread the table. After that transaction
+commits, the drop completes and the late reader receives 1146. A read
+blocked by this queue uses `lock_wait_timeout`.
+
+For `DROP TABLE z,a`, the drop reserves `a` before requesting `z`. If
+another transaction holds `a`, that transaction can still read `z`
+before the drop reaches it. If the transaction holds `z` and then
+requests the already reserved `a`, the read receives 1213. Both engines
+roll back the victim's transaction and release its earlier claims so
+the drop can finish. Timeout and cancellation release reservations
+acquired before the blocked name. A second DDL request waits behind
+an existing reservation.
+[MySQL metadata lock victim selection](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/mdl.cc#L1689-L1727).
+
+MySQL and both Fsdb storage modes matched all 414 maintained checks.
 
 Run the live schedules against disposable servers. Use `--data-dir`
 to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.

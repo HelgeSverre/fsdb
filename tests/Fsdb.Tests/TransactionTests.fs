@@ -1037,6 +1037,43 @@ let tests =
                   run reader "ROLLBACK" (Affected 0UL) |> ignore
               run admin "DROP TABLE gate" (Affected 0UL) |> ignore
 
+          testCase "queued table DDL admits an existing holder before a new reader"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let admin = run (create 1 store) "CREATE TABLE gate(id INT PRIMARY KEY)" (Affected 0UL)
+              run admin "INSERT INTO gate VALUES (1)" (Affected 1UL) |> ignore
+              let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+              let rows = ResultSet([ "id" ], [ [ Some "1" ] ])
+              let holder = run holder "SELECT id FROM gate" rows
+              let ddlSession = run (create 3 store) "SET SESSION lock_wait_timeout=2" (Affected 0UL)
+              let lateSession = run (create 4 store) "SET SESSION lock_wait_timeout=2" (Affected 0UL)
+              use dispatched = new Threading.ManualResetEventSlim(false)
+              let ddl = Threading.Tasks.Task.Run(fun () ->
+                  dispatched.Set()
+                  handle ddlSession "DROP TABLE gate" |> snd)
+              let mutable newcomer = None
+              try
+                  Expect.isTrue (dispatched.Wait(TimeSpan.FromSeconds 2.0)) "DDL dispatched"
+                  Expect.isFalse (ddl.Wait(TimeSpan.FromMilliseconds 100.0)) "DDL is waiting for the holder"
+                  run holder "SELECT id FROM gate" rows |> ignore
+                  let reader = Threading.Tasks.Task.Run(fun () -> handle lateSession "SELECT id FROM gate" |> snd)
+                  newcomer <- Some reader
+                  Expect.isFalse (reader.Wait(TimeSpan.FromMilliseconds 100.0)) "new reader is waiting behind the DDL"
+              finally
+                  run holder "COMMIT" (Affected 0UL) |> ignore
+              Expect.isTrue (ddl.Wait(TimeSpan.FromSeconds 3.0)) "DDL completes once the holder commits"
+              Expect.equal ddl.Result (Affected 0UL) "DDL completes successfully"
+              let reader = Option.get newcomer
+              Expect.isTrue (reader.Wait(TimeSpan.FromSeconds 3.0)) "new reader finishes after the DDL"
+              match reader.Result with
+              | Err(1146, _) -> ()
+              | actual -> failtestf "new reader must see the drop, got %A" actual
+
           testCase "serializable primary ranges ignore snapshots of replaced tables"
           <| fun _ ->
               let run session sql expected =

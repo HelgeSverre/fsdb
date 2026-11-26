@@ -51,7 +51,11 @@ def scalar(connection, sql):
 def outcome(connection, sql):
     try:
         return execute(connection, sql)
-    except (pymysql.err.OperationalError, pymysql.err.IntegrityError) as error:
+    except (
+        pymysql.err.OperationalError,
+        pymysql.err.IntegrityError,
+        pymysql.err.ProgrammingError,
+    ) as error:
         return error.args[0]
 
 
@@ -1077,6 +1081,123 @@ def check(port, mysql):
         )
         execute(holder, "ROLLBACK")
         expect("rollback releases metadata", outcome(ddl, "DROP TABLE gate"), 0)
+
+    def pending_statement(pool, connection, statement):
+        dispatched = Event()
+
+        def run():
+            dispatched.set()
+            return outcome(connection, statement)
+
+        pending = pool.submit(run)
+        assert dispatched.wait(1)
+        return pending
+
+    def blocked(pending):
+        try:
+            pending.result(0.15)
+        except TimeoutError:
+            return True
+        return False
+
+    with fixture(port, schema, mysql, metadata_setup) as (_, _, holder, ddl, late):
+        execute(ddl, "SET SESSION lock_wait_timeout=3")
+        execute(holder, "BEGIN")
+        execute(holder, "SELECT v FROM gate")
+        with ThreadPoolExecutor(2) as pool:
+            dropping = pending_statement(pool, ddl, "DROP TABLE gate")
+            try:
+                expect("queued drop waits", blocked(dropping), True)
+                expect("holder can reread", scalar(holder, "SELECT v FROM gate"), 10)
+                reading = pending_statement(pool, late, "SELECT v FROM gate")
+                expect("late reader waits behind drop", blocked(reading), True)
+            finally:
+                execute(holder, "COMMIT")
+            expect("queued drop completes first", dropping.result(2), 0)
+            expect("late reader sees the drop", reading.result(2), 1146)
+
+    pair = (
+        "CREATE TABLE a(id INT PRIMARY KEY)",
+        "INSERT INTO a VALUES (1)",
+        "CREATE TABLE z(id INT PRIMARY KEY)",
+        "INSERT INTO z VALUES (1)",
+        "CREATE TABLE audit(id INT PRIMARY KEY,v INT)",
+        "INSERT INTO audit VALUES(1,10)",
+    )
+    for held, other, expected in (("a", "z", 1), ("z", "a", 1213)):
+        with fixture(port, schema, mysql, pair) as (_, admin, holder, ddl, _):
+            execute(ddl, "SET SESSION lock_wait_timeout=3")
+            execute(holder, "SET SESSION lock_wait_timeout=2")
+            execute(holder, "BEGIN")
+            execute(holder, f"SELECT id FROM {held}")
+            if expected == 1213:
+                execute(holder, "UPDATE audit SET v=11 WHERE id=1")
+            with ThreadPoolExecutor(1) as pool:
+                dropping = pending_statement(pool, ddl, "DROP TABLE z,a")
+                try:
+                    expect(f"multi-table drop waits on {held}", blocked(dropping), True)
+                    expect(
+                        f"query {other} while drop waits on {held}",
+                        outcome(holder, f"SELECT id FROM {other}"),
+                        expected,
+                    )
+                    execute(
+                        holder, "DO 0"
+                    )  # An error packet does not refresh the server status.
+                    expect(
+                        "holder transaction status",
+                        bool(holder.server_status & 1),
+                        expected != 1213,
+                    )
+                    if expected == 1213:
+                        expect(
+                            "deadlock rolls back earlier writes",
+                            scalar(admin, "SELECT v FROM audit WHERE id=1"),
+                            10,
+                        )
+                        expect(
+                            "victim releases its earlier claim", dropping.result(2), 0
+                        )
+                    else:
+                        expect(
+                            "holder keeps its earlier claim", blocked(dropping), True
+                        )
+                finally:
+                    execute(holder, "COMMIT")
+                expect("multi-table drop completes", dropping.result(2), 0)
+
+    with fixture(port, schema, mysql, pair) as (_, _, holder, ddl, late):
+        execute(ddl, "SET SESSION lock_wait_timeout=1")
+        execute(holder, "BEGIN")
+        execute(holder, "SELECT id FROM z")
+        with ThreadPoolExecutor(2) as pool:
+            dropping = pending_statement(pool, ddl, "DROP TABLE z,a")
+            try:
+                expect("drop waits on second table", blocked(dropping), True)
+                reading = pending_statement(pool, late, "SELECT id FROM a")
+                expect("first reservation holds the reader", blocked(reading), True)
+                expect("multi-table drop times out", dropping.result(2), TIMEOUT)
+                expect("timeout frees the first reservation", reading.result(2), 1)
+            finally:
+                execute(holder, "ROLLBACK")
+
+    with fixture(port, schema, mysql, pair) as (_, _, holder, ddl, late):
+        execute(holder, "BEGIN")
+        execute(holder, "SELECT id FROM z")
+        execute(ddl, "SET SESSION lock_wait_timeout=3")
+        execute(late, "SET SESSION lock_wait_timeout=3")
+        with ThreadPoolExecutor(2) as pool:
+            dropping = pending_statement(pool, ddl, "DROP TABLE z,a")
+            try:
+                expect("drop reserves its first table", blocked(dropping), True)
+                altering = pending_statement(
+                    pool, late, "ALTER TABLE a ADD COLUMN v INT"
+                )
+                expect("later DDL waits on the reservation", blocked(altering), True)
+            finally:
+                execute(holder, "COMMIT")
+            expect("drop keeps its earlier reservation", dropping.result(2), 0)
+            expect("later DDL sees the missing table", altering.result(2), 1146)
 
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
