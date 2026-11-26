@@ -54,12 +54,9 @@ the join against the temporary catalog.
 
 ## Remaining view cases
 
-A joined UPDATE targeting only the view changed the temporary row
-where MySQL changed the permanent row. A two-target UPDATE changed
-both rows in MySQL and only the temporary row in Fsdb. Both Fsdb
-storage modes reproduced these outcomes. The joined UPDATE rewrite
-loses the view's permanent target when it lowers that target to a
-table name.
+The [joined UPDATE follow-up](2026-11-26-joined-update-shadow.md) covers
+permanent view bindings and simultaneous updates to the same-named
+temporary table.
 
 `DROP TEMPORARY TABLE base` can still return 3730 when a permanent
 foreign key references the same-named permanent base. MySQL drops the

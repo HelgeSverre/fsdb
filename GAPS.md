@@ -1335,11 +1335,13 @@ keys still claim existing rows to wait for primary-key moves.
 now preserves the permanent view target and the session's temporary target
 as separate tables, including when both contain the same key. The audited
 cases cover statement failure, transaction rollback, and rechecking view
-visibility after a lock wait. Mixed DELETE currently uses conservative
-permanent row claims. [Joined UPDATE](torture/findings/2026-11-26-joined-delete-binding.md#remaining-view-cases)
-can still write the temporary row when its target is the view. A DROP
-TEMPORARY TABLE can also fail when a permanent foreign key references the
-same name.
+visibility after a lock wait. [Joined UPDATE across a temporary shadow](torture/findings/2026-11-26-joined-update-shadow.md)
+now carries the permanent binding through multiple writable views,
+correlated view predicates, and indexed ngram MATCH. Mixed joined writes
+still use conservative permanent row claims. A standalone UPDATE through
+a view can reject a correlated caller reference, and reopening one
+temporary table can diverge from MySQL's error 1137. DROP TEMPORARY TABLE
+can also fail when a permanent foreign key references the same name.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
 now has a native MySQL contract and fsdb regression: duplicate derived rows

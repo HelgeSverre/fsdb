@@ -27,6 +27,3 @@ let groupBy key (targets: (int * 'table) list) : Groups<'table> =
         targets
         |> List.map (fun (source, tableRef) -> source, Map.find (key tableRef) groupByTable)
         |> Map.ofList }
-
-let group defaultDatabase targets =
-    groupBy (physicalTableKey defaultDatabase) targets

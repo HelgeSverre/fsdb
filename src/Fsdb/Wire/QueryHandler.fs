@@ -2963,7 +2963,7 @@ let startTransactionStatement (session: Session) : Session =
     | Some _ -> session
     | None -> session
 
-let private prepareTransactionWrite (statement: Statement) (session: Session) : Session =
+let private prepareTransactionWrite claimReadPartners (statement: Statement) (session: Session) : Session =
     match session.Tx with
     | None -> session
     | Some transaction ->
@@ -2974,7 +2974,7 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
         let canRefresh = not (insideFunctionOrTrigger session)
         let lowerJoined =
             match transaction.Isolation, statement with
-            | (ReadUncommitted | ReadCommitted), Update update when canRefresh && not update.Joins.IsEmpty ->
+            | (ReadUncommitted | ReadCommitted), Update update when claimReadPartners && canRefresh && not update.Joins.IsEmpty ->
                 FromTable update.From :: (update.Joins |> List.map _.Table)
                 |> List.collect FromItem.leaves
                 |> List.exists (function
@@ -3003,13 +3003,15 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
             | _ -> None
 
         let readClaims pending (transaction: Transaction) =
-            match transaction.Isolation with
-            | (ReadUncommitted | ReadCommitted) when lowerJoined ->
-                Executor.transactionWriteReadClaims Executor.WriteReadScope.JoinedRanges pending transaction.Snapshot registry dbName statement
-            // Standalone joined-view updates use a nonlocking partner read.
-            | ReadUncommitted | ReadCommitted -> []
-            | RepeatableRead | Serializable ->
-                Executor.transactionWriteReadClaims Executor.WriteReadScope.LockingPartners pending transaction.Snapshot registry dbName statement
+            if not claimReadPartners then []
+            else
+                match transaction.Isolation with
+                | (ReadUncommitted | ReadCommitted) when lowerJoined ->
+                    Executor.transactionWriteReadClaims Executor.WriteReadScope.JoinedRanges pending transaction.Snapshot registry dbName statement
+                // Standalone joined-view updates use a nonlocking partner read.
+                | ReadUncommitted | ReadCommitted -> []
+                | RepeatableRead | Serializable ->
+                    Executor.transactionWriteReadClaims Executor.WriteReadScope.LockingPartners pending transaction.Snapshot registry dbName statement
 
         let initialReadSnapshot = readSnapshot transaction
         let readTargets = readClaims pendingConnection initialReadSnapshot
@@ -3763,7 +3765,7 @@ let private executeParsedStatement accesses (session: Session) (stmt: Statement)
                 let executed, result =
                     try
                         started
-                        |> prepareTransactionWrite stmt
+                        |> prepareTransactionWrite true stmt
                         |> syncTransactionView
                         |> execute
                     with
@@ -4228,7 +4230,7 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
                 |> Map.ofSeq }
     let workingSession = { session with Store = working; Tx = None }
     let (executed, result), permanent =
-        Executor.withPermanentMutationResult working (fun () -> executeParsedCoreUnderLock workingSession stmt)
+        Executor.withPermanentMutationResult working session.Store (fun () -> executeParsedCoreUnderLock workingSession stmt)
 
     match result with
     | Err _ -> { executed with Store = session.Store; Tx = session.Tx }, result
@@ -4283,35 +4285,54 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             TemporaryCatalog = temporaryCatalog },
         result
 
-let private permanentJoinedDelete (session: Session) dbName = function
+let private permanentJoinedWrite (session: Session) dbName statement =
+    let temporarySources (ctes: CommonTableExpr list) from (joins: Join list) =
+        let cteNames = ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
+        FromTable from :: List.map (fun (join: Join) -> join.Table) joins
+        |> List.collect FromItem.leaves
+        |> List.choose (function
+            | FromTable source when source.Database.IsSome || not (cteNames.Contains(source.Table.ToLowerInvariant())) ->
+                let key = CatalogOverlay.tableKey (source.Database |> Option.defaultValue dbName) source.Table
+                CatalogOverlay.tryTable session.TemporaryCatalog key
+                |> Option.map (fun table -> (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant(), table)
+            | _ -> None)
+        |> Map.ofList
+
+    // Claim permanent write targets before binding the actual join to the overlay.
+    let ignoreJoinConditions = List.map (Join.mapConditions (fun _ -> Lit(VInt 1L)))
+    match statement with
     | Delete delete when not delete.Joins.IsEmpty ->
-        let ctes = delete.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
-        let temporaryAliases =
-            FromTable delete.From :: List.map (fun (join: Join) -> join.Table) delete.Joins
-            |> List.collect FromItem.leaves
-            |> List.choose (function
-                | FromTable source when source.Database.IsSome || not (ctes.Contains(source.Table.ToLowerInvariant())) ->
-                    let key = CatalogOverlay.tableKey (source.Database |> Option.defaultValue dbName) source.Table
-                    CatalogOverlay.tryTable session.TemporaryCatalog key
-                    |> Option.map (fun _ -> (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant())
-                | _ -> None)
-            |> Set.ofList
-        let targets = delete.Targets |> List.filter (fun name -> not (temporaryAliases.Contains(name.ToLowerInvariant())))
-        // Temporary columns cannot be bound on the permanent catalog. Claim
-        // the permanent targets before the overlay evaluates the actual join.
+        let temporaryAliases = temporarySources delete.Ctes delete.From delete.Joins
+        let targets = delete.Targets |> List.filter (fun name -> not (temporaryAliases.ContainsKey(name.ToLowerInvariant())))
         if targets.IsEmpty then None
         else
             Some(Delete
                 { delete with
                     Targets = targets
                     Where = None
-                    Joins = delete.Joins |> List.map (Join.mapConditions (fun _ -> Lit(VInt 1L))) })
+                    Joins = ignoreJoinConditions delete.Joins })
+    | Update update when not update.Joins.IsEmpty ->
+        let temporary = temporarySources update.Ctes update.From update.Joins
+        let isTemporary (assignment: Assignment) =
+            match assignment.Table with
+            | Some owner -> temporary.ContainsKey(owner.ToLowerInvariant())
+            | None ->
+                temporary |> Map.exists (fun _ table ->
+                    table.Columns |> List.exists (fun column -> column.Name.Equals(assignment.Column, StringComparison.OrdinalIgnoreCase)))
+        let assignments = update.Assignments |> List.filter (isTemporary >> not)
+        if assignments.IsEmpty then None
+        else
+            Some(Update
+                { update with
+                    Assignments = assignments
+                    Where = None
+                    Joins = ignoreJoinConditions update.Joins })
     | _ -> None
 
 let private executeTemporaryStatement (action: TemporaryAction option) dbName (session: Session) stmt =
     let start session =
         beginTransaction ImplicitTrackedTransaction (pendingTransactionCharacteristics session) (configuredReadOnly session) session
-    let writePlan = if action.IsNone then permanentJoinedDelete session dbName stmt else None
+    let writePlan = if action.IsNone then permanentJoinedWrite session dbName stmt else None
     match writePlan with
     | None ->
         let session =
@@ -4330,7 +4351,7 @@ let private executeTemporaryStatement (action: TemporaryAction option) dbName (s
                 | Error(code, message) -> working, Err(code, message)
                 | Ok () ->
                     working <- startTransactionStatement working
-                    working <- prepareTransactionWrite plan working
+                    working <- prepareTransactionWrite false plan working
                     executeWithTemporaryCatalog action working stmt
             working <- executed
             if publish then

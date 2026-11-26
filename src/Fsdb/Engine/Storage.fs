@@ -68,6 +68,7 @@ type StorageError =
     /// narrows an integer type over existing out-of-range rows.
     | OutOfRangeForColumn of column: string
     | ExpressionError of code: int * message: string
+    | StoredProgramFailure of SqlState.Error
     /// A unique index (or the primary key, reported as `"PRIMARY"`) already
     /// has a row with this value.
     | DuplicateKey of table: string * keyName: string * value: string
@@ -134,6 +135,7 @@ let toMySqlError (err: StorageError) : int * string =
     | FullTextColumnNotAllowed column -> 1283, sprintf "Column '%s' cannot be part of FULLTEXT index" column
     | OutOfRangeForColumn column -> 1264, sprintf "Out of range value for column '%s' at row 1" column
     | ExpressionError(code, message) -> code, message
+    | StoredProgramFailure error -> error.Code, error.Message
     | DuplicateKey(table, keyName, value) ->
         1062, sprintf "Duplicate entry '%s' for key '%s.%s'" value (table.ToLowerInvariant()) keyName
     | ForeignKeyRestrict(database, table, foreignKey) ->

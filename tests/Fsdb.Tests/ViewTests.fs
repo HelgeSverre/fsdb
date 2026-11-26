@@ -160,6 +160,148 @@ let tests =
                   [ [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ]
                   "both targets roll back when a base trigger rejects the delete"
 
+          testCase "joined UPDATE keeps a writable view and its temporary shadow distinct"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              let exec sql =
+                  let next, result = Fsdb.QueryHandler.handle session sql
+                  session <- next
+                  result
+              let setup sql = expectOk (exec sql) sql
+
+              for sql in
+                  [ "CREATE TABLE update_shadow(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO update_shadow VALUES (1,10),(2,20),(3,30)"
+                    "CREATE VIEW update_inner AS SELECT id AS k,n FROM update_shadow WHERE n>0 WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW update_outer AS SELECT * FROM update_inner WITH CASCADED CHECK OPTION"
+                    "CREATE TRIGGER reject_update BEFORE UPDATE ON update_shadow FOR EACH ROW BEGIN IF NEW.n=99 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='blocked update'; END IF; END"
+                    "CREATE TEMPORARY TABLE update_shadow(id INT PRIMARY KEY,n VARCHAR(12))"
+                    "INSERT INTO update_shadow VALUES (1,'temp1'),(2,'temp2'),(3,'temp3')" ] do
+                  setup sql
+
+              Expect.equal (exec "UPDATE update_outer v JOIN update_shadow t ON t.id=v.k SET v.n=v.n+1 WHERE v.k=1")
+                  (Affected 1UL) "the view updates its permanent base"
+              Expect.equal (exec "UPDATE update_shadow t JOIN update_outer v ON t.id=v.k SET t.n='private',v.n=v.n+2 WHERE v.k=2")
+                  (Affected 2UL) "each target has its own row identity and schema"
+              let rejected =
+                  exec "UPDATE update_shadow t JOIN update_outer v ON t.id=v.k SET t.n='rollback',v.n=99 WHERE v.k=3"
+                  |> errorInfo
+                  |> Option.map (fun error -> error.Code, error.State, error.Message)
+              Expect.equal rejected (Some(1644, "45000", "blocked update")) "the permanent trigger rejects the whole statement"
+              match exec "UPDATE update_shadow t JOIN update_outer v ON t.id=v.k SET t.n='check',v.n=-1 WHERE v.k=3" with
+              | Err(1369, _) -> ()
+              | result -> failtestf "expected the view check to reject the whole statement, got %A" result
+              Expect.equal (rows store "SELECT id,n FROM update_shadow ORDER BY id")
+                  [ [ Some "1"; Some "11" ]; [ Some "2"; Some "22" ]; [ Some "3"; Some "30" ] ] "the permanent values"
+              Expect.equal (exec "SELECT id,n FROM update_shadow ORDER BY id")
+                  (ResultSet([ "id"; "n" ], [ [ Some "1"; Some "temp1" ]; [ Some "2"; Some "private" ]; [ Some "3"; Some "temp3" ] ]))
+                  "the temporary values"
+              setup "START TRANSACTION"
+              Expect.equal (exec "UPDATE update_outer v JOIN update_shadow t ON t.id=v.k SET v.n=v.n+7,t.n='tx' WHERE v.k=1")
+                  (Affected 2UL) "both writes participate in the transaction"
+              Expect.equal (rows store "SELECT n FROM update_shadow WHERE id=1") [ [ Some "11" ] ]
+                  "the uncommitted permanent write is private"
+              setup "ROLLBACK"
+              Expect.equal (exec "SELECT n FROM update_outer WHERE k=1") (ResultSet([ "n" ], [ [ Some "11" ] ]))
+                  "rollback restores the view's row"
+              Expect.equal (exec "SELECT n FROM update_shadow WHERE id=1") (ResultSet([ "n" ], [ [ Some "temp1" ] ]))
+                  "rollback restores the temporary row"
+
+              let handle = Fsdb.QueryHandler.handle
+              let writer, _ = handle (Fsdb.Session.create 2 store) "START TRANSACTION"
+              let writer, quieted = handle writer "UPDATE update_shadow SET n=0 WHERE id=3"
+              Expect.equal quieted (Affected 1UL) "another transaction changes the permanent row"
+              let updater = session
+              use started = new ManualResetEventSlim()
+              let waiting =
+                  Task.Run(fun () ->
+                      started.Set()
+                      handle updater "UPDATE update_outer v JOIN update_shadow t ON t.id=v.k SET v.n=10,t.n='stale' WHERE v.k=3")
+              Expect.isTrue (started.Wait 5000) "the mixed update starts"
+              let blocked = not (waiting.Wait 100)
+              let _, committed = handle writer "COMMIT"
+              Expect.equal committed (Affected 0UL) "the competing writer commits"
+              Expect.isTrue blocked "the mixed update waits on the permanent row"
+              Expect.isTrue (waiting.Wait 5000) "the mixed update resumes"
+              let updated, result = waiting.GetAwaiter().GetResult()
+              session <- updated
+              Expect.equal result (Affected 0UL) "the view no longer contains the updated row"
+              Expect.equal (exec "SELECT n FROM update_shadow WHERE id=3") (ResultSet([ "n" ], [ [ Some "temp3" ] ]))
+                  "the temporary partner is unchanged"
+
+          testCase "joined UPDATE scores ngram matches on the permanent side of a temporary shadow"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              let exec sql =
+                  let next, result = Fsdb.QueryHandler.handle session sql
+                  session <- next
+                  result
+
+              for sql in
+                  [ "CREATE TABLE update_docs(id INT PRIMARY KEY,body VARCHAR(100),marked INT,FULLTEXT KEY ix_body(body) WITH PARSER ngram) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
+                    "INSERT INTO update_docs VALUES(1,'東京駅鉄道',0),(2,'東京の鉄道駅',0),(3,'北京地铁',0)"
+                    "CREATE VIEW update_article AS SELECT id,body,marked FROM update_docs"
+                    "CREATE TEMPORARY TABLE update_docs(id INT PRIMARY KEY,note VARCHAR(20))"
+                    "INSERT INTO update_docs VALUES (1,'other1'),(2,'other2'),(3,'other3')" ] do
+                  expectOk (exec sql) sql
+
+              Expect.equal
+                  (exec """UPDATE update_article v JOIN update_docs t ON t.id=v.id SET v.marked=1,t.note='hit' WHERE MATCH(v.body) AGAINST ('"東京駅"' IN BOOLEAN MODE)""")
+                  (Affected 2UL) "both rows for the contiguous phrase change"
+              Expect.equal (rows store "SELECT id,marked FROM update_docs ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ] "the permanent index scores the phrase"
+              Expect.equal (exec "SELECT id,note FROM update_docs ORDER BY id")
+                  (ResultSet([ "id"; "note" ], [ [ Some "1"; Some "hit" ]; [ Some "2"; Some "other2" ]; [ Some "3"; Some "other3" ] ]))
+                  "the score selects only the matching temporary partner"
+
+          testCase "joined UPDATE preserves both view bindings through a correlated join and a temporary shadow"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              let exec sql =
+                  let next, result = Fsdb.QueryHandler.handle session sql
+                  session <- next
+                  result
+
+              for sql in
+                  [ "CREATE TABLE correlated_data(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE correlated_lookup(id INT PRIMARY KEY,delta INT)"
+                    "CREATE TABLE correlated_flags(id INT PRIMARY KEY,enabled INT)"
+                    "CREATE TABLE correlated_second(id INT PRIMARY KEY,m INT)"
+                    "INSERT INTO correlated_data VALUES(1,10)"
+                    "INSERT INTO correlated_lookup VALUES(1,5)"
+                    "INSERT INTO correlated_flags VALUES(1,1)"
+                    "INSERT INTO correlated_second VALUES(1,50)"
+                    "CREATE VIEW correlated_v AS SELECT b.id,b.n,p.delta FROM correlated_data b JOIN correlated_lookup p ON p.id=b.id AND EXISTS(SELECT 1 FROM correlated_flags f WHERE f.id=b.id AND f.enabled=1)"
+                    "CREATE VIEW correlated_where AS SELECT b.id,b.n FROM correlated_data b WHERE EXISTS(SELECT 1 FROM correlated_flags f WHERE f.id=b.id AND f.enabled=1)"
+                    "CREATE VIEW shared_predicate AS SELECT id,n FROM correlated_data WHERE EXISTS(SELECT 1 FROM correlated_flags f WHERE f.enabled=1)"
+                    "CREATE VIEW correlated_second_v AS SELECT * FROM correlated_second"
+                    "CREATE TEMPORARY TABLE correlated_flags(id INT PRIMARY KEY,enabled INT)"
+                    "INSERT INTO correlated_flags VALUES(1,0)" ] do
+                  expectOk (exec sql) sql
+
+              Expect.equal
+                  (exec "UPDATE correlated_v v JOIN correlated_second_v s ON s.id=v.id JOIN correlated_flags t ON t.id=v.id SET v.n=v.n+v.delta,s.m=s.m+1,t.enabled=2 WHERE v.id=1")
+                  (Affected 3UL) "the permanent flag enables writes to both views and the temporary table"
+              Expect.equal (rows store "SELECT n FROM correlated_data") [ [ Some "15" ] ] "the first view uses its permanent join"
+              Expect.equal (rows store "SELECT m FROM correlated_second") [ [ Some "51" ] ] "the second view updates its own base"
+              Expect.equal (rows store "SELECT enabled FROM correlated_flags") [ [ Some "1" ] ] "the permanent flag remains unchanged"
+              Expect.equal (exec "SELECT enabled FROM correlated_flags")
+                  (ResultSet([ "enabled" ], [ [ Some "2" ] ])) "the direct alias updates the temporary flag"
+
+              Expect.equal
+                  (exec "UPDATE correlated_where v JOIN correlated_flags t ON t.id=v.id SET v.n=v.n+4,t.enabled=3 WHERE v.id=1")
+                  (Affected 2UL) "the WHERE subquery still binds to the permanent flag"
+              Expect.equal (rows store "SELECT n FROM correlated_data") [ [ Some "19" ] ] "the view update reaches the permanent row"
+              Expect.equal (exec "SELECT enabled FROM correlated_flags")
+                  (ResultSet([ "enabled" ], [ [ Some "3" ] ])) "the caller still updates the temporary flag"
+              Expect.equal
+                  (exec "UPDATE shared_predicate v JOIN correlated_lookup t ON t.id=v.id SET v.n=v.n+100 WHERE v.id=1 AND EXISTS(SELECT 1 FROM correlated_flags f WHERE f.enabled=1)")
+                  (Affected 0UL) "identical SQL in the caller uses the temporary flag"
+              Expect.equal (rows store "SELECT n FROM correlated_data") [ [ Some "19" ] ] "the caller filter still applies"
+
           testCase "joined DELETE distinguishes a writable view from its temporary shadow"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

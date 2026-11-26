@@ -398,6 +398,21 @@ type private MutationSourceOverride =
       IdentityOf: Value[] -> Value[] option
       WriteTable: TableRef option }
 
+type private MutationJoinCatalogs =
+    { Source: FromItem -> Store
+      Condition: (Expr -> Store option) option }
+
+let private mutationJoinCatalogs store =
+    { Source = fun _ -> store
+      Condition = None }
+
+type private ViewMutationSources =
+    { Aliases: Set<string>
+      Conditions: Expr list }
+
+let private ownsViewCondition sources expression =
+    sources.Conditions |> List.exists (fun condition -> obj.ReferenceEquals(condition, expression))
+
 type private MutationSourceOverrides = Map<string, Lazy<Result<MutationSourceOverride, QueryResult>>>
 
 type private LockingReadSource =
@@ -1197,9 +1212,6 @@ let internal currentDirectOnlyRestriction () = directOnlyRestriction.Value
 let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a =
     DynamicScope.withValue triggerRowScope (Some scope) body
 
-let internal withCommittedFullTextStore store body =
-    DynamicScope.withValue committedFullTextStore (Some store) body
-
 let withLockingReadStore (store: unit -> Store) (timeout: System.TimeSpan) (body: unit -> 'a) : 'a =
     DynamicScope.withValue lockingReadStore (Some store) (fun () ->
         DynamicScope.withValue lockingReadTimeout (Some timeout) body)
@@ -1455,18 +1467,31 @@ let private storeForStoredView (store: Store) =
 
 // The wire layer owns the temporary overlay. A joined write can return a
 // separate permanent snapshot when the SQL-visible catalog hides its target.
-let private permanentMutationResult = System.Threading.AsyncLocal<(Store * (Store -> unit)) option>()
+type private TemporaryMutationScope =
+    { Overlay: Store
+      Committed: Store
+      Publish: Store -> unit }
 
-let internal withPermanentMutationResult (overlay: Store) execute =
+let private temporaryMutationScope = System.Threading.AsyncLocal<TemporaryMutationScope option>()
+
+let internal withPermanentMutationResult overlay committed execute =
     let mutable permanent = None
-    let result =
-        DynamicScope.withValue permanentMutationResult (Some(overlay, fun snapshot -> permanent <- Some snapshot)) execute
+    let scope = { Overlay = overlay; Committed = committed; Publish = fun snapshot -> permanent <- Some snapshot }
+    let result = DynamicScope.withValue temporaryMutationScope (Some scope) execute
     result, permanent
 
-let private permanentMutationPublisher (store: Store) =
-    permanentMutationResult.Value
-    |> Option.bind (fun (overlay, publish) ->
-        if obj.ReferenceEquals(overlay.Databases, store.Databases) then Some publish else None)
+let private temporaryMutationScopeFor (store: Store) =
+    temporaryMutationScope.Value
+    |> Option.filter (fun scope -> obj.ReferenceEquals(scope.Overlay.Databases, store.Databases))
+
+let internal withCommittedFullTextStore store body =
+    // Keep committed index visibility backed by the shared store when the
+    // statement evaluator itself runs against a session temporary overlay.
+    let committed = temporaryMutationScopeFor store |> Option.map _.Committed |> Option.defaultValue store
+    DynamicScope.withValue committedFullTextStore (Some committed) body
+
+let private permanentMutationPublisher store =
+    temporaryMutationScopeFor store |> Option.map _.Publish
 
 type private ShadowedMutation =
     { PermanentBefore: Store
@@ -1496,6 +1521,25 @@ let private commitJoinedMutation (store: Store) baseCatalog snapshot = function
         store.Catalog <- split.TemporaryAfter.Catalog
         split.PublishPermanent split.PermanentAfter
     | None -> Storage.commitCatalogInto store baseCatalog snapshot
+
+let private isTemporaryTable (store: Store) (database: string) table =
+    store.TableShadows.ContainsKey(database.ToLowerInvariant(), normalizeTableName table)
+
+let private groupJoinedMutationTargets store dbName (sources: MutationSource list) indices =
+    indices
+    |> List.choose (fun index ->
+        let source = sources.[index]
+        source.PhysicalTable
+        |> Option.map (fun reference ->
+            let db, table = MutationTargets.physicalTableKey dbName reference
+            index, (reference, not source.FromStoredView && isTemporaryTable store db table)))
+    |> MutationTargets.groupBy (fun (reference, temporary) -> MutationTargets.physicalTableKey dbName reference, temporary)
+
+let private joinedMutationStore snapshot split temporary =
+    match split with
+    | Some split when temporary -> split.TemporaryAfter
+    | Some split -> split.PermanentAfter
+    | None -> snapshot
 
 let private parseStoredViewStatement (view: StoredView) =
     let options = { Parser.defaultOptions with LiteralCollation = Some view.CollationConnection }
@@ -2938,8 +2982,9 @@ let private unknownFunction (name: string) : EvalError =
     1305, sprintf "FUNCTION %s does not exist" name
 
 let private storageErr (e: StorageError) : QueryResult =
-    let code, message = toMySqlError e
-    Err(code, message)
+    match e with
+    | StoredProgramFailure error -> ErrInfo error
+    | _ -> toMySqlError e |> Err
 
 let private noteTableExists name =
     Diagnostics.note 1050 (sprintf "Table '%s' already exists" name)
@@ -12322,16 +12367,17 @@ and private physicalFastPathTable (store: Store) (dbName: string) (tableRef: Tab
     |> Option.flatten
 
 and private validateTableIndexHintSources
-    (store: Store)
+    (storeForSource: FromItem -> Store)
     (dbName: string)
     (cteNames: Set<string>)
     (from: FromItem option)
     (joins: Join list)
     : Result<unit, QueryResult> =
     let validate = function
-        | FromTable tableRef
+        | FromTable tableRef as source
             when not tableRef.IndexHints.IsEmpty
                  && not (tableRef.Database.IsNone && Set.contains (tableRef.Table.ToLowerInvariant()) cteNames) ->
+            let store = storeForSource source
             let tableDb = tableRef.Database |> Option.defaultValue dbName
             match tryStoredView store tableDb tableRef.Table with
             | Some view -> validateUnindexedRelationHints tableRef view.Name
@@ -13884,28 +13930,31 @@ and private applyMutationJoin
     (registry: Registry)
     (dbName: string)
     (scope: JoinEvaluationScope)
+    (catalogs: MutationJoinCatalogs)
     (sourceOverrides: MutationSourceOverrides)
     ((sourcesSoFar, rowsSoFar): MutationSource list * (Value[] option list * Value[]) list)
     (leftOperand: FromItem option)
     (join: Join)
     : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
+    let sourceStore = catalogs.Source join.Table
+    let conditionStore = catalogs.Condition |> Option.bind (fun lookup -> lookup join.On) |> Option.defaultValue store
     match join.Table with
     | FromJoinGroup _ when
         join.Kind <> RightJoin && join.Kind <> NaturalRightJoin
-        && sourceReferencesPreceding store dbName (sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)) join.Table ->
+        && sourceReferencesPreceding sourceStore dbName (sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)) join.Table ->
         let prepare outer =
-            prepareMutationJoinSource store registry dbName { scope with LateralOuter = Some outer } sourceOverrides join.Table
-        applyDependentMutationJoin store registry dbName scope (sourcesSoFar, rowsSoFar) leftOperand join prepare
+            prepareMutationJoinSource store registry dbName { scope with LateralOuter = Some outer } catalogs sourceOverrides join.Table
+        applyDependentMutationJoin conditionStore registry dbName scope catalogs.Condition (sourcesSoFar, rowsSoFar) leftOperand join prepare
     | FromLateral(_, qualifier) when join.Kind <> RightJoin && join.Kind <> NaturalRightJoin ->
         let prepare outer =
-            resolveFromSubquery store registry dbName join.Table (Some outer)
+            resolveFromSubquery sourceStore registry dbName join.Table (Some outer)
             |> Result.map (mutationDerivedSource qualifier)
-        applyDependentMutationJoin store registry dbName scope (sourcesSoFar, rowsSoFar) leftOperand join prepare
+        applyDependentMutationJoin conditionStore registry dbName scope catalogs.Condition (sourcesSoFar, rowsSoFar) leftOperand join prepare
     | FromJsonTable(source, path, columns, alias) when join.Kind <> RightJoin && join.Kind <> NaturalRightJoin ->
         let sourceColumns = sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)
 
         expandJsonTableJoinRows
-            store
+            sourceStore
             registry
             dbName
             scope
@@ -13927,17 +13976,17 @@ and private applyMutationJoin
                   Columns = joinColumns } ],
             List.ofSeq rows)
     | source ->
-        prepareMutationJoinSource store registry dbName scope sourceOverrides source
-        |> Result.bind (applyPreparedMutationJoin store registry dbName scope (sourcesSoFar, rowsSoFar) leftOperand join)
+        prepareMutationJoinSource store registry dbName scope catalogs sourceOverrides source
+        |> Result.bind (applyPreparedMutationJoin conditionStore registry dbName scope catalogs.Condition (sourcesSoFar, rowsSoFar) leftOperand join)
 
 and private applyDependentMutationJoin
-    store registry dbName scope
+    store registry dbName scope conditionStore
     ((sources, rows): MutationSource list * (Value[] option list * Value[]) list)
     leftOperand join prepare =
     let sourceColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
     let columns = sourceColumns |> List.collect snd
     let contextFor = contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sourceColumns) scope.LateralOuter
-    let matchRows rows = applyPreparedMutationJoin store registry dbName scope (sources, rows) leftOperand join
+    let matchRows rows = applyPreparedMutationJoin store registry dbName scope conditionStore (sources, rows) leftOperand join
     let matchRow ((_, flat) as row) = prepare (contextFor flat) |> Result.bind (matchRows [ row ])
     match rows with
     | [] ->
@@ -13955,23 +14004,25 @@ and private prepareMutationJoinSource
     (registry: Registry)
     (dbName: string)
     (scope: JoinEvaluationScope)
+    (catalogs: MutationJoinCatalogs)
     (sourceOverrides: MutationSourceOverrides)
     (source: FromItem)
     : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
     match source with
     | FromJoinGroup(baseSource, joins) ->
         let baseJoin = { Kind = CrossJoin; Table = baseSource; On = Lit(VInt 1L); Using = [] }
-        let initial = applyMutationJoin store registry dbName scope sourceOverrides ([], [ [], [||] ]) None baseJoin
+        let initial = applyMutationJoin store registry dbName scope catalogs sourceOverrides ([], [ [], [||] ]) None baseJoin
         joins
         |> List.fold
             (fun state innerJoin ->
                 state |> Result.bind (fun (rows, leftOperand) ->
-                    applyMutationJoin store registry dbName scope sourceOverrides rows (Some leftOperand) innerJoin
+                    applyMutationJoin store registry dbName scope catalogs sourceOverrides rows (Some leftOperand) innerJoin
                     |> Result.map (fun rows -> rows, FromJoinGroup(leftOperand, [ innerJoin ]))))
             (initial |> Result.map (fun rows -> rows, baseSource))
         |> Result.map fst
     | FromTable tableRef ->
         let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+        let sourceStore = catalogs.Source source
 
         let resolved =
             match Map.tryFind (qualifier.ToLowerInvariant()) sourceOverrides with
@@ -13980,26 +14031,26 @@ and private prepareMutationJoinSource
                 |> Result.map (fun prepared ->
                     prepared.Columns, prepared.Rows, prepared.IdentityOf, prepared.WriteTable)
             | None ->
-                resolveTableRef store registry dbName tableRef
+                resolveTableRef sourceStore registry dbName tableRef
                 |> Result.map (fun (columns, rows) -> columns, rows, Some, None)
 
         resolved
         |> Result.map (fun (columns, rows, identityOf, writeTable) ->
             [ { Qualifier = qualifier
                 PhysicalTable = Some(writeTable |> Option.defaultValue tableRef)
-                FromStoredView = writeTable.IsSome
+                FromStoredView = writeTable.IsSome || not (obj.ReferenceEquals(store, sourceStore))
                 Columns = columns } ],
             rows |> List.map (fun row -> [ identityOf row ], row))
     | FromJsonTable(_, _, _, qualifier) ->
-        prepareJoinSource store registry dbName scope Map.empty Map.empty source
+        prepareJoinSource (catalogs.Source source) registry dbName scope Map.empty Map.empty source
         |> Result.map (fun prepared -> mutationDerivedSource qualifier (prepared.Columns, List.ofSeq prepared.Rows))
     | FromLateral(_, qualifier) ->
-        resolveFromSubquery store registry dbName source scope.LateralOuter
+        resolveFromSubquery (catalogs.Source source) registry dbName source scope.LateralOuter
         |> Result.map (mutationDerivedSource qualifier)
     | FromSubquery(_, qualifier) ->
         (match scope.QueryOuter with
-         | None -> resolveFromItem store registry dbName source
-         | Some outer -> resolveFromSubquery store registry dbName source (Some outer))
+         | None -> resolveFromItem (catalogs.Source source) registry dbName source
+         | Some outer -> resolveFromSubquery (catalogs.Source source) registry dbName source (Some outer))
         |> Result.map (mutationDerivedSource qualifier)
 
 and private applyPreparedMutationJoin
@@ -14007,6 +14058,7 @@ and private applyPreparedMutationJoin
     (registry: Registry)
     (dbName: string)
     (scope: JoinEvaluationScope)
+    (conditionStore: (Expr -> Store option) option)
     ((sourcesSoFar, rowsSoFar): MutationSource list * (Value[] option list * Value[]) list)
     (leftOperand: FromItem option)
     (join: Join)
@@ -14022,6 +14074,8 @@ and private applyPreparedMutationJoin
     let leftIdentityPadding = List.replicate sourcesSoFar.Length None
 
     let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers scope.QueryOuter
+    let evaluate =
+        conditionStore |> Option.map evalBoundMutationCondition |> Option.defaultValue evalExpr
 
     let leftIndexed = rowsSoFar |> List.indexed
     let rightIndexed = rightRows |> List.indexed
@@ -14086,7 +14140,7 @@ and private applyPreparedMutationJoin
 
         let residualHolds (combinedFlat: Value[]) : Result<bool, EvalError> =
             residualConjuncts
-            |> traverse (fun c -> evalExpr { ctxFor combinedFlat with Clause = OnClause } c)
+            |> traverse (fun c -> evaluate { ctxFor combinedFlat with Clause = OnClause } c)
             |> Result.map (List.forall (fun v -> truthy v = Some true))
 
         if hashEligible then
@@ -14115,10 +14169,21 @@ and private applyPreparedMutationJoin
             |> traverseSeq (fun (li, ri, (lIdent, lFlat), (rIdent, r)) ->
                 let combinedFlat = Array.append lFlat r
 
-                evalExpr { ctxFor combinedFlat with Clause = OnClause } effectiveOn
+                evaluate { ctxFor combinedFlat with Clause = OnClause } effectiveOn
                 |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, (lIdent @ rIdent, combinedFlat)) else None))
             |> Result.mapError Err
             |> Result.map buildCombinedRows
+
+and private evalBoundMutationCondition storeForExpression ctx expression =
+    match storeForExpression expression with
+    | Some store -> evalExpr { ctx with Store = store } expression
+    | None ->
+        match expression with
+        | BinOp(And, left, right) ->
+            evalLogicalAnd
+                (evalBoundMutationCondition storeForExpression ctx left)
+                (fun () -> evalBoundMutationCondition storeForExpression ctx right)
+        | _ -> evalExpr ctx expression
 
 /// Resolves `from :: joins` into the same `(sources, rows)` shape
 /// `applyMutationJoin` builds up — the multi-table `UPDATE`/`DELETE`
@@ -14127,6 +14192,7 @@ and private runMutationJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
+    (catalogs: MutationJoinCatalogs)
     (sourceOverrides: MutationSourceOverrides)
     (from: TableRef)
     (joins: Join list)
@@ -14136,8 +14202,8 @@ and private runMutationJoin
     let resolved =
         let cteNames = currentCteScope () |> Map.keys |> Set.ofSeq
         validateRelationNames dbName cteNames [] (Some(FromTable from)) joins
-        |> Result.bind (fun () -> validateTableIndexHintSources store dbName cteNames (Some(FromTable from)) joins)
-        |> Result.bind (fun () -> prepareMutationJoinSource store registry dbName scope sourceOverrides (FromTable from))
+        |> Result.bind (fun () -> validateTableIndexHintSources catalogs.Source dbName cteNames (Some(FromTable from)) joins)
+        |> Result.bind (fun () -> prepareMutationJoinSource store registry dbName scope catalogs sourceOverrides (FromTable from))
 
     match resolved with
     | Error e -> Error e
@@ -14146,7 +14212,7 @@ and private runMutationJoin
         |> List.fold
             (fun acc join ->
                 acc |> Result.bind (fun (state, leftOperand) ->
-                    applyMutationJoin store registry dbName scope sourceOverrides state (Some leftOperand) join
+                    applyMutationJoin store registry dbName scope catalogs sourceOverrides state (Some leftOperand) join
                     |> Result.map (fun state -> state, FromJoinGroup(leftOperand, [ join ]))))
             (Ok(initial, FromTable from))
         |> Result.map fst
@@ -15209,7 +15275,7 @@ and private runSelectStmtCore
             (select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList)
     match
         validateRelationNames dbName cteNames select.Ctes select.From select.Joins
-        |> Result.bind (fun () -> validateTableIndexHintSources store dbName cteNames select.From select.Joins)
+        |> Result.bind (fun () -> validateTableIndexHintSources (fun _ -> store) dbName cteNames select.From select.Joins)
     with
     | Error error -> error, [], []
     | Ok() ->
@@ -24378,12 +24444,12 @@ and private fullTextPredicatePlan
                   PredicateFor = fun rowId -> rewrite (fun scores -> tryFullTextScore rowId scores |> Option.defaultValue 0.0)
                   ProbePredicate = rewrite (fun _ -> 0.0) })
 
-and private fullTextPhysicalSources (store: Store) (dbName: string) (sourceItems: FromItem list) =
+and private fullTextPhysicalSources (storeForSource: FromItem -> Store) (dbName: string) (sourceItems: FromItem list) =
     sourceItems
     |> traverse (fun item ->
         match item with
         | FromTable tableRef ->
-            tryPhysicalTableRef store dbName tableRef
+            tryPhysicalTableRef (storeForSource item) dbName tableRef
             |> Result.map (
                 Option.map (fun table ->
                     { Database = tableRef.Database |> Option.defaultValue dbName
@@ -24570,7 +24636,7 @@ and private fullTextScoreValues rowId computed =
     |> Array.ofList
 
 and private fullTextMutationSources
-    (store: Store)
+    (storeForSource: FromItem -> Store)
     (dbName: string)
     (from: TableRef)
     (joins: Join list)
@@ -24581,7 +24647,7 @@ and private fullTextMutationSources
     else
         let sourceItems = FromTable from :: (joins |> List.map _.Table) |> List.collect FromItem.leaves
 
-        fullTextPhysicalSources store dbName sourceItems
+        fullTextPhysicalSources storeForSource dbName sourceItems
         |> Result.bind (fun sources ->
             matchNodes
             |> traverse (fun node -> fullTextOwnerOf sources node |> Result.map (fun owner -> owner, node))
@@ -24656,7 +24722,7 @@ and private runFullTextSelect
     let unsupported () = Err(1191, "Can't find FULLTEXT index matching the column list"), [], []
     let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table) |> List.collect FromItem.leaves
 
-    match select.From, fullTextPhysicalSources store dbName sourceItems with
+    match select.From, fullTextPhysicalSources (fun _ -> store) dbName sourceItems with
     | None, _ -> unsupported ()
     | _, Error error -> error, [], []
     | Some(FromItem.Grouped(source, joins)), _ ->
@@ -25978,6 +26044,30 @@ let private recomputeGeneratedColumns
 
 let private rewriteExprWith = Expression.rewrite
 
+// MATCH keeps its column list outside the expression tree.
+let private rewriteViewReferences replace expression =
+    let rec rewrite expression =
+        rewriteExprWith (fun node ->
+            match replace node, node with
+            | Some rewritten, _ -> Some rewritten
+            | None, MatchAgainst(columns, query, mode) ->
+                let columns =
+                    columns
+                    |> List.map (fun column ->
+                        let reference = column.Qualifier |> Option.map (fun owner -> QualifiedCol(owner, column.Name)) |> Option.defaultValue (Col column.Name)
+                        match replace reference with
+                        | Some(QualifiedCol(owner, name)) -> { Qualifier = Some owner; Name = name }
+                        | Some(Col name) -> { Qualifier = None; Name = name }
+                        | _ -> column)
+                Some(MatchAgainst(columns, rewrite query, mode))
+            | None, _ -> None) expression
+    rewrite expression
+
+let private qualifyViewReference qualifier =
+    rewriteViewReferences (function
+        | Col name -> Some(QualifiedCol(qualifier, name))
+        | _ -> None)
+
 /// Rewrites `VALUES(col)` calls (MySQL's way of referring, inside an
 /// `INSERT ... ON DUPLICATE KEY UPDATE` assignment, to the value that row
 /// would have inserted) into the literal `candidate` value for that column —
@@ -26178,7 +26268,7 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
     | None -> None
     | Some view ->
         match parseStoredViewStatement view with
-        | Ok(Select select) -> updatableViewOfSelect store view select
+        | Ok(Select select) -> updatableViewOfSelect (storeForStoredView store) view select
         | _ -> None
 
 let private bindJoinedDeleteTargetNames dbName (delete: DeleteStmt) =
@@ -26335,7 +26425,7 @@ let private prepareDeleteViewSource store registry (stored: StoredView) (view: U
         else
             // Score against the original indexed corpus before the view
             // input becomes a CTE. Keep the physical identity of each row.
-            withoutCteScope (fun () -> fullTextMutationSources viewStore schema input [] matchNodes)
+            withoutCteScope (fun () -> fullTextMutationSources (fun _ -> viewStore) schema input [] matchNodes)
             |> Result.bind (fun (sources, rewrite) ->
                 let qualifier = input.Alias |> Option.defaultValue input.Table
 
@@ -26461,7 +26551,7 @@ let tryJoinedViewLoadError (store: Store) (defaultDatabase: string) (qualifiedNa
             Some(joinedViewLoadError viewName))
 
 let private rewriteViewExpression (view: UpdatableView) (expression: Expr) =
-    rewriteExprWith (function
+    rewriteViewReferences (function
         | FuncCall(name, [ Col column ]) when name.Equals("VALUES", System.StringComparison.OrdinalIgnoreCase) ->
             view.Columns
             |> Map.tryFind (column.ToLowerInvariant())
@@ -26912,7 +27002,7 @@ let private freshenViewAliases (store: Store) (defaultDatabase: string) (update:
         let replace = function
             | QualifiedCol(owner, column) -> renamed owner |> Option.map (fun fresh -> QualifiedCol(fresh, column))
             | _ -> None
-        let rewrite expression = Expression.rewrite replace expression
+        let rewrite expression = rewriteViewReferences replace expression
         let rewriteLateralSelect = Expression.rewriteSelectOuterAliases aliases
         let rewriteBody = function
             | PlainSelect select -> PlainSelect(rewriteLateralSelect select)
@@ -27147,7 +27237,7 @@ type private BoundUpdateSource =
       Equalities: (string * Value) list
       PrimaryClaim: WriteLockTargets option }
 
-let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list) where =
+let private boundUpdateJoinKeysWith storeForSource store dbName (from: TableRef) (joins: Join list) where =
     let whereConditions =
         optionalConjuncts where
         |> List.map (function
@@ -27156,8 +27246,8 @@ let private boundUpdateJoinKeys store dbName (from: TableRef) (joins: Join list)
             | predicate -> predicate)
 
     let physicalOperand = function
-        | FromTable source when source.IndexHints.IsEmpty ->
-            physicalFastPathTable store dbName source
+        | FromTable source as item when source.IndexHints.IsEmpty ->
+            physicalFastPathTable (storeForSource item) dbName source
             |> Option.map (fun table ->
                 (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant(), (source, table))
         | _ -> None
@@ -27310,8 +27400,11 @@ let private boundUpdateRows (table: Table) = function
     | UpdateRange range ->
         range.RowIds |> Seq.sortBy table.RowsArray.ScanPosition |> Seq.choose table.RowsArray.TryFind |> List.ofSeq
 
-let private boundUpdateJoinSources store dbName from joins where : MutationSourceOverrides option =
-    boundUpdateJoinKeys store dbName from joins where
+let private boundUpdateJoinKeys store dbName from joins where =
+    boundUpdateJoinKeysWith (fun _ -> store) store dbName from joins where
+
+let private boundUpdateJoinSources storeForSource store dbName from joins where : MutationSourceOverrides option =
+    boundUpdateJoinKeysWith storeForSource store dbName from joins where
     |> Option.bind (fun sources ->
         chooseBoundUpdateAccess store dbName where sources
         |> Option.map (Map.map (fun owner access ->
@@ -29587,8 +29680,7 @@ let private triggersFor
     (timing: string)
     (event: string)
     : StoredTrigger list =
-    let key = db.ToLowerInvariant(), normalizeTableName table
-    if store.TableShadows.ContainsKey key then []
+    if isTemporaryTable store db table then []
     else
         match scan store "mysql" "triggers" with
         | Error _ -> []
@@ -30272,7 +30364,8 @@ let private truncateHashPartitions
 
 /// Executes a statement under `currentAccount`; `ids` carries the OK-packet
 /// and generated AUTO_INCREMENT identities between statements.
-let rec executeAs
+let rec private executeAsWithViewSources
+    (viewSources: ViewMutationSources)
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -30823,8 +30916,10 @@ let rec executeAs
     let triggerStorageResult =
         function
         | None -> Ok()
-        | Some(Err(code, message)) -> Error(ExpressionError(code, message))
-        | Some _ -> Error(ExpressionError(1105, "Trigger execution failed"))
+        | Some result ->
+            match errorInfo result with
+            | Some error -> Error(StoredProgramFailure error)
+            | None -> Error(ExpressionError(1105, "Trigger execution failed"))
 
     let applyUpdateRows (statement: UpdateStmt) (runStore: Store) db table candidates predicate assignedColumns updater
         (triggerRows: ResizeArray<Value[] option * Value[] option>) beforeTriggers afterTriggers =
@@ -30924,7 +31019,8 @@ let rec executeAs
         =
         match viewCheckScope.Value with
         | Some scope
-            when scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
+            when not (isTemporaryTable runStore db table)
+                 && scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
                  && scope.Table.Equals(table, System.StringComparison.OrdinalIgnoreCase) ->
             let checkPredicate =
                 match scope.CheckPredicate with
@@ -30957,7 +31053,7 @@ let rec executeAs
                                     WriteTable = None }) ]
 
                 let joined row =
-                    runMutationJoin runStore registry db (overrideFor row) from joins
+                    runMutationJoin runStore registry db (mutationJoinCatalogs runStore) (overrideFor row) from joins
                     |> Result.mapError (function
                         | Err(code, message) -> ExpressionError(code, message)
                         | error -> ExpressionError(1105, sprintf "Join view check failed: %A" error))
@@ -31477,7 +31573,9 @@ let rec executeAs
             (fun targetStore tableColumns _ candidate ->
                 finishInsertRow targetStore db table tableColumns candidate)
 
-    let executeViewWrite (view: UpdatableView) (runtimeView: UpdatableView) (target: ViewColumnTarget) (runtimeTarget: ViewColumnTarget) statement (originalUpdate: UpdateStmt option) =
+    let executeViewWrite (view: UpdatableView) (runtimeView: UpdatableView) (target: ViewColumnTarget) (runtimeTarget: ViewColumnTarget) statement (originalUpdate: UpdateStmt option) predicate =
+        let executionStore = store
+        let store = storeForStoredView executionStore
         let targetKey = target.Database, target.Table, target.Qualifier
         let runtimeTargetKey = runtimeTarget.Database, runtimeTarget.Table, runtimeTarget.Qualifier
         let sourceAliases (source: UpdatableView) =
@@ -31939,7 +32037,13 @@ let rec executeAs
         | Ok authorized ->
             let execute () =
                 DynamicScope.withValue sharedViewCteScope (Some { Aliases = view.SharedCteAliases; Pending = true }) (fun () ->
-                    executeAs store authorized dbName ids foundRows currentAccount statement)
+                    let scope =
+                        { Aliases = runtimeAliases |> List.fold (fun aliases alias -> Set.add (alias.ToLowerInvariant()) aliases) viewSources.Aliases
+                          Conditions =
+                              Option.toList predicate
+                              @ (runtimeView.UpdateJoins |> List.collect Join.conditions)
+                              @ viewSources.Conditions }
+                    executeAsWithViewSources scope executionStore authorized dbName ids foundRows currentAccount statement)
 
             let checkPredicate = Map.tryFind runtimeTargetKey runtimeView.CheckPredicates
 
@@ -33171,7 +33275,7 @@ let rec executeAs
                                 Fields = baseFields
                                 Assignments = assignments }
 
-                    executeViewWrite view view target target rewritten None
+                    executeViewWrite view view target target rewritten None None
 
     | LoadData load ->
         let db, table = splitQualified dbName load.Table
@@ -33317,7 +33421,7 @@ let rec executeAs
                 | Ok(), Ok assignments ->
                     let rewritten = Insert(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
 
-                    executeViewWrite view view target target rewritten None
+                    executeViewWrite view view target target rewritten None None
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -33371,7 +33475,7 @@ let rec executeAs
                 | Ok(), Ok assignments ->
                     let rewritten = InsertSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select, assignments, ignoreDuplicates)
 
-                    executeViewWrite view view target target rewritten None
+                    executeViewWrite view view target target rewritten None None
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -33445,7 +33549,7 @@ let rec executeAs
             | Ok(target, baseColumns) ->
                 let rewritten = Replace(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs)
 
-                executeViewWrite view view target target rewritten None
+                executeViewWrite view view target target rewritten None None
 
     | Replace(table, columns, rowsExprs) ->
         let db, table = splitQualified dbName table
@@ -33473,7 +33577,7 @@ let rec executeAs
             | Ok(target, baseColumns) ->
                 let rewritten = ReplaceSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select)
 
-                executeViewWrite view view target target rewritten None
+                executeViewWrite view view target target rewritten None None
 
     | ReplaceSelect(table, columns, select) ->
         let db, table = splitQualified dbName table
@@ -33503,7 +33607,7 @@ let rec executeAs
             | Ok(target, _), Ok rewrittenAssignments ->
                 let rewritten = ReplaceSet(SqlText.objectName (Some target.Database) target.Table, rewrittenAssignments)
 
-                executeViewWrite view view target target rewritten None
+                executeViewWrite view view target target rewritten None None
 
     | ReplaceSet(table, assignments) ->
         let db, table = splitQualified dbName table
@@ -33741,13 +33845,11 @@ let rec executeAs
             let callerCurrentUser =
                 Functions.lookup "CURRENT_USER" registry
                 |> Option.map (fun currentUser -> currentUser [])
-            let qualifyView expression =
-                rewriteExprWith (function
-                    | Col name -> Some(QualifiedCol(baseQualifier, name))
-                    | _ -> None) expression
+            let qualifyView = qualifyViewReference baseQualifier
 
             let rewrite expression =
-                rewriteExprWith (function
+                rewriteViewReferences (function
+                    | condition when ownsViewCondition viewSources condition -> Some condition
                     | FuncCall(name, []) when equalsIgnoreCase name "CURRENT_USER" ->
                         callerCurrentUser |> Option.map Lit
                     | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier viewQualifier ->
@@ -33869,7 +33971,7 @@ let rec executeAs
                         let runtimeTarget = runtimeView.Targets.[exposed.Column.ToLowerInvariant()]
                         let classified =
                             { updateStmt with Assignments = assignments |> List.map fst }
-                        executeViewWrite view runtimeView target runtimeTarget (Update rewritten) (Some classified)
+                        executeViewWrite view runtimeView target runtimeTarget (Update rewritten) (Some classified) viewPredicate
 
     | Update updateStmt when updateStmt.Joins.IsEmpty && tryStoredView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome ->
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
@@ -33882,7 +33984,7 @@ let rec executeAs
         | Some view, None ->
             match rewriteStandaloneViewUpdate view updateStmt with
             | Error(code, message) -> ids, Err(code, message)
-            | Ok(rewritten, target) -> executeViewWrite view view target target (Update rewritten) (Some updateStmt)
+            | Ok(rewritten, target) -> executeViewWrite view view target target (Update rewritten) (Some updateStmt) None
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -34052,6 +34154,19 @@ let rec executeAs
         // Physical rows are claimed once even when multiple join rows reach them.
         (
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
+            let split = beginShadowedMutation store snapshot
+            // Only sources introduced by the view use the permanent catalog.
+            // The outer statement still resolves its own sources in the overlay.
+            let sourceStore =
+                match split with
+                | Some split ->
+                    fun source ->
+                        let viewOwned item =
+                            FromItem.tryQualifier item
+                            |> Option.exists (fun name -> viewSources.Aliases.Contains(name.ToLowerInvariant()))
+                        if FromItem.leaves source |> List.forall viewOwned then split.PermanentBefore
+                        else snapshot
+                | None -> fun _ -> snapshot
             let matchNodes =
                 (updateStmt.Assignments |> List.collect (_.Value >> collectMatchAgainst))
                 @ (updateStmt.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])
@@ -34059,26 +34174,47 @@ let rec executeAs
                 |> List.distinct
 
             let prepared =
-                fullTextMutationSources snapshot dbName updateStmt.From updateStmt.Joins matchNodes
+                fullTextMutationSources sourceStore dbName updateStmt.From updateStmt.Joins matchNodes
                 |> Result.bind (fun (sourceOverrides, rewrite) ->
+                    let catalogs, rewriteCondition =
+                        match split with
+                        | Some split when not viewSources.Conditions.IsEmpty ->
+                            let bindings = HashSet<Expr>(HashIdentity.Reference)
+                            let rec bind inherited original rewritten =
+                                let owned = inherited || ownsViewCondition viewSources original
+                                if owned then bindings.Add rewritten |> ignore
+                                match original, rewritten with
+                                | BinOp(And, left, right), BinOp(And, updatedLeft, updatedRight) ->
+                                    bind owned left updatedLeft
+                                    bind owned right updatedRight
+                                | _ -> ()
+                            let rewriteCondition original =
+                                let rewritten = rewrite original
+                                bind false original rewritten
+                                rewritten
+                            let storeForCondition expression =
+                                if bindings.Contains expression then Some split.PermanentBefore else None
+                            { Source = sourceStore; Condition = Some storeForCondition }, rewriteCondition
+                        | _ -> { Source = sourceStore; Condition = None }, rewrite
+
                     let rewritten =
                         { updateStmt with
                             Assignments = updateStmt.Assignments |> List.map (fun assignment -> { assignment with Value = rewrite assignment.Value })
-                            Joins = updateStmt.Joins |> List.map (Join.mapConditions rewrite)
-                            Where = updateStmt.Where |> Option.map rewrite }
+                            Joins = updateStmt.Joins |> List.map (Join.mapConditions rewriteCondition)
+                            Where = updateStmt.Where |> Option.map rewriteCondition }
 
                     let sourceOverrides =
                         if sourceOverrides.IsEmpty then
-                            boundUpdateJoinSources snapshot dbName rewritten.From rewritten.Joins rewritten.Where
+                            boundUpdateJoinSources sourceStore snapshot dbName rewritten.From rewritten.Joins rewritten.Where
                             |> Option.defaultValue sourceOverrides
                         else sourceOverrides
 
-                    runMutationJoin snapshot registry dbName sourceOverrides rewritten.From rewritten.Joins
-                    |> Result.map (fun joined -> rewritten, joined))
+                    runMutationJoin snapshot registry dbName catalogs sourceOverrides rewritten.From rewritten.Joins
+                    |> Result.map (fun joined -> rewritten, catalogs.Condition, joined))
 
             match prepared with
             | Error e -> ids, e
-            | Ok(updateStmt, (sources, joinedRows)) ->
+            | Ok(updateStmt, conditionStore, (sources, joinedRows)) ->
                 let sourceIndex = sources |> List.mapi (fun i source -> source.Qualifier.ToLowerInvariant(), i) |> Map.ofList
                 let combinedColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
                 let ctxFor = contextFactory snapshot registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
@@ -34119,14 +34255,16 @@ let rec executeAs
                 match updateStmt.Assignments |> traverse (resolveAssignment >> Result.bind guardAssignable) with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok resolvedAssignments ->
-                    let check = whereMatches ctxFor updateStmt.Where
+                    let check =
+                        match conditionStore, updateStmt.Where with
+                        | Some lookup, Some predicate ->
+                            fun row ->
+                                evalBoundMutationCondition lookup { ctxFor row with Clause = WhereClause } predicate
+                                |> Result.map (fun value -> truthy value = Some true)
+                        | _ -> whereMatches ctxFor updateStmt.Where
 
                     // Self-join aliases share one pending batch per physical table.
-                    let grouped =
-                        sources
-                        |> List.indexed
-                        |> List.choose (fun (index, source) -> source.PhysicalTable |> Option.map (fun tableRef -> index, tableRef))
-                        |> MutationTargets.group dbName
+                    let grouped = groupJoinedMutationTargets store dbName sources [ 0 .. sources.Length - 1 ]
 
                     let sourceGroups =
                         sources |> List.mapi (fun index _ -> Map.tryFind index grouped.SourceGroups) |> Array.ofList
@@ -34210,15 +34348,16 @@ let rec executeAs
                                     else Some columnIndex)
                                 |> Set.ofList)
 
-                        let invocationTables = grouped.Tables |> Array.map (physicalTableKey dbName) |> Set.ofArray
+                        let invocationTables = grouped.Tables |> Array.map (fst >> physicalTableKey dbName) |> Set.ofArray
 
                         let apply =
                             withTriggerInvocationTables invocationTables (fun () ->
                                 grouped.Tables
-                                |> Array.mapi (fun i tableRef ->
+                                |> Array.mapi (fun i (tableRef, temporary) ->
                                     if pending.[i].Count = 0 then
                                         Ok 0
                                     else
+                                        let snapshot = joinedMutationStore snapshot split temporary
                                         let tdb, tname = (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
                                         let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "UPDATE"
                                         let afterTriggers = triggersFor snapshot tdb tname "AFTER" "UPDATE"
@@ -34297,7 +34436,7 @@ let rec executeAs
 
                         match apply with
                         | Ok counts ->
-                            Storage.commitCatalogInto store baseCatalog snapshot
+                            commitJoinedMutation store baseCatalog snapshot split
                             // CLIENT_FOUND_ROWS reports claimed rows; the
                             // default reports rows changed after BEFORE triggers.
                             let matched = pending |> Array.sumBy (fun d -> d.Count)
@@ -34332,7 +34471,7 @@ let rec executeAs
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
             let target = view.Targets |> Map.values |> Seq.head
-            executeViewWrite view view target target (Delete rewritten) None
+            executeViewWrite view view target target (Delete rewritten) None None
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
@@ -34448,7 +34587,7 @@ let rec executeAs
 
         let prepared =
             validateJoinedDeleteTargets store registry dbName deleteStmt
-            |> Result.bind (fun () -> fullTextMutationSources store dbName deleteStmt.From deleteStmt.Joins matchNodes)
+            |> Result.bind (fun () -> fullTextMutationSources (fun _ -> store) dbName deleteStmt.From deleteStmt.Joins matchNodes)
             |> Result.bind (fun (sourceOverrides, rewrite) ->
                 let viewSources = prepareDeleteViewSources store registry dbName deleteStmt
                 let sources = Map.fold (fun sources name source -> Map.add name source sources) sourceOverrides viewSources
@@ -34457,7 +34596,7 @@ let rec executeAs
                         Joins = deleteStmt.Joins |> List.map (Join.mapConditions rewrite)
                         Where = deleteStmt.Where |> Option.map rewrite }
 
-                runMutationJoin store registry dbName sources rewritten.From rewritten.Joins
+                runMutationJoin store registry dbName (mutationJoinCatalogs store) sources rewritten.From rewritten.Joins
                 |> Result.bind (fun ((sources, _) as joined) ->
                     if rewritten.Joins |> List.exists joinCoalescesColumns then
                         let query =
@@ -34488,21 +34627,7 @@ let rec executeAs
                 let check = whereMatches ctxFor deleteStmt.Where
                 let targetIndices = List.distinct targetIndices
 
-                let tableIsShadowed tableRef =
-                    let database, table = physicalTableKey dbName tableRef
-                    Map.containsKey (database.ToLowerInvariant(), table) store.TableShadows
-
-                let targetTables =
-                    targetIndices
-                    |> List.choose (fun index ->
-                        let source = sources.[index]
-                        source.PhysicalTable
-                        |> Option.map (fun tableRef ->
-                            index, (tableRef, source.FromStoredView && tableIsShadowed tableRef)))
-
-                let grouped =
-                    targetTables
-                    |> MutationTargets.groupBy (fun (tableRef, permanent) -> physicalTableKey dbName tableRef, permanent)
+                let grouped = groupJoinedMutationTargets store dbName sources targetIndices
 
                 let claimed = grouped.Tables |> Array.map (fun _ -> HashSet<Value[]>(HashIdentity.Reference))
                 let claimedRows = grouped.Tables |> Array.map (fun _ -> ResizeArray<Value[]>())
@@ -34532,16 +34657,15 @@ let rec executeAs
                         |> List.map (physicalTableKey dbName)
                         |> Set.ofList
 
-                    let applyTable index (tableRef, throughView) =
+                    let applyTable index ((tableRef: TableRef), temporary) =
                         if claimedRows.[index].Count = 0 then
                             Ok 0
                         else
-                            let selectionStore, snapshot =
+                            let selectionStore =
                                 match split with
-                                | Some split when not throughView && tableIsShadowed tableRef ->
-                                    selectionStore, split.TemporaryAfter
-                                | Some split -> split.PermanentBefore, split.PermanentAfter
-                                | None -> selectionStore, snapshot
+                                | Some split when not temporary -> split.PermanentBefore
+                                | _ -> selectionStore
+                            let snapshot = joinedMutationStore snapshot split temporary
                             let tdb, tname = tableRef.Database |> Option.defaultValue dbName, tableRef.Table
                             tableSnapshot selectionStore tdb tname
                             |> Result.mapError storageErr
@@ -34611,6 +34735,9 @@ let rec executeAs
         ids, checksumTables store dbName tables quick
     | Explain(format, inner) ->
         ids, explainStatement format store registry currentAccount dbName inner
+
+and executeAs store registry dbName ids foundRows currentAccount stmt =
+    executeAsWithViewSources { Aliases = Set.empty; Conditions = [] } store registry dbName ids foundRows currentAccount stmt
 
 let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (statement: Statement) =
     let unsafeError =
