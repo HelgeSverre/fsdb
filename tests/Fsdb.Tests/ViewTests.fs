@@ -56,6 +56,40 @@ let tests =
                   [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ]
                   "rejected mutation preserves the physical target"
 
+          testCase "correlated subqueries see merged keys in reads and joined writes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE merged_base(k INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE merged_peer(k INT PRIMARY KEY)"
+                    "INSERT INTO merged_base VALUES(1,10),(2,20)"
+                    "INSERT INTO merged_peer VALUES(1)"
+                    "CREATE VIEW merged_writable AS SELECT k,n FROM merged_base"
+                    "CREATE VIEW merged_reader AS SELECT k FROM merged_peer" ] do
+                  expectOk (run store sql) sql
+
+              Expect.equal
+                  (rows store "SELECT (SELECT k) FROM merged_reader JOIN merged_writable USING(k)")
+                  [ [ Some "1" ] ] "the correlated projection sees the merged key"
+              Expect.equal
+                  (rows store "SELECT (SELECT k) FROM merged_peer p RIGHT JOIN merged_writable v USING(k) ORDER BY v.k")
+                  [ [ Some "1" ]; [ Some "2" ] ] "the unmatched row uses the preserved right key"
+              Expect.equal
+                  (run store "SELECT (SELECT k) FROM merged_peer p JOIN merged_writable v ON p.k=v.k")
+                  (Err(1052, "Column 'k' in field list is ambiguous")) "an ordinary join retains both keys"
+              Expect.equal
+                  (run store "UPDATE merged_peer p RIGHT JOIN merged_base b USING(k) SET b.n=(SELECT k)+30 WHERE (SELECT k)=2")
+                  (Affected 1UL) "both the assignment and the predicate see the merged key"
+              Expect.equal (rows store "SELECT n FROM merged_base WHERE k=2") [ [ Some "32" ] ]
+                  "the update changes the preserved physical row"
+              Expect.equal
+                  (run store "DELETE v FROM merged_peer p NATURAL JOIN merged_writable v JOIN (SELECT 1 AS probe) q ON (SELECT k)=q.probe")
+                  (Affected 1UL) "the later ON expression sees the earlier merged key"
+              Expect.equal
+                  (run store "DELETE v FROM merged_reader p RIGHT JOIN merged_writable v USING(k) WHERE (SELECT k)=2")
+                  (Affected 1UL) "the delete predicate sees the unmatched right key"
+              Expect.equal (rows store "SELECT k FROM merged_base") [] "both physical rows were deleted"
+
           testCase "joined DELETE classifies stored view targets before filtering rows"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

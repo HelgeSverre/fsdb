@@ -77,5 +77,13 @@ In the [merged-key fixture](2026-11-26-correlated-merged-keys.sql), MySQL
 returns the merged key and joined DELETE affects one row in each transaction.
 The right join uses the preserved row's key even when the left side has no
 match. The scalar subquery in the later ON clause sees the earlier USING key.
-Fsdb returns 1052 in each of these cases. Both engines correctly reject the
-same reference as ambiguous when the join uses ON and exposes both keys.
+Fsdb previously returned 1052 in these cases. Both Fsdb storage modes now
+match the fixture, including grouped, ordered, windowed and prepared reads.
+Qualified columns retain their source values, and inner columns take
+precedence over the merged outer key. Both engines report 1052 when an
+ordinary ON join exposes a second key with the same name.
+An UPDATE of a physical table can use the merged key in both SET and WHERE.
+Binary prepared execution matched the native INT result type, affected row
+count, and restored rows after rollback. In a two-session check, MySQL and
+WAL-backed Fsdb both waited for the writer that made the target row
+invisible to the view, then deleted zero rows after that writer committed.

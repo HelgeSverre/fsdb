@@ -1345,8 +1345,9 @@ now resolves qualified and unqualified outer references from caller
 subqueries against the view's output columns. The audited prepared writes
 still target the permanent table. [Caller subqueries in joined UPDATE](torture/findings/2026-11-26-joined-update-shadow.md#caller-subqueries-in-joined-update)
 also see the other joined sources and the audited USING and NATURAL
-merged columns. [Correlations through merged columns in SELECT and joined DELETE](torture/findings/2026-11-26-joined-delete-binding.md#correlated-merged-columns)
-still return 1052 for the audited USING and NATURAL cases. Reopening one temporary table
+merged columns. [Correlations through merged columns in SELECT and joined writes](torture/findings/2026-11-26-joined-delete-binding.md#correlated-merged-columns)
+also work in the audited USING and NATURAL cases, including a later ON
+clause and right-side keys without a left match. Reopening one temporary table
 can diverge from MySQL's error 1137. DROP TEMPORARY TABLE
 can also fail when a permanent foreign key references the same name.
 

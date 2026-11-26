@@ -11362,8 +11362,11 @@ and private describeQueryColumnDescriptorsInScope
                     let columns = sources |> List.collect snd
                     let context = contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sources) outer (probeRow columns)
                     { context with ProjectionAliases = scope.ProjectionAliases |> Map.map (fun _ binding -> binding |> Result.map (fun expression -> expression, VNull)) }
+                    |> withMergedColumns (mergedColumnExpressions scope.LogicalColumns)
                 let outer = List.foldBack (fun scope outer -> Some(contextOfScope scope outer)) outerScopes None
-                let context = contextFactory store registry dbName (columnIndexOf columns) qualifiers outer (probeRow columns)
+                let context =
+                    contextFactory store registry dbName columnIndex qualifiers outer (probeRow columns)
+                    |> withMergedColumns (mergedColumnExpressions scope.LogicalColumns)
 
                 let columnForExpression name expression =
                     match tryColumnDefForExpr context expression with
@@ -12892,7 +12895,9 @@ and private expandJsonTableJoinRows
         let newSources = sourcesSoFar @ [ alias, joinColumns ]
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
         let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) scope.LateralOuter
-        let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) (qualifierRanges newSources) outer
+        let ctxFor =
+            contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) (qualifierRanges newSources) outer
+            >> joinOperandScope newSources leftOperand join.Table
 
         let coalesceNames =
             match join.Kind with
@@ -13532,7 +13537,9 @@ and private applyPreparedJoin
         | NaturalRightJoin -> naturalCommonNames combinedColumnsSoFar joinColumns
         | _ -> join.Using
 
-    let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers outer
+    let ctxFor =
+        contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers outer
+        >> joinOperandScope newSources leftOperand join.Table
 
     // Most join strategies need an indexed left side, but keep that
     // force lazy: an always-true inner/cross join below can compose its
@@ -14185,7 +14192,9 @@ and private applyPreparedMutationJoin
     let joinColumns = rightSources |> List.collect _.Columns
     let joinRows = rightRows |> List.map snd
     let newSources = sourcesSoFar @ rightSources
-    let qualifiers = qualifierRanges (newSources |> List.map (fun source -> source.Qualifier, source.Columns))
+    let columnsOf (sources: MutationSource list) = sources |> List.map (fun source -> source.Qualifier, source.Columns)
+    let sourceColumns = columnsOf newSources
+    let qualifiers = qualifierRanges sourceColumns
     let combinedColumnsSoFar = sourcesSoFar |> List.collect _.Columns
     let leftFlatPadding = Array.create combinedColumnsSoFar.Length VNull
     let rightFlatPadding = Array.create joinColumns.Length VNull
@@ -14193,6 +14202,7 @@ and private applyPreparedMutationJoin
 
     let ctxFor =
         contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers scope.QueryOuter
+        >> joinOperandScope sourceColumns leftOperand join.Table
         >> catalogs.CallerContext
     let evaluate =
         catalogs.Condition |> Option.map evalBoundMutationCondition |> Option.defaultValue evalExpr
@@ -14231,7 +14241,6 @@ and private applyPreparedMutationJoin
 
         newSources, rows
 
-    let columnsOf (sources: MutationSource list) = sources |> List.map (fun source -> source.Qualifier, source.Columns)
     let condition =
         resolvedJoinCondition (columnsOf sourcesSoFar) (columnsOf rightSources) leftOperand join
         |> Result.bind (prepareJoinCondition (ctxFor [||]))
@@ -14350,13 +14359,11 @@ and private rewriteCoalescedCols (columns: Map<string, Expr>) (expression: Expr)
 and private joinCoalescesColumns (join: Join) =
     not join.Using.IsEmpty
     || (match join.Kind with NaturalJoin | NaturalLeftJoin | NaturalRightJoin -> true | _ -> false)
-    || (match join.Table with
-        | FromJoinGroup(source, joins) ->
-            let rec contains = function
-                | FromJoinGroup(source, joins) -> contains source || List.exists joinCoalescesColumns joins
-                | _ -> false
-            contains source || List.exists joinCoalescesColumns joins
-        | _ -> false)
+    || fromCoalescesColumns join.Table
+
+and private fromCoalescesColumns = function
+    | FromJoinGroup(source, joins) -> fromCoalescesColumns source || List.exists joinCoalescesColumns joins
+    | _ -> false
 
 and private logicalColumnNames (sources: (string * ColumnDef list) list) qualifier =
     sources
@@ -14371,12 +14378,53 @@ and private joinColumnError = function
 and private logicalSourceColumns sources item =
     FromItem.logicalColumns (logicalColumnNames sources) item |> Result.mapError joinColumnError
 
-and private coalescedColumnMap (columns: FromItem.LogicalColumn list) =
-    // A later ordinary join can reintroduce an otherwise coalesced name.
+and private mergedColumnExpressions (columns: FromItem.LogicalColumn list) =
     columns
     |> List.groupBy (fun column -> column.Name.ToLowerInvariant())
+    |> List.choose (fun (name, occurrences) ->
+        if occurrences |> List.exists (function FromItem.MergedColumn _ -> true | _ -> false) then
+            Some(name, occurrences |> List.map _.Expression)
+        else None)
+    |> Map.ofList
+
+and private withMergedColumns (columns: Map<string, Expr list>) : EvalContext -> EvalContext =
+    if columns.IsEmpty then id
+    else
+        fun context ->
+            let bindings =
+                columns |> Map.map (fun _ expressions ->
+                    expressions |> List.map (fun expression ->
+                        expression,
+                        { Value = lazy (evalExpr context expression)
+                          Definition = lazy (tryColumnDefForExpr context expression) }))
+            { context with MergedColumns = bindings }
+
+and private joinOperandScope sources leftOperand rightOperand : EvalContext -> EvalContext =
+    let operands = Option.toList leftOperand @ [ rightOperand ]
+    if operands |> List.exists fromCoalescesColumns then
+        // ON sees the logical outputs of its operands before the current join.
+        operands
+        |> traverse (logicalSourceColumns sources)
+        |> Result.map (List.concat >> mergedColumnExpressions >> withMergedColumns)
+        |> Result.defaultValue id
+    else id
+
+and private joinOutputScope (qualifiers: Map<string, ColumnDef list * int>) source joins : EvalContext -> EvalContext =
+    match source with
+    | Some source when fromCoalescesColumns source || List.exists joinCoalescesColumns joins ->
+        let namesOf (qualifier: string) =
+            qualifiers |> Map.tryFind (qualifier.ToLowerInvariant()) |> Option.map (fst >> List.map _.Name) |> Option.defaultValue []
+        FromItem.logicalColumns namesOf (FromJoinGroup(source, joins))
+        |> Result.map (mergedColumnExpressions >> withMergedColumns)
+        |> Result.defaultValue id
+    | _ -> id
+
+and private coalescedColumnMap (columns: FromItem.LogicalColumn list) =
+    // A later ordinary join can reintroduce an otherwise coalesced name.
+    mergedColumnExpressions columns
+    |> Map.toList
     |> List.choose (function
-        | name, [ FromItem.MergedColumn(_, expression) ] -> Some(name, expression)
+        | name, [ expression ] -> Some(name, expression)
         | _ -> None)
     |> Map.ofList
 
@@ -22594,7 +22642,7 @@ and private runGroupedSelect
         |> prepareOrderProjectionAliases registry columnIndex qualifiers orderProjections
 
     let jsonViewSourceNames = viewJsonSourceNames store dbName qualifiers select.Projections select
-    let baseCtxFor = contextFactory store registry dbName columnIndex qualifiers outer
+    let baseCtxFor = contextFactory store registry dbName columnIndex qualifiers outer >> joinOutputScope qualifiers select.From select.Joins
     let ctxFor =
         if Map.isEmpty jsonViewSourceNames then baseCtxFor
         else fun row -> { baseCtxFor row with JsonViewSourceNames = jsonViewSourceNames }
@@ -23328,7 +23376,7 @@ and private runWindowedSelect
     | None ->
 
     let columnIndex = columnIndexOf columns
-    let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
+    let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer >> joinOutputScope qualifiers select.From select.Joins
     let matches = prepareWhereMatches ctxFor select.Where
 
     match rows |> traverseSeq (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
@@ -25375,11 +25423,12 @@ and private runSelect
             | Error(InvalidDescription(Err(code, message))) -> code, message
             | _ -> error)
 
+    let baseCtxFor = contextFactory store registry dbName columnIndex qualifiers outer >> joinOutputScope qualifiers select.From select.Joins
     let windowBindings =
         match windowKeyBindings select with
         | [] -> Ok()
         | keys ->
-            let context = contextFactory store registry dbName columnIndex qualifiers outer (probeRow columns)
+            let context = baseCtxFor (probeRow columns)
             let preceding =
                 (select.Projections |> List.map (fun projection -> FieldList, projection.Expression))
                 @ (select.Where |> Option.toList |> List.map (fun expression -> WhereClause, expression))
@@ -25444,7 +25493,6 @@ and private runSelect
     else
 
     let jsonViewSourceNames = viewJsonSourceNames store dbName qualifiers projections select
-    let baseCtxFor = contextFactory store registry dbName columnIndex qualifiers outer
     let ctxFor =
         if Map.isEmpty jsonViewSourceNames then baseCtxFor
         else fun row -> { baseCtxFor row with JsonViewSourceNames = jsonViewSourceNames }
@@ -26052,6 +26100,7 @@ let private withCallerViewScope callerSubqueries projectionStore : EvalContext -
                         ColumnIndex = visibleColumns
                         Qualifiers = qualifiers
                         ViewProjections = views
+                        MergedColumns = Map.empty
                         ProjectionAliases = Map.empty
                         SubqueryScope = None }
                 let merged =
@@ -26075,18 +26124,8 @@ let private withCallerViewScope callerSubqueries projectionStore : EvalContext -
                                 (FromItem.logicalColumns namesOf source)
                             |> Result.toOption)
                     |> Option.defaultValue []
-                    |> List.groupBy (fun column -> column.Name.ToLowerInvariant())
-                    |> List.choose (fun (name, occurrences) ->
-                        if occurrences |> List.exists (function FromItem.MergedColumn _ -> true | _ -> false) then
-                            Some(name,
-                                occurrences |> List.map (fun column ->
-                                    let expression = column.Expression
-                                    expression,
-                                    { Value = lazy (evalExpr visible expression)
-                                      Definition = lazy (tryColumnDefForExpr visible expression) }))
-                        else None)
-                    |> Map.ofList
-                { visible with MergedColumns = merged }
+                    |> mergedColumnExpressions
+                withMergedColumns merged visible
         fun context -> { context with SubqueryScope = Some enter }
 
 /// Assigns `assignments` (already resolved to column indices) to a copy of
@@ -34484,8 +34523,10 @@ let rec private executeAsWithViewSources
             | Ok(updateStmt, conditionStore, (sources, joinedRows)) ->
                 let sourceIndex = sources |> List.mapi (fun i source -> source.Qualifier.ToLowerInvariant(), i) |> Map.ofList
                 let combinedColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
+                let qualifiers = qualifierRanges combinedColumns
                 let ctxFor =
-                    contextFactory snapshot registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
+                    contextFactory snapshot registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) qualifiers None
+                    >> joinOutputScope qualifiers (Some(FromTable updateStmt.From)) updateStmt.Joins
                     >> callerContext
 
                 let sourceOffsets = columnOffsets sources
@@ -34881,7 +34922,10 @@ let rec private executeAsWithViewSources
         | Ok(deleteStmt, (sources, joinedRows)) ->
             let sourceIndex = sources |> List.mapi (fun i source -> source.Qualifier.ToLowerInvariant(), i) |> Map.ofList
             let combinedColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
-            let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
+            let qualifiers = qualifierRanges combinedColumns
+            let ctxFor =
+                contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) qualifiers None
+                >> joinOutputScope qualifiers (Some(FromTable deleteStmt.From)) deleteStmt.Joins
 
             match
                 deleteStmt.Targets
