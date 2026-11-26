@@ -19866,6 +19866,21 @@ let tests =
                         | ResultSet(_, [ row ]) when row = ([ intersects; disjoint; intersects; disjoint ] |> List.map Some) -> ()
                         | result -> failtestf "expected MySQL geographic line-polygon intersections for %s and %s, got %A" lineText polygonText result
 
+                testCase "paired geographic endpoint contacts can cross a polygon"
+                <| fun _ ->
+                    let store = newStore ()
+                    let area = "ST_GeomFromText('POLYGON((36.41809629699596 -164.56426793400428,36.41809629699596 -164.42377706821037,36.77837156146064 -164.42377706821037,36.77837156146064 -164.56426793400428,36.41809629699596 -164.56426793400428),(36.50816511311213 -164.52914521755579,36.68830274534447 -164.52914521755579,36.68830274534447 -164.45889978465885,36.50816511311213 -164.45889978465885,36.50816511311213 -164.52914521755579))',4326)"
+                    for wkt, crosses in
+                        [ "LINESTRING(36.50816511311213 -164.45889979870793,36.68830274534447 -164.45889979870793)", true
+                          "LINESTRING(36.68830274534447 -164.45889979870793,36.50816511311213 -164.45889979870793)", true
+                          "LINESTRING(36.50816511311213 -164.45889969870794,36.68830274534447 -164.45889969870794)", false ] do
+                        let line = $"ST_GeomFromText('{wkt}',4326)"
+                        let sql = $"SELECT ST_Crosses({line},{area}),ST_Within({line},{area})"
+                        let expected = if crosses then [ Some "1"; Some "0" ] else [ Some "0"; Some "1" ]
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) when row = expected -> ()
+                        | result -> failtestf "unexpected line topology for {wkt}: %A" result
+
                 testCase "geographic line with a rejected turn follows its first point"
                 <| fun _ ->
                     let store = newStore ()

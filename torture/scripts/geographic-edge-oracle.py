@@ -179,7 +179,7 @@ def reverse_line(line):
     return "LINESTRING(" + ",".join(reversed(points.split(","))) + ")"
 
 
-def seeded_relation_cases():
+def seeded_relation_cases(seed=148731, polygon_count=500):
     def coordinates(origin, size, vertices):
         latitude, longitude = origin
         height, width = size
@@ -192,8 +192,8 @@ def seeded_relation_cases():
             + ")"
         )
 
-    rng = random.Random(148731)
-    for _ in range(500):
+    rng = random.Random(seed)
+    for _ in range(polygon_count):
         origin = rng.uniform(-76, 76), rng.uniform(-174, 174)
         size = rng.uniform(0.04, 3.5), rng.uniform(0.04, 3.5)
         outer = coordinates(origin, size, ((0, 0), (0, 1), (1, 1), (1, 0), (0, 0)))
@@ -237,7 +237,16 @@ def main():
     parser.add_argument(
         "--seeded-relations",
         action="store_true",
-        help="compare 1,000 seeded lines against polygons with holes",
+        help="compare seeded lines against polygons with holes",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=148731, help="seed for the line relation fixture"
+    )
+    parser.add_argument(
+        "--seeded-polygons",
+        type=int,
+        default=500,
+        help="number of polygons in the seeded fixture (two lines per polygon)",
     )
     parser.add_argument(
         "--srid",
@@ -246,6 +255,8 @@ def main():
         help="SRID for the line relation cases (point controls use EPSG 4326)",
     )
     args = parser.parse_args()
+    if args.seeded_polygons < 1:
+        parser.error("--seeded-polygons must be positive")
     if not FSDB.exists():
         raise RuntimeError(f"Build the Release CLI first: {FSDB}")
     root = pathlib.Path(tempfile.mkdtemp(prefix="fsdb-spatial-edge-"))
@@ -309,7 +320,11 @@ def main():
 
         count = 0
         mismatches = []
-        line_cases = seeded_relation_cases() if args.seeded_relations else cases()
+        line_cases = (
+            seeded_relation_cases(args.seed, args.seeded_polygons)
+            if args.seeded_relations
+            else cases()
+        )
         for line, polygon in line_cases:
             if args.reverse_lines:
                 line = reverse_line(line)

@@ -1279,6 +1279,61 @@ let private geographicTurnRejectsRoundedEndpoint referenceSystem source boundary
 
     rejected && straddles a b c d && straddles c d a b
 
+type private GeographicRoundedContact =
+    | PolygonVertex of latitudeLongitude: (float * float)
+    | SourceEndpoint of boundaryOrigin: (float * float)
+
+let private geographicRoundedContactsCross referenceSystem segment rings =
+    let spheroid, flattening = geographicIntersectionSpheroid referenceSystem
+    let distance = geographicInverseDistanceRadians false spheroid
+    let azimuth first last = geographicSegmentAzimuthsRadians flattening first last |> fst
+    let a, b = geographicLatitudeOrderedSegment segment
+    let sourceAzimuth = azimuth a b
+    let coincides first last =
+        not (equalGeographicCoordinates first last) && boostGeoEqual (distance first last) 0.0
+
+    let contact edge =
+        let c, d = geographicLatitudeOrderedSegment edge
+        let edgeAzimuth = azimuth c d
+        let along baseline from vertex =
+            abs (normalizedLongitudeRadians (azimuth from vertex - baseline)) <= Math.PI / 2.0
+        let straddles baseline from first last =
+            geographicAzimuthSide (azimuth from first) baseline
+            * geographicAzimuthSide (azimuth from last) baseline < 0
+
+        if boostGeoEqual (distance c a) 0.0 then None
+        elif coincides c b then
+            if along edgeAzimuth c b && straddles sourceAzimuth a c d then Some(SourceEndpoint c)
+            else None
+        else
+            let vertex =
+                if coincides a c then Some c
+                elif coincides a d then Some d
+                else None
+
+            vertex
+            |> Option.filter (fun point -> along sourceAzimuth a point && straddles edgeAzimuth c a b)
+            |> Option.map PolygonVertex
+
+    orientGeographicPolygonRings referenceSystem rings
+    |> List.exists (fun ring ->
+        let edges = ring |> List.rev |> List.pairwise
+        // A corner contact at the first ordered endpoint and a transverse
+        // contact at the other endpoint can straddle the intervening edge.
+        edges @ List.truncate 2 edges
+        |> List.windowed 3
+        |> List.exists (function
+            | [ preceding; (start, endpoint); following ] ->
+                let start, endpoint = geographicPointRadians start, geographicPointRadians endpoint
+                let joins vertex origin = coincides a vertex && coincides origin b
+                if not (joins start endpoint || joins endpoint start) then false
+                else
+                    match contact preceding, contact following with
+                    | Some(PolygonVertex vertex), Some(SourceEndpoint origin) -> vertex = start && origin = endpoint
+                    | Some(SourceEndpoint origin), Some(PolygonVertex vertex) -> origin = start && vertex = endpoint
+                    | _ -> false
+            | _ -> false))
+
 let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segment) rings sampled =
     let flattening = 1.0 / referenceSystem.InverseFlattening.Value
     let side first last query =
@@ -1351,6 +1406,9 @@ let internal geographicLinePolygonTopology referenceSystem lines polygons =
     let sampled = sampleGeographicLinePolygonTopology referenceSystem lines polygons
     let refined =
         match lines, polygons with
+        | [ [ start; endpoint ] ], [ rings ]
+            when sampled.LineWithinPolygon && geographicRoundedContactsCross referenceSystem (start, endpoint) rings ->
+            Some { Intersects = true; Crosses = true; Touches = false; LineWithinPolygon = false }
         | [ [ start; endpoint ] ], [ rings ] when sampled.Crosses || not sampled.Intersects ->
             tryGeographicSingleTurn referenceSystem (start, endpoint) rings sampled
         | _ -> None

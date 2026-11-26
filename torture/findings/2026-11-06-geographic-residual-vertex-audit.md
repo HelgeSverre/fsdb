@@ -487,6 +487,29 @@ Every remaining difference also occurred in the previous build.
 Five of the 13 wider residuals produce two touch-interior turns in
 the native probe. Those paired contacts reach the sampled classifier.
 
+## Rounded contact pairs along one edge
+
+A two-vertex line can have a rounded contact at a polygon corner and
+a second rounded contact at the other end of the line. The segment
+strategy orders source endpoints by latitude and checks each rounded
+contact against the directed boundary. When the contacts straddle the
+transverse edges at opposite vertices of one boundary span, the
+line/area relation records a crossing. The sampled point positions can
+all lie inside in this case. Nearby controls with both endpoints on the
+same side of a transverse edge remain contained.
+[Boost linear/areal turn dispatch](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/get_turn_info_la.hpp).
+
+The wider 5,000-case EPSG 4326 set fell from 13 to 8 differences forward
+and from 14 to 9 reversed, with no new mismatching cases. A 70-case
+longitude offset sweep reduced differences from 30 to 2. Its remaining
+cases combine a proper crossing turn with a rounded endpoint contact.
+All structured cases and both original seeded EPSG 4326 runs still
+match. The EPSG 4258 and 4267 seeded sets retain two differences each.
+
+The wider fixture uses `--seeded-relations --seed 615801 --seeded-polygons
+2500` on the [geographic edge oracle](../scripts/geographic-edge-oracle.py).
+Add `--reverse-lines` for the reversed fixture.
+
 ## Current-head overlay check
 
 A current-head rerun still finds 11/448 geographic line/polygon relation
