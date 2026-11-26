@@ -989,3 +989,19 @@ query. Times are medians over seven runs after three warmups per mode.
 The measured disjoint query excludes all but one row. Without a hint,
 Fsdb picked the index for this query and a scan for a disjoint probe
 that returned almost every row.
+
+## November 26 line-relation recheck
+
+Native MySQL 8.4.11 and the Release Fsdb build matched all 448
+structured geographic line/polygon relation cases. They also matched
+5,000 WGS 84 cases from seed `615801` in each direction. The point
+relation and point-to-line distance controls reported zero differences.
+
+`--compare-overlays` compares intersections only when a line relation
+differs. This run produced no overlay comparisons.
+
+```sh
+uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --compare-overlays
+uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --seeded-relations --seed 615801 --seeded-polygons 2500
+uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --seeded-relations --seed 615801 --seeded-polygons 2500 --reverse-lines
+```
