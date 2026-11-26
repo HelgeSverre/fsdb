@@ -11181,27 +11181,39 @@ and private describeQueryColumnDescriptorsInScope
                   ProjectionAliases = Map.empty })
 
     and describeJoinChain seen dbName ctes outerScopes preceding source joins : Result<DescribedJoinScope, ColumnDescriptionError> =
-        describeJoinSource seen dbName ctes outerScopes preceding source
+        let bindJoin (left: DescribedJoinScope) (right: DescribedJoinScope) join =
+            let onScope = appendScopes left right
+            let scopes = onScope :: outerScopes
+            validateExpression seen dbName ctes scopes (resolveReference scopes "on clause") join.On
+            |> Result.bind (fun () ->
+                let columnsOf qualifier =
+                    onScope.Sources |> List.tryFind (fst >> equalsIgnoreCase qualifier)
+                    |> Option.map (snd >> List.map (fun descriptor -> descriptor.Column.Name))
+                    |> Option.defaultValue []
+                FromItem.logicalJoinColumns columnsOf left.LogicalColumns join
+                |> Result.mapError (joinColumnError >> InvalidDescription)
+                |> Result.map (fun columns -> { onScope with LogicalColumns = columns }))
+
+        let describe = describeJoinSource seen dbName ctes outerScopes
+        let initial, remaining =
+            match FromItem.tryLateralRightJoin source joins with
+            | Some(left, join, remaining) ->
+                let initial =
+                    describe preceding join.Table
+                    |> Result.bind (fun right -> describe (appendScopes preceding right) left |> Result.bind (fun left -> bindJoin left right join))
+                initial, remaining
+            | None -> describe preceding source, joins
+
+        initial
         |> Result.bind (fun initial ->
-            joins
+            remaining
             |> List.fold (fun state join ->
                 state |> Result.bind (fun left ->
                     let lateralScope =
                         match join.Kind with
                         | RightJoin | NaturalRightJoin -> preceding
                         | _ -> appendScopes preceding left
-                    describeJoinSource seen dbName ctes outerScopes lateralScope join.Table
-                    |> Result.bind (fun right ->
-                        let onScope = appendScopes left right
-                        validateExpression seen dbName ctes (onScope :: outerScopes) (resolveReference (onScope :: outerScopes) "on clause") join.On
-                        |> Result.bind (fun () ->
-                            let columnsOf qualifier =
-                                onScope.Sources |> List.tryFind (fst >> equalsIgnoreCase qualifier)
-                                |> Option.map (snd >> List.map (fun descriptor -> descriptor.Column.Name))
-                                |> Option.defaultValue []
-                            FromItem.logicalJoinColumns columnsOf left.LogicalColumns join
-                            |> Result.mapError (joinColumnError >> InvalidDescription)
-                            |> Result.map (fun columns -> { onScope with LogicalColumns = columns })))))
+                    describe lateralScope join.Table |> Result.bind (fun right -> bindJoin left right join)))
                 (Ok initial))
 
     and validateExpression seen dbName ctes scopes resolve expression =
@@ -12764,7 +12776,7 @@ and private sourceReferencesPreceding store dbName (preceding: (string * ColumnD
         |> fst
     sourceReferencesPreceding [] item
 
-and private applyDependentJoinGroup
+and private applyDependentJoinSource
     store registry dbName scope sourceOverrides sourcePredicates consumption
     ((sources, rows): (string * ColumnDef list) list * Value[] seq) leftOperand (join: Join) =
     let columns = sources |> List.collect snd
@@ -12812,7 +12824,7 @@ and private applyJoin
     | FromJoinGroup _ when
         join.Kind <> RightJoin && join.Kind <> NaturalRightJoin
         && sourceReferencesPreceding store dbName (fst state) join.Table ->
-        applyDependentJoinGroup store registry dbName scope sourceOverrides sourcePredicates consumption state leftOperand join
+        applyDependentJoinSource store registry dbName scope sourceOverrides sourcePredicates consumption state leftOperand join
     | _ -> applyResolvedJoin store registry dbName scope sourceOverrides sourcePredicates leftPhysicalTable consumption state leftOperand join
 
 /// Lateral bodies receive the permitted outer scope; matching uses the ordinary join rules.
@@ -13368,14 +13380,37 @@ and private prepareJoinSource
     let outer = scope.QueryOuter
     match item with
     | FromItem.Grouped(source, joins) ->
-        prepareJoinSource store registry dbName scope sourceOverrides Map.empty source
+        let prepare = prepareJoinSource store registry dbName scope sourceOverrides Map.empty
+        let initial, remaining =
+            match FromItem.tryLateralRightJoin source joins with
+            | Some(left, join, remaining) ->
+                let initial =
+                    prepare join.Table
+                    |> Result.bind (fun right ->
+                        let state = right.Sources, right.Rows
+                        if sourceReferencesPreceding store dbName right.Sources left then
+                            let reversed = Join.reverseRightOperand left join
+                            applyDependentJoinSource store registry dbName scope sourceOverrides Map.empty ConsumesAllRows state (Some join.Table) reversed
+                            |> Result.map (fun (sources, rows, _) ->
+                                let rightSources, leftSources = List.splitAt right.Sources.Length sources
+                                let rows = rows |> Seq.map (restoreRightJoinRow right.Columns.Length)
+                                leftSources @ rightSources, rows, FromJoinGroup(left, [ join ]))
+                        else
+                            prepare left
+                            |> Result.bind (fun leftSource ->
+                                applyPreparedJoin store registry dbName scope leftSource.PhysicalTable ConsumesAllRows (leftSource.Sources, leftSource.Rows) (Some left) join right)
+                            |> Result.map (fun (sources, rows, _) -> sources, rows, FromJoinGroup(left, [ join ])))
+                initial, remaining
+            | None -> prepare source |> Result.map (fun initial -> initial.Sources, initial.Rows, source), joins
+
+        initial
         |> Result.bind (fun initial ->
-            joins
+            remaining
             |> List.fold (fun state join ->
                 state |> Result.bind (fun (sources, rows, leftOperand) ->
                     applyJoin store registry dbName scope sourceOverrides Map.empty None ConsumesAllRows (sources, rows) (Some leftOperand) join
                     |> Result.map (fun (sources, rows, _) -> sources, rows, FromJoinGroup(leftOperand, [ join ]))))
-                (Ok(initial.Sources, initial.Rows, source)))
+                (Ok initial))
         |> Result.map (fun (sources, rows, _) ->
             { Sources = sources; Columns = sources |> List.collect snd; Rows = rows; PhysicalTable = None })
     | FromItem.Qualified joinQualifier ->
@@ -13416,6 +13451,8 @@ and private prepareJoinSource
                     filterSourceRows store registry dbName outer joinQualifier columns predicate rows
                     |> Result.map (fun rows -> { Sources = [ joinQualifier, columns ]; Columns = columns; Rows = rows; PhysicalTable = None })))
 
+and private restoreRightJoinRow rightWidth (row: Value[]) =
+    Array.append row.[rightWidth..] row.[..rightWidth - 1]
 
 and private prepareJoinCondition contextFor columns expression =
     // Binding is required even when an operand produces no rows.
@@ -14140,15 +14177,44 @@ and private prepareMutationJoinSource
     : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
     match source with
     | FromJoinGroup(baseSource, joins) ->
-        let baseJoin = { Kind = CrossJoin; Table = baseSource; On = Lit(VInt 1L); Using = [] }
-        let initial = applyMutationJoin store registry dbName scope catalogs sourceOverrides ([], [ [], [||] ]) None baseJoin
-        joins
+        let prepare = prepareMutationJoinSource store registry dbName scope catalogs sourceOverrides
+        let initial, remaining =
+            match FromItem.tryLateralRightJoin baseSource joins with
+            | Some(left, join, remaining) ->
+                let initial =
+                    prepare join.Table
+                    |> Result.bind (fun ((rightSources, _) as right) ->
+                        let conditionStore = catalogs.Condition |> Option.bind (fun lookup -> lookup join.On) |> Option.defaultValue store
+                        let rightColumns = rightSources |> List.map (fun source -> source.Qualifier, source.Columns)
+                        if sourceReferencesPreceding store dbName rightColumns left then
+                            let reversed = Join.reverseRightOperand left join
+                            let prepareLeft outer =
+                                prepareMutationJoinSource store registry dbName { scope with LateralOuter = Some outer } catalogs sourceOverrides left
+                            applyDependentMutationJoin conditionStore registry dbName scope catalogs right (Some join.Table) reversed prepareLeft
+                            |> Result.map (fun (sources, rows) ->
+                                let sourceCount = rightSources.Length
+                                let rightWidth = rightSources |> List.sumBy (fun source -> source.Columns.Length)
+                                let rightSources, leftSources = List.splitAt sourceCount sources
+                                let restore (identities, row) =
+                                    let rightIdentities, leftIdentities = List.splitAt sourceCount identities
+                                    leftIdentities @ rightIdentities, restoreRightJoinRow rightWidth row
+                                leftSources @ rightSources, List.map restore rows)
+                        else
+                            prepare left
+                            |> Result.bind (fun leftRows -> applyPreparedMutationJoin conditionStore registry dbName scope catalogs leftRows (Some left) join right))
+                    |> Result.map (fun rows -> rows, FromJoinGroup(left, [ join ]))
+                initial, remaining
+            | None ->
+                let baseJoin = { Kind = CrossJoin; Table = baseSource; On = Lit(VInt 1L); Using = [] }
+                let initial = applyMutationJoin store registry dbName scope catalogs sourceOverrides ([], [ [], [||] ]) None baseJoin
+                initial |> Result.map (fun rows -> rows, baseSource), joins
+        remaining
         |> List.fold
             (fun state innerJoin ->
                 state |> Result.bind (fun (rows, leftOperand) ->
                     applyMutationJoin store registry dbName scope catalogs sourceOverrides rows (Some leftOperand) innerJoin
                     |> Result.map (fun rows -> rows, FromJoinGroup(leftOperand, [ innerJoin ]))))
-            (initial |> Result.map (fun rows -> rows, baseSource))
+            initial
         |> Result.map fst
     | FromTable tableRef ->
         let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
@@ -14337,19 +14403,21 @@ and private runMutationJoin
         let cteNames = currentCteScope () |> Map.keys |> Set.ofSeq
         validateRelationNames dbName cteNames [] (Some from) joins
         |> Result.bind (fun () -> validateTableIndexHintSources catalogs.Source dbName cteNames (Some from) joins)
-        |> Result.bind (fun () -> prepareMutationJoinSource store registry dbName scope catalogs sourceOverrides from)
 
-    match resolved with
-    | Error e -> Error e
-    | Ok initial ->
-        joins
-        |> List.fold
-            (fun acc join ->
-                acc |> Result.bind (fun (state, leftOperand) ->
-                    applyMutationJoin store registry dbName scope catalogs sourceOverrides state (Some leftOperand) join
-                    |> Result.map (fun state -> state, FromJoinGroup(leftOperand, [ join ]))))
-            (Ok(initial, from))
-        |> Result.map fst
+    resolved
+    |> Result.bind (fun () ->
+        match FromItem.tryLateralRightJoin from joins with
+        | Some _ -> prepareMutationJoinSource store registry dbName scope catalogs sourceOverrides (FromJoinGroup(from, joins))
+        | None ->
+            let initial = prepareMutationJoinSource store registry dbName scope catalogs sourceOverrides from
+            joins
+            |> List.fold
+                (fun acc join ->
+                    acc |> Result.bind (fun (state, leftOperand) ->
+                        applyMutationJoin store registry dbName scope catalogs sourceOverrides state (Some leftOperand) join
+                        |> Result.map (fun state -> state, FromJoinGroup(leftOperand, [ join ]))))
+                (initial |> Result.map (fun state -> state, from))
+            |> Result.map fst)
 
 /// NATURAL and USING joins expose common columns as coalesced values.
 /// Window and subquery scopes keep their own column bindings.
@@ -15795,6 +15863,17 @@ and private runUnlockedSelectStmt
         |> List.distinct
 
     match select.From with
+    | Some source when matchNodes.IsEmpty && (FromItem.tryLateralRightJoin source select.Joins).IsSome ->
+        let joined = FromJoinGroup(source, select.Joins)
+        match prepareJoinSource store registry dbName (joinEvaluationScope outer) Map.empty Map.empty joined
+              |> Result.bind (fun prepared ->
+                  let rewritten =
+                      if fromCoalescesColumns joined then rewriteNaturalSelect select prepared.Sources
+                      else Ok select
+                  rewritten |> Result.map (fun select -> prepared, select)) with
+        | Error error -> error, [], []
+        | Ok(prepared, rewritten) ->
+            runSelect store registry dbName prepared.Columns (qualifierRanges prepared.Sources) prepared.Rows ArbitraryGroupRows rewritten outer
     | Some(FromItem.Grouped(source, joins)) ->
         runUnlockedSelectStmt store registry dbName { select with From = Some source; Joins = joins @ select.Joins } outer
     | _ when not matchNodes.IsEmpty -> runFullTextSelect store registry dbName select matchNodes outer
@@ -25286,7 +25365,7 @@ and private runFullTextSelect
                           PhysicalTable = Some plan.Source.Table })
                     |> Map.ofList
 
-                let resolveBase =
+                let resolveBase () =
                     match Map.tryFind baseKey overrides with
                     | Some source ->
                         let rows =
@@ -25297,30 +25376,38 @@ and private runFullTextSelect
                         Ok(source.Columns, rows)
                     | None -> resolveFromItem store registry dbName fromItem |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq)
 
-                match resolveBase with
+                let scope = joinEvaluationScope outer
+                let resolveSources () =
+                    match FromItem.tryLateralRightJoin fromItem select.Joins with
+                    | Some _ ->
+                        let joined = FromJoinGroup(fromItem, select.Joins |> List.map (Join.mapConditions sub))
+                        prepareJoinSource store registry dbName scope overrides sourcePredicates joined
+                        |> Result.map (fun resolved -> resolved.Sources, resolved.Rows, [])
+                    | None ->
+                        resolveBase () |> Result.bind (fun (baseColumns, baseRows) ->
+                            let baseRows =
+                                if select.Joins.IsEmpty then trackExaminedRows baseRows
+                                else cacheExaminedRows baseRows
+                            let filtered =
+                                match Map.tryFind baseKey sourcePredicates with
+                                | None -> Ok baseRows
+                                | Some predicate -> filterSourceRows store registry dbName outer baseQualifier baseColumns predicate baseRows
+                            filtered |> Result.map (fun rows -> [ baseQualifier, baseColumns ], rows, select.Joins))
+
+                match resolveSources () with
                 | Error error -> error, [], []
-                | Ok(baseColumns, baseRows) ->
-                    let baseRows =
-                        if select.Joins.IsEmpty then trackExaminedRows baseRows
-                        else cacheExaminedRows baseRows
-                    let filteredBase =
-                        match Map.tryFind baseKey sourcePredicates with
-                        | None -> Ok baseRows
-                        | Some predicate -> filterSourceRows store registry dbName outer baseQualifier baseColumns predicate baseRows
-
-                    let initial = filteredBase |> Result.map (fun rows -> ([ baseQualifier, baseColumns ], rows), fromItem)
-
+                | Ok(sources, rows, remainingJoins) ->
                     let joined =
-                        select.Joins
+                        remainingJoins
                         |> List.fold
                             (fun state join ->
                                 state
                                 |> Result.bind (fun ((resolved, rows), leftOperand) ->
                                     let rewrittenJoin = Join.mapConditions sub join
 
-                                    applyJoin store registry dbName (joinEvaluationScope outer) overrides sourcePredicates None joinConsumption (resolved, rows) (Some leftOperand) rewrittenJoin
+                                    applyJoin store registry dbName scope overrides sourcePredicates None joinConsumption (resolved, rows) (Some leftOperand) rewrittenJoin
                                     |> Result.map (fun (sources, rows, _) -> (sources, rows), FromJoinGroup(leftOperand, [ join ]))))
-                            initial
+                            (Ok((sources, rows), fromItem))
 
                     match joined with
                     | Error error -> error, [], []

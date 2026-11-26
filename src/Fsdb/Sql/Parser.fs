@@ -4761,6 +4761,8 @@ let private updateSources: Parser<TableRef * Join list, unit> =
         let source, joins = ungroupFirst source joins
         match source, joins with
         | FromTable table, _ -> preturn (table, joins)
+        | (FromLateral _ | FromJsonTable _), ({ Kind = (RightJoin | NaturalRightJoin); Table = FromTable table } as first) :: rest ->
+            preturn (table, Join.reverseRightOperand source first :: rest)
         | FromSubquery _, ({ Table = FromTable table; Using = [] } as first) :: rest ->
             match first.Kind with
             | InnerJoin -> preturn (table, { first with Table = source } :: rest)

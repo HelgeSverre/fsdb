@@ -100,6 +100,10 @@ preserve its association and allow rendered join definitions to parse back
 retain MySQL's precedence in SELECT, UPDATE, and DELETE. An explicit join's
 ON clause sees its own operands even when one is empty. A lateral source can
 still reach earlier comma operands where MySQL permits the dependency.
+[Left-hand lateral sources in right joins](torture/findings/2026-11-26-left-lateral-right-join.md)
+can read the preserved operand in the audited SELECT and joined-write forms.
+The join retains MySQL's NULL padding and column order, including `USING`
+and `NATURAL RIGHT JOIN`.
 
 DDL covers databases, tables, indexes, views, triggers, users, grants,
 `CREATE TABLE ... AS SELECT`, temporary tables, `TRUNCATE`, and `RENAME TABLE`.

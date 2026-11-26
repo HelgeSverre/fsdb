@@ -1405,6 +1405,43 @@ let tests =
                   | Affected 0UL, None -> ()
                   | actual, _ -> failtestf "unexpected SQL PREPARE for %s: %A" sql actual
 
+          testCase "left lateral sources can bind to the preserved operand of a right join"
+          <| fun _ ->
+              let session = relationNameSession ()
+              handle session "INSERT INTO a VALUES(2),(3)" |> ignore
+              let query = "SELECT * FROM LATERAL (SELECT a.id AS x WHERE a.id<>2) d RIGHT JOIN a ON d.x=a.id ORDER BY a.id"
+              let rows = [ [ Some "1"; Some "1" ]; [ None; Some "2" ]; [ Some "3"; Some "3" ] ]
+              Expect.equal (handle session query |> snd) (ResultSet([ "x"; "id" ], rows)) "direct results retain the written projection order"
+              match prepareStatementForSession session query with
+              | Error error -> failtestf "expected the right operand to be in lateral scope: %A" error
+              | Ok(statement, parameters) ->
+                  let _, columns = preparedMetadata session statement parameters
+                  Expect.equal (columns |> List.map _.Name) [ "x"; "id" ] "prepared metadata retains the written projection order"
+              let prepared, result = handle session ("PREPARE left_lateral FROM '" + query + "'")
+              Expect.equal result (Affected 0UL) "SQL PREPARE"
+              Expect.equal (handle prepared "EXECUTE left_lateral" |> snd) (ResultSet([ "x"; "id" ], rows)) "SQL EXECUTE"
+              let invalid = "SELECT d.x FROM LATERAL (SELECT a.id AS x) d LEFT JOIN a ON d.x=a.id"
+              Expect.equal (handle session invalid |> snd) (Err(1054, "Unknown column 'a.id' in 'field list'")) "left join keeps the existing scope"
+              let nested =
+                  "SELECT d.x FROM LATERAL (SELECT a.id+b.id AS x) d RIGHT JOIN a ON TRUE RIGHT JOIN b ON TRUE ORDER BY a.id"
+              Expect.equal (handle session nested |> snd)
+                  (ResultSet([ "x" ], [ [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ])) "a lateral source can read both preserved operands"
+
+          testCase "ngram filters retain the preserved side of a right lateral join"
+          <| fun _ ->
+              let session = relationNameSession ()
+              for sql in
+                  [ "CREATE TABLE articles(id INT PRIMARY KEY, body VARCHAR(64), FULLTEXT KEY by_body(body) WITH PARSER ngram)"
+                    "INSERT INTO articles VALUES (1,'東京の地図'),(2,'京都の地図'),(3,'東京の地図')" ] do
+                  match handle session sql |> snd with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s: %A" sql other
+              let sql =
+                  "SELECT d.x,p.id FROM LATERAL (SELECT p.id AS x WHERE p.id<>3) d RIGHT JOIN articles p ON p.id=d.x "
+                  + "WHERE MATCH(p.body) AGAINST ('東京' IN BOOLEAN MODE)>0 ORDER BY p.id"
+              Expect.equal (handle session sql |> snd)
+                  (ResultSet([ "x"; "id" ], [ [ Some "1"; Some "1" ]; [ None; Some "3" ] ])) "scoring preserves lateral bindings and NULL padding"
+
           testCase "comma join scope separates explicit operands and retains lateral dependencies"
           <| fun _ ->
               let session = relationNameSession ()

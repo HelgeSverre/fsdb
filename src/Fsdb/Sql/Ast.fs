@@ -835,6 +835,27 @@ module FromItem =
         | FromJoinGroup(source, joins) -> leaves source @ (joins |> List.collect (fun join -> leaves join.Table))
         | source -> [ source ]
 
+    /// A RIGHT JOIN can expose its preserved operand to lateral sources in the left operand.
+    let tryLateralRightJoin source joins =
+        let hasLateral source =
+            leaves source |> List.exists (function FromLateral _ | FromJsonTable _ -> true | _ -> false)
+        // A later RIGHT JOIN encloses the earlier joins and supplies their outer scope.
+        let rec find lateral preceding outermost = function
+            | join :: rest ->
+                let outermost =
+                    match join.Kind with
+                    | RightJoin | NaturalRightJoin when lateral -> Some(preceding, join, rest)
+                    | _ -> outermost
+                find (lateral || hasLateral join.Table) (join :: preceding) outermost rest
+            | [] -> outermost
+        find (hasLateral source) [] None joins
+        |> Option.map (fun (preceding, join, remaining) ->
+            let left =
+                match List.rev preceding with
+                | [] -> source
+                | joins -> FromJoinGroup(source, joins)
+            left, join, remaining)
+
     type JoinColumnError =
         | MissingColumn of string
         | AmbiguousColumn of string
@@ -909,6 +930,10 @@ module FromItem =
         |> List.fold (fun state join -> state |> Result.bind (fun left -> logicalJoinColumns columnsOf left join)) initial
 
 module Join =
+    let reverseRightOperand left (join: Join) =
+        let kind = if join.Kind = NaturalRightJoin then NaturalLeftJoin else LeftJoin
+        { join with Kind = kind; Table = left }
+
     /// Grouped operands share the query block; derived sources bind their own conditions.
     let rec conditions (join: Join) =
         let rec sourceConditions = function
