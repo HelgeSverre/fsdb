@@ -2925,6 +2925,10 @@ implementation effort:
    collation. The lookup seeks separately within full-order spelling
    runs. The native mixed-prefix count improved 3.26× and still took
    9.24× MySQL's time.
+   [Correlated `ORDER BY … LIMIT`](torture/findings/2026-11-26-correlated-index-top-n.md)
+   now streams an eligible composite index slice through `LATERAL` and
+   scalar queries. The filtered fixture examines 43 rows, down from 1,617.
+   `EXPLAIN` still reports the correlated access as a full scan.
    Other computed lookup keys, residual predicates, and broader
    aggregate shapes still need work.
 

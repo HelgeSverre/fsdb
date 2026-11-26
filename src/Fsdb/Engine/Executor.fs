@@ -16073,12 +16073,15 @@ and private runUnlockedSelectStmt
                             physicalAccessRows access
 
                         let orderedPrefix =
-                            tryEqualityPrefixOrder store registry dbName tref select equalityAccess
+                            tryCorrelatedTopOrder store registry dbName tref select outer
+                            |> Option.map (fun lookup -> lookup.OrderedColumns, lookup.OrderedRows, select)
+                            |> Option.orElseWith (fun () ->
+                                tryEqualityPrefixOrder store registry dbName tref select equalityAccess
+                                |> Option.map (fun plan -> plan.Columns, plan.Rows, coveredSelect (equalityAccess |> Option.map EqualityAccess)))
 
                         match orderedPrefix with
-                        | Some plan ->
-                            let covered = coveredSelect (equalityAccess |> Option.map EqualityAccess)
-                            runArbitrary plan.Columns plan.Rows None { covered with OrderBy = [] }
+                        | Some(columns, rows, orderedSelect) ->
+                            runArbitrary columns rows None { orderedSelect with OrderBy = [] }
                         | None ->
                             let indexOrder = tryIndexOrder store registry dbName tref select
                             let earlyPhysicalAccess = choosePhysicalAccessBeforeIndexOrder indexOrder physicalCandidates
@@ -20895,8 +20898,76 @@ and private tryIndexOrder
 
             direct
             |> Option.orElseWith (fun () ->
-                tryFixedPrefixIndexOrder store registry dbName tref select.Where orderedColumns
+                tryFixedPrefixIndexOrder store registry dbName tref select.Where orderedColumns Set.empty
                 |> Option.bind planLookup))
+
+/// Bind physical integer predicates to the current outer row for index planning.
+/// Keep the SQL predicate for residual evaluation before LIMIT and OFFSET.
+and private tryCorrelatedTopOrder store registry dbName (tref: TableRef) (select: SelectStmt) outer : Storage.OrderedLookup option =
+    let directProjection (projection: Projection) =
+        match projection.Expression with
+        | Col _ | QualifiedCol _ | Star _ -> true
+        | _ -> false
+
+    let shadowsColumn () =
+        routineVariables.Value.IsSome
+        && (selectJoinExpressions select
+            |> List.exists (Expression.exists (function Col name -> (tryRoutineVariable name).IsSome | _ -> false)))
+
+    if outer.IsNone || select.Limit.IsNone || select.OrderBy.IsEmpty || hasZeroRowLimit select
+       || select.Distinct || select.CalculateFoundRows || not select.GroupBy.IsEmpty
+       || select.Having.IsSome || not (List.forall directProjection select.Projections) || shadowsColumn () then
+        None
+    else
+        Option.map3 (fun context predicate table -> context, predicate, table) outer select.Where (physicalFastPathTable store dbName tref)
+        |> Option.filter (fun (_, _, table) -> storedRowsMatchReadRows store table.Columns)
+        |> Option.bind (fun (context, predicate, table) ->
+            let qualifier = tref.Alias |> Option.defaultValue tref.Table
+            let source = correlatedProbeSource qualifier table.Columns
+            let innerColumn name =
+                resolveColumn table.Columns name |> Result.toOption |> Option.map (fun index -> table.Columns.[index])
+            let columnOf expression =
+                match tryCorrelatedInnerColumn source expression with
+                | Some name -> innerColumn name
+                | None -> tryColumnDefForExpr context expression
+            let unsupported = function
+                | (Col _ | QualifiedCol _) as expression ->
+                    columnOf expression |> Option.exists (_.Type >> isExactIntegerIndexType) |> not
+                | LiteralValue(VInt _ | VUInt _ | VNull) -> false
+                | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
+                | _ -> false
+
+            if not (isPlainRowPredicate predicate) || Expression.exists unsupported predicate then None
+            else
+                let correlatedPins =
+                    predicate |> conjuncts |> List.choose (function
+                        | BinOp(Eq, _, _) as expression ->
+                            tryCorrelatedEqualityPredicate source context expression
+                            |> Option.bind (function
+                                | name, (VInt _ | VUInt _) -> Some(name.ToLowerInvariant())
+                                | _ -> None)
+                        | _ -> None) |> Set.ofList
+
+                let safeOrder (term: IndexOrderTerm) =
+                    term.Transform.IsNone
+                    && (innerColumn term.Column |> Option.exists (fun column ->
+                        match column.Type with
+                        | TDate | TDateTime _ -> true
+                        | ty -> isExactIntegerIndexType ty))
+
+                if correlatedPins.IsEmpty then None
+                else
+                    let qualifiers = singleQualifier qualifier table.Columns
+                    let orderProjections = expandOrderProjections table.Columns qualifiers select.Projections
+                    let orderIsValid = validateOrderAliases (columnIndexOf table.Columns) qualifiers orderProjections select.OrderBy |> Result.isOk
+                    indexOrderTerms registry tref select
+                    |> Option.filter (fun terms -> orderIsValid && List.forall safeOrder terms)
+                    |> Option.bind (fun terms ->
+                        let bound =
+                            Expression.rewrite (function
+                                | (Col _ | QualifiedCol _) as expression -> tryCorrelatedOuterValue source context expression |> Option.map Lit
+                                | _ -> None) predicate
+                        tryFixedPrefixIndexOrder store registry dbName tref (Some bound) terms correlatedPins))
 
 and private tryEqualityPrefixOrder
     (store: Store)
@@ -22258,16 +22329,24 @@ and private tryFixedPrefixIndexOrder
     (tref: TableRef)
     (whereExpr: Expr option)
     (orderedTerms: IndexOrderTerm list)
+    (correlatedPins: Set<string>)
     : Storage.OrderedLookup option =
     let invert = function Asc -> Desc | Desc -> Asc
     let requestedDirections = orderedTerms |> List.map _.Direction
-    let allowed = indexAllowedForOrderedAccess IndexOrderBy tref
+    let orderAllowed = indexAllowedForOrderedAccess IndexOrderBy tref
+    let joinAllowed = indexHintsFor IndexJoin tref |> indexAllowedBy
+    let allowed name = orderAllowed name && (correlatedPins.IsEmpty || joinAllowed name)
 
     orderedIndexPrefixMatches IndexOrderBy store registry dbName tref whereExpr orderedTerms
     |> List.tryPick (fun resolved ->
         let matched = resolved.Match
 
-        if matched.PinnedCount = 0 then
+        let bindsOuterKey =
+            correlatedPins.IsEmpty
+            || (matched.Terms |> List.take matched.PinnedCount
+                |> List.exists (fun term -> correlatedPins.Contains(term.Column.ToLowerInvariant())))
+
+        if matched.PinnedCount = 0 || not bindsOuterKey then
             None
         else
             let stored = matched.Terms |> List.map _.Direction
