@@ -19927,6 +19927,10 @@ and private tryAllCorrelatedCountEqualities source whereExpr outer =
         | [] -> None
         | predicates -> predicates |> List.map (tryCorrelatedCountEqualityPredicate source context) |> tryAllSome)
 
+and private correlatedEqualityCollation outer (column: ColumnDef) bound boundColumn =
+    comparisonCollation outer "=" (Col column.Name) (Some column) bound boundColumn
+    |> Result.toOption
+
 and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (whereExpr: Expr option) : int option =
     FromItem.tryQualifier source
     |> Option.bind (fun qualifier ->
@@ -19941,14 +19945,7 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
                     (fun (stored: Collation.Collation) (effective: Collation.Collation) ->
                         stored.Name.Equals(effective.Name, System.StringComparison.OrdinalIgnoreCase))
                     (collationOfColumn outer column)
-                    (comparisonCollation
-                        outer
-                        "="
-                        (Col column.Name)
-                        (Some column)
-                        bound
-                        (tryColumnDefForExpr outer bound)
-                     |> Result.toOption)
+                    (correlatedEqualityCollation outer column bound (tryColumnDefForExpr outer bound))
                 |> Option.defaultValue false
             | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText), _ -> false
             | (TEnum _ | TSet _), _ -> false
@@ -20073,12 +20070,45 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                     outerInteger expression
                 | _ -> None
 
+            let textKey expression =
+                outputIndex expression
+                |> Option.bind (fun index ->
+                    projectedColumnIndex projection.PhysicalOutputs.[index]
+                    |> Option.map (fun physicalIndex -> projection.OutputColumns.[index], table.Columns.[physicalIndex]))
+                |> Option.filter (fun (_, physical) -> isTextColumn (Some physical))
+
+            let textBound = function
+                | LiteralValue(VString _ as value) as expression -> Some(expression, None, value)
+                | (Col _ | QualifiedCol _) as expression ->
+                    let column = tryColumnDefForExpr outer expression
+                    if isTextColumn column then
+                        match tryCorrelatedOuterValue scope outer expression with
+                        | Some(VString _ as value) -> Some(expression, column, value)
+                        | _ -> None
+                    else None
+                | _ -> None
+
+            let textPin =
+                let pin key bound =
+                    textKey key
+                    |> Option.bind (fun (output, physical) ->
+                        textBound bound
+                        |> Option.bind (fun (bound, boundColumn, value) ->
+                            let stored = Collation.findOrDefault physical.Collation
+                            correlatedEqualityCollation outer output bound boundColumn
+                            |> Option.filter (fun effective -> equalsIgnoreCase effective.Name stored.Name)
+                            |> Option.map (fun _ -> physical.Name, value)))
+                function
+                | BinOp(Eq, left, right) -> pin left right |> Option.orElseWith (fun () -> pin right left)
+                | _ -> None
+
             let pinResults =
                 equalities
                 |> List.map (fun expr ->
                     let pin =
                         tryEqualityPredicate innerKey bound expr
                         |> Option.bind (fun ((name, offset), value) -> storedBound offset value |> Option.map (fun value -> name, value))
+                        |> Option.orElseWith (fun () -> textPin expr)
                     expr, pin)
             let pins = pinResults |> List.choose snd
             let unpinned = pinResults |> List.choose (function expr, None -> Some expr | _ -> None)
@@ -20138,7 +20168,7 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                                 |> List.take matched.PinnedCount
                                 |> List.map (fun term -> values.[term.Column.ToLowerInvariant()])
 
-                            Storage.tryOrderedIndexPrefixRangeLookupInTableWith
+                            Storage.tryOrderedEqualityPrefixRangeRowsInTableWith
                                 (equalsIgnoreCase candidate.Name)
                                 outer.Store
                                 table
@@ -20146,15 +20176,15 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                                 prefixValues
                                 range.Lower
                                 range.Upper
-                            |> Option.map (fun lookup -> lookup, allRangesCovered && matched.PinnedCount = pins.Length))))
-                |> List.sortBy (fun (lookup, covered) -> lookup.OrderedRowCount, not covered)
+                            |> Option.map (fun (count, rows) -> count, rows, allRangesCovered && matched.PinnedCount = pins.Length))))
+                |> List.sortBy (fun (count, _, covered) -> count, not covered)
                 |> List.tryHead
-                |> Option.map (fun (lookup, covered) ->
+                |> Option.map (fun (count, orderedRows, covered) ->
                     let filters = if covered then sourceFilters @ residualFilters else sourceFilters
                     let filtered =
-                        if filters.IsEmpty then lookup.OrderedRows
+                        if filters.IsEmpty then orderedRows
                         else
-                            lookup.OrderedRows
+                            orderedRows
                             |> Seq.mapi (fun index row ->
                                 Limits.checkQueryCancellation index
                                 row)
@@ -20166,7 +20196,7 @@ and private tryCorrelatedIntegerRangeAccess (outer: EvalContext) source whereExp
                             |> Seq.map (fun row -> Array.map (readProjectionColumn row) projection.PhysicalOutputs)
                     { Columns = projection.OutputColumns
                       Rows = rows
-                      RowCount = if filters.IsEmpty then Some lookup.OrderedRowCount else None
+                      RowCount = if filters.IsEmpty then Some count else None
                       CoversWhere = covered })
             | _ -> None)
     | _ -> None

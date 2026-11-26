@@ -16319,6 +16319,42 @@ let tests =
                     let unsignedAllocations = measure unsignedQuery
                     Expect.isLessThan unsignedAllocations (signedAllocations * 3L) "wide unsigned bounds use the same composite slice"
 
+                testCase "correlated composite ranges use collation equality in text key parts"
+                <| fun _ ->
+                    let store = newStore ()
+                    let run = runDefault store
+                    run "CREATE TABLE text_parents(id INT PRIMARY KEY, tenant VARCHAR(24), part INT, cut INT) COLLATE utf8mb4_0900_ai_ci" |> ignore
+                    run "CREATE TABLE text_children(id INT PRIMARY KEY, tenant VARCHAR(24), part INT, seq INT, KEY ix(tenant,part DESC,seq DESC)) COLLATE utf8mb4_0900_ai_ci" |> ignore
+
+                    let insert table rows =
+                        run ("INSERT INTO " + table + " VALUES " + String.concat "," rows) |> ignore
+                    let variants = [| "cafe"; "CAFÉ"; "Café" |]
+                    [ 1..30 ] |> List.map (fun part -> $"({part},'CAFE',{part},5)") |> insert "text_parents"
+                    [ 1..1200 ]
+                    |> List.map (fun id ->
+                        let part = (id - 1) / 40 + 1
+                        let sequence = (id - 1) % 40 + 1
+                        $"({id},'{variants.[sequence % 3]}',{part},{sequence})")
+                    |> insert "text_children"
+                    run "INSERT INTO text_children VALUES (1201,'cafe ',1,5),(1202,'café',1,NULL),(1203,NULL,1,5)" |> ignore
+
+                    let sql hint = $"""
+                        SELECT SUM((SELECT COUNT(*) FROM text_children c {hint}
+                            WHERE c.tenant=p.tenant AND c.part=p.part AND c.seq BETWEEN p.cut AND p.cut+2))
+                        FROM text_parents p"""
+                    let measure hint =
+                        let before = System.GC.GetAllocatedBytesForCurrentThread()
+                        let result = run (sql hint)
+                        let allocated = System.GC.GetAllocatedBytesForCurrentThread() - before
+                        match result with
+                        | ResultSet(_, [ [ Some "90" ] ]) -> allocated
+                        | other -> failtestf "expected a count of 90, got %A" other
+
+                    measure "" |> ignore
+                    let indexed = measure ""
+                    let scan = measure "IGNORE INDEX(ix)"
+                    Expect.isLessThan (indexed * 5L) scan "the text equality band still permits selective suffix ranges"
+
                 testCase "correlated plain and functional candidates intersect in conjuncts and OR branches"
                 <| fun _ ->
                     let mutable calls = 0

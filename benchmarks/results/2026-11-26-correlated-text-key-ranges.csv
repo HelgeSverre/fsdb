@@ -1,0 +1,13 @@
+engine,pass,workload,status,iterations,p50_ms,p95_ms,detail
+before,1,integer-prefix-count,ok,20,1.351700,1.787500,
+before,1,folded-text-prefix-count,ok,20,10.682800,11.207900,
+after,1,integer-prefix-count,ok,20,1.359700,1.674000,
+after,1,folded-text-prefix-count,ok,20,3.294700,3.424200,
+mysql,1,integer-prefix-count,ok,20,0.280900,0.296100,
+mysql,1,folded-text-prefix-count,ok,20,0.352700,0.369200,
+mysql,2,folded-text-prefix-count,ok,20,0.369500,0.396300,
+mysql,2,integer-prefix-count,ok,20,0.281500,0.299700,
+after,2,folded-text-prefix-count,ok,20,3.378400,3.806300,
+after,2,integer-prefix-count,ok,20,1.272300,1.330700,
+before,2,folded-text-prefix-count,ok,20,11.074600,11.661000,
+before,2,integer-prefix-count,ok,20,1.376200,1.472500,

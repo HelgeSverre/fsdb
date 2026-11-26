@@ -2900,6 +2900,11 @@ implementation effort:
    use the composite slice for signed and unsigned TINYINT through BIGINT.
    The three native unsigned workloads ran 4.8–5.3× faster, including a
    sum through a projected CTE.
+   [Text equality prefixes with integer ranges](benchmarks/results/2026-11-26-correlated-text-key-ranges.md)
+   now use the composite index when the comparison uses the stored
+   collation. The lookup seeks separately within full-order spelling
+   runs. The native mixed-prefix count improved 3.26× and still took
+   9.24× MySQL's time.
    Other computed lookup keys, residual predicates, and broader
    aggregate shapes still need work.
 

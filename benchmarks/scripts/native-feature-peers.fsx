@@ -20,6 +20,7 @@ let modes =
       "computed-projection-controls"
       "offset-key-controls"
       "integer-key-controls"
+      "text-key-controls"
       "overlay-controls"
       "edge-controls" ]
 
@@ -239,6 +240,23 @@ let readIntegerKeyRanges () =
     for lane, query, expected in ordered do
         probe lane (fun () -> measure lane 20 (fun () -> scalar query |> require lane expected))
 
+let readTextKeyRanges () =
+    write "CREATE TABLE text_parent(id INT PRIMARY KEY, tenant VARCHAR(24), part INT, cut INT) COLLATE utf8mb4_0900_ai_ci"
+    write "CREATE TABLE text_child(id INT PRIMARY KEY, tenant VARCHAR(24), part INT, seq INT, KEY ix(tenant,part DESC,seq DESC), KEY ix_int(part,seq)) COLLATE utf8mb4_0900_ai_ci"
+    seed "text_parent" 30 (fun part -> $"({part},'CAFE',{part},5)")
+    let variants = [| "cafe"; "CAFÉ"; "Café" |]
+    seed "text_child" 1200 (fun id ->
+        let part = (id - 1) / 40 + 1
+        let sequence = (id - 1) % 40 + 1
+        $"({id},'{variants.[sequence % 3]}',{part},{sequence})")
+
+    let query extraPredicate =
+        $"SELECT SUM((SELECT COUNT(*) FROM text_child c WHERE c.part=p.part AND c.seq BETWEEN p.cut AND p.cut+2 {extraPredicate})) FROM text_parent p"
+    let cases = [ "integer-prefix-count", query ""; "folded-text-prefix-count", query "AND c.tenant=p.tenant" ]
+    let ordered = if pass % 2 = 0 then List.rev cases else cases
+    for lane, sql in ordered do
+        probe lane (fun () -> measure lane 20 (fun () -> scalar sql |> require lane 90L))
+
 let readCountArguments () =
     seedNullableBuckets ()
 
@@ -427,11 +445,12 @@ try
     write $"CREATE DATABASE {database}"
     try
         write $"USE {database}"
-        if mode <> "edge-controls" && mode <> "overlay-controls" && mode <> "integer-key-controls" then seedAccounts ()
+        if not (List.contains mode [ "edge-controls"; "overlay-controls"; "integer-key-controls"; "text-key-controls" ]) then seedAccounts ()
 
         let workloads =
             if mode = "range-controls" then [ readRangeControls ]
             elif mode = "integer-key-controls" then [ readIntegerKeyRanges ]
+            elif mode = "text-key-controls" then [ readTextKeyRanges ]
             elif List.contains mode [ "projected-range-controls"; "projected-filter-controls"; "correlated-residual-controls"; "computed-projection-controls"; "offset-key-controls" ] then
                 [ readProjectedRanges ]
             elif mode = "nullable-count-controls" || mode = "expression-count-controls" then [ readCountArguments ]
