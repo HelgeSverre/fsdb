@@ -11,8 +11,8 @@ Fsdb progressed from 37 to 58 matches on the original 58 checks.
 The earlier differences were insertions and key moves that succeeded
 on Fsdb while MySQL returned lock wait timeout 1205. The oracle
 rolls back each test insert so the next attempt sees the same data.
-The expanded purge checks bring the result to 66 of 68 on Fsdb
-and 68 of 68 on MySQL.
+Both engines now match the 69 checks for these primary-key gaps,
+including explicit read-view controls and both predecessor-purge cases.
 
 ## Isolation and transaction lifetime
 
@@ -49,7 +49,7 @@ for both an insert into the gap and a key move into it, using
 
 | Gate change while the missing lookup is protected | Observed MySQL behavior |
 | --- | --- |
-| Delete the lower record at `1` | The first inserts at `0` and `1` succeed. Inserts at `2`, `3`, and `4` still time out. Later probes can observe the wider gap after purge. |
+| Delete the lower record at `1` while a read view retains it | Inserts at `0` and `1` succeed. Inserts at `2`, `3`, and `4` still time out. Later probes can observe a wider gap after the reader ends and purge runs. |
 | Delete the upper record at `5` | Inserts at `2` through `6` time out as protection reaches the next record at `9`. |
 | Insert `6` before the lookup and keep the insertion pending, starting from keys `0` and `10` | The missing-key lookup proceeds. Inserts at `2` and `4` time out, and an insert at `7` succeeds. |
 | Commit the pending `6` | The insert at `7` still succeeds. |
@@ -60,11 +60,10 @@ for both an insert into the gap and a key move into it, using
 
 A pending insertion can bound the gap on either side. When it rolls
 back, protection extends to the next surviving record on that side.
-A deletion of a previously committed lower record initially follows
-the narrower boundary observed above. Fsdb coordinates missing-key
-interval claims and primary-key writes under the same table monitor. The signed
-composite-key probes also matched MySQL with both ascending and
-descending order on the second key part.
+Fsdb coordinates missing-key interval claims and primary-key writes
+under the same table monitor. The signed composite-key probes also
+matched MySQL with both ascending and descending order on the
+second key part.
 
 ### Consistent read views
 
@@ -82,8 +81,19 @@ and a lower record at `2`, a separate snapshot can keep `2` in place
 after its deletion. Inserting `1` succeeds while that snapshot is
 open. In MySQL, the insert of `1` eventually waits after the reader
 ends. This also applies when the lower record was pending at lookup
-time and committed before deletion. Fsdb still retains the committed
-lower boundary after the reader ends.
+time and committed before deletion. Fsdb widens the gap on the next
+affected write once the read view ends. MySQL widens it when its
+background purge removes the deleted record.
+
+## Cross-schema foreign keys
+
+With a qualified foreign key from `gate.id` to a key in another
+database, MySQL returns 1205 for both a direct move of `gate.id`
+into the protected gap and a parent key update that moves it via
+`ON UPDATE CASCADE`. Fsdb allows both moves while the gap is
+held. Both engines allow the moves after the holder rolls back.
+With these six checks included, MySQL matches 75 of 75 and Fsdb
+matches 73 of 75.
 
 ## Prepared XA and restart
 

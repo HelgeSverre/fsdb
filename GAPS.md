@@ -3120,10 +3120,10 @@ implementation effort:
    [schedule oracle](torture/findings/2026-11-26-joined-view-primary-key-gaps.md)
    covers insertions, key moves, shared holders, open-ended intervals,
    changes to neighboring keys, savepoints, and the lifetime of live
-   prepared XA claims. Eventual widening after purge of a committed
-   predecessor remains open, along with qualified foreign-key key
-   moves, broader scan plans, and other key types and join access paths.
-   An audited
+   prepared XA claims. Both boundaries widen once no writer or
+   consistent read view retains a deleted key. Key moves through qualified
+   foreign-key paths, broader scans, and other key types and join access
+   paths remain open. An audited
    [nested checked view LEFT JOINed to a window CTE](torture/findings/2026-11-17-nested-window-outer-view.md)
    correctly remains read only, matching MySQL's metadata, rows, CHECK OPTION
    rejection, and mutation rejection. Procedures, functions, and triggers

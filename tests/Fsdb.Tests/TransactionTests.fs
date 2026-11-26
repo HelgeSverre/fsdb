@@ -5872,7 +5872,7 @@ let tests =
                       | actual -> failtestf "%s should retain the published row lock (replacing=%b), got %A" isolation replacesExisting actual
                       run setup "UPDATE gate SET delta=7 WHERE id=1" (Affected 1UL) |> ignore
 
-          testCase "a missing joined-view primary key protects its gap until savepoint rollback"
+          testCase "joined-view primary gaps follow savepoints and consistent read views"
           <| fun _ ->
               let run session sql expected =
                   let next, result = handle session sql
@@ -5893,18 +5893,20 @@ let tests =
 
               let writer = run (create 2 store) "START TRANSACTION" 0UL
               let writer = run writer "SAVEPOINT before_lookup" 0UL
-              let writer =
-                  run writer
-                      "UPDATE active a JOIN gate g ON g.id=a.id SET a.n=a.n+g.delta WHERE a.id=3 AND a.seq BETWEEN 20 AND 22"
-                      0UL
+              let update =
+                  "UPDATE active a JOIN gate g ON g.id=a.id SET a.n=a.n+g.delta WHERE a.id=3 AND a.seq BETWEEN 20 AND 22"
+              let writer = run writer update 0UL
 
               let contender = run (create 3 store) "SET SESSION innodb_lock_wait_timeout=1" 0UL
-              run contender "INSERT INTO gate VALUES (6,0)" 1UL |> ignore
-              let blockedWrites = System.Diagnostics.Stopwatch.StartNew()
-              for sql in [ "INSERT INTO gate VALUES (3,0)"; "UPDATE gate SET id=4 WHERE id=5" ] do
+              let expectInsertWait sql =
                   match handle contender sql |> snd with
                   | Err(1205, _) -> ()
                   | result -> failtestf "expected an insertion wait for %s, got %A" sql result
+
+              run contender "INSERT INTO gate VALUES (6,0)" 1UL |> ignore
+              let blockedWrites = System.Diagnostics.Stopwatch.StartNew()
+              expectInsertWait "INSERT INTO gate VALUES (3,0)"
+              expectInsertWait "UPDATE gate SET id=4 WHERE id=5"
               Expect.isLessThan blockedWrites.Elapsed (TimeSpan.FromSeconds 10.0)
                   "autocommit writes use the session lock wait timeout"
 
@@ -5919,6 +5921,27 @@ let tests =
                   run writer "ROLLBACK" 0UL |> ignore
 
               run contender "UPDATE gate SET id=4 WHERE id=5" 1UL |> ignore
+
+              run setup "TRUNCATE TABLE gate" 0UL |> ignore
+              run setup "INSERT INTO gate VALUES (1,7),(5,13)" 2UL |> ignore
+              let writer = run (create 2 store) "START TRANSACTION" 0UL
+              let writer = run writer update 0UL
+              try
+                  let reader = run (create 5 store) "START TRANSACTION" 0UL
+                  let reader, seen = handle reader "SELECT COUNT(*) FROM gate"
+                  try
+                      match seen with
+                      | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                      | actual -> failtestf "expected the reader to see the predecessor, got %A" actual
+                      run setup "DELETE FROM gate WHERE id=1" 1UL |> ignore
+                      let inserting = run contender "START TRANSACTION" 0UL
+                      let inserting = run inserting "INSERT INTO gate VALUES (0,0)" 1UL
+                      run inserting "ROLLBACK" 0UL |> ignore
+                  finally
+                      run reader "ROLLBACK" 0UL |> ignore
+                  expectInsertWait "INSERT INTO gate VALUES (0,0)"
+              finally
+                  run writer "ROLLBACK" 0UL |> ignore
 
           testCase "a materialized joined update retains the rows read by its scan"
           <| fun _ ->

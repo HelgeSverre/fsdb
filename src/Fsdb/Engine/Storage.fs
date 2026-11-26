@@ -6376,8 +6376,7 @@ let private exactKeyOwner (cache: KeyLockCache) key =
 
 type private PrimaryGapBoundary =
     { Values: Value list
-      LockKey: string
-      WasCommitted: bool }
+      LockKey: string }
 
 let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (database: string) tableName (values: Value list) =
     match snapshot.TransactionLocks, tableAt snapshot database tableName with
@@ -6440,7 +6439,7 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
                 |> Seq.fold (fun best candidate ->
                     if best |> Option.forall (improves candidate) then Some candidate else best) None
 
-            let isCommittedOrPinned table key =
+            let isVisibleInAnyReadView table key =
                 contains table key || (readTables () |> Seq.exists (fun version -> contains version key))
 
             let install () =
@@ -6452,31 +6451,24 @@ let internal acquireMissingPrimaryGap timeout (live: Store) (snapshot: Store) (d
                            && (stripe.Gap |> Option.exists (fun (key, _) -> key = probe)) then
                             alreadyHeld <- true)
                     if not alreadyHeld then
-                        let boundary key =
-                            let encoded = encode table key
-                            { Values = key
-                              LockKey = encoded
-                              WasCommitted = isCommittedOrPinned table encoded }
+                        let boundary key = { Values = key; LockKey = encode observed key }
                         let mutable lower = nearest true values table |> Option.map boundary
                         let mutable upper = nearest false values table |> Option.map boundary
+
+                        // A key can bound the gap while an active writer owns it
+                        // or an older consistent read still sees its deleted row.
+                        let refreshBoundary lower table current =
+                            match current with
+                            | Some bound when not (isVisibleInAnyReadView table bound.LockKey)
+                                              && (exactKeyOwner cache bound.LockKey).IsNone ->
+                                nearest lower bound.Values table |> Option.map boundary
+                            | _ -> current
 
                         let blocks key =
                             match current (), trySignedPrimaryLockValues values.Length key with
                             | Some table, Some candidate ->
-                                match lower with
-                                // A rolled-back insertion can remove a provisional predecessor.
-                                | Some bound when not bound.WasCommitted ->
-                                    if isCommittedOrPinned table bound.LockKey then
-                                        lower <- Some { bound with WasCommitted = true }
-                                    elif (exactKeyOwner cache bound.LockKey).IsNone then
-                                        lower <- nearest true bound.Values table |> Option.map boundary
-                                | _ -> ()
-                                match upper with
-                                // A deleted successor stays available to read views until they end.
-                                | Some bound when not (isCommittedOrPinned table bound.LockKey)
-                                                  && (exactKeyOwner cache bound.LockKey).IsNone ->
-                                    upper <- nearest false bound.Values table |> Option.map boundary
-                                | _ -> ()
+                                lower <- refreshBoundary true table lower
+                                upper <- refreshBoundary false table upper
                                 not (contains table key)
                                 && (lower |> Option.forall (fun bound -> compare bound.Values candidate < 0))
                                 && (upper |> Option.forall (fun bound -> compare candidate bound.Values < 0))

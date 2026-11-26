@@ -160,11 +160,20 @@ def check(port, mysql):
         execute(owner, "ROLLBACK")
         expect("insertion after both holders release", insert((3,)), (1,))
 
+        isolation(admin, "REPEATABLE READ")
         for endpoint, expected in (
             (1, (1, 1, TIMEOUT, TIMEOUT, TIMEOUT, DUPLICATE, 1)),
             (5, (1, DUPLICATE, TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT)),
         ):
             reset_gate()
+            pin_predecessor = endpoint == 1
+            if pin_predecessor:
+                execute(admin, "START TRANSACTION")
+                expect(
+                    "read view before deleting predecessor",
+                    scalar(admin, "SELECT COUNT(*) FROM gate"),
+                    4,
+                )
             execute(writer, "START TRANSACTION")
             expect(
                 f"lookup before deleting endpoint {endpoint}",
@@ -182,8 +191,9 @@ def check(port, mysql):
                 expected,
             )
             execute(writer, "ROLLBACK")
+            if pin_predecessor:
+                execute(admin, "ROLLBACK")
 
-        isolation(admin, "REPEATABLE READ")
         for view_owner in ("gap holder", "other session"):
             reset_gate()
             reader = writer if view_owner == "gap holder" else admin
@@ -314,6 +324,38 @@ def check(port, mysql):
                 scalar(admin, "SELECT n FROM parent WHERE id=3"),
                 10,
             )
+
+        reference = schema + "_ref"
+        execute(admin, f"CREATE DATABASE {reference}")
+        try:
+            execute(admin, f"CREATE TABLE {reference}.keys_for_gate(k INT PRIMARY KEY)")
+            execute(admin, f"INSERT INTO {reference}.keys_for_gate VALUES (1),(5)")
+            reset_gate("(1,7),(5,13)")
+            execute(
+                admin,
+                "ALTER TABLE gate ADD CONSTRAINT fk_gate FOREIGN KEY(id) "
+                f"REFERENCES {reference}.keys_for_gate(k) ON UPDATE CASCADE",
+            )
+            for label, sql in (
+                ("direct qualified move", "UPDATE gate SET id=4 WHERE id=5"),
+                (
+                    "qualified cascade",
+                    f"UPDATE {reference}.keys_for_gate SET k=4 WHERE k=5",
+                ),
+            ):
+                direct = label == "direct qualified move"
+                if direct:
+                    execute(admin, f"INSERT INTO {reference}.keys_for_gate VALUES (4)")
+                execute(writer, "START TRANSACTION")
+                expect(f"lookup before {label}", outcome(writer, update), 0)
+                expect(f"{label} into the gap", attempt(sql), TIMEOUT)
+                execute(writer, "ROLLBACK")
+                expect(f"{label} after gap release", attempt(sql), 1)
+                if direct:
+                    execute(admin, f"DELETE FROM {reference}.keys_for_gate WHERE k=4")
+        finally:
+            execute(admin, "DROP TABLE gate")
+            execute(admin, f"DROP DATABASE {reference}")
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 
