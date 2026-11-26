@@ -846,6 +846,34 @@ let tests =
                     let expected = geometry "GEOMETRYCOLLECTION(POINT(83.66878579138226 -147.39327281023256),POINT(80.77618702776390 -147.39327381023256))"
                     Expect.equal (call "ST_Intersection" [ line; area ]) expected "the source endpoint precedes the polygon vertex"
 
+                testCase "geographic intersections subtract clipped lines using the solver coordinates"
+                <| fun _ ->
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]
+                    let area =
+                        geometry (
+                            "POLYGON((71.45560162577510 -118.01542423838433,71.45560162577510 -111.51325001828516,75.80346757517412 -111.51325001828516,75.80346757517412 -118.01542423838433,71.45560162577510 -118.01542423838433),"
+                            + "(72.54256811312486 -116.38988068335954,74.71650108782437 -116.38988068335954,74.71650108782437 -113.13879357330995,72.54256811312486 -113.13879357330995,72.54256811312486 -116.38988068335954))")
+                    let first = "72.54256811312486 -116.38987068335953"
+                    let last = "74.71650108782437 -116.38987068335953"
+                    for start, endpoint, reversed in [ first, last, false; last, first, true ] do
+                        let line = geometry $"LINESTRING({start},{endpoint})"
+                        match call "ST_Intersection" [ line; area ] with
+                        | VGeometry { Shape = GLineString [ firstPoint; lastPoint ] } ->
+                            let original, cut = if reversed then lastPoint, firstPoint else firstPoint, lastPoint
+                            Expect.equal (fst original) 72.54256811312486 "the fragment retains the original endpoint"
+                            Expect.isLessThan (abs (fst cut - 72.54256819438783)) 1e-10 "the clip turn ends the fragment"
+                        | actual -> failtestf "expected only the clipped fragment, got %A" actual
+
+                    let diagonalArea =
+                        geometry (
+                            "POLYGON((25.70702653967264 -144.23433043933093,25.70702653967264 -140.91907927719492,28.85891479529723 -140.91907927719492,28.85891479529723 -144.23433043933093,25.70702653967264 -144.23433043933093),"
+                            + "(26.49499860357879 -143.40551764879694,28.07094273139109 -143.40551764879694,28.07094273139109 -141.74789206772894,26.49499860357879 -141.74789206772894,26.49499860357879 -143.40551764879694))")
+                    let diagonal = geometry "LINESTRING(23.28939821659709 -140.08669568921005,28.37331764709052 -143.22688466142355)"
+                    match call "ST_Intersection" [ diagonal; diagonalArea ] with
+                    | VGeometry { Shape = GGeometryCollection [ { Shape = GLineString _ }; { Shape = GLineString _ }; { Shape = GPoint _ }; { Shape = GPoint _ }; { Shape = GPoint(latitude, _) } ] } ->
+                        Expect.isLessThan (abs (latitude - 26.49636018772874)) 1e-10 "the last contact stays separate from the clipped line"
+                    | actual -> failtestf "expected two lines and three separate points, got %A" actual
+
                 testCase "geographic MBR predicates use geodesic, circular and degenerate bounds"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

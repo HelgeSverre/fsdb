@@ -3210,8 +3210,10 @@ implementation effort:
    [Rounded endpoint rejection](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#rejected-crossings-behind-rounded-endpoints)
    closes the remaining difference, union, and symmetric difference cases
    in the wider polar sweep. [Rounded source endpoints](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#rounded-source-endpoints-in-the-point-pass)
-   contribute isolated intersection points. Coverage of points by
-   very short clipped fragments and spatial cost estimates remain open.
+   contribute isolated intersection points. [Coverage in solver radians](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#coverage-in-solver-radians)
+   closes the remaining seeded polar results across WGS 84, GRS 1980,
+   and Clarke 1866. Mixed-latitude and multipart overlay differences and
+   spatial cost estimates remain open.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
    [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)

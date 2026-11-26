@@ -1132,3 +1132,29 @@ fixture the clipped latitude changes by one ULP during the conversion
 to degrees and back. In the other the point latitude changes by one
 ULP. In both line directions, the coverage check removes each point
 when fed the original radians and keeps it after the conversion.
+
+### Coverage in solver radians
+
+The clipping and point passes retain the original radian coordinates
+for generated turns until the final coverage check. Both passes also
+carry the degree coordinates used by clipping and by the SQL result.
+Point coverage uses the default spheroid with flattening computed as
+`(a - b) / a`. In a diagonal fixture, the alternate calculation
+`1 - b / a` rounds the point and clip azimuths close enough to compare
+equal and incorrectly removes the point.
+[MySQL point/line subtraction](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/intersection_functor.cc),
+[Boost ellipsoid flattening](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/formulas/flattening.hpp).
+
+| Comparison | Results | Prior differences | Remaining differences |
+| --- | ---: | ---: | ---: |
+| WGS 84 structured overlays | 7,168 | 0 | 0 |
+| WGS 84 seeded polar overlays | 3,072 | 8 | 0 |
+| GRS 1980 seeded polar overlays (EPSG 4258) | 3,072 | 14 | 0 |
+| Clarke 1866 seeded polar overlays (EPSG 4267) | 3,072 | 4 | 0 |
+| WGS 84 seeded mixed-latitude overlays | 12,800 | 78 | 72 |
+| WGS 84 longitude-first seeded intersections | 180 | 2 | 0 |
+| WGS 84 longitude-first multipart intersections | 480 | 12 | 4 |
+
+The six mixed-latitude fixes were intersections. Every previously
+matching result still matches. The same seeded polar sweep runs on
+the alternate ellipsoids with `--srid 4258` and `--srid 4267`.

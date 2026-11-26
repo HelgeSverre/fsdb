@@ -1761,15 +1761,18 @@ let private geographicPointIndex () =
 
     contains, add
 
-let private distinctGeographicPoints points =
+let private distinctGeographicPointsBy coordinates points =
     let contains, add = geographicPointIndex ()
 
     points
     |> List.filter (fun point ->
-        if contains point then false
+        let position = coordinates point
+        if contains position then false
         else
-            add point
+            add position
             true)
+
+let private distinctGeographicPoints points = distinctGeographicPointsBy id points
 
 let private geographicPointResult points =
     match distinctGeographicPoints points with
@@ -2116,7 +2119,7 @@ let private distinctComponents equal members =
         if List.exists (equal item) retained then retained else item :: retained) []
     |> List.rev
 
-let private distinctGeographicLines referenceSystem lines =
+let private distinctGeographicLinesBy coordinates referenceSystem lines =
     let meridianExtent = function
         | (latitude, longitude) :: rest when rest |> List.forall (fun (_, lon) -> lon = longitude) ->
             let lower, upper =
@@ -2133,14 +2136,18 @@ let private distinctGeographicLines referenceSystem lines =
         | _ -> true
 
     lines
-    |> List.map (fun line -> line, meridianExtent line)
-    |> distinctComponents (fun (first, firstExtent) (second, secondExtent) ->
+    |> List.map (fun line ->
+        let positions = coordinates line
+        line, positions, meridianExtent positions)
+    |> distinctComponents (fun (_, first, firstExtent) (_, second, secondExtent) ->
         first = second
         || first = List.rev second
         || (sameExtent firstExtent secondExtent
             && geographicLineCovers referenceSystem [ first ] [ second ]
             && geographicLineCovers referenceSystem [ second ] [ first ]))
-    |> List.map fst
+    |> List.map (fun (line, _, _) -> line)
+
+let private distinctGeographicLines referenceSystem lines = distinctGeographicLinesBy id referenceSystem lines
 
 let private tryGeographicLineOverlay referenceSystem kind srid first second =
     let usableSegments line =
@@ -2236,9 +2243,17 @@ let private tryGeographicLineOverlay referenceSystem kind srid first second =
             | GEmpty, result | result, GEmpty -> Some result
             | points, lines -> Some(GGeometryCollection [ { Srid = srid; Shape = points }; { Srid = srid; Shape = lines } ])
 
+[<Struct>]
+type private GeographicOverlayPoint =
+    { Degrees: float * float
+      Radians: float * float }
+
+let private geographicOverlayPoint coordinates =
+    { Degrees = coordinates; Radians = geographicPointRadians coordinates }
+
 type private GeographicAreaLinePiece =
-    { Start: float * float
-      End: float * float
+    { Start: GeographicOverlayPoint
+      End: GeographicOverlayPoint
       Covered: bool
       StartsSegment: bool }
 
@@ -2440,7 +2455,7 @@ let private geographicPartitionContacts referenceSystem lineSections boundarySec
             contacts
             |> List.mapi (fun line -> List.map (fun (boundary, points) -> struct (line, boundary), points))
             |> List.concat
-        let remaining = Collections.Generic.Dictionary<struct (int * int), (float * float) list>()
+        let remaining = Collections.Generic.Dictionary<struct (int * int), GeographicOverlayPoint list>()
         for key, points in pairs do remaining.Add(key, points)
         let ordered = ResizeArray()
         let visit first second =
@@ -2505,14 +2520,18 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
     let covered point = areaPosition point |> Option.defaultValue true
 
     if start = endpoint then
-        [ { Start = start; End = endpoint; Covered = covered start; StartsSegment = true } ], []
+        let point = geographicOverlayPoint start
+        [ { Start = point; End = point; Covered = covered start; StartsSegment = true } ], []
     else
         let distance = geographicPointDistance referenceSystem start
         // MySQL retains the solver's longitude in area overlay results,
         // even when a cut just beyond the antimeridian uses an extra turn.
         let crossing boundary =
-            tryGeographicCrossingPoint id referenceSystem segment boundary
+            tryGeographicSegmentCrossing referenceSystem segment boundary
             |> Option.filter (fun _ -> not (geographicTurnRejectsRoundedEndpoint referenceSystem segment boundary))
+            |> Option.map (fun ((latitude, longitude) as radians) ->
+                { Degrees = latitude / mysqlRadians 1.0, longitude / mysqlRadians 1.0
+                  Radians = radians })
         let roundedVertex, roundedEndpoint = geographicRoundedOverlayContacts referenceSystem segment
         let side = geographicTurnSide referenceSystem
         let sourceStart, sourceEnd = geographicPointRadians start, geographicPointRadians endpoint
@@ -2530,15 +2549,19 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                     // The linear overlay traverses the polygon in the
                     // opposite direction to the point overlay. Equal-latitude
                     // edges can yield two distinct Sjöberg solutions.
-                    let roundedCut = roundedVertex (b, a)
+                    let roundedCut = roundedVertex (b, a) |> Option.map geographicOverlayPoint
                     let cut = roundedCut |> Option.orElseWith (fun () -> crossing (b, a))
                     let point =
                         if not includePoints then []
                         else
                             roundedEndpoint boundary
+                            |> Option.map geographicOverlayPoint
                             |> Option.orElseWith (fun () ->
                                 if fst a <> fst b then cut
-                                else roundedVertex boundary |> Option.orElseWith (fun () -> crossing boundary))
+                                else
+                                    roundedVertex boundary
+                                    |> Option.map geographicOverlayPoint
+                                    |> Option.orElseWith (fun () -> crossing boundary))
                             |> Option.toList
                     let turns =
                         match cut with
@@ -2549,11 +2572,13 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                                 if roundedCut.IsSome && fst start > fst endpoint then -(side first last sourceStart)
                                 else side first last sourceEnd
                             match after with
-                            | -1 -> Map.add vertex true turns
-                            | 1 -> Map.add vertex false turns
+                            | -1 -> Map.add vertex.Degrees true turns
+                            | 1 -> Map.add vertex.Degrees false turns
                             | _ -> turns
                     Option.toList cut @ cuts, addContacts point, spans, turns, hasEndpointContact
-                | [ point ] -> point :: cuts, addContacts [ point ], spans, turns, true
+                | [ coordinates ] ->
+                    let point = geographicOverlayPoint coordinates
+                    point :: cuts, addContacts [ point ], spans, turns, true
                 | points ->
                     let positions = List.map distance points
                     let turnPoints =
@@ -2562,7 +2587,9 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                             // the polygon edge. Its start belongs to the incoming edge.
                             [ b ]
                         else points
-                    points @ cuts, addContacts turnPoints, (List.min positions, List.max positions) :: spans, turns, true)
+                    List.map geographicOverlayPoint points @ cuts,
+                    addContacts (List.map geographicOverlayPoint turnPoints),
+                    (List.min positions, List.max positions) :: spans, turns, true)
                 ([], [], [], Map.empty, false)
 
         let turnCoverage first second =
@@ -2584,16 +2611,19 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
             if point = start then 0, 0.0
             elif point = endpoint then 2, 0.0
             else 1, distance point
-        let cuts = distinctGeographicPoints (start :: endpoint :: cuts) |> List.sortBy position
+        let cuts =
+            geographicOverlayPoint start :: geographicOverlayPoint endpoint :: cuts
+            |> distinctGeographicPointsBy (fun point -> point.Degrees)
+            |> List.sortBy (fun point -> position point.Degrees)
         let pieces =
             cuts
-            |> List.map (fun point -> distance point, point)
+            |> List.map (fun point -> distance point.Degrees, point)
             |> List.pairwise
             |> List.mapi (fun index ((lower, first), (upper, second)) ->
                 let alongBoundary = spans |> List.exists (fun (from, until) -> from <= lower && upper <= until)
                 let isCovered =
                     alongBoundary
-                    || (turnCoverage first second
+                    || (turnCoverage first.Degrees second.Degrees
                         |> Option.defaultWith (fun () ->
                             covered (geographicPointAlong referenceSystem start endpoint ((lower + upper) / 2.0))))
                 { Start = first; End = second; Covered = isCovered; StartsSegment = index = 0 })
@@ -2617,7 +2647,7 @@ let private geographicAreaLineFragments retainCovered pieces =
 
     finish current finished |> List.rev
 
-let private defaultGeographicFlattening = 1.0 - 6356752.3142451793 / 6378137.0
+let private defaultGeographicFlattening = (6378137.0 - 6356752.3142451793) / 6378137.0
 
 let private geographicSegmentCoversPoint flattening
     (((latitude1, longitude1) as start), ((latitude2, longitude2) as endpoint))
@@ -2638,10 +2668,10 @@ let private geographicSegmentCoversPoint flattening
 
 let private geographicOverlayLineCoverage lines =
     // MySQL subtracts the clipped linework using Boost's default spheroid.
-    let segments = lines |> List.collect (List.map geographicPointRadians >> List.pairwise)
+    // Keep the solver's radians through this test to avoid rounding a turn twice.
+    let segments = lines |> List.collect (List.map (fun point -> point.Radians) >> List.pairwise)
     fun point ->
-        let query = geographicPointRadians point
-        segments |> List.exists (fun segment -> geographicSegmentCoversPoint defaultGeographicFlattening segment query)
+        segments |> List.exists (fun segment -> geographicSegmentCoversPoint defaultGeographicFlattening segment point.Radians)
 
 let private geographicMbr referenceSystem shape =
     let half = Math.PI
@@ -2955,10 +2985,11 @@ let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygon
             pieces, contacts
 
         let partitioned = sourceSections |> List.map partitionLine
+        let lineCoordinates = List.map (fun point -> point.Degrees)
         let fragments retainCovered =
             partitioned
             |> List.collect (fst >> geographicAreaLineFragments retainCovered)
-            |> distinctGeographicLines referenceSystem
+            |> distinctGeographicLinesBy lineCoordinates referenceSystem
 
         match kind with
         | OverlayKind.Intersection ->
@@ -2968,13 +2999,13 @@ let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygon
                 partitioned
                 |> List.collect snd
                 |> geographicPartitionContacts referenceSystem (List.concat sourceSections) boundarySections
-                |> distinctGeographicPoints
-                |> List.choose (fun (latitude, longitude) ->
-                    if covered (latitude, longitude) then None
-                    else Some(GPoint(latitude, longitude)))
-            Some(compose (List.map GLineString inside @ points))
+                |> distinctGeographicPointsBy (fun point -> point.Degrees)
+                |> List.choose (fun point ->
+                    if covered point then None
+                    else Some(GPoint point.Degrees))
+            Some(compose (List.map (lineCoordinates >> GLineString) inside @ points))
         | OverlayKind.Difference ->
-            match fragments false with
+            match List.map lineCoordinates (fragments false) with
             | [] -> Some GEmpty
             | [ line ] -> Some(GLineString line)
             | lines -> Some(GMultiLineString lines)
@@ -2990,7 +3021,7 @@ let private tryGeographicLineAreaOverlay referenceSystem kind srid lines polygon
                     match kind, oriented with
                     | OverlayKind.Union, GMultiPolygon polygons -> List.map GPolygon polygons
                     | _ -> [ oriented ]
-                Some(compose (areas @ List.map GLineString outside))
+                Some(compose (areas @ List.map (lineCoordinates >> GLineString) outside))
 
 let private geographicLineworkCoversPoint referenceSystem lines point =
     geographicPointLinePosition referenceSystem point lines <> GeographicPointLinePosition.Outside
