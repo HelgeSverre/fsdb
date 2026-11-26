@@ -185,3 +185,33 @@ of 0.0000001 for MySQL's single-precision scores.
 
 In the four-document example, MySQL's fresh-cache score was 0.015610 for
 both matching documents. Cache-dependent wildcard differences remain.
+
+## Adjacent Boolean modifiers
+
+MySQL 8.4.11 recognizes ngram Boolean modifiers at the beginning of the
+query or after an ASCII space. In `生日-快乐`, the hyphen separates two
+optional terms. In `生日 -快乐`, it excludes documents containing `快乐`.
+A tab or fullwidth punctuation before a modifier does not enable it,
+and a space between the modifier and the term resets it. A run of
+modifiers at an enabled boundary uses the final required/excluded flag,
+the net rank adjustment, and the parity of the soft marker, in that
+order. [MySQL ngram Boolean lexer](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/include/fts0tokenize.h).
+
+A four-document binary bigram fixture compares `生日`, `快乐`,
+`生日快乐`, and `東京` with session stopwords disabled. Optimizing the
+MySQL full-text index and refreshing table statistics isolates the lexer
+from cache-dependent wildcard scores. MySQL verified all 14 modifier
+equivalences in the regression fixture. Before the change, the 19
+distinct queries produced 11 membership and 12 relevance differences.
+
+With the lexer change all 19 queries matched. The optimized binary
+index also matched 2,750 punctuation queries at token sizes 1, 2, 3, 5,
+and 10, plus 3,142 grouped, weighted, and wildcard queries at sizes 2
+and 3. The maintained two-column `utf8mb4_0900_ai_ci` corpus matched all
+3,870 natural-language, Boolean, and query-expansion searches at sizes
+1–10.
+
+With the same grouped corpus and refreshed statistics on a fresh
+MySQL index, the comparison still found 314 membership and 345
+relevance differences at sizes 2 and 3. This index-state-dependent
+behavior remains open. [MySQL full-text query source](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc).

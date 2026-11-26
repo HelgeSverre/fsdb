@@ -1731,6 +1731,9 @@ matching gram's postings toward document frequency on the audited
 optimized MySQL indexes. Repeated terms share relevance across groups,
 and audited ngram weighting operators adjust the result before each
 matched term contributes its relevance.
+[Adjacent ngram Boolean modifiers](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#adjacent-boolean-modifiers)
+now follow the ASCII space boundary, including repeated and opposing
+modifiers and punctuation between CJK terms.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.

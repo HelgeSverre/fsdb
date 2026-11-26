@@ -305,6 +305,31 @@ let tests =
                   Expect.equal (ids "\"AB\"") [ 1; 3; 4 ] $"{name} retains the uppercase gram in the index"
                   Expect.equal (ids "abc'def") [ 5 ] $"{name} matches the lowercase phrases"
 
+          testCase "Boolean ngram modifiers follow ASCII space boundaries"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_bin" |> Option.get
+              let documents = [ 1, [ "生日" ]; 2, [ "快乐" ]; 3, [ "生日快乐" ]; 4, [ "東京" ] ]
+              let index = buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation documents
+              let scores = booleanScores index
+              for query, equivalent in
+                  [ "生日+快乐", "生日 快乐"
+                    "生日-快乐", "生日 快乐"
+                    "生日>快乐", "生日 快乐"
+                    "生日~快乐", "生日 快乐"
+                    "生日\t+快乐", "生日 快乐"
+                    "生日，-快乐", "生日 快乐"
+                    "生日 + 快乐", "生日 快乐"
+                    "生日 ++快乐", "生日 +快乐"
+                    "生日 +-快乐", "生日 -快乐"
+                    "生日 -+快乐", "生日 +快乐"
+                    "生日 ><快乐", "生日 快乐"
+                    "生日 ~~快乐", "生日 快乐"
+                    "生日+(快乐)", "生日 (快乐)"
+                    "+\"生日\"-快乐", "+\"生日\" 快乐" ] do
+                  Expect.equal (scores query) (scores equivalent) $"{query} has the same membership and rank as {equivalent}"
+              Expect.equal (scores "生日 +快乐" |> Map.keys |> Seq.toList) [ 2; 3 ] "a modifier after ASCII space remains active"
+              Expect.equal (scores "生日 -快乐" |> Map.keys |> Seq.toList) [ 1 ] "a separated exclusion remains active"
+
           testCase "general Unicode ngrams retain halfwidth voicing marks in relevance"
           <| fun _ ->
               let rules = { Tokenizer = Ngrams 6; Stopwords = StopwordPolicy.BuiltIn }

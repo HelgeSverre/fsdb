@@ -892,6 +892,8 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
         | _ -> BooleanWordChars.contains
     let mutable i = 0
     let len = query.Length
+    let isNgram = match tokenizer with Ngrams _ -> true | Words _ -> false
+    let mutable afterAsciiSpace = true
     let keepApostrophes =
         match tokenizer with
         | Words _ -> true
@@ -948,6 +950,43 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
         if prefix then i <- i + 1
         words |> Array.mapi (fun index word -> BWord(word, prefix && index = words.Length - 1))
 
+    let readNgramOperator () =
+        let mutable requirement = Optional
+        let mutable weight = 0
+        let mutable soft = false
+        let mutable atTerm = false
+
+        let delimiter c =
+            afterAsciiSpace <- c = ' '
+            requirement <- Optional
+            weight <- 0
+            soft <- false
+
+        while i < len && not atTerm do
+            match query.[i] with
+            | '(' | ')' | '"' -> atTerm <- true
+            | c when isWord c -> atTerm <- true
+            | c ->
+                // Punctuation after a word separates terms. Only an ASCII
+                // space (or the beginning of the query) enables modifiers.
+                if afterAsciiSpace then
+                    match c with
+                    | '+' -> requirement <- Must
+                    | '-' -> requirement <- MustNot
+                    | '>' -> weight <- weight + 1
+                    | '<' -> weight <- weight - 1
+                    | '~' -> soft <- not soft
+                    | _ -> delimiter c
+                else delimiter c
+                i <- i + 1
+
+        match requirement with
+        | Must | MustNot -> requirement
+        | _ when weight > 0 -> Raise
+        | _ when weight < 0 -> Lower
+        | _ when soft -> Soft
+        | _ -> Optional
+
     // Cap parenthesis nesting so a query like "((((...))))" with thousands
     // of groups can't overflow the recursive-descent stack (a
     // StackOverflowException is not catchable and would kill the process).
@@ -959,7 +998,11 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
         let mutable go = true
 
         while go do
-            skipSpace ()
+            let ngramOperator =
+                if isNgram then readNgramOperator ()
+                else
+                    skipSpace ()
+                    Optional
 
             if i >= len then go <- false
             elif query.[i] = ')' then
@@ -967,15 +1010,18 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                 go <- false
             else
                 let op =
-                    match query.[i] with
-                    | '+' -> i <- i + 1; Must
-                    | '-' -> i <- i + 1; MustNot
-                    | '>' -> i <- i + 1; Raise
-                    | '<' -> i <- i + 1; Lower
-                    | '~' -> i <- i + 1; Soft
-                    | _ -> Optional
-
-                skipSpace ()
+                    if isNgram then ngramOperator
+                    else
+                        let operator =
+                            match query.[i] with
+                            | '+' -> i <- i + 1; Must
+                            | '-' -> i <- i + 1; MustNot
+                            | '>' -> i <- i + 1; Raise
+                            | '<' -> i <- i + 1; Lower
+                            | '~' -> i <- i + 1; Soft
+                            | _ -> Optional
+                        skipSpace ()
+                        operator
 
                 if i >= len then go <- false
                 elif query.[i] = '(' then
@@ -987,11 +1033,15 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                     while i < len && query.[i] <> '"' do
                         i <- i + 1
                     let phrase = query.Substring(start, i - start)
+                    if isNgram && i > start then afterAsciiSpace <- query.[i - 1] = ' '
                     if i < len then i <- i + 1 // closing quote
+                    let afterQuote = i
                     skipSpace ()
+                    if isNgram && i > afterQuote then afterAsciiSpace <- query.[i - 1] = ' '
 
                     let proximity =
                         if i < len && query.[i] = '@' then
+                            if isNgram then afterAsciiSpace <- false
                             i <- i + 1
                             let ds = i
                             while i < len && Char.IsDigit query.[i] do
@@ -1019,6 +1069,7 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                     | Ngrams _ -> ()
                 elif isWord query.[i] then
                     let w, sourceWord = readWord ()
+                    if isNgram then afterAsciiSpace <- false
                     let prefix = i < len && query.[i] = '*'
                     if prefix then i <- i + 1
                     if w.Text.Length > 0 then
