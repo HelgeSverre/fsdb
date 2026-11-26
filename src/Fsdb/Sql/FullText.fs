@@ -1390,32 +1390,26 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                     let phrase = query.Substring(start, i - start)
                     if isNgram && i > start then afterAsciiSpace <- query.[i - 1] = ' '
                     if i < len then i <- i + 1 // closing quote
-                    let afterQuote = i
-                    skipSpace ()
-                    if isNgram && i > afterQuote then afterAsciiSpace <- query.[i - 1] = ' '
 
                     let proximity =
-                        if i < len && query.[i] = '@' then
-                            if isNgram then afterAsciiSpace <- false
-                            i <- i + 1
-                            let ds = i
-                            while i < len && Char.IsDigit query.[i] do
-                                i <- i + 1
-                            match Int32.TryParse(query.Substring(ds, i - ds)) with
-                            | true, n -> Some n
-                            | _ -> None
-                        else
+                        if isNgram then
+                            // The ngram lexer treats @ as punctuation. Digits
+                            // after it belong to the next search term.
                             None
+                        else
+                            skipSpace ()
+                            if i < len && query.[i] = '@' then
+                                i <- i + 1
+                                let start = i
+                                while i < len && Char.IsDigit query.[i] do
+                                    i <- i + 1
+                                match Int32.TryParse(query.Substring(start, i - start)) with
+                                | true, n -> Some n
+                                | _ -> None
+                            else
+                                None
 
-                    let words = phraseWords phrase
-
-                    // MySQL's ngram phrases ignore the proximity suffix.
-                    let proximity =
-                        match tokenizer with
-                        | Words _ -> proximity
-                        | Ngrams _ -> None
-
-                    acc.Add(op, BPhrase(words, proximity))
+                    acc.Add(op, BPhrase(phraseWords phrase, proximity))
                 elif utf8Words && not (wordChunkBoundary query.[i]) then
                     match tokenizer with
                     | Words lengths ->
@@ -1886,11 +1880,15 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                             let frequency, available, read =
                                 match bounds with
                                 | Some(lower, upper) -> boundedExactPosting lower upper word rows deleted
-                                | None -> int64 rows.Count + int64 deleted.Count, rows, true
+                                | None ->
+                                    let frequency = int64 rows.Count + int64 deleted.Count
+                                    frequency, rows, frequency > 0L
                             let _, count = exactCounts.TryGetValue word
                             exactCounts.[word] <- count + frequency
                             match bounds with
-                            | Some _ when not read -> None
+                            // MySQL stops a phrase at the first unread posting.
+                            // Later grams must not change another phrase's rank.
+                            | _ when not read -> None
                             | Some _ when available.Count < rows.Count ->
                                 let allowed = available |> Map.keys |> Set.ofSeq
                                 visit (offset + 1) (intersectCandidates candidates (Some allowed))

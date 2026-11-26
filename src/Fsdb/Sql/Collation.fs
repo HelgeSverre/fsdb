@@ -124,6 +124,14 @@ let private substringExpansions =
       "ĳ", "ij"
       "Ĳ", "IJ" ]
 
+let private foldFullwidthAscii (value: string) =
+    let isFullwidthAscii c = c >= '\uFF01' && c <= '\uFF5E'
+    if not (value |> Seq.exists isFullwidthAscii) then value
+    else
+        value.ToCharArray()
+        |> Array.map (fun c -> if isFullwidthAscii c then char (int c - 0xFEE0) else c)
+        |> String
+
 let private normalizeHalfwidthKana (value: string) =
     let isHalfwidthKana (c: char) = c >= '\uFF61' && c <= '\uFF9F'
     let mutable first = 0
@@ -1590,12 +1598,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
 
     let foldUnicode520 includeEnclosed (value: string) =
         let value = value |> foldLegacySpace |> foldCjkPunctuationForms true
-        let value =
-            if includeEnclosed && (value |> Seq.exists (fun c -> c >= '\uFF01' && c <= '\uFF5E')) then
-                value.ToCharArray()
-                |> Array.map (fun c -> if c >= '\uFF01' && c <= '\uFF5E' then char (int c - 0xFEE0) else c)
-                |> String
-            else value
+        let value = if includeEnclosed then foldFullwidthAscii value else value
         let value = if includeEnclosed then foldLegacyEnclosedCjk true value else value
         let value = if includeEnclosed then foldUnicode520EnclosedCjkEquality value else value
         let value = if includeEnclosed then foldUnicode520SupplementaryCompatibilityEquality value else value
@@ -1620,7 +1623,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | "utf8mb4_0900_as_ci" ->
             // U+180E is ignorable and conjoining Jamo compose in UCA 9;
             // their distinct legacy weights belong to older collations.
-            value |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
+            value |> foldFullwidthAscii |> foldCjkPunctuationForms true |> foldKanaVariants |> foldSmallKana
             |> foldUnicodeQuoteForms
             |> foldSupplementaryKanaImplicit false
         | "utf8mb4_unicode_520_ci" -> foldUnicode520 true value

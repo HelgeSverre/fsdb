@@ -889,6 +889,43 @@ let tests =
                   let sql = sprintf "SELECT id FROM docs WHERE MATCH(body) AGAINST('%s' IN BOOLEAN MODE) ORDER BY id" term
                   Expect.equal (ids (run store sql)) expected sql
 
+          testCase "ngram quoted phrases leave terms after an at sign searchable"
+          <| fun _ ->
+              let store = create ()
+              for statement in
+                  [ "CREATE TABLE docs(id INT PRIMARY KEY, body TEXT, FULLTEXT(body) WITH PARSER ngram) COLLATE utf8mb4_0900_ai_ci"
+                    "INSERT INTO docs VALUES (1,'東京駅'),(2,'東京'),(3,'2東京'),(4,'22'),(5,'北京'),(6,'東京駅 22'),(7,'東京駅 北京'),(8,'0東京'),(9,'２０東京')" ] do
+                  TestSupport.Sql.expectOk (run store statement) statement
+
+              let search query =
+                  let score = $"MATCH(body) AGAINST('{query}' IN BOOLEAN MODE)"
+                  run store $"SELECT id, ROUND({score},6) AS score FROM docs WHERE {score} ORDER BY id"
+
+              for query, control, expectedIds in
+                  [ "\"東京駅\" @2東京", "\"東京駅\" 2東京", [ "1"; "3"; "6"; "7" ]
+                    "\"東京駅\"@22", "\"東京駅\" 22", [ "1"; "4"; "6"; "7" ]
+                    "\"東京駅\" @２０東京", "\"東京駅\" 20東京", [ "1"; "6"; "7"; "9" ]
+                    "+\"東京駅\" @22", "+\"東京駅\" 22", [ "1"; "6"; "7" ]
+                    "(\"東京駅\"@22 -北京)", "(\"東京駅\" 22 -北京)", [ "1"; "4"; "6" ] ] do
+                  let actual = search query
+                  Expect.equal (ids actual) expectedIds query
+                  Expect.equal actual (search control) $"the at sign preserves term relevance in {query}"
+
+              match search "\"東京駅\" @２０東京" with
+              | ResultSet(_, rows) ->
+                  Expect.equal (List.last rows) [ Some "9"; Some "1.374085" ] "fullwidth ０東 shares the ASCII 0東 frequency"
+              | other -> failtestf "expected phrase scores, got %A" other
+
+              for query, expectedScore in
+                  [ "\"東京駅\" @8東京", "0.239557"
+                    "\"東京駅\" @東京8", "0.264465"
+                    "\"東京駅\" @東京8東京", "0.264465"
+                    "\"東京駅\" @8東京駅", "0.239557" ] do
+                  match search query with
+                  | ResultSet(_, [ [ Some "1"; Some score ]; [ Some "6"; _ ]; [ Some "7"; _ ] ]) ->
+                      Expect.equal score expectedScore $"postings after the missing gram do not affect {query}"
+                  | other -> failtestf "expected phrase rows 1, 6, and 7, got %A" other
+
           testCase "fulltext exact phrases stay within indexed columns"
           <| fun _ ->
               for parser, first, second in [ " WITH PARSER ngram", "生日", "快乐"; "", "mysql", "security" ] do

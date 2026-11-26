@@ -1753,6 +1753,11 @@ matched term contributes its relevance.
 [Adjacent ngram Boolean modifiers](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#adjacent-boolean-modifiers)
 now follow the ASCII space boundary, including repeated and opposing
 modifiers and punctuation between CJK terms.
+[Quoted ngram phrases and numeric terms](torture/findings/2026-11-26-ngram-at-sign.md)
+retain digits after an `@` delimiter. Phrase ranking stops reading at the
+first missing posting, so later grams do not change another phrase's rank.
+The case-insensitive UCA 9 collations share fullwidth ASCII equality and
+posting keys.
 [Boolean ngram rank cancellation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#boolean-rank-cancellation)
 now treats a final score of zero as a nonmatch in the audited weighted
 term, phrase, group, and prefix cases. [Single-precision rank accumulation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#single-precision-rank-accumulation)

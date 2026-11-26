@@ -2321,6 +2321,17 @@ let tests =
                     Expect.isTrue (col.Equals "하늘" "하늘") "UCA 9 composes conjoining Jamo"
                     Expect.equal (col.FullTextKeyOf "하늘") (col.FullTextKeyOf "하늘") "composed and decomposed Hangul share an ngram key"
 
+                testTheory "case-insensitive UCA 9 collations share fullwidth ASCII keys"
+                    [ "utf8mb4_0900_ai_ci"; "utf8mb4_0900_as_ci" ]
+                    <| fun name ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        for code in 0x21 .. 0x7E do
+                            let ascii = $"東{char code}京"
+                            let fullwidth = $"東{char (code + 0xFEE0)}京"
+                            Expect.isTrue (col.Equals ascii fullwidth) $"equality for {ascii}"
+                            Expect.equal (col.KeyOf ascii) (col.KeyOf fullwidth) $"index key for {ascii}"
+                            Expect.equal (col.FullTextKeyOf ascii) (col.FullTextKeyOf fullwidth) $"ngram key for {ascii}"
+
                 testTheory "legacy Unicode collations keep Hangul Jamo distinct from syllables"
                     [ "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci" ]
                     <| fun name ->
