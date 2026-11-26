@@ -4393,11 +4393,6 @@ let private crossJoinClause: Parser<Join, unit> =
     attempt (keyword "CROSS" >>. keyword "JOIN" >>. fromItem)
     |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L); Using = [] }
 
-/// Comma operands retain the same source boundaries as explicit CROSS JOIN.
-let private commaJoinClause: Parser<Join, unit> =
-    attempt (sym "," >>. fromItem)
-    |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L); Using = [] }
-
 /// `JOIN ... USING (col, ...)`'s column list — the equi-keys are resolved by
 /// name at execution time (`Executor.applyJoin`), so the parser only carries
 /// the names. MySQL's `USING (...)` can't be combined with an `ON`, which
@@ -4416,7 +4411,6 @@ let private usingClause: Parser<string list, unit> =
 /// parsing.
 let private joinClause: Parser<Join, unit> =
     crossJoinClause
-    <|> commaJoinClause
     <|> ((joinKind .>>. fromItem)
          >>= fun (kind, table) ->
              match kind with
@@ -4434,8 +4428,20 @@ let private joinClause: Parser<Join, unit> =
                  <|> (usingClause |>> fun cols -> { Kind = kind; Table = table; On = Lit(VInt 1L); Using = cols })
              | CrossJoin -> fail "CROSS JOIN is parsed separately")
 
+let private joinedTables: Parser<FromItem * Join list, unit> =
+    let explicitJoins = fromItem .>>. many joinClause
+    explicitJoins .>>. many (sym "," >>. explicitJoins)
+    |>> fun ((first, joins), commaOperands) ->
+        // Explicit joins bind more tightly than a comma. Their ON clauses
+        // see only their operands, while lateral sources can see earlier tables.
+        let commaJoins =
+            commaOperands |> List.map (fun (source, joined) ->
+                let operand = if joined.IsEmpty then source else FromJoinGroup(source, joined)
+                { Kind = CrossJoin; Table = operand; On = Lit(VInt 1L); Using = [] })
+        first, joins @ commaJoins
+
 fromJoinChainRef.Value <-
-    fromItem .>>. many joinClause
+    joinedTables
     |>> fun (source, joins) ->
         match source with
         | FromJoinGroup(inner, innerJoins) -> inner, innerJoins @ joins
@@ -4692,7 +4698,7 @@ let private singleTableOrderLimit (joins: Join list) : Parser<OrderKey list * Ex
 /// a multi-table UPDATE when its first join is to a table/view. Swap those
 /// operands, reversing LEFT/RIGHT direction when needed.
 let private updateSources: Parser<TableRef * Join list, unit> =
-    fromItem .>>. many joinClause
+    joinedTables
     >>= fun (source, joins) ->
         let independentGroup (first: FromItem) (groupedJoins: Join list) =
             let available = HashSet<string>(StringComparer.OrdinalIgnoreCase)

@@ -1405,6 +1405,35 @@ let tests =
                   | Affected 0UL, None -> ()
                   | actual, _ -> failtestf "unexpected SQL PREPARE for %s: %A" sql actual
 
+          testCase "comma join scope separates explicit operands and retains lateral dependencies"
+          <| fun _ ->
+              let session = relationNameSession ()
+              handle session "INSERT INTO a VALUES(2)" |> ignore
+              let select =
+                  "SELECT a.id,b.id,d.x FROM a, b RIGHT JOIN LATERAL (SELECT a.id AS x) d ON b.id=d.x ORDER BY a.id"
+              let expected = ResultSet([ "id"; "id"; "x" ], [ [ Some "1"; Some "1"; Some "1" ]; [ Some "2"; None; Some "2" ] ])
+              Expect.equal (handle session select |> snd) expected select
+              let preparedSession, prepared = handle session ("PREPARE comma_scope FROM '" + select + "'")
+              Expect.equal prepared (Affected 0UL) "SQL prepare retains the earlier lateral source"
+              Expect.equal (handle preparedSession "EXECUTE comma_scope" |> snd) expected "execute prepared join"
+
+              let expectBindingError sql expected =
+                  Expect.equal (handle session sql |> snd) (Err(1054, expected)) sql
+                  match prepareStatementForSession session sql with
+                  | Error error -> Expect.equal error (1054, expected) sql
+                  | Ok _ -> failtestf "expected a prepare error for %s" sql
+
+              let invalidJoin = "a, b LEFT JOIN c ON a.id=c.id"
+              let invalidOn = "Unknown column 'a.id' in 'on clause'"
+              expectBindingError ("SELECT a.id FROM " + invalidJoin) invalidOn
+              expectBindingError ("UPDATE " + invalidJoin + " SET a.id=99") invalidOn
+              expectBindingError ("DELETE a FROM " + invalidJoin) invalidOn
+              expectBindingError
+                  "SELECT a.id FROM a, b RIGHT JOIN LATERAL (SELECT b.id AS x) d ON b.id=d.x"
+                  "Unknown column 'b.id' in 'field list'"
+              Expect.equal (handle session "SELECT id FROM a ORDER BY id" |> snd)
+                  (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) "rejected mutations leave the target intact"
+
           testCase "prepared direct columns retain native source flags through aliases"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

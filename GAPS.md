@@ -96,6 +96,10 @@ to move earlier. The table form accepts ON, USING, or no condition and works in 
 joined mutations, and updatable views. Parentheses around the left FROM chain
 preserve its association and allow rendered join definitions to parse back
 ([oracle and regressions](torture/findings/2026-10-07-straight-joins.md)).
+[Comma-separated join operands](torture/findings/2026-11-26-comma-join-scope.md)
+retain MySQL's precedence in SELECT, UPDATE, and DELETE. An explicit join's
+ON clause sees its own operands even when one is empty. A lateral source can
+still reach earlier comma operands where MySQL permits the dependency.
 
 DDL covers databases, tables, indexes, views, triggers, users, grants,
 `CREATE TABLE ... AS SELECT`, temporary tables, `TRUNCATE`, and `RENAME TABLE`.

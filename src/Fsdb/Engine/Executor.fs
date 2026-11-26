@@ -12919,7 +12919,7 @@ and private expandJsonTableJoinRows
         validateReferencesWith resolveArgumentReference source
         |> Result.mapError Err
         |> Result.bind (fun () -> resolvedJoinCondition sourcesSoFar [ alias, joinColumns ] leftOperand join)
-        |> Result.bind (prepareJoinCondition (ctxFor [||]))
+        |> Result.bind (prepareJoinCondition ctxFor (combinedColumnsSoFar @ joinColumns))
         |> Result.bind (fun effectiveOn ->
             let expandLeft (row: 'Row) : Result<'Result list, QueryResult> =
                 let left = flatRow row
@@ -13417,12 +13417,17 @@ and private prepareJoinSource
                     |> Result.map (fun rows -> { Sources = [ joinQualifier, columns ]; Columns = columns; Rows = rows; PhysicalTable = None })))
 
 
-and private prepareJoinCondition context expression =
+and private prepareJoinCondition contextFor columns expression =
+    // Binding is required even when an operand produces no rows.
+    let context = { contextFor (probeRow columns) with Clause = OnClause }
     if isLiteralConstantExpression context.Registry expression then
-        evalExpr { context with Clause = OnClause } expression
+        evalExpr context expression
         |> Result.map (truthy >> Option.map boolToValue >> Option.defaultValue VNull >> Lit)
         |> Result.mapError Err
-    else Ok expression
+    else
+        validateExpressionInContext context expression
+        |> Result.map (fun () -> expression)
+        |> Result.mapError Err
 
 and private resolvedJoinCondition
     (sourcesSoFar: (string * ColumnDef list) list)
@@ -13582,7 +13587,7 @@ and private applyPreparedJoin
 
     let condition =
         resolvedJoinCondition sourcesSoFar rightSources leftOperand join
-        |> Result.bind (prepareJoinCondition (ctxFor [||]))
+        |> Result.bind (prepareJoinCondition ctxFor (combinedColumnsSoFar @ joinColumns))
 
     match condition with
     | Error error -> Error error
@@ -14243,7 +14248,7 @@ and private applyPreparedMutationJoin
 
     let condition =
         resolvedJoinCondition (columnsOf sourcesSoFar) (columnsOf rightSources) leftOperand join
-        |> Result.bind (prepareJoinCondition (ctxFor [||]))
+        |> Result.bind (prepareJoinCondition ctxFor (combinedColumnsSoFar @ joinColumns))
 
     match condition with
     | Error error -> Error error
