@@ -80,3 +80,44 @@ Both editors rendered the sampled JSON plan with `range` access through
 `PRIMARY`. Fsdb omitted the MySQL cost fields. The planner gap is
 tracked under EXPLAIN fidelity.
 [Planner gaps](../../GAPS.md#2-query-execution).
+
+## Backup and restore follow-up
+
+The second pass used TablePlus 26.10.22 build 802, WAL-backed Fsdb
+at `2257848b`, and the repository's digest-pinned MySQL 8.4.11 image.
+The loopback fixture contained two rows with JSON, binary, Unicode, NULL,
+and a microsecond datetime, plus a view and a `BEFORE INSERT` trigger.
+Each restore targeted a fresh schema. A separate SQL session checked the
+restored objects and rows.
+
+TablePlus **Backup** confirmed the `mysqldump` startup failure. The app
+reported error 1229 on the session assignment shown above and left a
+zero-byte file. With the same settings, the MySQL backup completed and
+produced 4,364 bytes.
+
+### TablePlus restore of a native dump
+
+Both **Restore** runs used the same 4,359-byte file produced by MySQL
+8.4.11 `mysqldump`. On MySQL, TablePlus reported completion. The view
+returned the original text and the restored trigger trimmed a newly
+inserted value.
+
+On Fsdb, TablePlus reported `ERROR 1064 (42000)` at the trigger
+definition. Both base rows had already been loaded and were visible
+from a second connection. The trigger was absent and `note_view` still
+returned the dump's temporary `SELECT 1 AS id, 1 AS body`. The restore
+had stopped before the final view definition.
+
+```sql
+/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`%`*/
+/*!50003 TRIGGER `trim_notes` BEFORE INSERT ON `notes`
+FOR EACH ROW SET NEW.body=TRIM(NEW.body) */;
+```
+
+The command-line client reproduced 1064 with the same explicit definer
+in plain SQL. Removing only the definer comment from the original dump
+let the command-line restore finish with the final view and trigger.
+TablePlus also completed when the trigger used plain `CREATE TRIGGER`
+and the connected account became its definer. For this fixture the
+connected account matched the dump's `root@%` definer. Removing an
+explicit definer changes ownership when the restore account differs.
