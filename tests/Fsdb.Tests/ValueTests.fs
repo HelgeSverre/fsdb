@@ -772,6 +772,24 @@ let tests =
                         Expect.isLessThan (abs (contactLatitude - 41.00000008675716)) 1e-10 "the separate point lies beside the short fragment"
                     | actual -> failtestf "expected the tiny clipped line and point, got %A" actual
 
+                    let nearCorner = "POLYGON((0 0,0 4,4 4,4 0,0 0))"
+                    let cornerLine = "LINESTRING(-0.01 0.010001,0.010001 -0.01)"
+                    for first, second in [ cornerLine, nearCorner; nearCorner, cornerLine ] do
+                        let result = call "ST_Intersection" [ geometry 4326L first; geometry 4326L second ]
+                        match result with
+                        | VGeometry { Shape = GLineString [ (cutLatitude, cutLongitude); (endLatitude, endLongitude) ] } ->
+                            Expect.isLessThan (abs (cutLatitude - 0.0000010557728948424692)) 1e-12 "the proper turn starts the fragment"
+                            Expect.isLessThan (abs cutLongitude) 1e-12 "the fragment starts at the western edge"
+                            Expect.equal (endLatitude, endLongitude) (-0.01, 0.010001) "the fragment follows the source direction"
+                        | actual -> failtestf "expected the corner turn to retain a line fragment, got %A" actual
+
+                    let outside = geometry 4326L "LINESTRING(-1 0.00001,5 0.00001)"
+                    let firstInside = geometry 4326L "LINESTRING(2 0.00001,5 0.00001)"
+                    let smallerArea = geometry 4326L "POLYGON((0 0,0 3,3 3,3 0,0 0))"
+                    let result = call "ST_Intersection" [ outside; geometry 4326L nearCorner ]
+                    Expect.equal (call "ST_IsEmpty" [ result ]) (VInt 1L) "a turn-free line starts outside"
+                    Expect.equal (call "ST_Intersection" [ firstInside; smallerArea ]) firstInside "a turn-free line starts inside"
+
                 testCase "geographic MBR predicates use geodesic, circular and degenerate bounds"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

@@ -3204,8 +3204,9 @@ implementation effort:
    `MBRIntersects`, `MBRWithin`, and `MBRContains` can use geodesic
    bounds for candidate selection with a scalar recheck. [Equality, touch,
    overlap, and disjointness](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#additional-mbr-index-predicates)
-   can also use the spatial index. Detailed spatial cost estimates,
-   residual isolated points, and near-hole relation differences remain.
+   can also use the spatial index. [Directed overlay turns](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#november-26-overlay-interval-classification)
+   now classify the clipped intervals near corners. Near-polar overlay
+   contacts, isolated points, and spatial cost estimates remain open.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
    [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)

@@ -1005,3 +1005,31 @@ uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --compare
 uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --seeded-relations --seed 615801 --seeded-polygons 2500
 uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --seeded-relations --seed 615801 --seeded-polygons 2500 --reverse-lines
 ```
+
+## November 26 overlay interval classification
+
+The linear overlay now uses the direction of a proper boundary turn
+to classify the adjacent intervals. A midpoint can round to the other
+side of the polygon near a corner. When a segment has no boundary
+turn, its first interior or exterior endpoint determines coverage.
+Shared endpoints and boundary spans retain their existing handling.
+[Boost linear overlay traversal](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/follow.hpp).
+
+Native MySQL 8.4.11 supplied the expected geometry. The oracle compared
+type, member order, and coordinates within 10⁻⁸ degrees. Each operation
+has 896 results per source direction from 448 cases in both operand orders.
+
+| Source direction | Intersection before → after | Difference | Union | Symmetric difference |
+| --- | ---: | ---: | ---: | ---: |
+| Original | 42 → 4 | 18 → 1 | 36 → 2 | 36 → 2 |
+| Reversed | 80 → 12 | 31 → 1 | 62 → 2 | 62 → 2 |
+
+The remaining cases were present before the change. They include
+near-polar hole contacts. Separate longitude-first comparisons also
+retained the existing isolated-point differences on seeded rectangles
+and multipart inputs.
+
+```sh
+uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays
+uv run --with pymysql python torture/scripts/geographic-edge-oracle.py --check-overlays --reverse-lines
+```

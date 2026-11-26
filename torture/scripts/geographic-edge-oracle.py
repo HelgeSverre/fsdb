@@ -8,6 +8,7 @@ import argparse
 import itertools
 import pathlib
 import random
+import re
 import shutil
 import socket
 import subprocess
@@ -40,6 +41,51 @@ def result(connection, line, polygon, srid=4326):
     with connection.cursor() as cursor:
         cursor.execute(sql)
         return cursor.fetchone()
+
+
+def overlay_text(connection, operation, left, right, srid):
+    first = f"ST_GeomFromText('{left}',{srid})"
+    second = f"ST_GeomFromText('{right}',{srid})"
+    with connection.cursor() as cursor:
+        try:
+            cursor.execute(f"SELECT ST_AsText(ST_{operation}({first},{second}))")
+            return cursor.fetchone()[0]
+        except pymysql.err.Error as error:
+            return ("error", error.args[0])
+
+
+COORDINATE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def same_overlay(expected, actual):
+    if not isinstance(expected, str) or not isinstance(actual, str):
+        return expected == actual
+    if COORDINATE.sub("#", expected) != COORDINATE.sub("#", actual):
+        return False
+    return all(
+        abs(float(left) - float(right)) <= 1e-8
+        for left, right in zip(
+            COORDINATE.findall(expected), COORDINATE.findall(actual), strict=True
+        )
+    )
+
+
+def check_line_area_overlays(mysql, fsdb, line_cases, srid):
+    cases = list(line_cases)
+    failures = 0
+    for operation in ("Intersection", "Difference", "Union", "SymDifference"):
+        mismatches = []
+        for line, polygon in cases:
+            for left, right in ((line, polygon), (polygon, line)):
+                expected = overlay_text(mysql, operation, left, right, srid)
+                actual = overlay_text(fsdb, operation, left, right, srid)
+                if not same_overlay(expected, actual):
+                    mismatches.append((left, right, expected, actual))
+        failures += len(mismatches)
+        print(f"ST_{operation}: {len(cases) * 2} results; {len(mismatches)} mismatches")
+        for mismatch in mismatches:
+            print(mismatch)
+    return int(failures != 0)
 
 
 def point_result(connection, coordinates, polygon):
@@ -230,6 +276,11 @@ def main():
         help="show both engines' intersection geometry for mismatching lines",
     )
     parser.add_argument(
+        "--check-overlays",
+        action="store_true",
+        help="compare all four overlays in both operand orders, using a 1e-8 degree tolerance",
+    )
+    parser.add_argument(
         "--reverse-lines",
         action="store_true",
         help="reverse each source line before checking its directed relations",
@@ -325,6 +376,14 @@ def main():
             if args.seeded_relations
             else cases()
         )
+        if args.check_overlays:
+            if args.reverse_lines:
+                line_cases = (
+                    (reverse_line(line), polygon) for line, polygon in line_cases
+                )
+            return check_line_area_overlays(
+                mysql_connection, fsdb_connection, line_cases, args.srid
+            )
         for line, polygon in line_cases:
             if args.reverse_lines:
                 line = reverse_line(line)
@@ -785,4 +844,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

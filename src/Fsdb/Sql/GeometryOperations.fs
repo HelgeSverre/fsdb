@@ -2458,10 +2458,13 @@ let private geographicPartitionContacts referenceSystem lineSections boundarySec
         List.ofSeq ordered
 
 let private geographicAreaLinePieces referenceSystem includePoints polygons boundarySegments ((start, endpoint) as segment) =
-    let covered point =
+    let areaPosition point =
         match geographicPointPolygonPosition referenceSystem point polygons with
-        | GeographicPointPolygonPosition.Outside _ -> false
-        | _ -> true
+        | GeographicPointPolygonPosition.Outside _ -> Some false
+        | GeographicPointPolygonPosition.Interior -> Some true
+        | _ -> None
+
+    let covered point = areaPosition point |> Option.defaultValue true
 
     if start = endpoint then
         [ { Start = start; End = endpoint; Covered = covered start; StartsSegment = true } ], []
@@ -2470,10 +2473,12 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
         // MySQL retains the solver's longitude in area overlay results,
         // even when a cut just beyond the antimeridian uses an extra turn.
         let crossing = tryGeographicCrossingPoint id referenceSystem segment
+        let side = geographicTurnSide referenceSystem
+        let sourceEnd = geographicPointRadians endpoint
 
-        let cuts, contacts, spans =
+        let cuts, contacts, spans, turns, hasEndpointContact =
             boundarySegments
-            |> List.fold (fun (cuts, contacts, spans) (section, ((a, b) as boundary)) ->
+            |> List.fold (fun (cuts, contacts, spans, turns, hasEndpointContact) (section, ((a, b) as boundary)) ->
                 let addContacts = function
                     | [] -> contacts
                     | points when includePoints -> (section, points) :: contacts
@@ -2489,8 +2494,16 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                         if not includePoints then []
                         elif fst a <> fst b then Option.toList cut
                         else crossing boundary |> Option.toList
-                    Option.toList cut @ cuts, addContacts point, spans
-                | [ point ] -> point :: cuts, addContacts [ point ], spans
+                    let turns =
+                        match cut with
+                        | None -> turns
+                        | Some vertex ->
+                            match side (geographicPointRadians b) (geographicPointRadians a) sourceEnd with
+                            | -1 -> Map.add vertex true turns
+                            | 1 -> Map.add vertex false turns
+                            | _ -> turns
+                    Option.toList cut @ cuts, addContacts point, spans, turns, hasEndpointContact
+                | [ point ] -> point :: cuts, addContacts [ point ], spans, turns, true
                 | points ->
                     let positions = List.map distance points
                     let turnPoints =
@@ -2499,7 +2512,21 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                             // the polygon edge. Its start belongs to the incoming edge.
                             [ b ]
                         else points
-                    points @ cuts, addContacts turnPoints, (List.min positions, List.max positions) :: spans) ([], [], [])
+                    points @ cuts, addContacts turnPoints, (List.min positions, List.max positions) :: spans, turns, true)
+                ([], [], [], Map.empty, false)
+
+        let turnCoverage first second =
+            if hasEndpointContact then None
+            // Without a boundary turn the starting position determines coverage.
+            elif cuts.IsEmpty then areaPosition start |> Option.orElseWith (fun () -> areaPosition endpoint)
+            else
+                // A proper turn classifies the intervals beside it even when
+                // the sampled midpoint rounds to the opposite side.
+                match Map.tryFind first turns, Map.tryFind second turns with
+                | Some after, Some next when after = next -> None
+                | Some after, _ -> Some after
+                | None, Some next -> Some(not next)
+                | _ -> None
 
         let cuts = distinctGeographicPoints (start :: endpoint :: cuts) |> List.sortBy distance
         let pieces =
@@ -2510,7 +2537,9 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
                 let alongBoundary = spans |> List.exists (fun (from, until) -> from <= lower && upper <= until)
                 let isCovered =
                     alongBoundary
-                    || covered (geographicPointAlong referenceSystem start endpoint ((lower + upper) / 2.0))
+                    || (turnCoverage first second
+                        |> Option.defaultWith (fun () ->
+                            covered (geographicPointAlong referenceSystem start endpoint ((lower + upper) / 2.0))))
                 { Start = first; End = second; Covered = isCovered; StartsSegment = index = 0 })
         pieces, List.rev contacts
 
