@@ -172,6 +172,7 @@ type Index<'id when 'id: comparison> =
           FlushedThrough: int64 option
           CachedTerms: FullTextCache.Terms
           CacheBudget: FullTextCache.Budget
+          CacheCycle: obj
           Deleted: DeletedPostings
           DocumentOrderFollowsIds: bool
           HasDocumentOrder: bool }
@@ -425,6 +426,7 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       FlushedThrough = None
       CachedTerms = FullTextCache.empty
       CacheBudget = FullTextCache.emptyBudget
+      CacheCycle = obj ()
       Deleted = emptyDeletedPostings
       DocumentOrderFollowsIds = true
       HasDocumentOrder = true }
@@ -620,6 +622,7 @@ let internal withDocumentOrderFrom (source: Index<'id>) (target: Index<'id>) =
         FlushedThrough = source.FlushedThrough
         CachedTerms = source.CachedTerms
         CacheBudget = source.CacheBudget
+        CacheCycle = source.CacheCycle
         Deleted = source.Deleted
         DocumentOrderFollowsIds = source.DocumentOrderFollowsIds
         HasDocumentOrder = source.HasDocumentOrder }
@@ -632,7 +635,8 @@ let internal syncCachedPostings (index: Index<'id>) =
         { index with
             FlushedThrough = Some(index.NextDocumentOrder - 1L)
             CachedTerms = FullTextCache.empty
-            CacheBudget = FullTextCache.emptyBudget }
+            CacheBudget = FullTextCache.emptyBudget
+            CacheCycle = obj () }
 
 let internal onlyCacheSynced (before: Index<'id>) (after: Index<'id>) =
     obj.ReferenceEquals(before, after)
@@ -660,6 +664,18 @@ let internal cachedTermsInInsertionOrder (index: Index<'id>) =
     FullTextCache.inInsertionOrder index.CachedTerms
 
 let internal cacheBudget (index: Index<'id>) = index.CacheBudget
+
+let internal cacheCycle (index: Index<'id>) = index.CacheCycle
+
+let internal sameCacheCycle (before: Index<'id>) (after: Index<'id>) =
+    obj.ReferenceEquals(before.CacheCycle, after.CacheCycle)
+
+let internal addedCachedDocuments (before: Index<'id>) (after: Index<'id>) =
+    after.FlushedThrough.IsSome
+    && after.NextDocumentOrder > before.NextDocumentOrder
+    && (after.CacheBudget.Bytes > before.CacheBudget.Bytes
+        // An indexed write can request sync even when its text yields no grams.
+        || (after.Documents |> Map.exists (fun _ document -> document.Order >= before.NextDocumentOrder)))
 
 let internal cachedPostingTail spelling (index: Index<'id>) =
     Map.tryFind (index.Collation.FullTextKeyOf spelling) index.CacheBudget.Tails

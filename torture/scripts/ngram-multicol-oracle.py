@@ -3,8 +3,9 @@
 Build Fsdb.Cli in Release first. Requires native mysqld/mysqladmin and PyMySQL.
 Each token size uses disposable servers and data directories.
 Use --legacy-punctuation, --legacy-radicals, or --legacy-range for the expanded
-utf8mb4_unicode_ci corpora, --cache-lifecycle for explicit flushes, or
---cache-pressure for automatic flushes.
+utf8mb4_unicode_ci corpora, --cache-lifecycle for explicit flushes,
+--cache-pressure for per-table pressure, or --global-cache-pressure for
+server-wide pressure.
 """
 
 import argparse
@@ -560,10 +561,89 @@ def verify_cache_pressure(mysql, fsdb):
     return failures
 
 
+def verify_global_cache_pressure(mysql, fsdb):
+    connections = (mysql, fsdb)
+    tables = [f"fts{n % 2}.d{n}" for n in range(6)]
+    # Isolate the generated bigrams so each occupies its own posting list.
+    grams = [chr(0x3400 + n // 2048) + chr(0x4000 + n % 2048) for n in range(15000)]
+    documents = [" ".join(grams[first:first + 100]) for first in range(0, len(grams), 100)]
+
+    for connection in connections:
+        assert query(connection, "SELECT @@innodb_ft_total_cache_size")[0][0] == 32_000_000
+        query(connection, "SET SESSION innodb_ft_enable_stopword=OFF")
+        query(connection, "CREATE DATABASE fts0")
+        query(connection, "CREATE DATABASE fts1")
+        query(connection, "CREATE TABLE fts0.plain(id INT PRIMARY KEY)")
+        for table in tables:
+            query(connection, f"CREATE TABLE {table}(id INT PRIMARY KEY,flag INT DEFAULT 0,body TEXT,FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin")
+            query(connection, f"INSERT INTO {table}(id,body) VALUES(1,'東京'),(2,'東海'),(3,'大阪')")
+
+    for table in tables:
+        for first in range(0, len(documents), 25):
+            batch = list(enumerate(documents[first:first + 25], first + 10))
+            placeholders = ",".join(["(%s,%s)"] * len(batch))
+            values = [value for row in batch for value in row]
+            for connection in connections:
+                query(connection, f"INSERT INTO {table}(id,body) VALUES {placeholders}", values)
+
+    def read(connection):
+        return tuple(
+            tuple(row[0] for row in query(connection,
+                f"SELECT id FROM {table} WHERE MATCH(body) AGAINST('東京 東*' IN BOOLEAN MODE) ORDER BY id"))
+            for table in tables
+        )
+
+    failures = 0
+
+    def check(stage, expected, wait_for_sync=False):
+        nonlocal failures
+
+        def observe(connection):
+            deadline = time.monotonic() + (5 if wait_for_sync else 0)
+            while True:
+                found = read(connection)
+                if found == expected or time.monotonic() >= deadline:
+                    return found
+                time.sleep(0.05)
+
+        reference = observe(mysql)
+        assert reference == expected, (stage, reference)
+        actual = observe(fsdb)
+        print(f"{stage}: MySQL {reference}, Fsdb {actual}")
+        failures += reference != actual
+
+    cached = ((1,),) * len(tables)
+    check("filled", cached)
+    time.sleep(6)
+    check("idle above limit", cached)
+    for connection in connections:
+        query(connection, "SET GLOBAL innodb_optimize_fulltext_only=ON")
+        query(connection, "OPTIMIZE TABLE fts0.plain")
+        query(connection, "UPDATE fts1.d5 SET flag=1 WHERE id=1")
+        query(connection, "START TRANSACTION")
+        query(connection, "INSERT INTO fts0.d4(id,body) VALUES(200,'東山')")
+        query(connection, "ROLLBACK")
+    check("plain optimize, non-indexed update, and rollback", cached)
+
+    for connection in connections:
+        query(connection, "START TRANSACTION")
+        query(connection, "INSERT INTO fts0.d0(id,body) VALUES(200,'山')")
+        query(connection, "COMMIT")
+    first_synced = ((1, 2),) + cached[1:]
+    check("indexed write with no searchable bigram", first_synced, wait_for_sync=True)
+    time.sleep(6)
+    for connection in connections:
+        query(connection, "INSERT INTO fts1.d5(id,body) VALUES(200,'東山')")
+    time.sleep(0.5)
+    check("below total limit", first_synced)
+    return failures
+
+
 def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=None,
            collation_override=None, legacy_term_range=None, weight_checks=False,
            mixed_checks=False, order_checks=False, cldr_pinyin=None,
-           tailoring_probe=False, all_range_scalars=False, cache_lifecycle=False, cache_pressure=False):
+           tailoring_probe=False, all_range_scalars=False, cache_lifecycle=False, cache_pressure=False,
+           global_cache_pressure=False):
     prefix = '中' * (size - 1)
     if legacy_radicals:
         legacy_chars = LEGACY_RADICALS
@@ -599,6 +679,7 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
         terms += [prefix + char for char in ("가", "각", "가", "ㄱㅏ", "각")]
     modes = MODES
     collation = collation_override or ("utf8mb4_unicode_ci" if legacy_chars is not None else None)
+    cache_options = ["--innodb-ft-cache-size=80000000", "--innodb-ft-total-cache-size=32000000"] if global_cache_pressure else []
     with tempfile.TemporaryDirectory(prefix=f"fsdb-ngram-{size}-") as directory:
         root = pathlib.Path(directory)
         data = root / "mysql"
@@ -616,7 +697,7 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     ["mysqld", "--no-defaults", f"--datadir={data}", "--skip-networking",
                      f"--socket={mysql_socket}", f"--pid-file={root / 'mysql.pid'}",
                      "--mysqlx=0", "--innodb-buffer-pool-size=64M",
-                     "--innodb-redo-log-capacity=64M", f"--ngram-token-size={size}"],
+                     "--innodb-redo-log-capacity=64M", f"--ngram-token-size={size}", *cache_options],
                     stdout=mysql_log, stderr=subprocess.STDOUT,
                 )
                 mysql_connection = connect(unix_socket=mysql_socket)
@@ -627,7 +708,7 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     reservation.bind(("127.0.0.1", 0))
                     port = reservation.getsockname()[1]
                 fsdb = subprocess.Popen(
-                    ["dotnet", str(FSDB), "--port", str(port), "--ngram-token-size", str(size)],
+                    ["dotnet", str(FSDB), "--port", str(port), "--ngram-token-size", str(size), *cache_options],
                     stdout=fsdb_log, stderr=subprocess.STDOUT,
                 )
                 fsdb_connection = connect(host="127.0.0.1", port=port)
@@ -635,6 +716,8 @@ def verify(size, legacy_punctuation=False, legacy_radicals=False, legacy_range=N
                     return verify_cache_lifecycle(mysql_connection, fsdb_connection)
                 if cache_pressure:
                     return verify_cache_pressure(mysql_connection, fsdb_connection)
+                if global_cache_pressure:
+                    return verify_global_cache_pressure(mysql_connection, fsdb_connection)
                 for connection in (mysql_connection, fsdb_connection):
                     setup(connection, size, documents, collation)
 
@@ -827,6 +910,7 @@ if __name__ == "__main__":
     corpus.add_argument("--legacy-range", help="hexadecimal Unicode range START:END for legacy-collation CJK probes")
     corpus.add_argument("--cache-lifecycle", action="store_true", help="compare binary bigram ranks across cache and disk transitions")
     corpus.add_argument("--cache-pressure", action="store_true", help="compare automatic binary-bigram cache flushes under write load")
+    corpus.add_argument("--global-cache-pressure", action="store_true", help="compare full-text sync under server-wide pressure")
     parser.add_argument("--all-range-scalars", action="store_true", help="include range scalars missing from Python's Unicode character database")
     parser.add_argument("--legacy-term-range", help="search only this subrange of --legacy-range while indexing the whole range")
     parser.add_argument("--weight-checks", action="store_true", help="compare exact WEIGHT_STRING bytes for --legacy-range")
@@ -836,10 +920,11 @@ if __name__ == "__main__":
     parser.add_argument("--mixed-checks", action="store_true", help="compare compatibility forms wrapped with ASCII or Han")
     parser.add_argument("--collation", choices=("utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_0900_as_ci", "utf8mb4_ja_0900_as_cs_ks", "utf8mb4_0900_as_cs", "utf8mb4_zh_0900_as_cs"))
     args = parser.parse_args()
-    if args.cache_lifecycle or args.cache_pressure:
+    if args.cache_lifecycle or args.cache_pressure or args.global_cache_pressure:
         if args.sizes not in ([], [2]) or args.collation:
             parser.error("the cache probes use binary bigrams")
-        raise SystemExit(bool(verify(2, cache_lifecycle=args.cache_lifecycle, cache_pressure=args.cache_pressure)))
+        raise SystemExit(bool(verify(2, cache_lifecycle=args.cache_lifecycle, cache_pressure=args.cache_pressure,
+                                     global_cache_pressure=args.global_cache_pressure)))
     legacy_range = None
     if args.legacy_range:
         try:

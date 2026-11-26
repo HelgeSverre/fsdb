@@ -533,6 +533,15 @@ type CatalogPublicationGate internal () =
 
     member internal _.WaitingWriters = sync.WaitingWriteCount
 
+/// Accessed under the catalog publication gate. Private transaction catalogs
+/// carry their own inactive state until their rows publish into the live store.
+type FullTextCachePressure =
+    internal
+        { mutable Armed: bool
+          mutable Requests: Map<string * string, string * obj> }
+
+let private newFullTextCachePressure () = { Armed = false; Requests = Map.empty }
+
 /// Shared catalog state plus session-local coercion and transaction settings.
 /// Session clones share reference-typed synchronization fields but copy the
 /// mutable SQL-mode, FK, and collation values.
@@ -544,6 +553,8 @@ type Store =
       mutable ExecutionSettings: ExecutionSettings
       mutable FullTextWordLengths: StorageOptions.WordLengths
       mutable FullTextCacheSize: int
+      mutable FullTextTotalCacheSize: int
+      FullTextCachePressure: FullTextCachePressure
       mutable NgramTokenSize: int
       mutable FullTextStopwordsEnabled: bool
       /// Resolved once if a statement builds full-text postings.
@@ -645,7 +656,36 @@ let private fullTextStopwordSettings (store: Store) =
     else { Source = None; Policy = FullText.StopwordPolicy.Disabled }
 
 let private publishCatalogRoots (store: Store) publication =
-    store.CatalogPublication.Publish publication
+    store.CatalogPublication.Publish(fun () ->
+        let pressure = store.FullTextCachePressure
+        if not pressure.Armed then publication ()
+        else
+            let before = store.Databases |> Seq.map (fun entry -> entry.Key, entry.Value.Value) |> Map.ofSeq
+            let result = publication ()
+            let mutable cleared = false
+            let mutable requests = pressure.Requests
+            for KeyValue(dbName, previous) in before do
+                let current =
+                    match store.Databases.TryGetValue dbName with
+                    | true, slot -> slot.Value
+                    | false, _ -> Map.empty
+                if not (obj.ReferenceEquals(previous, current)) then
+                    for KeyValue(name, old) in previous do
+                        if not old.FullTextIndexes.IsEmpty then
+                            match Map.tryFind name current with
+                            | None -> cleared <- true
+                            | Some table when not (obj.ReferenceEquals(old.FullTextIndexes, table.FullTextIndexes)) ->
+                                for KeyValue(indexName, previousIndex) in old.FullTextIndexes do
+                                    match Map.tryFind indexName table.FullTextIndexes with
+                                    | Some index when FullText.sameCacheCycle previousIndex index ->
+                                        if FullText.addedCachedDocuments previousIndex index then
+                                            requests <- Map.add (dbName, name) (indexName, FullText.cacheCycle index) requests
+                                    | _ -> cleared <- true
+                            | Some _ -> ()
+            // Sync or DDL can discard a cache and release the server-wide pressure flag.
+            if cleared then pressure.Armed <- false
+            else Threading.Volatile.Write(&pressure.Requests, requests)
+            result)
 
 let private withIndexExpressionDiagnostics (store: Store) operation =
     let behavior =
@@ -843,6 +883,8 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       ForeignKeyChecks = store.ForeignKeyChecks
       FullTextWordLengths = store.FullTextWordLengths
       FullTextCacheSize = store.FullTextCacheSize
+      FullTextTotalCacheSize = store.FullTextTotalCacheSize
+      FullTextCachePressure = newFullTextCachePressure ()
       NgramTokenSize = store.NgramTokenSize
       FullTextStopwordsEnabled = store.FullTextStopwordsEnabled
       FullTextStopwordSettings = store.FullTextStopwordSettings
@@ -5481,6 +5523,8 @@ let create () : Store =
       ExecutionSettings = ExecutionSettings.defaults
       FullTextWordLengths = StorageOptions.defaultWordLengths
       FullTextCacheSize = StorageOptions.defaults.FullTextCacheSize
+      FullTextTotalCacheSize = StorageOptions.defaults.FullTextTotalCacheSize
+      FullTextCachePressure = newFullTextCachePressure ()
       NgramTokenSize = FullText.ngramTokenSize
       FullTextStopwordsEnabled = true
       FullTextStopwordSettings = lazy { Source = None; Policy = FullText.StopwordPolicy.BuiltIn }
@@ -7092,6 +7136,18 @@ let private flushTableFullText flushPostings table =
     if table.FullTextIndexes.IsEmpty then table
     else { table with FullTextIndexes = table.FullTextIndexes |> Map.map (fun _ index -> flushPostings index) }
 
+let private cachedFullTextBytes (table: Table) =
+    if table.FullTextIndexes.IsEmpty then 0L
+    else table.FullTextIndexes |> Seq.sumBy (fun (KeyValue(_, index)) -> (FullText.cacheBudget index).Bytes)
+
+let internal sampleFullTextCachePressure (store: Store) =
+    store.CatalogPublication.Publish(fun () ->
+        let pressure = store.FullTextCachePressure
+        if not pressure.Armed then
+            let total = store.Databases.Values |> Seq.sumBy (fun slot ->
+                slot.Value |> Seq.sumBy (fun (KeyValue(_, table)) -> cachedFullTextBytes table))
+            pressure.Armed <- total > int64 store.FullTextTotalCacheSize)
+
 let internal flushFullText (store: Store) dbName tableName =
     withDatabasePublishing store dbName
         (fun () -> [ FullTextPostingsFlushed(dbName, tableName) ])
@@ -7100,19 +7156,32 @@ let internal flushFullText (store: Store) dbName tableName =
             |> Result.map (fun table -> Map.add (normalizeTableName tableName) (flushTableFullText FullText.flushPostings table) database, ()))
 
 let internal syncFullTextCachesUnderPressure (store: Store) =
-    let needsSync (table: Table) =
-        not table.FullTextIndexes.IsEmpty
-        && (table.FullTextIndexes |> Seq.sumBy (fun (KeyValue(_, index)) -> (FullText.cacheBudget index).Bytes))
-           > int64 store.FullTextCacheSize / 10L
+    let pressure = store.FullTextCachePressure
+    let requests =
+        if (Threading.Volatile.Read(&pressure.Requests)).IsEmpty then Map.empty
+        else
+            store.CatalogPublication.Publish(fun () ->
+                let pending = pressure.Requests
+                Threading.Volatile.Write(&pressure.Requests, Map.empty)
+                pending)
+
+    let needsSync dbName tableName (table: Table) =
+        cachedFullTextBytes table > int64 store.FullTextCacheSize / 10L
+        || match Map.tryFind (dbName, tableName) requests with
+           | None -> false
+           | Some(indexName, cycle) ->
+               match Map.tryFind indexName table.FullTextIndexes with
+               | Some index -> obj.ReferenceEquals(cycle, FullText.cacheCycle index)
+               | None -> false
 
     for KeyValue(dbName, slot) in store.Databases do
         for KeyValue(tableName, table) in slot.Value do
-            if needsSync table then
+            if needsSync dbName tableName table then
                 withDatabasePublishing store dbName
                     (fun synced -> if synced then [ FullTextCacheSynced(dbName, tableName) ] else [])
                     (fun database ->
                         match Map.tryFind tableName database with
-                        | Some current when needsSync current ->
+                        | Some current when needsSync dbName tableName current ->
                             let synced = flushTableFullText FullText.syncCachedPostings current
                             Ok(Map.add tableName synced database, true)
                         | _ -> Ok(database, false))
@@ -7131,12 +7200,17 @@ let internal acquireFullTextSync (store: Store) : IDisposable =
                 let owner = WeakReference<Store>(store)
                 let mutable timer: Threading.Timer = null
                 let mutable running = 0
+                let mutable lastSample = Diagnostics.Stopwatch.GetTimestamp()
                 let tick _ =
                     if Threading.Interlocked.CompareExchange(&running, 1, 0) = 0 then
                         try
                             match owner.TryGetTarget() with
                             | true, current ->
-                                try syncFullTextCachesUnderPressure current
+                                try
+                                    syncFullTextCachesUnderPressure current
+                                    if Diagnostics.Stopwatch.GetElapsedTime(lastSample).TotalSeconds >= 5.0 then
+                                        sampleFullTextCachePressure current
+                                        lastSample <- Diagnostics.Stopwatch.GetTimestamp()
                                 with error -> Log.diagnostic "fsdb: full-text cache sync: %s" error.Message
                             | false, _ -> timer.Dispose()
                         finally

@@ -673,6 +673,23 @@ let tests =
                   | Some error -> Expect.equal (error.Code, error.State) (1238, "HY000") sql
                   | None -> failtestf "accepted %s" sql
 
+          testCase "server-wide full-text cache size is bounded and read only"
+          <| fun _ ->
+              for value, expected in [ "1", 32000000; "640M", 671088640; "2G", 1600000000 ] do
+                  Expect.equal (StorageOptions.fromEntries [ entry "innodb-ft-total-cache-size" (Some value) ])
+                      (Ok({ StorageOptions.defaults with FullTextTotalCacheSize = expected }, [])) value
+              Expect.equal ((Program.parseArguments [| "--innodb-ft-total-cache-size"; "32000000" |]).GetResult Program.Innodb_Ft_Total_Cache_Size)
+                  "32000000" "CLI accepts the option"
+              let dir = TestSupport.directory "fulltext-total-cache-size"
+              let db = Db.create () |> Db.withFullTextTotalCacheSize 32000000 |> Db.withDataDir dir
+              use connection = Db.connect db
+              Expect.equal (connection.Query "SELECT @@innodb_ft_total_cache_size,@@GLOBAL.innodb_ft_total_cache_size" |> rows)
+                  [ [ Some "32000000"; Some "32000000" ] ] "startup size survives attachment"
+              for sql in [ "SELECT @@SESSION.innodb_ft_total_cache_size"; "SET innodb_ft_total_cache_size=640000000"; "SET GLOBAL innodb_ft_total_cache_size=640000000" ] do
+                  match connection.Query sql |> errorInfo with
+                  | Some error -> Expect.equal (error.Code, error.State) (1238, "HY000") sql
+                  | None -> failtestf "accepted %s" sql
+
           testCase "expansion limit startup follows MySQL bounds and precedence"
           <| fun _ ->
               for value, expected in [ "-1", 0; "0", 0; "20", 20; "1000", 1000; "1001", 1000; "1K", 1000; "64MB", 1000; "-abc", 0; "18446744073709551615", 1000 ] do

@@ -114,6 +114,7 @@ let defaultVariables: Map<string, string option> =
           "innodb_optimize_fulltext_only", "OFF"
           "ngram_token_size", string FullText.ngramTokenSize
           "innodb_ft_cache_size", string StorageOptions.defaults.FullTextCacheSize
+          "innodb_ft_total_cache_size", string StorageOptions.defaults.FullTextTotalCacheSize
           "ft_query_expansion_limit", string StorageOptions.defaults.FullTextQueryExpansionLimit
           "read_only", "OFF"
           "restrict_fk_on_non_standard_key", "ON"
@@ -127,7 +128,8 @@ let private storeDefaults: (string * (Store -> string)) list =
     [ "innodb_ft_min_token_size", fun store -> string store.FullTextWordLengths.Minimum
       "innodb_ft_max_token_size", fun store -> string store.FullTextWordLengths.Maximum
       "ngram_token_size", fun store -> string store.NgramTokenSize
-      "innodb_ft_cache_size", fun store -> string store.FullTextCacheSize ]
+      "innodb_ft_cache_size", fun store -> string store.FullTextCacheSize
+      "innodb_ft_total_cache_size", fun store -> string store.FullTextTotalCacheSize ]
 
 /// Recomputes defaults so configured limits and reported values cannot drift.
 let private liveDefaults (store: Store) : Map<string, string option> =

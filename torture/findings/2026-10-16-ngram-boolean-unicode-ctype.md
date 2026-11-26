@@ -476,8 +476,25 @@ from MySQL's. The WAL records each automatic sync, and a checkpoint
 preserves the active posting tails and allocation charge. A sync
 preserves deleted postings and can coexist with a serializable writer.
 Snapshots from earlier formats rebuild the charge from live cached rows.
-Server-wide pressure, budget contributions from word-parser indexes,
-and scoring across multiple segments of one disk gram remain open.
+
+`innodb_ft_total_cache_size` also drives the ngram cache worker. The
+server-wide probe loads six tables across two databases. Each cache
+fits below the individual sync threshold, while the combined caches
+exceed 32,000,000 bytes. An idle check, an optimize on an unindexed
+table, an update to an unindexed column, and a rolled-back insert
+leave every table's cache alone. The next committed indexed write
+syncs its table even when its text yields no bigrams. The sentinel
+search changes from `[1]` to `[1, 2]`. Writes to a different
+table stay cached once the total drops back below the threshold.
+Dropping a full-text table can also clear the sampled pressure.
+After SIGKILL and WAL replay, the selected table stayed synced
+and the other five tables stayed cached.
+[InnoDB global cache sampling](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0opt.cc#L2561).
+
+Budget contributions from word-parser indexes remain open. With five
+word-parser tables and one ngram table in the same pressure fixture,
+MySQL synced the ngram table on its next indexed write. Fsdb kept it
+cached. Scoring across multiple segments of one disk gram remains open.
 
 Fsdb's orderly CLI shutdown now closes accepted clients, waits for
 their work to finish, and flushes the ngram cache in the final
@@ -496,4 +513,5 @@ reopen.
 dotnet build src/Fsdb.Cli -c Release
 uv run --no-project --with pymysql python torture/scripts/ngram-multicol-oracle.py --cache-lifecycle
 uv run --no-project --with pymysql python torture/scripts/ngram-multicol-oracle.py --cache-pressure
+uv run --no-project --with pymysql python torture/scripts/ngram-multicol-oracle.py --global-cache-pressure
 ```

@@ -46,6 +46,7 @@ let private attachDataDir attach (dataDir: string) (db: Db) : Db =
     Storage.configureNgramTokenSize db.Store.NgramTokenSize store
     Storage.configureFullTextWordLengths db.Store.FullTextWordLengths store
     store.FullTextCacheSize <- db.Store.FullTextCacheSize
+    store.FullTextTotalCacheSize <- db.Store.FullTextTotalCacheSize
     let stopwordsEnabled = Session.tryGlobalVariable db.Store "innodb_ft_enable_stopword" <> Some(Some "OFF")
     configureFullTextStopwords stopwordsEnabled store
     configureFullTextStopwordTables
@@ -89,6 +90,11 @@ let withNgramTokenSize (size: int) (db: Db) : Db =
 /// Sets the startup limit for each table's full-text posting cache.
 let withFullTextCacheSize (size: int) (db: Db) : Db =
     db.Store.FullTextCacheSize <- StorageOptions.normalizeFullTextCacheSize (int64 size)
+    db
+
+/// Sets the server-wide startup limit for full-text posting caches.
+let withFullTextTotalCacheSize (size: int) (db: Db) : Db =
+    db.Store.FullTextTotalCacheSize <- StorageOptions.normalizeFullTextTotalCacheSize (int64 size)
     db
 
 /// Selects the initial full-text stopword setting before opening sessions.

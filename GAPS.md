@@ -1762,8 +1762,10 @@ Per-table ngram cache pressure now publishes automatic syncs while
 preserving deleted postings. The pressure probe matches membership
 across two syncs and after rollback. Checkpoints preserve the active
 cache budget, and WAL replay applies the recorded sync boundaries.
-Server-wide cache pressure and scoring across multiple disk segments
-per gram remain open.
+Server-wide ngram cache pressure also matches the cross-database
+probe. Idle tables remain cached until a committed indexed write
+requests sync for its table. Contributions from word-parser caches
+and scoring across multiple disk segments per gram remain open.
 The [legacy full-text case maps](torture/findings/2026-10-07-fulltext-case-folding.md#legacy-lowercase-tables)
 keep later uppercase letters distinct where MySQL's older maps do, including
 mixed CJK bigrams with turned H, Cherokee, and sharp S.

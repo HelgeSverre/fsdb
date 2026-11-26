@@ -2569,6 +2569,58 @@ let tests =
               execute reopened "INSERT INTO docs VALUES(4,'東北'),(5,'東京 東海 東海')" |> ignore
               Expect.equal (read reopened) [ [ Some "1" ]; [ Some "2" ]; [ Some "5" ] ] "new writes enter the cache again"
 
+          testCase "server-wide ngram pressure syncs the next committed indexed table only"
+          <| fun _ ->
+              let store = create ()
+              store.FullTextCacheSize <- 50000
+              store.FullTextTotalCacheSize <- 2000
+              let execute session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+              let session = execute (Fsdb.Session.create 1 store) "CREATE DATABASE peer"
+              let createDocs table session =
+                  let session = execute session $"CREATE TABLE {table}(id INT PRIMARY KEY,body TEXT,flag INT DEFAULT 0,FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin"
+                  execute session $"INSERT INTO {table}(id,body) VALUES(1,'東京'),(2,'東海'),(3,'大阪')"
+              let session = session |> createDocs "fsdb.docs" |> createDocs "peer.docs"
+              let read table =
+                  handle session $"SELECT id FROM {table} WHERE MATCH(body) AGAINST('東京 東*' IN BOOLEAN MODE) ORDER BY id" |> snd
+              let cached = ResultSet([ "id" ], [ [ Some "1" ] ])
+
+              sampleFullTextCachePressure store
+              syncFullTextCachesUnderPressure store
+              Expect.equal (read "fsdb.docs") cached "sampling alone does not sync an idle cache"
+
+              let session = execute session "UPDATE fsdb.docs SET flag=1 WHERE id=1"
+              let session = execute session "START TRANSACTION"
+              let session = execute session "INSERT INTO fsdb.docs(id,body) VALUES(4,'東南')"
+              let session = execute session "ROLLBACK"
+              let session = execute session "START TRANSACTION"
+              let session = execute session "INSERT INTO fsdb.docs(id,body) VALUES(4,'東南')"
+              let session = execute session "DELETE FROM fsdb.docs WHERE id=4"
+              let session = execute session "COMMIT"
+              syncFullTextCachesUnderPressure store
+              Expect.equal (read "fsdb.docs") cached "unindexed updates and transient inserts leave the cache alone"
+
+              let session = execute session "START TRANSACTION"
+              let session = execute session "INSERT INTO peer.docs(id,body) VALUES(4,'東南')"
+              let session = execute session "COMMIT"
+              syncFullTextCachesUnderPressure store
+              Expect.equal (read "peer.docs") (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "4" ] ])) "the committed search table syncs"
+              Expect.equal (read "fsdb.docs") cached "the untouched database stays cached"
+
+              sampleFullTextCachePressure store
+              let session = execute session "INSERT INTO fsdb.docs(id,body) VALUES(4,'東南')"
+              syncFullTextCachesUnderPressure store
+              Expect.equal (read "fsdb.docs") cached "the remaining caches now fit under the total limit"
+
+              let session = execute session "INSERT INTO peer.docs(id,body) VALUES(5,'東春 西風 南海')"
+              sampleFullTextCachePressure store
+              let session = execute session "DROP TABLE peer.docs"
+              execute session "INSERT INTO fsdb.docs(id,body) VALUES(5,'東山')" |> ignore
+              syncFullTextCachesUnderPressure store
+              Expect.equal (read "fsdb.docs") cached "dropping a full-text table clears pressure"
+
           testCase "automatic ngram sync survives WAL replay and preserves serializable writes"
           <| fun _ ->
               let dir = tempDataDir ()

@@ -14,6 +14,7 @@ type Settings =
     { FullTextQueryExpansionLimit: int
       FullTextWordLengths: WordLengths
       FullTextCacheSize: int
+      FullTextTotalCacheSize: int
       NgramTokenSize: int
       FullTextStopwordsEnabled: bool
       FullTextStopwordTables: StopwordTables }
@@ -22,6 +23,7 @@ let defaults =
     { FullTextQueryExpansionLimit = 20
       FullTextWordLengths = defaultWordLengths
       FullTextCacheSize = 8_000_000
+      FullTextTotalCacheSize = 640_000_000
       NgramTokenSize = 2
       FullTextStopwordsEnabled = true
       FullTextStopwordTables = { UserTable = None; ServerTable = None } }
@@ -37,6 +39,8 @@ let internal validWordLengths lengths =
 let internal normalizeNgramTokenSize size = int (max 1L (min 10L size))
 
 let internal normalizeFullTextCacheSize size = int (max 1_600_000L (min 80_000_000L size))
+
+let internal normalizeFullTextTotalCacheSize size = int (max 32_000_000L (min 1_600_000_000L size))
 
 /// Consumes storage settings, leaving other server options for their owners.
 let fromEntries (entries: OptionFile.Entry list) =
@@ -60,10 +64,16 @@ let fromEntries (entries: OptionFile.Entry list) =
             { settings with FullTextStopwordTables = { settings.FullTextStopwordTables with UserTable = entry.Value } }, remaining, errors
         | "innodb_ft_server_stopword_table" ->
             { settings with FullTextStopwordTables = { settings.FullTextStopwordTables with ServerTable = entry.Value } }, remaining, errors
-        | "innodb_ft_cache_size" ->
+        | "innodb_ft_cache_size" | "innodb_ft_total_cache_size" ->
             match entry.Value |> Option.bind OptionFile.tryParseUnsignedSize with
             | Some size ->
-                { settings with FullTextCacheSize = normalizeFullTextCacheSize (int64 (min 80_000_000UL size)) }, remaining, errors
+                let bounded = int64 (min 1_600_000_000UL size)
+                let updated =
+                    if name = "innodb_ft_cache_size" then
+                        { settings with FullTextCacheSize = normalizeFullTextCacheSize bounded }
+                    else
+                        { settings with FullTextTotalCacheSize = normalizeFullTextTotalCacheSize bounded }
+                updated, remaining, errors
             | None ->
                 let error = sprintf "%s:%d: %s requires an unsigned size with an optional K, M, G, T, P or E suffix" entry.Source entry.Line name
                 settings, remaining, error :: errors
