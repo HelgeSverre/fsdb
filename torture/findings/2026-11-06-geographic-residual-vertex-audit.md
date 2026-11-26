@@ -510,6 +510,28 @@ The wider fixture uses `--seeded-relations --seed 615801 --seeded-polygons
 2500` on the [geographic edge oracle](../scripts/geographic-edge-oracle.py).
 Add `--reverse-lines` for the reversed fixture.
 
+## Proper turn paired with a rounded endpoint
+
+The paired-contact case can also have a proper turn at the low end of the
+latitude-ordered source and a rounded contact at the high endpoint. The
+proper turn's distance from the low endpoint rounds to zero. Fsdb evaluates
+the two turns in source order. A proper exit followed by a terminal rounded
+contact reports a touch when the exit's incoming side is exterior. Reversing
+the source makes the rounded contact occur first, followed by a proper entry
+that establishes an interior interval. Other proper turns or shared
+endpoints leave the case with the existing classifier.
+[Boost line/area turn analysis](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/relate/linear_areal.hpp).
+
+The 70-case longitude offset sweep now matches MySQL 8.4.11 throughout.
+A denser sweep covers the same five fixtures and both source directions,
+using 81 positions from −0.000002° to +0.000002° in steps of 0.00000005°.
+Its differences fell from 41 to one, with no new mismatching cases. The
+remaining case produces a sole proper turn in the native probe. The
+structured and original seeded checks retain their previous counts, as
+do the wider 5,000-case runs in both directions. A separate 6,000-case
+holdout with `--seed 311041 --seeded-polygons 3000` fell from 17 to 15
+differences. The remaining differences also occurred in the baseline.
+
 ## Current-head overlay check
 
 A current-head rerun still finds 11/448 geographic line/polygon relation

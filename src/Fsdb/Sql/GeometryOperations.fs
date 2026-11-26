@@ -1132,6 +1132,12 @@ type internal GeographicLinePolygonTopology =
       Touches: bool
       LineWithinPolygon: bool }
 
+let private geographicLineAreaCrossing =
+    { Intersects = true; Crosses = true; Touches = false; LineWithinPolygon = false }
+
+let private geographicLineAreaTouch =
+    { geographicLineAreaCrossing with Crosses = false; Touches = true }
+
 /// A candidate event where the interpolated line crosses a polygon edge in
 /// coordinate space. The fraction and point can be reused by a geographic
 /// overlay; the relation check currently classifies the intervals between
@@ -1245,11 +1251,7 @@ let private sampleGeographicLinePolygonTopology referenceSystem lines polygons =
     let intersects =
         hasContact
         && geographicLinePolygonDistance referenceSystem lines polygons = Some 0.0
-    if boundaryOnly then
-        { Intersects = true
-          Crosses = false
-          Touches = true
-          LineWithinPolygon = false }
+    if boundaryOnly then geographicLineAreaTouch
     else
         { Intersects = intersects
           Crosses = intersects && hasInterior && hasOutside
@@ -1283,7 +1285,24 @@ type private GeographicRoundedContact =
     | PolygonVertex of latitudeLongitude: (float * float)
     | SourceEndpoint of boundaryOrigin: (float * float)
 
-let private geographicRoundedContactsCross referenceSystem segment rings =
+let private geographicTurnSide referenceSystem =
+    let flattening = 1.0 / referenceSystem.InverseFlattening.Value
+    fun first last query ->
+        if equalGeographicCoordinates first last
+           || equalGeographicCoordinates first query
+           || equalGeographicCoordinates last query then 0
+        else
+            let azimuth = geographicTurnAzimuth flattening first
+            geographicAzimuthSide (azimuth query) (azimuth last)
+
+let private geographicTurnArrivesFromInside side first last point sourceStart =
+    // The incoming interval uses two sub-arcs of the directed ring edge.
+    let incoming = side first point sourceStart
+    let onward = side first point last
+    if incoming * onward = -1 then incoming = -1
+    else side point last sourceStart = -1
+
+let private tryGeographicPairedTurns referenceSystem ((start, endpoint) as segment) rings =
     let spheroid, flattening = geographicIntersectionSpheroid referenceSystem
     let distance = geographicInverseDistanceRadians false spheroid
     let azimuth first last = geographicSegmentAzimuthsRadians flattening first last |> fst
@@ -1315,34 +1334,62 @@ let private geographicRoundedContactsCross referenceSystem segment rings =
             |> Option.filter (fun point -> along sourceAzimuth a point && straddles edgeAzimuth c a b)
             |> Option.map PolygonVertex
 
-    orientGeographicPolygonRings referenceSystem rings
-    |> List.exists (fun ring ->
-        let edges = ring |> List.rev |> List.pairwise
-        // A corner contact at the first ordered endpoint and a transverse
-        // contact at the other endpoint can straddle the intervening edge.
+    let boundary =
+        orientGeographicPolygonRings referenceSystem rings
+        |> List.map (List.rev >> List.pairwise)
+    let side = geographicTurnSide referenceSystem
+    let sourceStart, sourceEnd = geographicPointRadians start, geographicPointRadians endpoint
+
+    let tryMixed properEdge endpointEdge =
+        let first, last = properEdge
+        let first, last = geographicPointRadians first, geographicPointRadians last
+        tryGeographicSegmentCrossing referenceSystem segment properEdge
+        |> Option.bind (fun point ->
+            if not (boostGeoEqual (distance a point) 0.0)
+               || equalGeographicCoordinates point first
+               || equalGeographicCoordinates point last then None
+            else
+                let otherTurn =
+                    boundary
+                    |> List.exists (List.exists (fun edge ->
+                        edge <> properEdge && edge <> endpointEdge
+                        && ((tryGeographicSegmentCrossing referenceSystem segment edge).IsSome
+                            || not (List.isEmpty (geographicSharedSegmentEndpoints referenceSystem segment edge)))))
+                if otherTurn then None
+                else
+                    match side first last sourceEnd with
+                    | 1 when fst start <= fst endpoint ->
+                        // The proper exit precedes the terminal rounded contact.
+                        if geographicTurnArrivesFromInside side first last point sourceStart then Some geographicLineAreaCrossing
+                        else Some geographicLineAreaTouch
+                    | -1 when fst start > fst endpoint ->
+                        // The initial rounded contact exits before the proper entry.
+                        Some geographicLineAreaCrossing
+                    | _ -> None)
+
+    let tryAlongSpan corner origin cornerEdge endpointEdge =
+        if not (coincides origin b) then None
+        else
+            match contact endpointEdge with
+            | Some(SourceEndpoint anchor) when anchor = origin ->
+                match contact cornerEdge with
+                | Some(PolygonVertex vertex) when vertex = corner -> Some geographicLineAreaCrossing
+                | _ -> tryMixed cornerEdge endpointEdge
+            | _ -> None
+
+    boundary
+    |> List.tryPick (fun edges ->
         edges @ List.truncate 2 edges
         |> List.windowed 3
-        |> List.exists (function
-            | [ preceding; (start, endpoint); following ] ->
-                let start, endpoint = geographicPointRadians start, geographicPointRadians endpoint
-                let joins vertex origin = coincides a vertex && coincides origin b
-                if not (joins start endpoint || joins endpoint start) then false
-                else
-                    match contact preceding, contact following with
-                    | Some(PolygonVertex vertex), Some(SourceEndpoint origin) -> vertex = start && origin = endpoint
-                    | Some(SourceEndpoint origin), Some(PolygonVertex vertex) -> origin = start && vertex = endpoint
-                    | _ -> false
-            | _ -> false))
+        |> List.tryPick (function
+            | [ preceding; (first, last); following ] ->
+                let first, last = geographicPointRadians first, geographicPointRadians last
+                tryAlongSpan first last preceding following
+                |> Option.orElseWith (fun () -> tryAlongSpan last first following preceding)
+            | _ -> None))
 
 let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segment) rings sampled =
-    let flattening = 1.0 / referenceSystem.InverseFlattening.Value
-    let side first last query =
-        if equalGeographicCoordinates first last
-           || equalGeographicCoordinates first query
-           || equalGeographicCoordinates last query then 0
-        else
-            let azimuth = geographicTurnAzimuth flattening first
-            geographicAzimuthSide (azimuth query) (azimuth last)
+    let side = geographicTurnSide referenceSystem
 
     let edges =
         orientGeographicPolygonRings referenceSystem rings
@@ -1375,17 +1422,11 @@ let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segmen
         let endpointContact = edges |> List.exists (fun other -> other <> edge && sharesEndpoint other)
         if endpointContact || equalGeographicCoordinates point a || equalGeographicCoordinates point b then None
         else
-            // The incoming interval uses two sub-arcs of the directed ring edge.
-            // Its side can differ from an independent point-in-polygon test.
-            let incoming = side a point sourceStart
-            let onward = side a point b
-            let fromInside =
-                if incoming * onward = -1 then incoming = -1
-                else side point b sourceStart = -1
+            let fromInside = geographicTurnArrivesFromInside side a b point sourceStart
             match side a b sourceEnd with
             // An exit reached from outside establishes boundary contact.
             | 1 when sampled.Crosses && not fromInside ->
-                Some { sampled with Crosses = false; Touches = true }
+                Some geographicLineAreaTouch
             // An entry can expose an interior interval missed by sampling.
             | -1 when not sampled.Intersects && not fromInside ->
                 let spheroid, _ = geographicIntersectionSpheroid referenceSystem
@@ -1396,8 +1437,7 @@ let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segmen
                     if fst sourceStart > fst sourceEnd then distance sourceEnd sourceStart - distance sourceEnd point
                     else distance sourceStart point
 
-                if startDistance > 0.0 then
-                    Some { Intersects = true; Crosses = true; Touches = false; LineWithinPolygon = false }
+                if startDistance > 0.0 then Some geographicLineAreaCrossing
                 else None
             | _ -> None
     | _ -> None
@@ -1406,11 +1446,14 @@ let internal geographicLinePolygonTopology referenceSystem lines polygons =
     let sampled = sampleGeographicLinePolygonTopology referenceSystem lines polygons
     let refined =
         match lines, polygons with
-        | [ [ start; endpoint ] ], [ rings ]
-            when sampled.LineWithinPolygon && geographicRoundedContactsCross referenceSystem (start, endpoint) rings ->
-            Some { Intersects = true; Crosses = true; Touches = false; LineWithinPolygon = false }
-        | [ [ start; endpoint ] ], [ rings ] when sampled.Crosses || not sampled.Intersects ->
-            tryGeographicSingleTurn referenceSystem (start, endpoint) rings sampled
+        | [ [ start; endpoint ] ], [ rings ] ->
+            let segment = start, endpoint
+            let paired =
+                if sampled.LineWithinPolygon then tryGeographicPairedTurns referenceSystem segment rings
+                else None
+            paired |> Option.orElseWith (fun () ->
+                if sampled.Crosses || not sampled.Intersects then tryGeographicSingleTurn referenceSystem segment rings sampled
+                else None)
         | _ -> None
     Option.defaultValue sampled refined
 
