@@ -34760,7 +34760,9 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                             && List.forall2 (fun (column, _) key -> equalsIgnoreCase column key) varyingOrder orderedKeys
                         if not followsPrimaryKeys then None
                         elif varyingOrder |> List.forall (fun (column, direction) -> direction = keyDirection column) then Some Storage.ForwardScan
-                        elif keys.Length = 1 then Some Storage.ReverseScan
+                        elif (keys.Length = 1 || (prefixLength > 0 && prefixLength = conditions.Length))
+                             && (varyingOrder |> List.forall (fun (column, direction) -> direction <> keyDirection column)) then
+                            Some Storage.ReverseScan
                         else None
 
                     select.OrderBy |> List.map orderColumn |> tryAllSome |> Option.bind scanDirection

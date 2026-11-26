@@ -940,6 +940,41 @@ let tests =
               finally
                   run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "serializable reverse primary prefixes lock the seek gaps and visited rows"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a,b DESC))" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES (1,40),(1,10),(2,40),(2,30),(2,20),(2,10),(4,40),(4,10)" (Affected 8UL) |> ignore
+              let probe = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let attempt sql =
+                  let transaction = run probe "BEGIN" (Affected 0UL)
+                  let transaction, result = handle transaction sql
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  result
+
+              let reader = run (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+              let visitedRow = "SELECT b FROM gate WHERE a=2 AND b=10 FOR UPDATE NOWAIT"
+              for prefix, expected in [ 2, [ [ Some "10" ] ]; 3, [] ] do
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let transaction = run transaction $"SELECT b FROM gate FORCE INDEX (PRIMARY) WHERE a={prefix} ORDER BY b ASC LIMIT 1"
+                                       (ResultSet([ "b" ], expected))
+                  try
+                      match attempt visitedRow, prefix with
+                      | Err(3572, _), 2 | ResultSet(_, [ [ Some "10" ] ]), 3 -> ()
+                      | actual, _ -> failtestf "unexpected record lock for prefix %d: %A" prefix actual
+                      for key in [ "(2,15)"; "(3,10)" ] do
+                          match attempt $"INSERT INTO gate VALUES {key}" with
+                          | Err(1205, _) -> ()
+                          | actual -> failtestf "the reverse seek gap containing %s must be locked, got %A" key actual
+                      Expect.equal (attempt "INSERT INTO gate VALUES (2,25)") (Affected 1UL) "the earlier gap stays writable"
+                  finally
+                      run transaction "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "serializable primary ranges follow descending and composite index order"
           <| fun _ ->
               let run session sql expected =

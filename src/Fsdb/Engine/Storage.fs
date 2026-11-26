@@ -6424,6 +6424,12 @@ let internal compareIntegerPrimaryValues = compareIndexedValues None
 type private PrimaryGapScan =
     | OrdinaryGap
     | LimitedGap of direction: PrimaryScanDirection * stoppedAtRecord: bool
+    | EmptyReversePrefixGap
+
+let private isEqualityPrefix lower upper =
+    match lower, upper with
+    | Some(first, true), Some(last, true) -> first = last
+    | _ -> false
 
 // A limited scan returns false after waiting for one key so its caller can
 // reselect the stopping row before claiming a gap or waiting for another key.
@@ -6456,7 +6462,10 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
             let current () =
                 tableAt live database tableKey |> Option.filter (fun table -> table.SchemaRevision = observed.SchemaRevision)
             let cache = keyLockCache live (lockNamespaceKey database tableKey)
-            let reverse = match scan with LimitedGap(ReverseScan, _) -> true | _ -> false
+            let reverse =
+                match scan with
+                | LimitedGap(ReverseScan, _) | EmptyReversePrefixGap -> true
+                | _ -> false
             let probe, lower, upper =
                 match read with
                 | PrimaryPoint values -> encode observed values, Some(values, false), Some(values, false)
@@ -6469,6 +6478,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                     let anchor (values: Value list, inclusive) = values, values.Length = width || not inclusive
                     let prefix =
                         match scan with
+                        | EmptyReversePrefixGap -> "empty-reverse:"
                         | LimitedGap(ReverseScan, _) -> "reverse:"
                         | LimitedGap(ForwardScan, true) -> "stopped:"
                         | _ -> "range:"
@@ -6543,7 +6553,13 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             alreadyHeld <- true)
                     if not alreadyHeld then
                         let boundary key = { Values = key; LockKey = encode observed key }
-                        let mutable lower = lower |> Option.bind (fun edge -> nearest true edge table) |> Option.map boundary
+                        let lowerAnchor = lower |> Option.bind (fun edge -> nearest true edge table)
+                        let lowerAnchor =
+                            match scan with
+                            // A missing prefix also protects the gap before the rejected predecessor.
+                            | EmptyReversePrefixGap -> lowerAnchor |> Option.bind (fun key -> nearest true (key, false) table)
+                            | _ -> lowerAnchor
+                        let mutable lower = lowerAnchor |> Option.map boundary
                         let upperAnchor =
                             match read with
                             // An inclusive descending scan can reach the end of the index.
@@ -6595,7 +6611,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
             if not (needsGap observed) then true
             else
                 match scan, read with
-                | LimitedGap _, PrimaryRange(lower, upper) ->
+                | (LimitedGap _ | EmptyReversePrefixGap), PrimaryRange(lower, upper) ->
                     let firstBlocker =
                         lock cache.SyncRoot (fun () ->
                             let blocker =
@@ -6659,6 +6675,7 @@ let private primaryRangeRows (table: Table) lower upper limit =
                 if inclusive then after else first)
             |> Option.defaultValue entries.Count
         match limit with
+        | Some(ReverseScan, _) when start = finish && isEqualityPrefix lower upper -> [], None
         | Some(ReverseScan, count) ->
             // An exhausted reverse scan tests the first record below the range.
             // That record is locked even though it fails the predicate.
@@ -6703,11 +6720,12 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
     let rec acquireLimited direction lower upper snapshot ((rowIds, stop) as selection) =
         let retained = transactionGapLocks snapshot
         let stoppingEdge = stop |> Option.map (fun key -> key, true)
-        let read =
+        let scan, read =
             match direction with
-            | ReverseScan -> PrimaryRange(stoppingEdge, upper)
-            | ForwardScan -> PrimaryRange(lower, stoppingEdge |> Option.orElse upper)
-        let installed = acquirePrimaryReadGap (remaining ()) live snapshot database tableName (LimitedGap(direction, stop.IsSome)) read
+            | ReverseScan when stop.IsNone && isEqualityPrefix lower upper -> EmptyReversePrefixGap, PrimaryRange(lower, upper)
+            | ReverseScan -> LimitedGap(ReverseScan, stop.IsSome), PrimaryRange(stoppingEdge, upper)
+            | ForwardScan -> LimitedGap(ForwardScan, stop.IsSome), PrimaryRange(lower, stoppingEdge |> Option.orElse upper)
+        let installed = acquirePrimaryReadGap (remaining ()) live snapshot database tableName scan read
         let current = refresh ()
         match rows current with
         | None ->

@@ -663,6 +663,10 @@ def check(port, mysql):
         "CREATE TABLE gate(id INT PRIMARY KEY)",
         "INSERT INTO gate VALUES (10),(20),(30),(40)",
     )
+    composite_range = (
+        "CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a,b DESC))",
+        composite_rows,
+    )
     for label, setup, query, rows, row_probes, inserts in (
         (
             "limited offset",
@@ -760,6 +764,53 @@ def check(port, mysql):
             (("id=10", 1),),
             (("(5)", TIMEOUT), ("(15)", 1)),
         ),
+        (
+            "reverse composite prefix",
+            composite_range,
+            "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=2 ORDER BY b ASC LIMIT 1",
+            ((10,),),
+            (("a=2 AND b=10", 3572), ("a=2 AND b=20", 1)),
+            (("(2,15)", TIMEOUT), ("(3,10)", TIMEOUT), ("(2,25)", 1)),
+        ),
+        (
+            "reverse exhausted composite prefix",
+            composite_range,
+            "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=2 ORDER BY a DESC,b ASC LIMIT 8",
+            ((10,), (20,), (30,), (40,)),
+            (("a=1 AND b=40", 3572), ("a=4 AND b=10", 1)),
+            (("(1,45)", TIMEOUT), ("(3,10)", TIMEOUT), ("(4,5)", 1)),
+        ),
+        (
+            "reverse absent composite prefix",
+            composite_range,
+            "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=3 ORDER BY b ASC LIMIT 1",
+            (),
+            (("a=2 AND b=10", 1), ("a=4 AND b=10", 1)),
+            (("(2,15)", TIMEOUT), ("(3,10)", TIMEOUT), ("(2,25)", 1)),
+        ),
+        (
+            "reverse absent prefix before the first record",
+            composite_range,
+            "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=0 ORDER BY b ASC LIMIT 1",
+            (),
+            (("a=1 AND b=40", 1),),
+            (("(0,10)", TIMEOUT), ("(1,35)", 1)),
+        ),
+        (
+            "reverse two-column prefix with offset",
+            (
+                "CREATE TABLE gate(a INT,b INT,c INT,PRIMARY KEY(a,b DESC,c DESC))",
+                "INSERT INTO gate VALUES (2,10,10),(2,20,10),(2,20,20),(2,30,30),(2,40,40)",
+            ),
+            "SELECT c FROM gate FORCE INDEX(PRIMARY) WHERE a=2 AND b=20 ORDER BY c ASC LIMIT 1 OFFSET 1",
+            ((20,),),
+            (
+                ("a=2 AND b=20 AND c=10", 3572),
+                ("a=2 AND b=20 AND c=20", 3572),
+                ("a=2 AND b=30 AND c=30", 1),
+            ),
+            (("(2,25,1)", TIMEOUT), ("(2,15,1)", TIMEOUT), ("(2,35,1)", 1)),
+        ),
     ):
         with fixture(port, schema, mysql, setup) as (_, _, reader, _, probe):
             execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
@@ -775,8 +826,8 @@ def check(port, mysql):
                 expect(label + " " + sql, rolled_back_outcome(probe, sql), expected)
             execute(reader, "ROLLBACK")
 
-    def check_limited_wait(direction, first_key, later_key):
-        with fixture(port, schema, mysql, ascending_range) as (
+    def check_limited_wait(label, setup, read_sql, first_key, later_key, expected):
+        with fixture(port, schema, mysql, setup) as (
             _,
             later,
             reader,
@@ -786,17 +837,17 @@ def check(port, mysql):
             execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
             for connection, key in ((later, later_key), (first, first_key)):
                 execute(connection, "BEGIN")
-                execute(connection, f"INSERT INTO gate VALUES ({key})")
+                execute(
+                    connection,
+                    "INSERT INTO gate VALUES (" + ",".join(map(str, key)) + ")",
+                )
             execute(reader, "BEGIN")
             dispatched = Event()
 
             def first_row():
                 with reader.cursor() as cursor:
                     dispatched.set()
-                    cursor.execute(
-                        "SELECT id FROM gate FORCE INDEX(PRIMARY) "
-                        f"WHERE id BETWEEN 12 AND 39 ORDER BY id {direction} LIMIT 1"
-                    )
+                    cursor.execute(read_sql)
                     return cursor.fetchall()
 
             with ThreadPoolExecutor(max_workers=1) as pool:
@@ -809,7 +860,7 @@ def check(port, mysql):
                     except TimeoutError:
                         waited = True
                     expect(
-                        f"{direction} limited read waits for the first pending key",
+                        f"{label} limited read waits for the first pending key",
                         waited,
                         True,
                     )
@@ -819,16 +870,32 @@ def check(port, mysql):
                     except TimeoutError:
                         rows = "still waiting"
                     expect(
-                        f"{direction} later pending key leaves the read free to finish",
+                        f"{label} later pending key leaves the read free to finish",
                         rows,
-                        ((first_key,),),
+                        expected,
                     )
                 finally:
                     execute(later, "ROLLBACK")
             execute(reader, "ROLLBACK")
 
-    check_limited_wait("ASC", 15, 18)
-    check_limited_wait("DESC", 37, 35)
+    for direction, first_key, later_key in (("ASC", 15, 18), ("DESC", 37, 35)):
+        check_limited_wait(
+            direction,
+            ascending_range,
+            "SELECT id FROM gate FORCE INDEX(PRIMARY) "
+            f"WHERE id BETWEEN 12 AND 39 ORDER BY id {direction} LIMIT 1",
+            (first_key,),
+            (later_key,),
+            ((first_key,),),
+        )
+    check_limited_wait(
+        "reverse composite",
+        composite_range,
+        "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=2 ORDER BY b ASC LIMIT 1",
+        (2, 5),
+        (2, 7),
+        ((5,),),
+    )
 
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures

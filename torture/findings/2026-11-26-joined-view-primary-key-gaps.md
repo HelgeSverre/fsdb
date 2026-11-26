@@ -301,10 +301,32 @@ A separate 48-case comparison matched 404 checks. It compared row
 results, record locks, and sampled gap locks through competing statements
 against MySQL's `performance_schema.data_locks` on both index directions.
 
-Composite reverse scans and unordered limits remain open. On the
-mixed key `(a ASC,b DESC)`, MySQL used a backward scan for `a=2 ORDER BY
-b ASC`, and a filesort after adding `b BETWEEN 12 AND 39`. The two
-plans protect different rows and gaps.
+#### Composite equality prefixes
+
+Reverse scans also cover composite integer primary keys when the WHERE
+clause fixes a leading prefix by equality and ORDER BY reverses the
+remaining key columns. For `(a ASC,b DESC)`, `a=2 ORDER BY b ASC LIMIT 1`
+locks the lowest matching `b` and its preceding gap. It also protects
+the gap before the first physical key after the prefix. An exhausted
+scan extends the lock to the first rejected predecessor when one exists.
+
+With no rows at `a=3`, MySQL and Fsdb protect the gap before the prefix
+and the gap before its physical predecessor. A second transaction can
+still lock that predecessor row. A pending insertion outside the
+prefix can position the gap without delaying the read. A pending
+insertion inside the prefix delays the read and can become its result.
+
+MySQL and both Fsdb modes matched all 283 checks in the expanded oracle.
+The two- and three-column comparisons matched 1,690 row, record-lock,
+and gap checks across 92 scans in both physical index directions. They
+included a three-column key with two varying ORDER BY columns and
+separate cases with two leading equalities. Seven additional
+pending-writer schedules also matched.
+
+Composite suffix ranges and unordered limits remain open. For the
+audited `a=2 AND b BETWEEN 12 AND 39`, MySQL used a backward scan on
+`(a ASC,b ASC)` ordered by `b DESC`. It used a filesort on
+`(a ASC,b DESC)` ordered by `b ASC`, with a different lock footprint.
 
 Run the live schedules against disposable servers. Use `--data-dir`
 to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.
