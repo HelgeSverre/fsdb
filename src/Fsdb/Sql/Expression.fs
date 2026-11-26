@@ -428,6 +428,11 @@ let rewriteTree replace expression =
 let rewriteSelectExpressions replace select =
     rewriteSelect (plainRewriteRules replace id) select
 
+let private relationAliases (select: SelectStmt) =
+    (Option.toList select.From @ List.map (fun (join: Join) -> join.Table) select.Joins)
+    |> List.collect FromItem.leaves
+    |> List.choose FromItem.tryQualifier
+
 let private outerQualifiedRules replace =
     let rec rulesFor shadowed =
         { Replace =
@@ -439,13 +444,25 @@ let private outerQualifiedRules replace =
           EnterSelect =
             fun nested ->
                 let locals =
-                    ((nested.From |> Option.toList) @ (nested.Joins |> List.map _.Table))
-                    |> List.collect FromItem.leaves
-                    |> List.choose FromItem.tryQualifier
+                    relationAliases nested
                     |> List.map _.ToLowerInvariant()
                     |> Set.ofList
                 Some(rulesFor (Set.union shadowed locals)) }
     rulesFor Set.empty
+
+let rewriteSubqueryOuterReferences replace expression =
+    let rules = outerQualifiedRules replace
+    rewriteTreeWith { rules with Replace = fun _ -> None } expression
+
+let subqueryRelationAliases statement =
+    let aliases = System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+    let rules =
+        { plainRewriteRules (fun _ -> None) id with
+            EnterSelect = fun select ->
+                relationAliases select |> List.iter (fun alias -> aliases.Add alias |> ignore)
+                None }
+    rewriteStatementWith rules statement |> ignore
+    List.ofSeq aliases
 
 /// Rewrites qualified outer references in a FROM source while preserving
 /// aliases shadowed inside dependent LATERAL and JSON_TABLE subqueries.

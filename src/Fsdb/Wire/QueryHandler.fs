@@ -4290,15 +4290,18 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             TemporaryCatalog = temporaryCatalog },
         result
 
-let private permanentJoinedWrite (session: Session) dbName statement =
+let private permanentTemporaryOverlayWrite (session: Session) dbName statement =
+    let temporaryTable (source: TableRef) =
+        let key = CatalogOverlay.tableKey (source.Database |> Option.defaultValue dbName) source.Table
+        CatalogOverlay.tryTable session.TemporaryCatalog key
+
     let temporarySources (ctes: CommonTableExpr list) from (joins: Join list) =
         let cteNames = ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
         FromTable from :: List.map (fun (join: Join) -> join.Table) joins
         |> List.collect FromItem.leaves
         |> List.choose (function
             | FromTable source when source.Database.IsSome || not (cteNames.Contains(source.Table.ToLowerInvariant())) ->
-                let key = CatalogOverlay.tableKey (source.Database |> Option.defaultValue dbName) source.Table
-                CatalogOverlay.tryTable session.TemporaryCatalog key
+                temporaryTable source
                 |> Option.map (fun table -> (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant(), table)
             | _ -> None)
         |> Map.ofList
@@ -4306,6 +4309,11 @@ let private permanentJoinedWrite (session: Session) dbName statement =
     // Only permanent targets need a row claim. The planner still uses the
     // temporary sources' visible types to infer bounds through equality joins.
     match statement with
+    | Update update when update.Joins.IsEmpty ->
+        let database = update.From.Database |> Option.defaultValue dbName
+        if (temporaryTable update.From).IsNone && Executor.viewExists session.Store database update.From.Table then
+            Some statement
+        else None
     | Delete delete when not delete.Joins.IsEmpty ->
         let temporaryAliases = temporarySources delete.Ctes delete.From delete.Joins
         let targets = delete.Targets |> List.filter (fun name -> not (temporaryAliases.ContainsKey(name.ToLowerInvariant())))
@@ -4327,7 +4335,7 @@ let private permanentJoinedWrite (session: Session) dbName statement =
 let private executeTemporaryStatement (action: TemporaryAction option) dbName (session: Session) stmt =
     let start session =
         beginTransaction ImplicitTrackedTransaction (pendingTransactionCharacteristics session) (configuredReadOnly session) session
-    let writePlan = if action.IsNone then permanentJoinedWrite session dbName stmt else None
+    let writePlan = if action.IsNone then permanentTemporaryOverlayWrite session dbName stmt else None
     match writePlan with
     | None ->
         let session =

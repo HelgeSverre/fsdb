@@ -1340,8 +1340,11 @@ now carries the permanent binding through multiple writable views,
 correlated view predicates, and indexed ngram MATCH. [Mixed joined writes](torture/findings/2026-11-26-joined-update-shadow.md#primary-key-locking-follow-up)
 can lock just the permanent row when integer equalities identify its
 complete primary key. Missing and unproven keys still use broader claims.
-A standalone UPDATE through a view can reject a correlated caller reference,
-and reopening one temporary table can diverge from MySQL's error 1137. DROP TEMPORARY TABLE
+[Standalone view UPDATE](torture/findings/2026-11-26-joined-update-shadow.md#standalone-update-follow-up)
+now resolves qualified outer references in caller subqueries and writes
+the permanent view target. Unqualified outer references to renamed view
+columns can still fail. Reopening one temporary table can diverge from
+MySQL's error 1137. DROP TEMPORARY TABLE
 can also fail when a permanent foreign key references the same name.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)

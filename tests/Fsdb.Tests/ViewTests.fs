@@ -409,6 +409,78 @@ let tests =
               Expect.equal (rows store "SELECT id,n FROM wait_base")
                   [ [ Some "1"; Some "0" ] ] "the permanent row survives"
 
+          testCase "standalone view UPDATE binds qualified correlations without capturing local aliases"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              let exec sql =
+                  let next, result = Fsdb.QueryHandler.handle session sql
+                  session <- next
+                  result
+              let setup sql = expectOk (exec sql) sql
+
+              for sql in
+                  [ "CREATE TABLE standalone_base(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE standalone_permit(id INT PRIMARY KEY,enabled INT)"
+                    "CREATE TABLE standalone_lookup(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO standalone_base VALUES(1,10),(2,20)"
+                    "INSERT INTO standalone_permit VALUES(1,1),(2,1)"
+                    "INSERT INTO standalone_lookup VALUES(1,50)"
+                    "CREATE VIEW standalone_inner AS SELECT b.id AS k,b.n FROM standalone_base b WHERE EXISTS(SELECT 1 FROM standalone_permit p WHERE p.id=b.id AND p.enabled=1) WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW standalone_outer AS SELECT * FROM standalone_inner WITH CASCADED CHECK OPTION"
+                    "CREATE TEMPORARY TABLE standalone_base(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO standalone_base VALUES(1,100),(2,200)" ] do
+                  setup sql
+
+              Expect.equal
+                  (exec "UPDATE standalone_outer v SET v.n=(SELECT b.n FROM standalone_base b WHERE b.id=v.k)+1 WHERE v.k=1")
+                  (Affected 1UL) "the correlated caller reads its temporary row and writes the view's permanent row"
+              Expect.equal
+                  (exec "UPDATE standalone_outer v SET v.n=(SELECT v.n FROM standalone_lookup v WHERE v.id=1) WHERE v.k=2")
+                  (Affected 1UL) "a local alias still shadows the caller's outer alias"
+              Expect.equal (rows store "SELECT id,n FROM standalone_base ORDER BY id")
+                  [ [ Some "1"; Some "101" ]; [ Some "2"; Some "50" ] ] "both values reach the permanent table"
+              setup "START TRANSACTION"
+              Expect.equal
+                  (exec "UPDATE standalone_outer v SET v.n=v.n+1 WHERE v.k=1 AND EXISTS(SELECT 1 FROM standalone_base b WHERE b.id=v.k)")
+                  (Affected 1UL) "the correlated WHERE reads the temporary table"
+              Expect.equal (exec "SELECT n FROM standalone_outer WHERE k=1") (ResultSet([ "n" ], [ [ Some "102" ] ]))
+                  "the writer sees its uncommitted permanent value"
+              Expect.equal (rows store "SELECT n FROM standalone_base WHERE id=1") [ [ Some "101" ] ]
+                  "another session sees the committed value"
+              setup "ROLLBACK"
+              Expect.equal (exec "SELECT n FROM standalone_outer WHERE k=1") (ResultSet([ "n" ], [ [ Some "101" ] ]))
+                  "rollback restores the permanent row"
+              Expect.equal (exec "SELECT n FROM standalone_base WHERE id=1") (ResultSet([ "n" ], [ [ Some "100" ] ]))
+                  "the temporary source remains unchanged"
+
+              let rejected =
+                  exec "UPDATE standalone_outer v SET v.k=9 WHERE v.k=1 AND EXISTS(SELECT 1 FROM standalone_base b WHERE b.id=v.k)"
+                  |> errorInfo
+                  |> Option.map _.Code
+              Expect.equal rejected (Some 1369) "CHECK OPTION rechecks the permanent view after a key change"
+              Expect.equal (rows store "SELECT id,n FROM standalone_base ORDER BY id")
+                  [ [ Some "1"; Some "101" ]; [ Some "2"; Some "50" ] ] "rejection preserves the permanent key"
+
+              let handle = Fsdb.QueryHandler.handle
+              let writer, _ = handle (Fsdb.Session.create 2 store) "START TRANSACTION"
+              let writer, changed = handle writer "UPDATE standalone_base SET n=60 WHERE id=2"
+              Expect.equal changed (Affected 1UL) "the writer changes the predicate on the permanent row"
+              let updater = session
+              use started = new ManualResetEventSlim()
+              let waiting =
+                  Task.Run(fun () ->
+                      started.Set()
+                      handle updater "UPDATE standalone_outer v SET v.n=61 WHERE v.k=2 AND v.n=50 AND EXISTS(SELECT 1 FROM standalone_base b WHERE b.id=v.k)")
+              Expect.isTrue (started.Wait 5000) "the update starts"
+              let blocked = not (waiting.Wait 100)
+              expectOk (handle writer "COMMIT" |> snd) "publish the owner's change"
+              Expect.isTrue blocked "the update waits for the permanent row"
+              Expect.isTrue (waiting.Wait 5000) "the update resumes"
+              Expect.equal (waiting.GetAwaiter().GetResult() |> snd) (Affected 0UL) "WHERE is rechecked against the committed row"
+              Expect.equal (rows store "SELECT n FROM standalone_base WHERE id=2") [ [ Some "60" ] ]
+                  "the waiting update leaves the owner's value in place"
+
           testCase "mixed joined writes claim complete primary keys through the temporary partner"
           <| fun _ ->
               for keyType, key in [ "INT", "1"; "BIGINT UNSIGNED", "9223372036854775813" ] do

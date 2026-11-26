@@ -413,6 +413,19 @@ type private ViewMutationSources =
 let private ownsViewCondition sources expression =
     sources.Conditions |> List.exists (fun condition -> obj.ReferenceEquals(condition, expression))
 
+let private mutationConditionBindings viewSources store =
+    let bindings = HashSet<Expr>(HashIdentity.Reference)
+    let rec track inherited original rewritten =
+        let owned = inherited || ownsViewCondition viewSources original
+        if owned then bindings.Add rewritten |> ignore
+        match original, rewritten with
+        | BinOp(And, left, right), BinOp(And, updatedLeft, updatedRight) ->
+            track owned left updatedLeft
+            track owned right updatedRight
+        | _ -> ()
+    let lookup expression = if bindings.Contains expression then Some store else None
+    lookup, track false
+
 type private MutationSourceOverrides = Map<string, Lazy<Result<MutationSourceOverride, QueryResult>>>
 
 type private LockingReadSource =
@@ -26945,10 +26958,11 @@ let private targetsFirstJoinedView (store: Store) (defaultDatabase: string) (upd
 
 /// View-local aliases must stay distinct when a joined UPDATE flattens
 /// multiple view definitions into one mutation source list.
-let private freshenViewAliases (store: Store) (defaultDatabase: string) (update: UpdateStmt) (view: UpdatableView) =
+let private freshenViewAliases reserved (store: Store) (defaultDatabase: string) (update: UpdateStmt) (view: UpdatableView) =
     let used = HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
     let qualifier (table: TableRef) = table.Alias |> Option.defaultValue table.Table
 
+    reserved |> List.iter (fun name -> used.Add name |> ignore)
     for join in update.Joins do
         for source in FromItem.leaves join.Table do
             match source with
@@ -26965,6 +26979,15 @@ let private freshenViewAliases (store: Store) (defaultDatabase: string) (update:
             | source -> FromItem.tryQualifier source |> Option.iter (fun name -> used.Add name |> ignore)
 
     let externalAliases = used |> Seq.map _.ToLowerInvariant() |> Set.ofSeq
+    if not externalAliases.IsEmpty then
+        Do(
+            Option.toList view.Predicate
+            @ (view.CheckPredicates |> Map.values |> List.ofSeq)
+            @ (view.Expressions |> Map.values |> List.ofSeq)
+            @ (view.UpdateJoins |> List.collect Join.conditions)
+            @ List.map fst view.OrderBy)
+        |> Expression.subqueryRelationAliases
+        |> List.iter (fun name -> used.Add name |> ignore)
     let baseAlias = qualifier view.UpdateFrom
     used.Add baseAlias |> ignore
     let joinSources = view.UpdateJoins |> List.collect (fun join -> FromItem.leaves join.Table)
@@ -27002,7 +27025,10 @@ let private freshenViewAliases (store: Store) (defaultDatabase: string) (update:
         let replace = function
             | QualifiedCol(owner, column) -> renamed owner |> Option.map (fun fresh -> QualifiedCol(fresh, column))
             | _ -> None
-        let rewrite expression = rewriteViewReferences replace expression
+        let rewrite expression =
+            expression
+            |> Expression.rewriteSubqueryOuterReferences replace
+            |> rewriteViewReferences replace
         let rewriteLateralSelect = Expression.rewriteSelectOuterAliases aliases
         let rewriteBody = function
             | PlainSelect select -> PlainSelect(rewriteLateralSelect select)
@@ -27042,6 +27068,7 @@ let private freshenViewAliases (store: Store) (defaultDatabase: string) (update:
             Targets = view.Targets |> Map.map (fun _ target -> rewriteTarget target)
             Expressions = view.Expressions |> Map.map (fun _ expression -> rewrite expression)
             Predicate = view.Predicate |> Option.map rewrite
+            OrderBy = view.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
             CheckPredicates = view.CheckPredicates |> Map.toList |> List.map (fun (key, predicate) -> rewriteKey key, rewrite predicate) |> Map.ofList
             JoinCheck = view.JoinCheck |> Option.map (fun check -> { check with Predicate = check.Predicate |> Option.map rewrite }) }
 
@@ -27114,7 +27141,16 @@ let private rewriteStandaloneViewUpdate (view: UpdatableView) (update: UpdateStm
     elif not view.UpdateJoins.IsEmpty && update.Limit.IsSome then
         Error(1221, "Incorrect usage of UPDATE and LIMIT")
     else
-        let rewrite = rewriteViewExpression view
+        let owner = update.From.Alias |> Option.defaultValue update.From.Table
+        let physicalAlias = view.UpdateFrom.Alias |> Option.defaultValue view.UpdateFrom.Table
+        let rewriteOuter = function
+            | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier owner ->
+                Map.tryFind (name.ToLowerInvariant()) view.Expressions
+                |> Option.map (qualifyViewReference physicalAlias)
+                |> Option.orElseWith (fun () -> Some(QualifiedCol("__fsdb_view", name)))
+            | _ -> None
+        let rewrite =
+            Expression.rewriteSubqueryOuterReferences rewriteOuter >> rewriteViewExpression view
         let assign (assignment: Assignment) =
             match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets with
             | Some target -> Ok(assignment, target)
@@ -31590,12 +31626,13 @@ let rec private executeAsWithViewSources
             |> List.map (fun (runtime, original) -> runtime.ToLowerInvariant(), original)
             |> Map.ofList
         let restoreExpression expression =
-            Expression.rewrite (function
+            let restore = function
                 | QualifiedCol(owner, column) ->
                     restoreAliases
                     |> Map.tryFind (owner.ToLowerInvariant())
                     |> Option.map (fun original -> QualifiedCol(original, column))
-                | _ -> None) expression
+                | _ -> None
+            expression |> Expression.rewriteSubqueryOuterReferences restore |> rewriteViewReferences restore
         let writesView (update: UpdateStmt) (assignment: Assignment) =
             let qualifier = update.From.Alias |> Option.defaultValue update.From.Table
             assignment.Table |> Option.forall (fun owner -> equalsIgnoreCase owner qualifier)
@@ -33668,7 +33705,7 @@ let rec private executeAsWithViewSources
         | Some _, Some column ->
             ids, Err(1052, sprintf "Column '%s' in order clause is ambiguous" column)
         | Some view, None ->
-            let runtimeView = freshenViewAliases store dbName updateStmt view
+            let runtimeView = freshenViewAliases [] store dbName updateStmt view
             let viewQualifier = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
             let baseQualifier = runtimeView.UpdateFrom.Alias |> Option.defaultValue runtimeView.UpdateFrom.Table
             let joinedOwners =
@@ -33982,15 +34019,23 @@ let rec private executeAsWithViewSources
         | Some _, Some column ->
             ids, Err(1052, sprintf "Column '%s' in order clause is ambiguous" column)
         | Some view, None ->
-            match rewriteStandaloneViewUpdate view updateStmt with
+            let reserved = Expression.subqueryRelationAliases (Update updateStmt)
+            let runtimeView = freshenViewAliases reserved store dbName updateStmt view
+            match rewriteStandaloneViewUpdate runtimeView updateStmt with
             | Error(code, message) -> ids, Err(code, message)
-            | Ok(rewritten, target) -> executeViewWrite view view target target (Update rewritten) (Some updateStmt) None
+            | Ok(rewritten, runtimeTarget) ->
+                let target = view.Targets[updateStmt.Assignments.Head.Column.ToLowerInvariant()]
+                executeViewWrite view runtimeView target runtimeTarget (Update rewritten) (Some updateStmt) runtimeView.Predicate
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
         let tableAlias = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
 
-        let tableRootResult = tableSnapshot store db table
+        let publishPermanent =
+            if viewSources.Aliases.Contains(tableAlias.ToLowerInvariant()) then permanentMutationPublisher store
+            else None
+        let writeStore = if publishPermanent.IsSome then storeForStoredView store else store
+        let tableRootResult = tableSnapshot writeStore db table
         let tableRoot = tableRootResult |> Result.toOption
         let hintError =
             tableRoot
@@ -34002,7 +34047,7 @@ let rec private executeAsWithViewSources
         let physicalCandidates =
             tableRoot
             |> Option.bind (fun table ->
-                tryPhysicalCandidatesInTable store registry table updateStmt.From updateStmt.Where)
+                tryPhysicalCandidatesInTable writeStore registry table updateStmt.From updateStmt.Where)
 
         let physicalCandidateIds =
             physicalCandidates
@@ -34038,12 +34083,31 @@ let rec private executeAsWithViewSources
             | Ok indexedAssignments ->
                 let qualifiers = singleQualifier tableAlias columns
 
-                let beforeTriggers = triggersFor store db table "BEFORE" "UPDATE"
-                let afterTriggers = triggersFor store db table "AFTER" "UPDATE"
+                let beforeTriggers = triggersFor writeStore db table "BEFORE" "UPDATE"
+                let afterTriggers = triggersFor writeStore db table "AFTER" "UPDATE"
                 let useSnapshot = updateStmt.Ignore || updateCallsCustomFunction registry updateStmt || not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
                 let baseCatalog, targetStore =
-                    if useSnapshot then Storage.beginTransactionSnapshotWithBase store else store.Catalog, store
-                let ctxFor = contextFactory targetStore registry dbName columnIndex qualifiers None
+                    if useSnapshot then Storage.beginTransactionSnapshotWithBase writeStore else writeStore.Catalog, writeStore
+                let queryStore = if publishPermanent.IsSome then store else targetStore
+                let ctxFor = contextFactory queryStore registry dbName columnIndex qualifiers None
+                let checkPredicate =
+                    match publishPermanent, updateStmt.Where, viewSources.Conditions with
+                    | Some _, Some original, _ :: _ ->
+                        let lookup, bind = mutationConditionBindings viewSources writeStore
+                        bind original original
+                        let evaluate lookup expression row =
+                            evalBoundMutationCondition lookup { ctxFor row with Clause = WhereClause } expression
+                            |> Result.map (fun value -> truthy value = Some true)
+                        fun predicate row ->
+                            match predicate with
+                            | Some expression when obj.ReferenceEquals(original, expression) ->
+                                evaluate lookup expression row
+                            | Some expression ->
+                                let lookup, bind = mutationConditionBindings viewSources writeStore
+                                bind original expression
+                                evaluate lookup expression row
+                            | None -> Ok true
+                    | _ -> whereMatches ctxFor
 
                 let fullTextRowIds = Dictionary<Value[], RowId>(HashIdentity.Reference)
 
@@ -34053,15 +34117,14 @@ let rec private executeAsWithViewSources
                         fullTextRowIds.[row] <- rowId)
 
                 let preparedPredicate =
-                    match fullTextPlan with
-                    | None -> prepareWhereMatches ctxFor updateStmt.Where
-                    | Some _ -> whereMatches ctxFor updateStmt.Where
+                    if fullTextPlan.IsNone && publishPermanent.IsNone then prepareWhereMatches ctxFor updateStmt.Where
+                    else checkPredicate updateStmt.Where
 
                 let check row =
                     match fullTextPlan with
                     | Some plan ->
                         match fullTextRowIds.TryGetValue row with
-                        | true, rowId -> whereMatches ctxFor (Some(plan.PredicateFor rowId)) row
+                        | true, rowId -> checkPredicate (Some(plan.PredicateFor rowId)) row
                         | false, _ -> Ok false
                     | None -> preparedPredicate row
 
@@ -34078,7 +34141,7 @@ let rec private executeAsWithViewSources
 
                 match
                     withSourceMetadataProbe (fun () ->
-                        whereMatches ctxFor probePredicate metadataRow
+                        checkPredicate probePredicate metadataRow
                         |> Result.bind (fun _ -> checkAssignments metadataRow))
                 with
                 | Error(code, message) -> ids, Err(code, message)
@@ -34098,7 +34161,7 @@ let rec private executeAsWithViewSources
                             | Some _ ->
                                 match fullTextPlan with
                                 | Some plan ->
-                                    whereMatches ctxFor (Some(plan.PredicateFor rowId)) row
+                                    checkPredicate (Some(plan.PredicateFor rowId)) row
                                     |> Result.mapError ExpressionError
                                 | None -> check row |> Result.mapError ExpressionError
                         let assignedIdxs = indexedAssignments |> List.map fst |> Set.ofList
@@ -34111,7 +34174,7 @@ let rec private executeAsWithViewSources
 
                         let updater row =
                             let updated =
-                                applyAssignments targetStore registry dbName columnIndex qualifiers tableAlias columns indexedAssignments row
+                                applyAssignments queryStore registry dbName columnIndex qualifiers tableAlias columns indexedAssignments row
                                 |> Result.map (applyOnUpdateTimestamps (temporalCoercionMode targetStore) columns assignedIdxs row)
                                 |> Result.bind (computeGeneratedRow targetStore registry db table columns)
 
@@ -34120,9 +34183,9 @@ let rec private executeAsWithViewSources
                                 Diagnostics.warning 3819 message
                                 Ok row
                             | Ok candidate ->
-                                match fireTriggers targetStore db table Before TriggerUpdate beforeTriggers [ Some row, Some candidate ] with
-                                | Some(Err(code, message)) -> Error(ExpressionError(code, message))
-                                | _ ->
+                                match triggerStorageResult (fireTriggers targetStore db table Before TriggerUpdate beforeTriggers [ Some row, Some candidate ]) with
+                                | Error error -> Error error
+                                | Ok () ->
                                     let validated =
                                         computeGeneratedRow targetStore registry db table columns candidate
                                         |> Result.bind (validateViewCandidate targetStore db table columns (Some row))
@@ -34144,8 +34207,10 @@ let rec private executeAsWithViewSources
                             applyUpdateRows updateStmt targetStore db table (Some targetRows) predicate coercedAssignments updater changedRows beforeTriggers afterTriggers
                         with
                         | Ok changed ->
-                            if useSnapshot then
-                                Storage.commitCatalogInto store baseCatalog targetStore
+                            match publishPermanent with
+                            | Some publish -> publish targetStore
+                            | None when useSnapshot -> Storage.commitCatalogInto store baseCatalog targetStore
+                            | None -> ()
 
                             ids, Affected(uint64 (if foundRows then targetRows.Length else changed))
                         | Error e -> ids, storageErr e
@@ -34179,21 +34244,11 @@ let rec private executeAsWithViewSources
                     let catalogs, rewriteCondition =
                         match split with
                         | Some split when not viewSources.Conditions.IsEmpty ->
-                            let bindings = HashSet<Expr>(HashIdentity.Reference)
-                            let rec bind inherited original rewritten =
-                                let owned = inherited || ownsViewCondition viewSources original
-                                if owned then bindings.Add rewritten |> ignore
-                                match original, rewritten with
-                                | BinOp(And, left, right), BinOp(And, updatedLeft, updatedRight) ->
-                                    bind owned left updatedLeft
-                                    bind owned right updatedRight
-                                | _ -> ()
+                            let storeForCondition, bind = mutationConditionBindings viewSources split.PermanentBefore
                             let rewriteCondition original =
                                 let rewritten = rewrite original
-                                bind false original rewritten
+                                bind original rewritten
                                 rewritten
-                            let storeForCondition expression =
-                                if bindings.Contains expression then Some split.PermanentBefore else None
                             { Source = sourceStore; Condition = Some storeForCondition }, rewriteCondition
                         | _ -> { Source = sourceStore; Condition = None }, rewrite
 
@@ -35810,6 +35865,17 @@ let private transactionWriteTargetsIn
                 |> Option.map (List.distinctBy viewTargetKey)
 
             match assignmentTargets with
+            | Some [ target ] when temporaryCatalog.IsSome ->
+                let bounds = lazy (joinedPrimaryBounds update.From [] update.Where)
+                let reference =
+                    { Database = Some target.Database
+                      Table = target.Table
+                      Alias = Some target.Qualifier
+                      Partitions = []
+                      IndexHints = [] }
+                primaryViewTarget bounds (tableQualifier update.From) reference view (sameViewTarget target)
+                |> Option.orElseWith (fun () -> targets reference None)
+                |> Option.toList
             | Some [ target ] ->
                 let predicate =
                     update.Where

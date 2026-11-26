@@ -19,9 +19,8 @@ A concurrent writer hid a base row from the view while the joined UPDATE
 waited. Both engines then affected zero rows and retained the temporary
 row unchanged at REPEATABLE READ and READ COMMITTED. WAL recovery after
 an abrupt stop reproduced the expected permanent rows and view results.
-Standalone UPDATE through a view can still raise 1054 for a qualified
-caller reference inside a correlated subquery. Referencing a temporary
-table twice in a join can also succeed in Fsdb where MySQL returns 1137.
+Referencing a temporary table twice in a join can still succeed in Fsdb
+where MySQL returns 1137.
 
 ## Primary-key locking follow-up
 
@@ -39,3 +38,23 @@ at a key absent from the snapshot still waits for a pending move into
 that key and deletes the row after the move commits. Missing keys retain
 broader row claims, and incomplete or unsupported bounds fall back to
 the existing scan-shaped claims.
+
+## Standalone UPDATE follow-up
+
+The [standalone fixture](2026-11-26-standalone-view-correlations.sql)
+compares MySQL 8.4.11 with both Fsdb storage modes. All 20 result rows
+and the CHECK OPTION rejection match, including its code, SQLSTATE, and
+message. The update binds qualified outer view columns inside caller
+subqueries without capturing names declared by those subqueries.
+Caller subqueries can read a temporary table while the view reads and
+writes the permanent catalog. A prepared execution and explicit rollback
+exercise the same path.
+
+In a two-session check the update waited for the permanent row and
+affected zero rows after the writer committed a value that stopped
+matching the caller's WHERE clause. The temporary row stayed unchanged.
+The committed data matched after replaying WAL following an abrupt stop.
+
+An unqualified reference to an outer column renamed by the view still
+returns 1054 in the audited EXISTS subquery when its local table lacks
+a column of that name.
