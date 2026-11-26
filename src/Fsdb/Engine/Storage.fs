@@ -6472,6 +6472,10 @@ type private PrimaryGapScan =
     | RetainedRangeGap of PrimaryScanDirection
     | RetainedReverseSeekGap
 
+type private PrimaryRangeLockResult =
+    | RangeRowsLocked
+    | ReopenRange
+
 let private isEqualityPrefix lower upper =
     match lower, upper with
     | Some(first, true), Some(last, true) -> first = last
@@ -6758,7 +6762,8 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
         duration
     let lockRows wait snapshot rowIds =
         if not (List.isEmpty rowIds) then
-            acquireTransactionReadTargets (remaining ()) snapshot database tableName strength wait rowIds |> ignore
+            let budget = if wait = NoWait then TimeSpan.Zero else remaining ()
+            acquireTransactionReadTargets budget snapshot database tableName strength wait rowIds |> ignore
     let rows snapshot =
         tableAt snapshot database tableName
         |> Option.filter (fun table -> table.SchemaRevision = plan.ReadSchemaRevision)
@@ -6769,15 +6774,8 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
                 |> Option.map (fun targets -> targets.RowIds |> List.map (fun id -> id, values), None)
             | PrimaryRange(lower, upper) -> Some(primaryRangeRows table lower upper plan.ReadRangeLimit))
 
-    let retainVisitedGap snapshot savedGaps direction lower upper visited blocked =
+    let narrowScanGap snapshot savedGaps gap =
         let provisional = transactionGapLocks snapshot
-        let edge key = Some(key, true)
-        let gap =
-            match direction, visited with
-            | ForwardScan, Some key -> Some(RetainedRangeGap ForwardScan, PrimaryRange(lower, edge key))
-            | ForwardScan, None -> None
-            | ReverseScan, Some key -> Some(RetainedRangeGap ReverseScan, PrimaryRange(edge key, upper))
-            | ReverseScan, None -> Some(RetainedReverseSeekGap, PrimaryRange(edge blocked, upper))
         gap |> Option.iter (fun (scan, range) ->
             acquirePrimaryReadGap TimeSpan.Zero live snapshot database tableName scan range |> ignore)
         let visitedGaps =
@@ -6785,11 +6783,19 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
             |> List.filter (fun gap -> not (provisional |> List.exists (fun saved -> obj.ReferenceEquals(saved, gap))))
         releaseLaterGapLocks snapshot (savedGaps @ visitedGaps)
 
+    let gapThrough direction lower upper key =
+        let edge = Some(key, true)
+        let range =
+            match direction with
+            | ForwardScan -> PrimaryRange(lower, edge)
+            | ReverseScan -> PrimaryRange(edge, upper)
+        Some(RetainedRangeGap direction, range)
+
     let lockRangeRows snapshot savedGaps direction lower upper canRetain ((selected, _) as selection) =
         let rowIds = List.map fst selected
         if not canRetain then
             lockRows WaitForLocks snapshot rowIds
-            Ok()
+            Ok RangeRowsLocked
         else
             Limits.checkQueryInterruption queryCancellation.Value
             // Use a batched claim when there is no contention. On a conflict,
@@ -6800,18 +6806,42 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
                     false
                 with LockNowait _ -> true
             let rec visit visited = function
-                | [] -> Ok()
+                | [] -> Ok RangeRowsLocked
                 | (id, key) :: rest ->
-                    let claim =
+                    Limits.checkQueryInterruption queryCancellation.Value
+                    let acquired =
+                        try
+                            lockRows NoWait snapshot [ id ]
+                            true
+                        with LockNowait _ -> false
+                    if acquired then visit (Some key) rest
+                    else
+                        // Keep the next-key gap at the blocked row. Writers
+                        // farther along the index can proceed during the wait.
+                        narrowScanGap snapshot savedGaps (gapThrough direction lower upper key)
                         try
                             lockRows WaitForLocks snapshot [ id ]
-                            Ok()
+                            Ok ReopenRange
                         with LockWaitTimeout _ as error ->
-                            if rows (refresh ()) <> Some selection then reraise ()
-                            retainVisitedGap snapshot savedGaps direction lower upper visited key
+                            let visitedGap =
+                                if direction = ReverseScan && visited.IsNone then
+                                    Some(RetainedReverseSeekGap, PrimaryRange(Some(key, true), upper))
+                                else visited |> Option.bind (gapThrough direction lower upper)
+                            narrowScanGap snapshot savedGaps visitedGap
                             Error error
-                    claim |> Result.bind (fun () -> visit (Some key) rest)
-            if contended then visit None selected else Ok()
+            if not contended then Ok RangeRowsLocked
+            elif rows (refresh ()) = Some selection then visit None selected
+            else
+                releaseLaterGapLocks snapshot savedGaps
+                Ok ReopenRange
+
+    let nextSelection outcome selection current =
+        match rows current with
+        // Another key may have entered the range while only the visited
+        // portion was protected. Even an unchanged selection needs its gap.
+        | Some next when outcome = ReopenRange -> Some(true, next)
+        | Some next when next <> selection -> Some(false, next)
+        | _ -> None
 
     let rec acquire canRetain snapshot ((selected, _) as selection) =
         let timeout = remaining ()
@@ -6821,17 +6851,17 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
                 if List.isEmpty selected then
                     acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap plan.ReadAccess |> ignore
                 lockRows WaitForLocks snapshot (List.map fst selected)
-                Ok()
+                Ok RangeRowsLocked
             | PrimaryRange(lower, upper) ->
                 let savedGaps = transactionGapLocks snapshot
                 acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap plan.ReadAccess |> ignore
                 lockRangeRows snapshot savedGaps ForwardScan lower upper canRetain selection
-        acquired |> Result.bind (fun () ->
+        acquired |> Result.bind (fun outcome ->
             // A writer can publish a new row identity for the key while the read waits.
             let current = refresh ()
-            match rows current with
-            | Some next when next <> selection -> acquire false current next
-            | _ -> Ok current)
+            match nextSelection outcome selection current with
+            | Some(retain, next) -> acquire retain current next
+            | None -> Ok current)
 
     let rec acquireLimited direction lower upper canRetain snapshot ((_, stop) as selection) =
         let retained = transactionGapLocks snapshot
@@ -6852,11 +6882,11 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
             acquireLimited direction lower upper canRetain current next
         | Some _ ->
             lockRangeRows current retained direction lower upper canRetain selection
-            |> Result.bind (fun () ->
+            |> Result.bind (fun outcome ->
                 let current = refresh ()
-                match rows current with
-                | Some next when next <> selection -> acquireLimited direction lower upper false current next
-                | _ -> Ok current)
+                match nextSelection outcome selection current with
+                | Some(retain, next) -> acquireLimited direction lower upper retain current next
+                | None -> Ok current)
 
     let initial = refresh ()
     match rows initial with

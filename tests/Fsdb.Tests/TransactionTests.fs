@@ -834,6 +834,54 @@ let tests =
                   for key in Option.toList blockedGap do
                       Expect.equal (insert key) (Affected 1UL) "rollback releases the gap"
 
+          testCase "waiting primary range reads allow inserts beyond the blocked record"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for suffix, insertKey, protectedKey, expected in
+                  [ "FOR UPDATE", 35, 25, [ 20; 30; 35 ]
+                    "ORDER BY id LIMIT 3 FOR UPDATE", 35, 25, [ 20; 30; 35 ]
+                    "ORDER BY id DESC LIMIT 3 FOR UPDATE", 15, 25, [ 30; 20; 15 ] ] do
+                  let store = Fsdb.Storage.create ()
+                  let admin = run (create 1 store) "CREATE TABLE gate (id INT PRIMARY KEY,n INT)" (Affected 0UL)
+                  run admin "INSERT INTO gate VALUES (10,1),(20,2),(30,3),(40,4)" (Affected 4UL) |> ignore
+                  let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let holder = run holder "UPDATE gate SET n=9 WHERE id=30" (Affected 1UL)
+                  let reader = run (create 3 store) "SET SESSION innodb_lock_wait_timeout=6" (Affected 0UL)
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let owner = reader.Tx.Value.Snapshot.TransactionLocks.Value.Owner
+                  let waiting = Threading.Tasks.Task.Run(fun () ->
+                      handle reader ("SELECT id FROM gate WHERE id BETWEEN 12 AND 38 " + suffix))
+                  let probe = run (create 4 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+                  let progress =
+                      try
+                          let registered () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.ContainsKey owner)
+                          if Threading.SpinWait.SpinUntil(registered, TimeSpan.FromSeconds 3.0) then
+                              let blocked = handle probe $"INSERT INTO gate VALUES({protectedKey},0)" |> snd
+                              let inserted = handle probe $"INSERT INTO gate VALUES({insertKey},0)" |> snd
+                              Some(blocked, inserted)
+                          else None
+                      finally
+                          run holder "ROLLBACK" (Affected 0UL) |> ignore
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 4.0)) "locking read resumed"
+                  let reader, result = waiting.Result
+                  try
+                      match progress with
+                      | Some(Err(1205, _), Affected 1UL) -> ()
+                      | actual -> failtestf "%s: expected the current gap to wait and the later gap to allow insertion, got %A" suffix actual
+                      Expect.equal result (ResultSet([ "id" ], List.map (fun key -> [ Some(string key) ]) expected)) suffix
+                      let writer = run probe "BEGIN" (Affected 0UL)
+                      let writer, result = handle writer $"SELECT id FROM gate WHERE id={insertKey} FOR UPDATE NOWAIT"
+                      run writer "ROLLBACK" (Affected 0UL) |> ignore
+                      match result with
+                      | Err(3572, _) -> ()
+                      | actual -> failtestf "the resumed cursor must lock the inserted row, got %A" actual
+                  finally
+                      run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "timed-out primary locking reads retain only the visited rows and gaps"
           <| fun _ ->
               let run session sql expected =
