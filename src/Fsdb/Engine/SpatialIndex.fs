@@ -7,6 +7,13 @@ type Relation =
     | Within
     | Contains
 
+[<RequireQualifiedAccess>]
+type internal Envelope =
+    | Box of GeometryBounds
+    | Parallel of GeometryBounds
+    | Empty
+    | Invalid
+
 type private Entry<'id> =
     { Id: 'id
       Bounds: GeometryBounds }
@@ -21,10 +28,16 @@ type private Node<'id> =
 type Index<'id when 'id: comparison> =
     private
         { Bounds: Map<'id, GeometryBounds>
+          ParallelRows: Set<'id>
+          EmptyRows: Set<'id>
+          InvalidRows: Set<'id>
           Root: Node<'id> option }
 
 let empty<'id when 'id: comparison> : Index<'id> =
     { Bounds = Map.empty
+      ParallelRows = Set.empty
+      EmptyRows = Set.empty
+      InvalidRows = Set.empty
       Root = None }
 
 let private maxX = function
@@ -120,18 +133,40 @@ let rec private delete (entry: Entry<'id>) (root: Node<'id> option) =
 
 let remove id (index: Index<'id>) =
     match Map.tryFind id index.Bounds with
-    | None -> index
+    | None ->
+        { index with
+            EmptyRows = Set.remove id index.EmptyRows
+            InvalidRows = Set.remove id index.InvalidRows }
     | Some bounds ->
         let entry = { Id = id; Bounds = bounds }
-        { Bounds = Map.remove id index.Bounds
-          Root = delete entry index.Root }
+        { index with
+            Bounds = Map.remove id index.Bounds
+            ParallelRows = Set.remove id index.ParallelRows
+            Root = delete entry index.Root }
 
 let add id (bounds: GeometryBounds) (index: Index<'id>) =
     let index = remove id index
     let entry = { Id = id; Bounds = bounds }
 
-    { Bounds = Map.add id bounds index.Bounds
-      Root = insert entry index.Root }
+    { index with Bounds = Map.add id bounds index.Bounds; Root = insert entry index.Root }
+
+let internal addEnvelope id envelope index =
+    match envelope with
+    | Envelope.Box bounds -> add id bounds index
+    | Envelope.Parallel bounds ->
+        let index = add id bounds index
+        { index with ParallelRows = Set.add id index.ParallelRows }
+    | Envelope.Empty ->
+        let index = remove id index
+        { index with EmptyRows = Set.add id index.EmptyRows }
+    | Envelope.Invalid ->
+        let index = remove id index
+        { index with InvalidRows = Set.add id index.InvalidRows }
+
+let internal emptyRows index = index.EmptyRows
+let internal invalidRows index = index.InvalidRows
+let internal parallelRows index = index.ParallelRows
+let internal boundedRows index = Map.toSeq index.Bounds
 
 let private matches relation query candidate =
     match relation with
@@ -151,13 +186,7 @@ let private matches relation query candidate =
         && candidate.MinY <= query.MinY
         && candidate.MaxY >= query.MaxY
 
-let search relation (bounds: GeometryBounds) (index: Index<'id>) =
-    let lowerMinX, upperMinX, requiredMaxX =
-        match relation with
-        | Intersects -> System.Double.NegativeInfinity, bounds.MaxX, bounds.MinX
-        | Within -> bounds.MinX, bounds.MaxX, System.Double.NegativeInfinity
-        | Contains -> System.Double.NegativeInfinity, bounds.MinX, bounds.MaxX
-
+let private searchBounds lowerMinX upperMinX requiredMaxX accept (index: Index<'id>) =
     let rec collect found = function
         | None -> found
         | Some current when current.SubtreeMaxX < requiredMaxX -> found
@@ -167,7 +196,7 @@ let search relation (bounds: GeometryBounds) (index: Index<'id>) =
             let found = collect found current.Left
 
             let found =
-                if matches relation bounds current.Entry.Bounds then
+                if accept current.Entry.Bounds then
                     Set.add current.Entry.Id found
                 else
                     found
@@ -176,7 +205,42 @@ let search relation (bounds: GeometryBounds) (index: Index<'id>) =
 
     collect Set.empty index.Root
 
+let search relation (bounds: GeometryBounds) index =
+    let lowerMinX, upperMinX, requiredMaxX =
+        match relation with
+        | Intersects -> System.Double.NegativeInfinity, bounds.MaxX, bounds.MinX
+        | Within -> bounds.MinX, bounds.MaxX, System.Double.NegativeInfinity
+        | Contains -> System.Double.NegativeInfinity, bounds.MinX, bounds.MaxX
+    searchBounds lowerMinX upperMinX requiredMaxX (matches relation bounds) index
+
 let count (index: Index<'id>) = Map.count index.Bounds
+
+// The scalar comparison scales its tolerance by the larger coordinate.
+let private equalityMargin value =
+    2.0 * (System.Math.BitIncrement(1.0) - 1.0) * max 1.0 (abs value)
+
+let internal searchApproximateEquality bounds index =
+    let minX = bounds.MinX
+    searchBounds
+        (minX - equalityMargin minX)
+        (minX + equalityMargin minX)
+        (bounds.MaxX - equalityMargin bounds.MaxX)
+        (GeometryOperations.mbrBoundsEqual bounds)
+        index
+
+let internal searchPlanarWindow relation bounds index =
+    // Contains and Within also accept approximately equal boxes.
+    let adjust direction value = value + direction * equalityMargin value
+    let probe =
+        match relation with
+        | Intersects -> bounds
+        | Within | Contains ->
+            let marginDirection = if relation = Within then 1.0 else -1.0
+            { MinX = adjust (-marginDirection) bounds.MinX
+              MaxX = adjust marginDirection bounds.MaxX
+              MinY = adjust (-marginDirection) bounds.MinY
+              MaxY = adjust marginDirection bounds.MaxY }
+    search relation probe index
 
 let searchGeographicCandidates bounds index =
     // Compare unwrapped envelopes in each possible longitude alignment.

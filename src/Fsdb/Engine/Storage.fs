@@ -2939,16 +2939,23 @@ let private spatialKeyGroups (table: Table) : SpatialKeyGroup list =
                   Geography = declaredGeography table.Columns.[columnIndex] })
         | _ -> None)
 
-let private spatialBoundsAt (group: SpatialKeyGroup) (row: Value[]) =
+let private spatialEnvelopeAt (group: SpatialKeyGroup) (row: Value[]) =
+    let envelope toBox bounds =
+        bounds
+        |> Option.map toBox
+        |> Option.defaultValue SpatialIndex.Envelope.Empty
+        |> Some
+
     match row.[group.ColumnIndex], group.Geography with
     | VGeometry geometry, Some referenceSystem ->
         if SpatialReferenceSystems.tryGeometryParameterDomainError geometry |> Option.isSome then
-            // Writes may store a generated out-of-range geometry. Pass it
-            // through to scalar validation even when probing a distant box.
-            Some { MinX = Double.NegativeInfinity; MaxX = Double.PositiveInfinity
-                   MinY = Double.NegativeInfinity; MaxY = Double.PositiveInfinity }
-        else GeometryOperations.geographicMbrIndexBounds referenceSystem geometry
-    | VGeometry geometry, None -> geometryBounds geometry
+            Some SpatialIndex.Envelope.Invalid
+        else
+            GeometryOperations.geographicMbrBounds referenceSystem geometry
+            |> envelope (fun bounds ->
+                if GeometryOperations.geographicMbrIsNonEquatorialParallel bounds then SpatialIndex.Envelope.Parallel bounds
+                else SpatialIndex.Envelope.Box bounds)
+    | VGeometry geometry, None -> geometryBounds geometry |> envelope SpatialIndex.Envelope.Box
     | _ -> None
 
 let private fullTextFields (indices: int list) (row: Value[]) =
@@ -3405,8 +3412,8 @@ let private rebuildSpatialIndexes (table: Table) : SpatialIndexes =
             table.RowsArray.Indexed
             |> Seq.fold
                 (fun index (rowId, row) ->
-                    spatialBoundsAt group row
-                    |> Option.fold (fun index bounds -> SpatialIndex.add rowId bounds index) index)
+                    spatialEnvelopeAt group row
+                    |> Option.fold (fun index envelope -> SpatialIndex.addEnvelope rowId envelope index) index)
                 SpatialIndex.empty
 
         group.Name, index)
@@ -3638,15 +3645,13 @@ let private publishRowsWithDocumentRules rulesFor (before: Table) (after: Table)
             |> List.fold
                 (fun indexes group ->
                     let update index (rowId, removed: Value[] option, added: Value[] option) =
-                        let removedBounds = removed |> Option.bind (spatialBoundsAt group)
-                        let addedBounds = added |> Option.bind (spatialBoundsAt group)
-
-                        if removedBounds = addedBounds then
-                            index
+                        let before = removed |> Option.bind (spatialEnvelopeAt group)
+                        let after = added |> Option.bind (spatialEnvelopeAt group)
+                        if before = after then index
                         else
-                            index
-                            |> SpatialIndex.remove rowId
-                            |> fun current -> addedBounds |> Option.fold (fun current bounds -> SpatialIndex.add rowId bounds current) current
+                            match after with
+                            | Some envelope -> SpatialIndex.addEnvelope rowId envelope index
+                            | None -> SpatialIndex.remove rowId index
 
                     let index = changes |> Array.fold update (Map.find group.Name indexes)
                     Map.add group.Name index indexes)
@@ -5959,11 +5964,65 @@ type SpatialLookup =
       SpatialColumns: ColumnDef list
       SpatialRows: (RowId * Value[]) list }
 
+[<RequireQualifiedAccess>]
+type internal SpatialProbe =
+    | Window of SpatialIndex.Relation
+    | Equal
+    | Disjoint of indexedOperandFirst: bool
+
+let private spatialCandidateIds disjointLimit probe geography geometry index =
+    let invalid = SpatialIndex.invalidRows index
+    let bounds =
+        match geography with
+        | Some referenceSystem -> GeometryOperations.geographicMbrBounds referenceSystem geometry
+        | None -> geometryBounds geometry
+    let intersect bounds =
+        match geography with
+        | Some _ -> SpatialIndex.searchGeographicCandidates bounds index
+        | None -> SpatialIndex.search SpatialIndex.Intersects bounds index
+
+    match bounds, probe with
+    | None, SpatialProbe.Equal -> Some(Set.union invalid (SpatialIndex.emptyRows index))
+    | None, _ -> Some invalid
+    | Some bounds, SpatialProbe.Equal ->
+        Some(Set.union invalid (SpatialIndex.searchApproximateEquality bounds index))
+    | Some bounds, SpatialProbe.Window relation ->
+        let matches =
+            match geography with
+            // A collapsed latitude interval can be interpreted as a
+            // geodesic segment that leaves its envelope.
+            | Some _ when GeometryOperations.geographicMbrIsNonEquatorialParallel bounds ->
+                SpatialIndex.boundedRows index |> Seq.map fst |> Set.ofSeq
+            | Some _ -> Set.union (SpatialIndex.parallelRows index) (intersect bounds)
+            | None -> SpatialIndex.searchPlanarWindow relation bounds index
+        Some(Set.union invalid matches)
+    | Some bounds, SpatialProbe.Disjoint indexedOperandFirst ->
+        let isDisjoint =
+            match geography with
+            | None -> GeometryOperations.planarMbrIntersects bounds >> not
+            | Some _ when indexedOperandFirst ->
+                fun candidate -> not (GeometryOperations.geographicMbrBoxesIntersect candidate bounds)
+            | Some _ -> GeometryOperations.geographicMbrBoxesIntersect bounds >> not
+        // Disjoint ranges use exact cached envelopes. Complementing the
+        // padded intersection candidates would drop some disjoint rows.
+        let matches =
+            SpatialIndex.boundedRows index
+            |> Seq.choose (fun (id, candidate) -> if isDisjoint candidate then Some id else None)
+        match disjointLimit with
+        | None -> Some(Set.union invalid (Set.ofSeq matches))
+        | Some limit when invalid.Count > limit -> None
+        | Some limit ->
+            let remaining = limit - invalid.Count
+            let selected = matches |> Seq.truncate (remaining + 1) |> Set.ofSeq
+            if selected.Count > remaining then None
+            else Some(Set.union invalid selected)
+
 let internal trySpatialLookupInTableWhere
     (allowed: string -> bool)
+    (disjointLimit: int option)
     (table: Table)
     (columnName: string)
-    (relation: SpatialIndex.Relation)
+    (probe: SpatialProbe)
     (geometry: Geometry)
     : SpatialLookup option =
     resolveColumn table.Columns columnName
@@ -5974,17 +6033,13 @@ let internal trySpatialLookupInTableWhere
             spatialKeyGroups table
             |> List.tryFind (fun group -> group.ColumnIndex = columnIndex && group.Visible && allowed group.Name)
             |> Option.bind (fun group ->
-                let search =
-                    match group.Geography with
-                    | Some referenceSystem when SpatialReferenceSystems.tryGeometryParameterDomainError geometry |> Option.isNone ->
-                        GeometryOperations.geographicMbrIndexBounds referenceSystem geometry
-                        |> Option.map SpatialIndex.searchGeographicCandidates
-                    | Some _ -> None
-                    | None -> geometryBounds geometry |> Option.map (SpatialIndex.search relation)
-
-                Option.map2 (fun search index ->
+                table.SpatialIndexes
+                |> Map.tryFind group.Name
+                |> Option.filter (fun _ -> SpatialReferenceSystems.tryGeometryParameterDomainError geometry |> Option.isNone)
+                |> Option.bind (spatialCandidateIds disjointLimit probe group.Geography geometry)
+                |> Option.map (fun candidates ->
                     let rows =
-                        search index
+                        candidates
                         |> Seq.choose (fun rowId ->
                             table.RowsArray.TryFind rowId
                             |> Option.map (fun row -> rowId, row))
@@ -5993,9 +6048,7 @@ let internal trySpatialLookupInTableWhere
                     { SpatialIndexName = group.Name
                       SpatialColumnIndex = columnIndex
                       SpatialColumns = table.Columns
-                      SpatialRows = rows })
-                    search
-                    (Map.tryFind group.Name table.SpatialIndexes))
+                      SpatialRows = rows }))
         | _ -> None)
 
 let trySpatialLookup
@@ -6007,7 +6060,7 @@ let trySpatialLookup
     (geometry: Geometry)
     : SpatialLookup option =
     tableAt store dbName tableName
-    |> Option.bind (fun table -> trySpatialLookupInTableWhere (fun _ -> true) table columnName relation geometry)
+    |> Option.bind (fun table -> trySpatialLookupInTableWhere (fun _ -> true) None table columnName (SpatialProbe.Window relation) geometry)
 
 let internal equalityIndexesForColumns (table: Table) (columnNames: string list) : EqualityIndex list =
     columnNames

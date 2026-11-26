@@ -20526,6 +20526,69 @@ let tests =
                     Expect.equal (run $"UPDATE places SET shape={moved} WHERE id=4") (Affected 1UL) "move a point across the seam"
                     Expect.equal (run (query "FORCE INDEX (sx)" $"MBRIntersects(shape,{seam})")) (rows [ "4" ]) "the updated envelope is searchable"
 
+                testCase "indexed MBR predicates preserve approximate equality, empty bounds and boundary matches"
+                <| fun _ ->
+                    let store = newStore ()
+                    let run sql = runDefault store sql
+                    let empty = "GEOMETRYCOLLECTION EMPTY"
+                    let square = "POLYGON((0 0,4 0,4 4,0 4,0 0))"
+                    let seam = "POLYGON((170 -5,-170 -5,-170 5,170 5,170 -5))"
+                    for srid in [ 0; 4326 ] do
+                        let geometry text =
+                            if srid = 0 then $"ST_GeomFromText('{text}')"
+                            else $"ST_GeomFromText('{text}',{srid},'axis-order=long-lat')"
+                        let table = $"places{srid}"
+                        Expect.equal
+                            (run $"CREATE TABLE {table} (id INT PRIMARY KEY, shape GEOMETRY NOT NULL SRID {srid}, SPATIAL INDEX sx(shape))")
+                            (Affected 0UL) "indexed table"
+                        let values =
+                            [ square; "LINESTRING(0 0,4 4)"; "POINT(0 2)"; "POINT(2 2)"; "POINT(10 10)"; empty
+                              "POLYGON((3 3,6 3,6 6,3 6,3 3))"; "LINESTRING(0 2,0 3)"; "POINT(170 0)"
+                              "LINESTRING(-60 70,60 70)"; "MULTIPOINT(-60 70,60 70)"; seam; "POINT(179 0)"
+                              "POINT(4 2)"; "POINT(4.000000000000001 2)"
+                              "MULTIPOINT((25.074357574339956 -68.93391251564026),(32.41602215403691 -68.93391251564026))" ]
+                            |> List.mapi (fun i wkt -> $"({i + 1},{geometry wkt})")
+                            |> String.concat ","
+                        Expect.equal (run $"INSERT INTO {table} VALUES {values}") (Affected 16UL) "fixture rows"
+                        let matchesSquare =
+                            if srid = 0 then [ "1"; "2" ] else [ "1" ]
+                        let containsNearPoint =
+                            if srid = 0 then [ "12"; "14"; "15" ] else [ "14"; "15" ]
+                        let nearPoint = geometry "POINT(4.000000000000001 2)"
+                        let parallelBounds = geometry "MULTIPOINT((32.41602215403691 -68.93391251564026),(25.074357574339956 -68.93391251564026))"
+                        for predicate, ids in
+                            [ $"MBREquals(shape,{geometry square})", matchesSquare
+                              $"MBREquals({geometry empty},shape)", [ "6" ]
+                              $"MBREquals(shape,{nearPoint})", [ "14"; "15" ]
+                              $"MBRWithin(shape,{nearPoint})", [ "14"; "15" ]
+                              $"MBRContains(shape,{nearPoint})", containsNearPoint
+                              $"MBRTouches(shape,{geometry square})", [ "3"; "8"; "14" ]
+                              $"MBRTouches({geometry seam},shape)", [ "9" ]
+                              $"MBROverlaps(shape,{geometry square})", [ "7" ]
+                              $"MBROverlaps(shape,{parallelBounds})", []
+                              $"MBRDisjoint(shape,{geometry empty})", []
+                              $"MBRDisjoint({geometry seam},shape)",
+                                  if srid = 0 then [ "5"; "10"; "11"; "13"; "16" ]
+                                  else [ "1"; "2"; "3"; "4"; "5"; "7"; "8"; "10"; "11"; "14"; "15"; "16" ] ] do
+                            let query hint = $"SELECT id FROM {table} {hint} INDEX(sx) WHERE {predicate} ORDER BY id"
+                            let rows = ResultSet([ "id" ], ids |> List.map (fun id -> [ Some id ]))
+                            Expect.equal (run (query "FORCE")) rows predicate
+                            Expect.equal (run (query "IGNORE")) rows "scan must return the same rows"
+                            match run ("EXPLAIN " + query "FORCE") with
+                            | ResultSet(_, [ row ]) ->
+                                Expect.equal row.[4] (Some "range") predicate
+                                Expect.equal row.[6] (Some "sx") "forced spatial index"
+                            | other -> failtestf "expected spatial range access, got %A" other
+                        let secondEmpty = geometry empty
+                        Expect.equal (run $"UPDATE {table} SET shape={secondEmpty} WHERE id=5") (Affected 1UL) "change a row to empty"
+                        Expect.equal
+                            (run $"SELECT id FROM {table} FORCE INDEX(sx) WHERE MBREquals(shape,{secondEmpty}) ORDER BY id")
+                            (ResultSet([ "id" ], [ [ Some "5" ]; [ Some "6" ] ])) "the new empty row is searchable"
+                        Expect.equal (run $"UPDATE {table} SET shape={nearPoint} WHERE id=5") (Affected 1UL) "replace an empty row"
+                        Expect.equal
+                            (run $"SELECT id FROM {table} FORCE INDEX(sx) WHERE MBREquals(shape,{secondEmpty}) ORDER BY id")
+                            (ResultSet([ "id" ], [ [ Some "6" ] ])) "replacing an empty row removes its empty entry"
+
                 testCase "declared spatial SRIDs are enforced on writes and schema changes"
                 <| fun _ ->
                     let store = newStore ()

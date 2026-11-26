@@ -2361,21 +2361,24 @@ let private geographicMbr referenceSystem shape =
 
     envelope shape
 
-let private mbrBoundsEqual first second =
+let internal mbrBoundsEqual first second =
     boostGeoEqual first.MinX second.MinX && boostGeoEqual first.MaxX second.MaxX
     && boostGeoEqual first.MinY second.MinY && boostGeoEqual first.MaxY second.MaxY
 
 let private geographicBoundsAsMbr box =
     { MinX = box.West; MaxX = box.East; MinY = box.South; MaxY = box.North }
 
-let internal geographicMbrIndexBounds referenceSystem geometry =
+let internal geographicMbrBounds referenceSystem geometry =
     geographicMbr referenceSystem geometry.Shape
-    |> Option.map (fun bounds ->
-        if bounds.South = bounds.North && bounds.South <> 0.0 && bounds.West <> bounds.East then
-            // A collapsed horizontal box can participate in Contains as a
-            // geodesic segment that extends beyond its stored intervals.
-            { MinX = -Math.PI; MaxX = Math.PI; MinY = -Math.PI / 2.0; MaxY = Math.PI / 2.0 }
-        else geographicBoundsAsMbr bounds)
+    |> Option.map geographicBoundsAsMbr
+
+let internal geographicMbrIsNonEquatorialParallel bounds =
+    bounds.MinY = bounds.MaxY && bounds.MinY <> 0.0 && bounds.MinX <> bounds.MaxX
+
+let internal geographicMbrBoxesIntersect first second =
+    let geographic box =
+        { West = box.MinX; East = box.MaxX; South = box.MinY; North = box.MaxY }
+    geographicBoundsIntersect (geographic first) (geographic second)
 
 let private geographicLongitudeCovers outer inner =
     let period = 2.0 * Math.PI
@@ -2456,7 +2459,7 @@ let private planarMbrCovers outer inner =
     outer.MinX <= inner.MinX && inner.MaxX <= outer.MaxX
     && outer.MinY <= inner.MinY && inner.MaxY <= outer.MaxY
 
-let private planarMbrIntersects first second =
+let internal planarMbrIntersects first second =
     first.MinX <= second.MaxX && second.MinX <= first.MaxX
     && first.MinY <= second.MaxY && second.MinY <= first.MaxY
 
@@ -2471,7 +2474,7 @@ let private planarLineMbrInteriorsMeet first second =
     && interiorsMeet first.MinY first.MaxY second.MinY second.MaxY
 
 let private mbrOverlaps lineOverlaps first second =
-    if mbrIsPoint first || mbrIsPoint second then false
+    if first = second || mbrIsPoint first || mbrIsPoint second then false
     elif mbrIsLine first && mbrIsLine second then lineOverlaps first second
     else
         first.MinX < second.MaxX && second.MinX < first.MaxX

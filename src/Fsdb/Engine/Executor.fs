@@ -168,7 +168,7 @@ type private DecimalRangeCut =
 
 type private SpatialLookupPredicate =
     { Column: string
-      Relation: SpatialIndex.Relation
+      Relation: Storage.SpatialProbe
       Geometry: Geometry }
 
 type private ColumnReferenceScope =
@@ -16160,20 +16160,27 @@ and private spatialLookupPredicates scope registry (tref: TableRef) whereExpr : 
             (columnName column)
             (geometry value)
 
+    let either first second left right =
+        predicate first left right
+        |> Option.orElseWith (fun () -> predicate second right left)
+
+    let window = Storage.SpatialProbe.Window
+    let intersects = window SpatialIndex.Intersects
     whereExpr
     |> optionalConjuncts
     |> List.choose (function
         | FuncCall(name, [ left; right ]) when Functions.isUnmodifiedBuiltinScalar name registry ->
             match name.ToUpperInvariant() with
-            | "MBRINTERSECTS" ->
-                predicate SpatialIndex.Intersects left right
-                |> Option.orElseWith (fun () -> predicate SpatialIndex.Intersects right left)
+            | "MBRINTERSECTS" | "MBRTOUCHES" | "MBROVERLAPS" ->
+                either intersects intersects left right
+            | "MBREQUALS" ->
+                either Storage.SpatialProbe.Equal Storage.SpatialProbe.Equal left right
+            | "MBRDISJOINT" ->
+                either (Storage.SpatialProbe.Disjoint true) (Storage.SpatialProbe.Disjoint false) left right
             | "MBRWITHIN" ->
-                predicate SpatialIndex.Within left right
-                |> Option.orElseWith (fun () -> predicate SpatialIndex.Contains right left)
+                either (window SpatialIndex.Within) (window SpatialIndex.Contains) left right
             | "MBRCONTAINS" ->
-                predicate SpatialIndex.Contains left right
-                |> Option.orElseWith (fun () -> predicate SpatialIndex.Within right left)
+                either (window SpatialIndex.Contains) (window SpatialIndex.Within) left right
             | _ -> None
         | _ -> None)
 
@@ -19572,6 +19579,7 @@ and private tryRangeAccess
     |> Option.bind (fun table -> tryRangeAccessInTable scope store registry table tref whereExpr)
 
 and private trySpatialAccessInTable
+    (policy: IndexAccessPolicy)
     (scope: ColumnReferenceScope)
     (store: Store)
     (registry: Registry)
@@ -19579,13 +19587,20 @@ and private trySpatialAccessInTable
     (tref: TableRef)
     (whereExpr: Expr option)
     : Storage.SpatialLookup option =
-    let allowed = indexAllowedBy (indexHintsFor IndexJoin tref)
+    let hints = indexHintsFor IndexJoin tref
+    let allowed = indexAllowedBy hints
+    let disjointLimit =
+        if policy = CandidateNarrowing || (hints |> List.exists (fun hint -> hint.Kind = ForceIndex)) then None
+        else
+            // A range candidate adds a row lookup. Once the estimated work
+            // reaches a scan, stop collecting disjoint entries.
+            Some((max 1 table.RowsArray.Count - 1) / 2)
     (if storedRowsMatchReadRows store table.Columns then
          spatialLookupPredicates scope registry tref whereExpr
      else
          [])
     |> List.tryPick (fun predicate ->
-        Storage.trySpatialLookupInTableWhere allowed table predicate.Column predicate.Relation predicate.Geometry)
+        Storage.trySpatialLookupInTableWhere allowed disjointLimit table predicate.Column predicate.Relation predicate.Geometry)
 
 and private trySpatialAccess
     (scope: ColumnReferenceScope)
@@ -19596,7 +19611,7 @@ and private trySpatialAccess
     (whereExpr: Expr option)
     : Storage.SpatialLookup option =
     physicalFastPathTable store dbName tref
-    |> Option.bind (fun table -> trySpatialAccessInTable scope store registry table tref whereExpr)
+    |> Option.bind (fun table -> trySpatialAccessInTable CostedRead scope store registry table tref whereExpr)
 
 and private trySpatialLookup scope store registry dbName tref whereExpr =
     trySpatialAccess scope store registry dbName tref whereExpr
@@ -19754,7 +19769,7 @@ and private directPhysicalAccessCandidatesInTableWith
       |> Option.map EqualityAccess
       tryInAccessInTableWith policy store registry table tref whereExpr
       |> Option.map MembershipAccess
-      trySpatialAccessInTable BareOrQualifiedColumn store registry table tref whereExpr
+      trySpatialAccessInTable policy BareOrQualifiedColumn store registry table tref whereExpr
       |> Option.map SpatialAccess
       tryRangeAccessInTableWith policy BareOrQualifiedColumn store registry table tref whereExpr
       |> Option.map RangeAccess ]

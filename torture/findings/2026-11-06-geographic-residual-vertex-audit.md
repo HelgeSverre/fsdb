@@ -704,9 +704,9 @@ tested DDL, geometry subtype and SRID errors, and catalog IDs.
 
 The index stores geodesic envelopes for geographic columns. It searches
 equivalent longitude ranges for `MBRIntersects`, `MBRWithin`, and
-`MBRContains`, then rechecks the full SQL predicate. Wide bounds retain
-uncommon degenerate envelopes whose line interpretation can extend past
-their stored latitude. Generated out-of-range values remain candidates
+`MBRContains`, then rechecks the full SQL predicate. Candidate selection
+retains uncommon degenerate envelopes whose line interpretation can extend
+past their stored latitude. Generated out-of-range values remain candidates
 so scalar evaluation can report their coordinate error. MySQL can skip
 such values when a forced spatial probe excludes them.
 
@@ -728,6 +728,42 @@ warmups and seven timed runs per mode over TCP.
 
 MySQL chose a spatial range under `FORCE INDEX` for the three timed
 queries. In the geodesic extremum query without hints, Fsdb chose the
-spatial index and MySQL chose a scan. Additional geographic predicate
-access paths and cost-model parity remain open.
+spatial index and MySQL chose a scan. Cost-model parity remains open.
 [MySQL spatial index optimization](https://dev.mysql.com/doc/refman/8.4/en/spatial-index-optimization.html).
+
+#### Additional MBR index predicates
+
+`MBREquals`, `MBRTouches`, `MBROverlaps`, and `MBRDisjoint` can use
+spatial indexes on Cartesian and geographic columns. Equality probes
+check approximate equality on the cached bounds and keep empty rows
+searchable. Touch and overlap probes keep geographic line cases that can
+extend beyond a collapsed latitude interval. Disjoint probes compare
+the exact cached bounds in the original argument order. Unhinted
+queries stop collecting when estimated candidate lookups would cost
+at least as much as scanning. Invalid geographic rows remain available
+to the scalar coordinate validator. MySQL scans for `MBRCovers` and
+`MBRCoveredBy` in the audited case. [MySQL MBR predicate reference](https://dev.mysql.com/doc/refman/8.4/en/spatial-relation-functions-mbr.html).
+
+All 500 seeded queries returned the same IDs across both engines with
+the index forced and ignored. That run exposed 30 cases where an earlier
+Fsdb scalar implementation reported that a collapsed geographic box
+overlapped itself. Identical bounds now produce false. In the structured
+comparison, MySQL's forced equality range omitted a point one ULP away
+that its own scan matched. Fsdb returns both points in both modes.
+Planar containment and within probes use padded bounds to preserve the
+same scalar equality tolerance.
+
+The same-host durable benchmark used 24,000 WGS 84 grid points, a
+rectangle, and a distant point. Ordered rows matched in every measured
+query. Times are medians over seven runs after three warmups per mode.
+
+| Query | Rows | MySQL scan (ms) | Fsdb scan (ms) | MySQL forced index (ms) | Fsdb forced index (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Equality | 1 | 73.656 | 62.823 | 0.214 | 0.355 |
+| Touch | 11 | 112.796 | 95.208 | 0.389 | 0.419 |
+| Overlap | 1 | 113.512 | 98.498 | 0.362 | 0.436 |
+| Disjoint | 1 | 113.428 | 95.071 | 1.272 | 1.226 |
+
+The measured disjoint query excludes all but one row. Without a hint,
+Fsdb picked the index for this query and a scan for a disjoint probe
+that returned almost every row.
