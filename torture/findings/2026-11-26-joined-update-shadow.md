@@ -72,6 +72,19 @@ The earlier qualified fixture still matches, including the lock-wait
 schedule. WAL replay after an abrupt stop recovered matching committed
 rows from both fixtures.
 
-A caller subquery in an explicit joined UPDATE can still return 1054
-for `v.k` after the writable view `v` has been lowered. MySQL resolved
-the same reference in the audited assignment.
+### Caller subqueries in joined UPDATE
+
+The [joined fixture](2026-11-26-joined-view-caller-subqueries.sql) matches
+MySQL 8.4.11 on 25 result rows and two errors in both Fsdb storage modes.
+Caller subqueries in SET, WHERE, and JOIN ON see the exposed columns of
+writable views along with their other joined sources. The fixture covers
+multiple writable views, a temporary source, hidden base columns,
+ambiguous output names, and merged USING and NATURAL keys. The merged
+key cases include a writable view on the right of the join.
+
+Prepared execution and explicit rollback match in the fixture. A separate
+two-session check waited for the permanent writer, then affected zero rows
+after the committed value stopped matching. WAL replay after an abrupt
+stop recovered matching permanent rows. A newline inside the SQL string
+supplied to text PREPARE still returns 1064 in Fsdb for the same statement
+that prepares successfully on one line.

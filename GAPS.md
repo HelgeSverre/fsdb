@@ -1343,8 +1343,9 @@ complete primary key. Missing and unproven keys still use broader claims.
 [Standalone view UPDATE](torture/findings/2026-11-26-joined-update-shadow.md#standalone-update-follow-up)
 now resolves qualified and unqualified outer references from caller
 subqueries against the view's output columns. The audited prepared writes
-still target the permanent table. Caller subqueries in an explicit joined
-UPDATE can still lose the outer view alias. Reopening one temporary table
+still target the permanent table. [Caller subqueries in joined UPDATE](torture/findings/2026-11-26-joined-update-shadow.md#caller-subqueries-in-joined-update)
+also see the other joined sources and the audited USING and NATURAL
+merged columns. Reopening one temporary table
 can diverge from MySQL's error 1137. DROP TEMPORARY TABLE
 can also fail when a permanent foreign key references the same name.
 

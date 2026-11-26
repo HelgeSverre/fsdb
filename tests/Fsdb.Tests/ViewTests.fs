@@ -532,6 +532,58 @@ let tests =
               Expect.equal (rows store "SELECT n FROM logical_base WHERE id=1") [ [ Some "3" ] ]
                   "the prepared update reaches the permanent row"
 
+          testCase "joined view UPDATE preserves the caller namespace in expression subqueries"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              let exec sql =
+                  let next, result = Fsdb.QueryHandler.handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "CREATE TABLE caller_base(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE caller_side(id INT PRIMARY KEY,amount INT)"
+                    "CREATE TABLE caller_lookup(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO caller_base VALUES(1,10),(2,20)"
+                    "INSERT INTO caller_side VALUES(1,50),(2,60)"
+                    "INSERT INTO caller_lookup VALUES(1,3),(2,4)"
+                    "CREATE VIEW writable_caller AS SELECT id AS k,n,id+10 AS shifted FROM caller_base"
+                    "CREATE VIEW writable_side AS SELECT id AS partner,amount,id+100 AS bump FROM caller_side"
+                    "CREATE TEMPORARY TABLE caller_base(id INT PRIMARY KEY,private_value INT)"
+                    "INSERT INTO caller_base VALUES(1,100),(2,200)" ] do
+                  expectOk (exec sql) sql
+
+              Expect.equal
+                  (exec "UPDATE writable_caller v JOIN caller_side p ON p.id=v.k SET v.n=(SELECT private_value FROM caller_base t WHERE t.id=k)+(SELECT p.amount) WHERE v.k=1")
+                  (Affected 1UL) "the subqueries can see the view and its physical partner"
+              Expect.equal (rows store "SELECT n FROM caller_base WHERE id=1") [ [ Some "150" ] ]
+                  "the caller's temporary source is used"
+              Expect.equal
+                  (exec "UPDATE writable_caller v JOIN writable_side s ON s.partner=v.k SET v.n=(SELECT v.shifted+s.amount),s.amount=(SELECT v.k+s.bump) WHERE v.k=2")
+                  (Affected 2UL) "both writable views expose their original outputs"
+              Expect.equal
+                  (exec "UPDATE writable_caller v JOIN caller_side p ON p.id=v.k AND EXISTS(SELECT 1 FROM caller_lookup q WHERE q.id=v.k AND q.n=3) SET v.n=v.n+1 WHERE v.k=1")
+                  (Affected 1UL) "the caller's ON subquery can refer to the view"
+              Expect.equal (rows store "SELECT n FROM caller_base ORDER BY id")
+                  [ [ Some "151" ]; [ Some "72" ] ] "the permanent base sees both changes"
+              Expect.equal (rows store "SELECT amount FROM caller_side ORDER BY id")
+                  [ [ Some "50" ]; [ Some "104" ] ] "the second view writes its own base"
+
+              let errorCode sql = exec sql |> errorInfo |> Option.map _.Code
+              Expect.equal
+                  (errorCode "UPDATE writable_caller v JOIN writable_side s ON s.partner=v.k SET v.n=(SELECT id) WHERE v.k=1")
+                  (Some 1054) "a hidden physical column stays out of scope"
+              Expect.equal
+                  (errorCode "UPDATE writable_caller v JOIN caller_lookup p ON p.id=v.k SET v.n=(SELECT n) WHERE v.k=1")
+                  (Some 1052) "an unqualified name exposed by both sources is ambiguous"
+              expectOk (exec "CREATE TABLE merged_partner(k INT PRIMARY KEY)") "create a partner with the view's key name"
+              expectOk (exec "INSERT INTO merged_partner VALUES(1),(2)") "seed the merge keys"
+              Expect.equal
+                  (exec "UPDATE writable_caller v JOIN merged_partner p USING(k) SET v.n=(SELECT k)+8 WHERE v.k=1")
+                  (Affected 1UL) "a caller subquery sees one merged column for a USING key"
+              Expect.equal (rows store "SELECT n FROM caller_base WHERE id=1") [ [ Some "9" ] ]
+                  "the merged key supplies the new value"
+
           testCase "mixed joined writes claim complete primary keys through the temporary partner"
           <| fun _ ->
               for keyType, key in [ "INT", "1"; "BIGINT UNSIGNED", "9223372036854775813" ] do

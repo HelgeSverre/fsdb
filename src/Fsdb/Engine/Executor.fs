@@ -398,19 +398,16 @@ type private MutationSourceOverride =
       IdentityOf: Value[] -> Value[] option
       WriteTable: TableRef option }
 
-type private MutationJoinCatalogs =
-    { Source: FromItem -> Store
-      Condition: (Expr -> Store option) option }
-
-let private mutationJoinCatalogs store =
-    { Source = fun _ -> store
-      Condition = None }
+type private CallerViewProjection =
+    { Qualifier: string
+      PhysicalSources: Set<string>
+      Expressions: Map<string, Expr>
+      Columns: Lazy<Map<string, ColumnDef>> }
 
 type private CallerViewSubqueries =
     { Selects: HashSet<SelectStmt>
-      Qualifier: string
-      Expressions: Map<string, Expr>
-      Columns: Lazy<Map<string, ColumnDef>> }
+      Projections: CallerViewProjection list
+      MergingJoins: (FromItem * Join list) option }
 
 type private ViewMutationSources =
     { Aliases: Set<string>
@@ -3961,7 +3958,8 @@ type private EvalContext =
       Qualifiers: Map<string, ColumnDef list * int>
       Row: Value[]
       /// Caller subqueries of a lowered view write see its exposed row.
-      ViewProjection: (string * Map<string, ProjectedViewColumn>) option
+      ViewProjections: Map<string, Map<string, ProjectedViewColumn>>
+      MergedColumns: Map<string, (Expr * ProjectedViewColumn) list>
       SubqueryScope: (SelectStmt -> EvalContext -> EvalContext) option
       /// Materialized expressions retain their syntax for type and collation inference.
       EvaluatedExpressions: (Expr * Value) list
@@ -4003,6 +4001,16 @@ type private JoinEvaluationScope =
 
 let private joinEvaluationScope outer =
     { QueryOuter = outer; LateralOuter = outer }
+
+type private MutationJoinCatalogs =
+    { Source: FromItem -> Store
+      Condition: (Expr -> Store option) option
+      CallerContext: EvalContext -> EvalContext }
+
+let private mutationJoinCatalogs store =
+    { Source = fun _ -> store
+      Condition = None
+      CallerContext = id }
 
 type private ResolvedJoinSource =
     { Sources: (string * ColumnDef list) list
@@ -4053,7 +4061,8 @@ let private contextFactory
           ColumnsByPosition = columnsByPosition
           Qualifiers = qualifiers
           Row = row
-          ViewProjection = None
+          ViewProjections = Map.empty
+          MergedColumns = Map.empty
           SubqueryScope = None
           EvaluatedExpressions = []
           RollupKeys = []
@@ -4108,11 +4117,32 @@ let private joinKeysMatchReadRows
     |> Seq.collect (fun (leftIndex, rightIndex) -> [ leftColumns.[leftIndex]; rightColumns.[rightIndex] ])
     |> storedRowsMatchReadRows store
 
-let private projectedViewColumn (ctx: EvalContext) qualifier (name: string) =
-    ctx.ViewProjection
-    |> Option.bind (fun (owner, columns) ->
-        if qualifier |> Option.forall (equalsIgnoreCase owner) then Map.tryFind (name.ToLowerInvariant()) columns
-        else None)
+let private projectedViewColumn (ctx: EvalContext) (qualifier: string) (name: string) =
+    ctx.ViewProjections
+    |> Map.tryFind (qualifier.ToLowerInvariant())
+    |> Option.bind (Map.tryFind (name.ToLowerInvariant()))
+
+[<Struct>]
+type private UnqualifiedColumn =
+    | PhysicalPosition of index: int
+    | ProjectedColumn of binding: ProjectedViewColumn
+    | UnboundColumn
+    | AmbiguousColumn
+
+let private unqualifiedColumn (ctx: EvalContext) name =
+    match Map.tryFind name ctx.MergedColumns with
+    | Some [ _, column ] -> ProjectedColumn column
+    | Some _ -> AmbiguousColumn
+    | None ->
+        let physical = Map.tryFind name ctx.ColumnIndex
+        let projected =
+            if ctx.ViewProjections.IsEmpty then []
+            else ctx.ViewProjections |> Map.values |> Seq.choose (Map.tryFind name) |> Seq.toList
+        match physical, projected with
+        | (None | Some []), [] -> UnboundColumn
+        | (None | Some []), [ column ] -> ProjectedColumn column
+        | Some [ index ], [] -> PhysicalPosition index
+        | _ -> AmbiguousColumn
 
 let private expressionSubqueryContext (ctx: EvalContext) select =
     match ctx.SubqueryScope with
@@ -4127,27 +4157,25 @@ let rec private resolveCol (ctx: EvalContext) (name: string) : Result<Value, Eva
     match tryRoutineVariable name with
     | Some variable -> Ok variable.Value
     | None ->
-        match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
-        | Some [ i ] ->
+        match unqualifiedColumn ctx (name.ToLowerInvariant()) with
+        | PhysicalPosition i ->
             tryColumnDefAt ctx i
             |> Option.map (fun column -> readColumnValue ctx.Store column ctx.Row.[i])
             |> Option.defaultValue ctx.Row.[i]
             |> Ok
-        | Some(_ :: _ :: _) -> Error(1052, sprintf "Column '%s' in %s is ambiguous" name (clauseLabel ctx.Clause))
-        | Some [] | None ->
-            match projectedViewColumn ctx None name with
-            | Some column -> column.Value.Value
+        | AmbiguousColumn -> Error(1052, sprintf "Column '%s' in %s is ambiguous" name (clauseLabel ctx.Clause))
+        | ProjectedColumn column -> column.Value.Value
+        | UnboundColumn ->
+            match Map.tryFind (name.ToLowerInvariant()) ctx.ProjectionAliases with
+            | Some binding ->
+                binding |> Result.map snd
+                |> Result.mapError (fun (code, message) ->
+                    if code = 1052 then code, sprintf "Column '%s' in %s is ambiguous" name (clauseLabel ctx.Clause)
+                    else code, message)
             | None ->
-                match Map.tryFind (name.ToLowerInvariant()) ctx.ProjectionAliases with
-                | Some binding ->
-                    binding |> Result.map snd
-                    |> Result.mapError (fun (code, message) ->
-                        if code = 1052 then code, sprintf "Column '%s' in %s is ambiguous" name (clauseLabel ctx.Clause)
-                        else code, message)
-                | None ->
-                    match ctx.Outer with
-                    | Some parent -> resolveCol { parent with Clause = ctx.Clause } name
-                    | None -> Error(unknownColumnIn ctx.Clause name)
+                match ctx.Outer with
+                | Some parent -> resolveCol { parent with Clause = ctx.Clause } name
+                | None -> Error(unknownColumnIn ctx.Clause name)
 
 /// The `QualifiedCol` counterpart of `resolveCol` — same outer-context
 /// fallback, checked against `ctx.Qualifiers` instead of `ctx.ColumnIndex`.
@@ -4175,12 +4203,12 @@ let private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: string)
                     |> List.tryFindIndex (fun column -> equalsIgnoreCase column.Name col)
                     |> Option.map (fun index -> Ok(readColumnValue context.Store columns.[index] context.Row.[offset + index])))
             localColumn
-            |> Option.orElseWith (fun () -> projectedViewColumn context (Some table) col |> Option.map (fun column -> column.Value.Value))
+            |> Option.orElseWith (fun () -> projectedViewColumn context table col |> Option.map (fun column -> column.Value.Value))
             |> Option.orElseWith (fun () -> context.Outer |> Option.bind lookup)
         match lookup ctx with
         | Some result -> result
         | None ->
-            unknownQualifiedReference (not ctx.Qualifiers.IsEmpty || ctx.ViewProjection.IsSome || ctx.Outer.IsSome) (clauseLabel ctx.Clause) table col
+            unknownQualifiedReference (not ctx.Qualifiers.IsEmpty || not ctx.ViewProjections.IsEmpty || ctx.Outer.IsSome) (clauseLabel ctx.Clause) table col
             |> Error
 
 let private validateColumnReference ctx reference =
@@ -4192,10 +4220,9 @@ let private validateColumnReference ctx reference =
 let private tryDirectColumnForExpr (ctx: EvalContext) (expr: Expr) : (int * ColumnDef) option =
     match expr with
     | Col name when tryRoutineVariable name |> Option.isNone ->
-        Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex
-        |> Option.bind (function
-            | [ index ] -> tryColumnDefAt ctx index |> Option.map (fun column -> index, column)
-            | _ -> None)
+        match unqualifiedColumn ctx (name.ToLowerInvariant()) with
+        | PhysicalPosition index -> tryColumnDefAt ctx index |> Option.map (fun column -> index, column)
+        | _ -> None
     | QualifiedCol(table, col) ->
         Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers
         |> Option.bind (fun (columns, offset) ->
@@ -4206,12 +4233,13 @@ let private tryDirectColumnForExpr (ctx: EvalContext) (expr: Expr) : (int * Colu
     | _ -> None
 
 let rec private tryProjectionAlias (ctx: EvalContext) (name: string) =
-    if Map.containsKey (name.ToLowerInvariant()) ctx.ColumnIndex || (tryRoutineVariable name |> Option.isSome) then None
-    else
+    match unqualifiedColumn ctx (name.ToLowerInvariant()) with
+    | UnboundColumn when (tryRoutineVariable name).IsNone ->
         match Map.tryFind (name.ToLowerInvariant()) ctx.ProjectionAliases with
         | Some(Ok(expression, _)) -> Some(ctx, expression)
         | Some(Error _) -> None
         | None -> ctx.Outer |> Option.bind (fun outer -> tryProjectionAlias outer name)
+    | _ -> None
 
 let private (|ProjectionAlias|_|) ctx = function
     | Col name -> tryProjectionAlias ctx name
@@ -4227,23 +4255,20 @@ let rec private tryColumnDefForExpr (ctx: EvalContext) (expr: Expr) : ColumnDef 
         match tryRoutineVariable name with
         | Some variable -> Some variable.Column
         | None ->
-            match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
-            | Some [ index ] -> tryColumnDefAt ctx index
-            | Some(_ :: _ :: _)
-            | Some [] -> None
-            | None ->
-                match projectedViewColumn ctx None name with
-                | Some column -> column.Definition.Value
-                | None ->
-                    match Map.tryFind (name.ToLowerInvariant()) ctx.ProjectionAliases with
-                    | Some(Ok(expression, _)) -> tryColumnDefForExpr ctx expression
-                    | Some(Error _) -> None
-                    | None -> ctx.Outer |> Option.bind (fun outer -> tryColumnDefForExpr outer expr)
+            match unqualifiedColumn ctx (name.ToLowerInvariant()) with
+            | PhysicalPosition index -> tryColumnDefAt ctx index
+            | AmbiguousColumn -> None
+            | ProjectedColumn column -> column.Definition.Value
+            | UnboundColumn ->
+                match Map.tryFind (name.ToLowerInvariant()) ctx.ProjectionAliases with
+                | Some(Ok(expression, _)) -> tryColumnDefForExpr ctx expression
+                | Some(Error _) -> None
+                | None -> ctx.Outer |> Option.bind (fun outer -> tryColumnDefForExpr outer expr)
     | QualifiedCol(table, col) ->
         Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers
         |> Option.bind (fun (columns, _) -> columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name col))
         |> Option.orElseWith (fun () ->
-            match projectedViewColumn ctx (Some table) col with
+            match projectedViewColumn ctx table col with
             | Some column -> column.Definition.Value
             | None -> ctx.Outer |> Option.bind (fun outer -> tryColumnDefForExpr outer expr))
     | _ -> None
@@ -11483,26 +11508,32 @@ and private describeQueryColumnDescriptorsInScope
         match outer with
         | None -> []
         | Some context ->
+            let viewSources =
+                context.ViewProjections |> Map.toList |> List.map (fun (qualifier, columns) ->
+                    qualifier,
+                    columns |> Map.toList |> List.map (fun (name, binding) ->
+                        binding.Definition.Value
+                        |> Option.map (fun column -> { column with Name = name })
+                        |> Option.defaultWith (fun () -> computedColumn name (TVarBinary 0) true None None)
+                        |> describeColumn))
+            let viewColumns =
+                viewSources |> List.collect (snd >> List.map (fun descriptor ->
+                    let name = descriptor.Column.Name
+                    FromItem.SourceColumn(name, Col name)))
+            let logicalColumns =
+                (context.ColumnIndex |> Map.toList |> List.collect (fun (name, positions) ->
+                    positions |> List.map (fun _ -> FromItem.SourceColumn(name, Col name))))
+                @ viewColumns
+                |> List.filter (fun column -> not (context.MergedColumns.ContainsKey(column.Name.ToLowerInvariant())))
+            let mergedColumns =
+                context.MergedColumns |> Map.toList |> List.collect (fun (name, columns) ->
+                    columns |> List.map (fun (expression, _) -> FromItem.MergedColumn(name, expression)))
             let scope =
-                match context.ViewProjection with
-                | Some(qualifier, columns) ->
-                    { emptyScope with
-                        Sources =
-                            [ qualifier,
-                              columns |> Map.toList |> List.map (fun (name, binding) ->
-                                  binding.Definition.Value
-                                  |> Option.map (fun column -> { column with Name = name })
-                                  |> Option.defaultWith (fun () -> computedColumn name (TVarBinary 0) true None None)
-                                  |> describeColumn) ]
-                        LogicalColumns =
-                            columns |> Map.keys |> Seq.map (fun name -> FromItem.SourceColumn(name, Col name)) |> List.ofSeq }
-                | None ->
-                    { emptyScope with
-                        Sources = context.Qualifiers |> Map.toList |> List.map (fun (name, (columns, _)) -> name, List.map describeColumn columns)
-                        LogicalColumns =
-                            context.ColumnIndex |> Map.toList |> List.collect (fun (name, positions) ->
-                                positions |> List.map (fun _ -> FromItem.SourceColumn(name, Col name)))
-                        ProjectionAliases = context.ProjectionAliases |> Map.map (fun _ binding -> binding |> Result.map fst) }
+                { Sources =
+                    (context.Qualifiers |> Map.toList |> List.map (fun (name, (columns, _)) -> name, List.map describeColumn columns))
+                    @ viewSources
+                  LogicalColumns = logicalColumns @ mergedColumns
+                  ProjectionAliases = context.ProjectionAliases |> Map.map (fun _ binding -> binding |> Result.map fst) }
             scope :: enclosingScopes context.Outer
 
     let enclosingCtes () =
@@ -14029,12 +14060,12 @@ and private applyMutationJoin
         && sourceReferencesPreceding sourceStore dbName (sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)) join.Table ->
         let prepare outer =
             prepareMutationJoinSource store registry dbName { scope with LateralOuter = Some outer } catalogs sourceOverrides join.Table
-        applyDependentMutationJoin conditionStore registry dbName scope catalogs.Condition (sourcesSoFar, rowsSoFar) leftOperand join prepare
+        applyDependentMutationJoin conditionStore registry dbName scope catalogs (sourcesSoFar, rowsSoFar) leftOperand join prepare
     | FromLateral(_, qualifier) when join.Kind <> RightJoin && join.Kind <> NaturalRightJoin ->
         let prepare outer =
             resolveFromSubquery sourceStore registry dbName join.Table (Some outer)
             |> Result.map (mutationDerivedSource qualifier)
-        applyDependentMutationJoin conditionStore registry dbName scope catalogs.Condition (sourcesSoFar, rowsSoFar) leftOperand join prepare
+        applyDependentMutationJoin conditionStore registry dbName scope catalogs (sourcesSoFar, rowsSoFar) leftOperand join prepare
     | FromJsonTable(source, path, columns, alias) when join.Kind <> RightJoin && join.Kind <> NaturalRightJoin ->
         let sourceColumns = sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)
 
@@ -14062,16 +14093,18 @@ and private applyMutationJoin
             List.ofSeq rows)
     | source ->
         prepareMutationJoinSource store registry dbName scope catalogs sourceOverrides source
-        |> Result.bind (applyPreparedMutationJoin conditionStore registry dbName scope catalogs.Condition (sourcesSoFar, rowsSoFar) leftOperand join)
+        |> Result.bind (applyPreparedMutationJoin conditionStore registry dbName scope catalogs (sourcesSoFar, rowsSoFar) leftOperand join)
 
 and private applyDependentMutationJoin
-    store registry dbName scope conditionStore
+    store registry dbName scope catalogs
     ((sources, rows): MutationSource list * (Value[] option list * Value[]) list)
     leftOperand join prepare =
     let sourceColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
     let columns = sourceColumns |> List.collect snd
-    let contextFor = contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sourceColumns) scope.LateralOuter
-    let matchRows rows = applyPreparedMutationJoin store registry dbName scope conditionStore (sources, rows) leftOperand join
+    let contextFor =
+        contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sourceColumns) scope.LateralOuter
+        >> catalogs.CallerContext
+    let matchRows rows = applyPreparedMutationJoin store registry dbName scope catalogs (sources, rows) leftOperand join
     let matchRow ((_, flat) as row) = prepare (contextFor flat) |> Result.bind (matchRows [ row ])
     match rows with
     | [] ->
@@ -14143,7 +14176,7 @@ and private applyPreparedMutationJoin
     (registry: Registry)
     (dbName: string)
     (scope: JoinEvaluationScope)
-    (conditionStore: (Expr -> Store option) option)
+    (catalogs: MutationJoinCatalogs)
     ((sourcesSoFar, rowsSoFar): MutationSource list * (Value[] option list * Value[]) list)
     (leftOperand: FromItem option)
     (join: Join)
@@ -14158,9 +14191,11 @@ and private applyPreparedMutationJoin
     let rightFlatPadding = Array.create joinColumns.Length VNull
     let leftIdentityPadding = List.replicate sourcesSoFar.Length None
 
-    let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers scope.QueryOuter
+    let ctxFor =
+        contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers scope.QueryOuter
+        >> catalogs.CallerContext
     let evaluate =
-        conditionStore |> Option.map evalBoundMutationCondition |> Option.defaultValue evalExpr
+        catalogs.Condition |> Option.map evalBoundMutationCondition |> Option.defaultValue evalExpr
 
     let leftIndexed = rowsSoFar |> List.indexed
     let rightIndexed = rightRows |> List.indexed
@@ -25976,31 +26011,83 @@ let private isSelfAssignment allowBare qualifier column = function
     | QualifiedCol(owner, name) -> equalsIgnoreCase owner qualifier && equalsIgnoreCase name column
     | _ -> false
 
-let private withCallerViewScope callerSubqueries projectionStore (context: EvalContext) =
+let private withCallerViewScope callerSubqueries projectionStore : EvalContext -> EvalContext =
     match callerSubqueries with
-    | None -> context
+    | None -> id
     | Some caller ->
+        let hiddenSources = caller.Projections |> List.map _.PhysicalSources |> Set.unionMany
         let enter select physical =
             if not (caller.Selects.Contains select) then physical
             else
                 let projection = { physical with Store = projectionStore; SubqueryScope = None }
-                let columns =
-                    caller.Expressions
-                    |> Map.map (fun name expression ->
-                        { Value = lazy (evalExpr projection expression)
-                          Definition =
-                            lazy (
-                                tryColumnDefForExpr projection expression
-                                |> Option.orElseWith (fun () -> Map.tryFind name caller.Columns.Value)) })
-                { physical with
-                    ColumnIndex = Map.empty
-                    ColumnsByPosition = [||]
-                    Qualifiers = Map.empty
-                    Row = [||]
-                    ViewProjection = Some(caller.Qualifier, columns)
-                    ProjectionAliases = Map.empty
-                    SubqueryScope = None }
-        { context with SubqueryScope = Some enter }
+                let views =
+                    caller.Projections
+                    |> List.choose (fun view ->
+                        if view.PhysicalSources |> Set.forall physical.Qualifiers.ContainsKey then
+                            let columns =
+                                view.Expressions
+                                |> Map.map (fun name expression ->
+                                    { Value = lazy (evalExpr projection expression)
+                                      Definition =
+                                        lazy (
+                                            tryColumnDefForExpr projection expression
+                                            |> Option.orElseWith (fun () -> Map.tryFind name view.Columns.Value)) })
+                            Some(view.Qualifier.ToLowerInvariant(), columns)
+                        else None)
+                    |> Map.ofList
+                let qualifiers =
+                    physical.Qualifiers |> Map.filter (fun qualifier _ -> not (hiddenSources.Contains qualifier))
+                let visiblePositions =
+                    qualifiers |> Map.values |> Seq.collect (fun (columns, offset) ->
+                        seq { offset .. offset + columns.Length - 1 })
+                    |> Set.ofSeq
+                let visibleColumns =
+                    physical.ColumnIndex |> Map.toList |> List.choose (fun (name, positions) ->
+                        match List.filter visiblePositions.Contains positions with
+                        | [] -> None
+                        | kept -> Some(name, kept))
+                    |> Map.ofList
+                let visible =
+                    { physical with
+                        ColumnIndex = visibleColumns
+                        Qualifiers = qualifiers
+                        ViewProjections = views
+                        ProjectionAliases = Map.empty
+                        SubqueryScope = None }
+                let merged =
+                    caller.MergingJoins
+                    |> Option.bind (fun (source, joins) ->
+                        let qualifiersOf source =
+                            FromItem.leaves source |> List.choose FromItem.tryQualifier |> List.map _.ToLowerInvariant()
+                        let available = Set.union (qualifiers |> Map.keys |> Set.ofSeq) (views |> Map.keys |> Set.ofSeq)
+                        let prefix = joins |> List.takeWhile (fun join -> qualifiersOf join.Table |> List.forall available.Contains)
+                        let represented = qualifiersOf source @ (prefix |> List.collect (_.Table >> qualifiersOf)) |> Set.ofList
+                        if available <> represented then None
+                        else
+                            let namesOf (qualifier: string) =
+                                let key = qualifier.ToLowerInvariant()
+                                match Map.tryFind key views with
+                                | Some columns -> columns |> Map.keys |> List.ofSeq
+                                | None ->
+                                    qualifiers |> Map.tryFind key |> Option.map (fst >> List.map _.Name) |> Option.defaultValue []
+                            prefix
+                            |> List.fold (fun columns join -> columns |> Result.bind (fun left -> FromItem.logicalJoinColumns namesOf left join))
+                                (FromItem.logicalColumns namesOf source)
+                            |> Result.toOption)
+                    |> Option.defaultValue []
+                    |> List.groupBy (fun column -> column.Name.ToLowerInvariant())
+                    |> List.choose (fun (name, occurrences) ->
+                        if occurrences |> List.exists (function FromItem.MergedColumn _ -> true | _ -> false) then
+                            Some(name,
+                                occurrences |> List.map (fun column ->
+                                    let expression = column.Expression
+                                    expression,
+                                    { Value = lazy (evalExpr visible expression)
+                                      Definition = lazy (tryColumnDefForExpr visible expression) }))
+                        else None)
+                    |> Map.ofList
+                { visible with MergedColumns = merged }
+        fun context -> { context with SubqueryScope = Some enter }
 
 /// Assigns `assignments` (already resolved to column indices) to a copy of
 /// `row`, left-to-right — each right-hand side is evaluated against the row
@@ -32157,25 +32244,42 @@ let rec private executeAsWithViewSources
         | Ok authorized ->
             let callerSubqueries =
                 match originalUpdate with
-                | Some original when original.Joins.IsEmpty ->
+                | Some original ->
                     let selects =
-                        (original.Assignments |> List.map _.Value)
-                        @ Option.toList original.Where
-                        @ List.map fst original.OrderBy
-                        @ Option.toList original.Limit
-                        |> List.collect Expression.collectSubqueries
-                    if selects.IsEmpty then None
+                        match viewSources.CallerSubqueries with
+                        | Some caller -> caller.Selects
+                        | None when not viewSources.Aliases.IsEmpty -> HashSet(HashIdentity.Reference)
+                        | None ->
+                            let expressions =
+                                (original.Assignments |> List.map _.Value)
+                                @ Option.toList original.Where
+                                @ List.map fst original.OrderBy
+                                @ Option.toList original.Limit
+                                @ (original.Joins |> List.collect Join.conditions)
+                            HashSet(expressions |> List.collect Expression.collectSubqueries, HashIdentity.Reference)
+                    if selects.Count = 0 then None
                     else
-                        Some
-                            { Selects = HashSet(selects, HashIdentity.Reference)
-                              Qualifier = original.From.Alias |> Option.defaultValue original.From.Table
-                              Expressions = runtimeView.Expressions
+                        let physicalFrom = runtimeView.UpdateFrom
+                        let physicalAlias = physicalFrom.Alias |> Option.defaultValue physicalFrom.Table
+                        let projection =
+                            { Qualifier = original.From.Alias |> Option.defaultValue original.From.Table
+                              PhysicalSources = runtimeAliases |> List.map _.ToLowerInvariant() |> Set.ofList
+                              Expressions = runtimeView.Expressions |> Map.map (fun _ -> qualifyViewReference physicalAlias)
                               Columns =
                                 lazy (
                                     describeStoredViewColumns store authorized view.ViewDatabase view.ViewName
                                     |> Option.defaultValue []
                                     |> List.map (fun column -> column.Name.ToLowerInvariant(), column)
                                     |> Map.ofList) }
+                        Some
+                            { Selects = selects
+                              Projections = projection :: (viewSources.CallerSubqueries |> Option.map _.Projections |> Option.defaultValue [])
+                              MergingJoins =
+                                match viewSources.CallerSubqueries with
+                                | Some caller -> caller.MergingJoins
+                                | None when original.Joins |> List.exists joinCoalescesColumns ->
+                                    Some(FromTable original.From, original.Joins)
+                                | None -> None }
                 | _ -> viewSources.CallerSubqueries
             let execute () =
                 DynamicScope.withValue sharedViewCteScope (Some { Aliases = view.SharedCteAliases; Pending = true }) (fun () ->
@@ -34326,6 +34430,8 @@ let rec private executeAsWithViewSources
         (
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             let split = beginShadowedMutation store snapshot
+            let projectionStore = split |> Option.map _.PermanentBefore |> Option.defaultValue snapshot
+            let callerContext = withCallerViewScope viewSources.CallerSubqueries projectionStore
             // Only sources introduced by the view use the permanent catalog.
             // The outer statement still resolves its own sources in the overlay.
             let sourceStore =
@@ -34355,8 +34461,8 @@ let rec private executeAsWithViewSources
                                 let rewritten = rewrite original
                                 bind original rewritten
                                 rewritten
-                            { Source = sourceStore; Condition = Some storeForCondition }, rewriteCondition
-                        | _ -> { Source = sourceStore; Condition = None }, rewrite
+                            { Source = sourceStore; Condition = Some storeForCondition; CallerContext = callerContext }, rewriteCondition
+                        | _ -> { Source = sourceStore; Condition = None; CallerContext = callerContext }, rewrite
 
                     let rewritten =
                         { updateStmt with
@@ -34378,10 +34484,9 @@ let rec private executeAsWithViewSources
             | Ok(updateStmt, conditionStore, (sources, joinedRows)) ->
                 let sourceIndex = sources |> List.mapi (fun i source -> source.Qualifier.ToLowerInvariant(), i) |> Map.ofList
                 let combinedColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
-                let projectionStore = split |> Option.map _.PermanentBefore |> Option.defaultValue snapshot
                 let ctxFor =
                     contextFactory snapshot registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
-                    >> withCallerViewScope viewSources.CallerSubqueries projectionStore
+                    >> callerContext
 
                 let sourceOffsets = columnOffsets sources
 
