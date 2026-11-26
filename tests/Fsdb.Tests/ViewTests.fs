@@ -160,6 +160,113 @@ let tests =
                   [ [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ]
                   "both targets roll back when a base trigger rejects the delete"
 
+          testCase "joined DELETE distinguishes a writable view from its temporary shadow"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE shadow_base(id INT PRIMARY KEY,n INT)") "create permanent base"
+              let mutable session = Fsdb.Session.create 1 store
+              let exec sql =
+                  let next, result = Fsdb.QueryHandler.handle session sql
+                  session <- next
+                  result
+              let setup sql = expectOk (exec sql) sql
+
+              for sql in
+                  [ "USE fsdb"
+                    "CREATE TABLE shadow_child(id INT PRIMARY KEY,parent INT,FOREIGN KEY(parent) REFERENCES shadow_base(id) ON DELETE CASCADE)"
+                    "INSERT INTO shadow_base VALUES(1,10),(2,20),(3,30)"
+                    "INSERT INTO shadow_child VALUES(10,1),(20,2),(30,3)"
+                    "CREATE VIEW shadow_inner AS SELECT id AS k,n FROM shadow_base WHERE n>0"
+                    "CREATE VIEW shadow_outer AS SELECT * FROM shadow_inner"
+                    "CREATE TRIGGER shadow_block BEFORE DELETE ON shadow_base FOR EACH ROW BEGIN IF OLD.id=3 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='blocked'; END IF; END"
+                    "CREATE TEMPORARY TABLE shadow_base(id INT PRIMARY KEY,label VARCHAR(10))"
+                    "INSERT INTO shadow_base VALUES(1,'temp1'),(2,'temp2'),(3,'temp3')" ] do
+                  setup sql
+
+              Expect.equal
+                  (exec "DELETE v FROM shadow_outer v JOIN shadow_base t ON t.id=v.k WHERE v.k=1")
+                  (Affected 1UL) "the view deletes only its permanent row"
+              Expect.equal
+                  (exec "DELETE t,v FROM shadow_base t JOIN shadow_outer v ON t.id=v.k WHERE v.k=2")
+                  (Affected 2UL) "the same key names two physical rows"
+              match exec "DELETE t,v FROM shadow_base t JOIN shadow_outer v ON t.id=v.k WHERE v.k=3" with
+              | Err(1644, "blocked") -> ()
+              | other -> failtestf "expected the permanent trigger to reject the delete, got %A" other
+
+              Expect.equal (exec "SELECT k,n FROM shadow_outer ORDER BY k")
+                  (ResultSet([ "k"; "n" ], [ [ Some "3"; Some "30" ] ])) "the permanent row survives rejection"
+              Expect.equal (exec "SELECT id,label FROM shadow_base ORDER BY id")
+                  (ResultSet([ "id"; "label" ], [ [ Some "1"; Some "temp1" ]; [ Some "3"; Some "temp3" ] ]))
+                  "temporary rows change only when named and are restored on error"
+              Expect.equal (rows store "SELECT id,parent FROM shadow_child")
+                  [ [ Some "30"; Some "3" ] ] "permanent foreign-key cascades follow the view target"
+
+              Expect.equal
+                  (exec "DELETE IGNORE t FROM shadow_base t JOIN shadow_outer v ON t.id=v.k WHERE v.k=3")
+                  (Affected 1UL) "temporary deletes never fire the permanent trigger"
+
+              setup "INSERT INTO shadow_base VALUES (3,'temp3')"
+              setup "START TRANSACTION"
+              setup "INSERT INTO shadow_base VALUES (4,'temp4')"
+              setup "SAVEPOINT before_delete"
+              Expect.equal
+                  (exec "DELETE t FROM shadow_base t JOIN shadow_outer v ON t.id=v.k WHERE v.k=3")
+                  (Affected 1UL) "the temporary write participates in the transaction"
+              setup "ROLLBACK TO SAVEPOINT before_delete"
+              Expect.equal
+                  (exec "SELECT id FROM shadow_base ORDER BY id")
+                  (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "3" ]; [ Some "4" ] ] ))
+                  "rollback to savepoint restores the earlier temporary rows"
+              setup "ROLLBACK"
+              Expect.equal
+                  (exec "SELECT id FROM shadow_base ORDER BY id")
+                  (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "3" ] ] ))
+                  "full rollback restores the temporary rows at transaction start"
+
+              expectOk (run store "INSERT INTO shadow_child VALUES (40,NULL)") "add an independent permanent target"
+              setup "START TRANSACTION"
+              Expect.equal
+                  (exec "DELETE c,t FROM shadow_child c JOIN shadow_base t ON c.id=40 AND t.id=1")
+                  (Affected 2UL) "a single transaction changes both catalogs"
+              Expect.equal (rows store "SELECT id FROM shadow_child WHERE id=40")
+                  [ [ Some "40" ] ] "another session cannot observe the uncommitted permanent deletion"
+              setup "ROLLBACK"
+              Expect.equal (rows store "SELECT id FROM shadow_child WHERE id=40")
+                  [ [ Some "40" ] ] "rollback preserves the permanent row"
+              Expect.equal (exec "SELECT id FROM shadow_base WHERE id=1")
+                  (ResultSet([ "id" ], [ [ Some "1" ] ])) "rollback restores the temporary row"
+
+          testCase "joined DELETE waits for a base row behind a temporary shadow"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE wait_base(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO wait_base VALUES(1,10)"
+                    "CREATE VIEW wait_view AS SELECT id AS k FROM wait_base WHERE n>0" ] do
+                  expectOk (run store sql) sql
+
+              let handle = Fsdb.QueryHandler.handle
+              let writer, _ = handle (Fsdb.Session.create 1 store) "START TRANSACTION"
+              let writer, update = handle writer "UPDATE wait_base SET n=0 WHERE id=1"
+              Expect.equal update (Affected 1UL) "the writer makes the row invisible to the view"
+              let reader, _ = handle (Fsdb.Session.create 2 store) "CREATE TEMPORARY TABLE wait_base(id INT PRIMARY KEY)"
+              let reader, _ = handle reader "INSERT INTO wait_base VALUES(1)"
+              use started = new ManualResetEventSlim()
+              let waiting =
+                  Task.Run(fun () ->
+                      started.Set()
+                      handle reader "DELETE v FROM wait_view v JOIN wait_base t ON t.id=v.k WHERE v.k=1")
+              Expect.isTrue (started.Wait 5000) "the delete starts"
+              let blocked = not (waiting.Wait 100)
+              let _, committed = handle writer "COMMIT"
+              Expect.equal committed (Affected 0UL) "the writer commits"
+              Expect.isTrue blocked "the deleter waits for the permanent row"
+              Expect.isTrue (waiting.Wait 5000) "the deleter resumes"
+              let _, deleted = waiting.GetAwaiter().GetResult()
+              Expect.equal deleted (Affected 0UL) "the view predicate is rechecked against the committed row"
+              Expect.equal (rows store "SELECT id,n FROM wait_base")
+                  [ [ Some "1"; Some "0" ] ] "the permanent row survives"
+
           testCase "joined DELETE uses ngram scores in a nested view"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

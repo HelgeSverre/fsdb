@@ -2606,6 +2606,21 @@ let private commitSessionWith (publishFlat: bool) (session: Session) : Session =
 
 let private commitSession (session: Session) : Session = commitSessionWith false session
 
+let private restoreTemporaryRows (before: Catalog) (checkpoint: Catalog) (current: Catalog) =
+    before
+    |> Map.fold (fun catalog database tables ->
+        tables
+        |> Map.fold (fun catalog name original ->
+            let key = database, name
+            match CatalogOverlay.tryTable current key with
+            | Some table when table.SchemaRevision = original.SchemaRevision ->
+                let restored =
+                    CatalogOverlay.tryTable checkpoint key
+                    |> Option.filter (fun saved -> saved.SchemaRevision = table.SchemaRevision)
+                    |> Option.defaultValue original
+                CatalogOverlay.setTable catalog database name (Some { restored with NextAutoId = max restored.NextAutoId table.NextAutoId })
+            | _ -> catalog) catalog) current
+
 /// Discards the open transaction's snapshot — a no-op, matching real MySQL,
 /// if there isn't one open — except for each table's AUTO_INCREMENT
 /// counter, which MySQL never rolls back (an id an aborted INSERT consumed
@@ -2629,7 +2644,11 @@ let private rollbackSession (session: Session) : Session =
     TableLocks.releaseTransactionAccess session.Store session.ConnectionId
     removeTransactionView session
 
-    let session = { session with Tx = None; Cursors = Map.empty }
+    let temporaryCatalog =
+        session.Tx
+        |> Option.map (fun tx -> restoreTemporaryRows tx.TemporaryRowsBefore Map.empty session.TemporaryCatalog)
+        |> Option.defaultValue session.TemporaryCatalog
+    let session = { session with Tx = None; Cursors = Map.empty; TemporaryCatalog = temporaryCatalog }
     if hadTransaction then Session.endTransactionTracking session else session
 
 /// Starts a new transaction with a provisional snapshot. The real snapshot
@@ -2669,6 +2688,7 @@ let private beginTransaction kind characteristics (readOnly: bool) (session: Ses
                       ReadOnly = readOnly
                       Seeded = false
                       EngineAccess = UnusedEngine
+                      TemporaryRowsBefore = Map.empty
                       Savepoints = Map.empty
                       NextSavepointSeq = 0
                       Xa = None } }
@@ -3179,6 +3199,7 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
                                   Seeded = tx.Seeded
                                   BaseCatalog = tx.BaseCatalog
                                   Catalog = if tx.Seeded then tx.Snapshot.Catalog else Map.empty
+                                  TemporaryCatalog = session.TemporaryCatalog
                                   PendingEventCount = eventCount
                                   RollbackWork = Storage.transactionRollbackWork tx.Snapshot
                                   GapLocks = Storage.transactionGapLocks tx.Snapshot
@@ -3241,7 +3262,9 @@ let private rollbackToSavepoint (name: string) (session: Session) : Session * Qu
             else
                 { tx with BaseCatalog = savepoint.BaseCatalog; Savepoints = survivors }
 
-        { session with Tx = Some restored },
+        { session with
+            Tx = Some restored
+            TemporaryCatalog = restoreTemporaryRows tx.TemporaryRowsBefore savepoint.TemporaryCatalog session.TemporaryCatalog },
         Affected 0UL
     | None -> session, savepointNotFound name
 
@@ -4164,6 +4187,18 @@ let rec private filterTemporaryEvent keys event =
         if retained.IsEmpty then None else Some(TransactionCommitted retained)
     | _ -> Some event
 
+let private rememberTemporaryRows keys original updated (tx: Transaction) =
+    let before =
+        keys
+        |> Set.fold (fun catalog ((db, name) as key) ->
+            match CatalogOverlay.tryTable original key, CatalogOverlay.tryTable updated key with
+            | Some previous, Some current when not (obj.ReferenceEquals(previous, current)) ->
+                match CatalogOverlay.tryTable catalog key with
+                | Some saved when saved.SchemaRevision = previous.SchemaRevision -> catalog
+                | _ -> CatalogOverlay.setTable catalog db name (Some previous)
+            | _ -> catalog) tx.TemporaryRowsBefore
+    { tx with TemporaryRowsBefore = before }
+
 let private executeWithTemporaryCatalog (action: TemporaryAction option) (session: Session) (stmt: Statement) =
     let dbName = session.Database |> Option.defaultValue defaultDatabase
     let baseStore = Session.currentStore session
@@ -4192,7 +4227,8 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
                 |> Seq.map (fun key -> key, CatalogOverlay.tryTable baseCatalog key)
                 |> Map.ofSeq }
     let workingSession = { session with Store = working; Tx = None }
-    let executed, result = executeParsedCoreUnderLock workingSession stmt
+    let (executed, result), permanent =
+        Executor.withPermanentMutationResult working (fun () -> executeParsedCoreUnderLock workingSession stmt)
 
     match result with
     | Err _ -> { executed with Store = session.Store; Tx = session.Tx }, result
@@ -4215,9 +4251,10 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
         let overlayKeys = Set.unionMany [ beforeKeys; afterKeys; targets ]
 
         let permanentCatalog =
-            if changesOnlyTemporaryCatalog dbName beforeKeys action stmt then
-                baseCatalog
-            else
+            match permanent with
+            | Some snapshot -> snapshot.Catalog
+            | None when changesOnlyTemporaryCatalog dbName beforeKeys action stmt -> baseCatalog
+            | None ->
                 overlayKeys
                 |> Set.fold (fun catalog (db, table) ->
                     CatalogOverlay.restoreTable baseCatalog catalog db table) working.Catalog
@@ -4228,15 +4265,83 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
         |> Option.iter (fun events ->
             let retained = events |> Seq.choose (filterTemporaryEvent overlayKeys) |> Seq.toArray
             events.Clear()
-            events.AddRange retained)
+            events.AddRange retained
+            permanent
+            |> Option.bind _.PendingEvents
+            |> Option.iter events.AddRange)
 
         Storage.commitCatalogInto baseStore baseCatalog working
 
+        let transaction =
+            if action.IsNone && isDataChangeStatement stmt then
+                session.Tx |> Option.map (rememberTemporaryRows beforeKeys session.TemporaryCatalog temporaryCatalog)
+            else session.Tx
+
         { executed with
             Store = session.Store
-            Tx = session.Tx
+            Tx = transaction
             TemporaryCatalog = temporaryCatalog },
         result
+
+let private permanentJoinedDelete (session: Session) dbName = function
+    | Delete delete when not delete.Joins.IsEmpty ->
+        let ctes = delete.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
+        let temporaryAliases =
+            FromTable delete.From :: List.map (fun (join: Join) -> join.Table) delete.Joins
+            |> List.collect FromItem.leaves
+            |> List.choose (function
+                | FromTable source when source.Database.IsSome || not (ctes.Contains(source.Table.ToLowerInvariant())) ->
+                    let key = CatalogOverlay.tableKey (source.Database |> Option.defaultValue dbName) source.Table
+                    CatalogOverlay.tryTable session.TemporaryCatalog key
+                    |> Option.map (fun _ -> (source.Alias |> Option.defaultValue source.Table).ToLowerInvariant())
+                | _ -> None)
+            |> Set.ofList
+        let targets = delete.Targets |> List.filter (fun name -> not (temporaryAliases.Contains(name.ToLowerInvariant())))
+        // Temporary columns cannot be bound on the permanent catalog. Claim
+        // the permanent targets before the overlay evaluates the actual join.
+        if targets.IsEmpty then None
+        else
+            Some(Delete
+                { delete with
+                    Targets = targets
+                    Where = None
+                    Joins = delete.Joins |> List.map (Join.mapConditions (fun _ -> Lit(VInt 1L))) })
+    | _ -> None
+
+let private executeTemporaryStatement (action: TemporaryAction option) dbName (session: Session) stmt =
+    let start session =
+        beginTransaction ImplicitTrackedTransaction (pendingTransactionCharacteristics session) (configuredReadOnly session) session
+    let writePlan = if action.IsNone then permanentJoinedDelete session dbName stmt else None
+    match writePlan with
+    | None ->
+        let session =
+            if session.Tx.IsNone && autocommitDisabled session && action.IsNone && isDataChangeStatement stmt then start session
+            else session
+        executeWithTemporaryCatalog action session stmt
+    | Some plan ->
+        let publish = session.Tx.IsNone && not (autocommitDisabled session)
+        let mutable working = if session.Tx.IsNone then start session else session
+        try
+            let executed, result =
+                let access =
+                    if working.Tx |> Option.exists _.ReadOnly then Error(1792, "Cannot execute statement in a READ ONLY transaction")
+                    else checkSessionAccess working working.Store (requiredPrivilegesForStatement working working.Store dbName stmt)
+                match access with
+                | Error(code, message) -> working, Err(code, message)
+                | Ok () ->
+                    working <- startTransactionStatement working
+                    working <- prepareTransactionWrite plan working
+                    executeWithTemporaryCatalog action working stmt
+            working <- executed
+            if publish then
+                match terminalErrorInfo result with
+                | Some _ -> rollbackSession executed, result
+                | None -> commitSessionWith true executed, result
+            else
+                syncTransactionView executed, result
+        with _ ->
+            if publish then rollbackSession working |> ignore
+            reraise ()
 
 let private executeParsedWithTemporaryActionCore (action: TemporaryAction option) (session: Session) (stmt: Statement) =
     let dbName = session.Database |> Option.defaultValue defaultDatabase
@@ -4285,7 +4390,7 @@ let private executeParsedWithTemporaryActionCore (action: TemporaryAction option
             let session = if implicitCommit then commitSession session else session
             if implicitCommit then TableLocks.releaseExplicit session.Store session.ConnectionId
             executeWithTemporaryStatementAccess session (statementAccesses session) (fun () ->
-                executeWithTemporaryCatalog action session stmt)
+                executeTemporaryStatement action dbName session stmt)
         elif implicitCommit then
             let session = commitSession session
             TableLocks.releaseExplicit session.Store session.ConnectionId

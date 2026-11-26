@@ -383,6 +383,7 @@ type private FullTextCandidates =
 type private MutationSource =
     { Qualifier: string
       PhysicalTable: TableRef option
+      FromStoredView: bool
       Columns: ColumnDef list }
 
 let private columnOffsets (sources: MutationSource list) =
@@ -1451,6 +1452,50 @@ let private storeForStoredView (store: Store) =
                     | Some table -> Map.add tableName table tables
                     | None -> Map.remove tableName tables))) store.Catalog
         { Storage.beginTransactionSnapshotFromCatalog store permanentCatalog with TableShadows = Map.empty }
+
+// The wire layer owns the temporary overlay. A joined write can return a
+// separate permanent snapshot when the SQL-visible catalog hides its target.
+let private permanentMutationResult = System.Threading.AsyncLocal<(Store * (Store -> unit)) option>()
+
+let internal withPermanentMutationResult (overlay: Store) execute =
+    let mutable permanent = None
+    let result =
+        DynamicScope.withValue permanentMutationResult (Some(overlay, fun snapshot -> permanent <- Some snapshot)) execute
+    result, permanent
+
+let private permanentMutationPublisher (store: Store) =
+    permanentMutationResult.Value
+    |> Option.bind (fun (overlay, publish) ->
+        if obj.ReferenceEquals(overlay.Databases, store.Databases) then Some publish else None)
+
+type private ShadowedMutation =
+    { PermanentBefore: Store
+      PermanentAfter: Store
+      TemporaryAfter: Store
+      PublishPermanent: Store -> unit }
+
+let private beginShadowedMutation store snapshot =
+    permanentMutationPublisher store
+    |> Option.map (fun publish ->
+        let permanent = storeForStoredView store
+        // InnoDB temporary tables have no foreign-key relationships. Their
+        // row identities also must not contend with those of the shared table.
+        let temporary =
+            { snapshot with
+                ForeignKeyChecks = false
+                TransactionLocks = None
+                RowLocks = System.Collections.Concurrent.ConcurrentDictionary()
+                KeyLocks = System.Collections.Concurrent.ConcurrentDictionary() }
+        { PermanentBefore = permanent
+          PermanentAfter = Storage.beginTransactionSnapshot permanent
+          TemporaryAfter = temporary
+          PublishPermanent = publish })
+
+let private commitJoinedMutation (store: Store) baseCatalog snapshot = function
+    | Some split ->
+        store.Catalog <- split.TemporaryAfter.Catalog
+        split.PublishPermanent split.PermanentAfter
+    | None -> Storage.commitCatalogInto store baseCatalog snapshot
 
 let private parseStoredViewStatement (view: StoredView) =
     let options = { Parser.defaultOptions with LiteralCollation = Some view.CollationConnection }
@@ -13829,7 +13874,7 @@ and private applyPreparedJoin
 
 and private mutationDerivedSource qualifier ((columns, rows): ColumnDef list * Value[] list)
     : MutationSource list * (Value[] option list * Value[]) list =
-    [ { Qualifier = qualifier; PhysicalTable = None; Columns = columns } ],
+    [ { Qualifier = qualifier; PhysicalTable = None; FromStoredView = false; Columns = columns } ],
     rows |> List.map (fun row -> [ None ], row)
 
 /// Multi-table mutations retain each source row beside the flattened row.
@@ -13878,6 +13923,7 @@ and private applyMutationJoin
             sourcesSoFar
             @ [ { Qualifier = alias
                   PhysicalTable = None
+                  FromStoredView = false
                   Columns = joinColumns } ],
             List.ofSeq rows)
     | source ->
@@ -13932,14 +13978,17 @@ and private prepareMutationJoinSource
             | Some source ->
                 source.Value
                 |> Result.map (fun prepared ->
-                    prepared.Columns, prepared.Rows, prepared.IdentityOf, prepared.WriteTable |> Option.defaultValue tableRef)
+                    prepared.Columns, prepared.Rows, prepared.IdentityOf, prepared.WriteTable)
             | None ->
                 resolveTableRef store registry dbName tableRef
-                |> Result.map (fun (columns, rows) -> columns, rows, Some, tableRef)
+                |> Result.map (fun (columns, rows) -> columns, rows, Some, None)
 
         resolved
         |> Result.map (fun (columns, rows, identityOf, writeTable) ->
-            [ { Qualifier = qualifier; PhysicalTable = Some writeTable; Columns = columns } ],
+            [ { Qualifier = qualifier
+                PhysicalTable = Some(writeTable |> Option.defaultValue tableRef)
+                FromStoredView = writeTable.IsSome
+                Columns = columns } ],
             rows |> List.map (fun row -> [ identityOf row ], row))
     | FromJsonTable(_, _, _, qualifier) ->
         prepareJoinSource store registry dbName scope Map.empty Map.empty source
@@ -26354,7 +26403,8 @@ let private prepareDeleteViewSources store registry dbName (delete: DeleteStmt) 
                     tryUpdatableView store schema source.Table
                     |> Option.filter (fun view ->
                         view.UpdateJoins.IsEmpty
-                        && not (Map.containsKey (view.Database.ToLowerInvariant(), view.Table.ToLowerInvariant()) store.TableShadows))
+                        && (not (Map.containsKey (view.Database.ToLowerInvariant(), view.Table.ToLowerInvariant()) store.TableShadows)
+                            || (permanentMutationPublisher store).IsSome))
                     |> Option.map (fun view -> qualifier.ToLowerInvariant(), stored, view))
         | _ -> None)
     |> List.map (fun (qualifier, stored, view) -> qualifier, lazy (prepareDeleteViewSource store registry stored view))
@@ -29537,22 +29587,25 @@ let private triggersFor
     (timing: string)
     (event: string)
     : StoredTrigger list =
-    match scan store "mysql" "triggers" with
-    | Error _ -> []
-    | Ok(_, rows) ->
-        rows
-        |> Seq.choose SystemCatalog.Trigger.tryRead
-        |> Seq.filter (isTriggerSlot db table timing event)
-        |> Seq.map (fun trigger ->
-            { Name = trigger.Name
-              Body = trigger.Body
-              Definer = trigger.Definer
-              Order = trigger.Order
-              SqlMode = trigger.SqlMode
-              CharacterSetClient = trigger.CharacterSetClient
-              CollationConnection = trigger.CollationConnection })
-        |> Seq.sortBy (fun trigger -> trigger.Order)
-        |> List.ofSeq
+    let key = db.ToLowerInvariant(), normalizeTableName table
+    if store.TableShadows.ContainsKey key then []
+    else
+        match scan store "mysql" "triggers" with
+        | Error _ -> []
+        | Ok(_, rows) ->
+            rows
+            |> Seq.choose SystemCatalog.Trigger.tryRead
+            |> Seq.filter (isTriggerSlot db table timing event)
+            |> Seq.map (fun trigger ->
+                { Name = trigger.Name
+                  Body = trigger.Body
+                  Definer = trigger.Definer
+                  Order = trigger.Order
+                  SqlMode = trigger.SqlMode
+                  CharacterSetClient = trigger.CharacterSetClient
+                  CollationConnection = trigger.CollationConnection })
+            |> Seq.sortBy (fun trigger -> trigger.Order)
+            |> List.ofSeq
 
 let private afterInsertTriggers (store: Store) (db: string) (table: string) =
     triggersFor store db table "AFTER" "INSERT"
@@ -34435,11 +34488,21 @@ let rec executeAs
                 let check = whereMatches ctxFor deleteStmt.Where
                 let targetIndices = List.distinct targetIndices
 
+                let tableIsShadowed tableRef =
+                    let database, table = physicalTableKey dbName tableRef
+                    Map.containsKey (database.ToLowerInvariant(), table) store.TableShadows
+
                 let targetTables =
                     targetIndices
-                    |> List.choose (fun index -> sources.[index].PhysicalTable |> Option.map (fun tableRef -> index, tableRef))
+                    |> List.choose (fun index ->
+                        let source = sources.[index]
+                        source.PhysicalTable
+                        |> Option.map (fun tableRef ->
+                            index, (tableRef, source.FromStoredView && tableIsShadowed tableRef)))
 
-                let grouped = MutationTargets.group dbName targetTables
+                let grouped =
+                    targetTables
+                    |> MutationTargets.groupBy (fun (tableRef, permanent) -> physicalTableKey dbName tableRef, permanent)
 
                 let claimed = grouped.Tables |> Array.map (fun _ -> HashSet<Value[]>(HashIdentity.Reference))
                 let claimedRows = grouped.Tables |> Array.map (fun _ -> ResizeArray<Value[]>())
@@ -34462,16 +34525,23 @@ let rec executeAs
                 | Ok _ ->
                     let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
                     let selectionStore = Storage.beginTransactionSnapshotFromCatalog store baseCatalog
+                    let split = beginShadowedMutation store snapshot
                     let invocationTables =
                         sources
                         |> List.choose _.PhysicalTable
                         |> List.map (physicalTableKey dbName)
                         |> Set.ofList
 
-                    let applyTable index (tableRef: TableRef) =
+                    let applyTable index (tableRef, throughView) =
                         if claimedRows.[index].Count = 0 then
                             Ok 0
                         else
+                            let selectionStore, snapshot =
+                                match split with
+                                | Some split when not throughView && tableIsShadowed tableRef ->
+                                    selectionStore, split.TemporaryAfter
+                                | Some split -> split.PermanentBefore, split.PermanentAfter
+                                | None -> selectionStore, snapshot
                             let tdb, tname = tableRef.Database |> Option.defaultValue dbName, tableRef.Table
                             tableSnapshot selectionStore tdb tname
                             |> Result.mapError storageErr
@@ -34498,7 +34568,7 @@ let rec executeAs
                                         if deleteStmt.Ignore then
                                             let initialRestriction =
                                                 if targetIndices.Length > 1 && snapshot.ForeignKeyChecks then
-                                                    Storage.foreignKeyDeleteRestriction baseCatalog tdb tname
+                                                    Storage.foreignKeyDeleteRestriction selectionStore.Catalog tdb tname
                                                 else
                                                     fun _ -> None
                                             let selectedImages = Map.ofList selectedRows
@@ -34522,7 +34592,7 @@ let rec executeAs
 
                     match apply with
                     | Ok counts ->
-                        Storage.commitCatalogInto store baseCatalog snapshot
+                        commitJoinedMutation store baseCatalog snapshot split
                         ids, Affected(uint64 (List.sum counts))
                     | Error e -> ids, e
 

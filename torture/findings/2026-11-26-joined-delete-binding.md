@@ -31,21 +31,39 @@ Both base tables retain their rows after every rejection. The successful
 delete leaves only ID 1 in each table and in the writable view after
 reopening the durable Fsdb store.
 
+## Temporary shadow follow-up
+
+The [shadow fixture](2026-11-26-joined-delete-shadow.sql) gives the
+permanent base of a two-layer writable view and a same-named session
+temporary table overlapping primary keys. Fsdb previously returned
+1146 for the audited joined DELETE through the view. Both Fsdb storage
+modes now match MySQL 8.4.11 on all 37 output rows and the trigger's
+1644 error. Foreign-key cascades reach the permanent child even when
+a same-named temporary child supplies the join. A trigger rejection
+restores both targets, and a temporary-only delete skips the permanent
+trigger.
+
+In a two-session check, a writer made an eligible row invisible to
+the view while a second session attempted the joined DELETE. Both
+engines waited and returned zero affected rows after the writer
+committed. A separate mixed DELETE removed two rows and explicit
+rollback restored both. The WAL-backed Fsdb server recovered the
+expected permanent base and child rows after an abrupt stop. The
+mixed path still claims permanent rows conservatively before binding
+the join against the temporary catalog.
+
 ## Remaining view cases
 
-A separate fixture created a permanent `base` with row `(1,10)`, a
-two-layer writable view over it, and a session temporary `base` with
-row `(1,91)`. Both engines handled a simple DELETE through the view
-and a joined write targeting only the temporary alias correctly.
-When the same joined statement also named the view as a target, Fsdb
-returned 1146 for DELETE. A joined UPDATE targeting only the view
-changed the temporary row where MySQL changed the permanent row.
-A two-target UPDATE changed both rows in MySQL and only the temporary
-row in Fsdb. Both Fsdb storage modes reproduced these outcomes.
-Stored-view reads resolve through the permanent catalog. The joined
-UPDATE rewrite loses that distinction when it lowers the target to a
-table name, while the joined DELETE rewrite excludes a shadowed base
-from its physical-target mapping.
+A joined UPDATE targeting only the view changed the temporary row
+where MySQL changed the permanent row. A two-target UPDATE changed
+both rows in MySQL and only the temporary row in Fsdb. Both Fsdb
+storage modes reproduced these outcomes. The joined UPDATE rewrite
+loses the view's permanent target when it lowers that target to a
+table name.
+
+`DROP TEMPORARY TABLE base` can still return 3730 when a permanent
+foreign key references the same-named permanent base. MySQL drops the
+temporary table and retains both permanent tables.
 
 Assignment to a user variable in the surrounding statement can make
 MySQL materialize an UNDEFINED view. The audited joined DELETE then

@@ -290,6 +290,7 @@ type Savepoint =
       Seeded: bool
       BaseCatalog: Catalog
       Catalog: Catalog
+      TemporaryCatalog: Catalog
       PendingEventCount: int
       RollbackWork: int64
       GapLocks: Storage.RowLockStripe list
@@ -354,6 +355,8 @@ type Transaction =
       /// Set after the first database statement seeds a repeatable-read view.
       Seeded: bool
       EngineAccess: TransactionEngineAccess
+      /// First image of each temporary table changed by transactional DML.
+      TemporaryRowsBefore: Catalog
       /// Sequence numbers preserve establishment order independently of writes.
       Savepoints: Map<string, Savepoint>
       /// Monotonic and never reused after a savepoint is dropped.

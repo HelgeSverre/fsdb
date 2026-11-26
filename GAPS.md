@@ -1331,10 +1331,15 @@ score. A [bound integer primary key](torture/findings/2026-11-25-joined-delete-v
 now avoids locking disjoint base rows. The audited cases cover a literal on
 the view column and an equality propagated from its joined table. Missing
 keys still claim existing rows to wait for primary-key moves.
-[Mixed permanent and temporary sources](torture/findings/2026-11-26-joined-delete-binding.md#remaining-view-cases)
-still diverge when a temporary table shadows the base table reached through
-a view. Joined DELETE can return 1146, and joined UPDATE can write the
-temporary row instead of the permanent row. Broader lock narrowing remains open.
+[Joined DELETE across a temporary shadow](torture/findings/2026-11-26-joined-delete-binding.md#temporary-shadow-follow-up)
+now preserves the permanent view target and the session's temporary target
+as separate tables, including when both contain the same key. The audited
+cases cover statement failure, transaction rollback, and rechecking view
+visibility after a lock wait. Mixed DELETE currently uses conservative
+permanent row claims. [Joined UPDATE](torture/findings/2026-11-26-joined-delete-binding.md#remaining-view-cases)
+can still write the temporary row when its target is the view. A DROP
+TEMPORARY TABLE can also fail when a permanent foreign key references the
+same name.
 
 A [UNION ALL derived source before a writable joined component](torture/findings/2026-11-04-union-derived-updatable-view.md)
 now has a native MySQL contract and fsdb regression: duplicate derived rows
