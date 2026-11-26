@@ -266,11 +266,12 @@ These tables summarize immutable, linked result artifacts. They are historical
 measurements, not claims about the current branch; use a fresh run for a current
 comparison.
 
-The [native peer benchmark at `ac7d4a67`](results/ac7d4a67-peer-comparison.md)
+The [native peer benchmark at `baf72b20`](results/baf72b20-peer-refresh.md)
 compares Fsdb with MySQL, MariaDB, and Dolt across verified point reads,
 durable updates, joined views, correlated aggregates, spatial predicates,
-and CJK searches. It also compares default and Server GC for durable
-Fsdb point reads. The
+and CJK searches. The
+[earlier GC control](results/ac7d4a67-peer-comparison.md#fsdb-garbage-collection-control)
+compares default and Server GC for durable Fsdb point reads. The
 [WAL attachment control](results/ddbd4602-peer-comparison.md#wal-attachment-control)
 compares point reads with and without WAL on the same Fsdb build. The
 [previous native run](results/cc2cb5f6-peer-comparison.md) includes the
