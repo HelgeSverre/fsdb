@@ -1014,6 +1014,43 @@ let tests =
                   finally
                       run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "serializable primary ranges ignore snapshots of replaced tables"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let composite = "CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a,b))"
+              for oldSchema, oldRow, replacement in
+                  [ "CREATE TABLE gate(a INT PRIMARY KEY)", "(2)", [ "DROP TABLE gate"; composite ]
+                    composite, "(2,35)", [ "DROP TABLE gate"; composite ]
+                    composite, "(2,35)", [ "TRUNCATE TABLE gate" ] ] do
+                  let store = Fsdb.Storage.create ()
+                  let admin = run (create 1 store) oldSchema (Affected 0UL)
+                  let admin = run admin $"INSERT INTO gate VALUES {oldRow}" (Affected 1UL)
+                  let admin = run admin "CREATE TABLE sibling(id INT PRIMARY KEY)" (Affected 0UL)
+                  let admin = run admin "INSERT INTO sibling VALUES (1)" (Affected 1UL)
+                  let older = run (create 2 store) "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ" (Affected 0UL)
+                  let older = run older "BEGIN" (Affected 0UL)
+                  let older = run older "SELECT id FROM sibling" (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                  try
+                      let admin = (admin, replacement) ||> List.fold (fun session sql -> run session sql (Affected 0UL))
+                      run admin "INSERT INTO gate VALUES (2,10),(2,20),(2,30),(2,40)" (Affected 4UL) |> ignore
+                      let reader = run (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+                      let reader = run reader "BEGIN" (Affected 0UL)
+                      let reader = run reader "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=2 AND b BETWEEN 20 AND 30 ORDER BY b DESC LIMIT 1"
+                                       (ResultSet([ "b" ], [ [ Some "30" ] ]))
+                      try
+                          let probe = run (create 4 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+                          match handle probe "INSERT INTO gate VALUES (2,36)" |> snd with
+                          | Err(1205, _) -> ()
+                          | actual -> failtestf "the replacement table's gap must extend to 40, got %A" actual
+                      finally
+                          run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  finally
+                      run older "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "serializable primary ranges follow descending and composite index order"
           <| fun _ ->
               let run session sql expected =

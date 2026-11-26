@@ -970,6 +970,51 @@ def check(port, mysql):
         ((38,),),
     )
 
+    composite = "CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a,b))"
+    for label, old_table, old_row, replacement in (
+        (
+            "replace a single-column key",
+            "CREATE TABLE gate(a INT PRIMARY KEY)",
+            "(2)",
+            ("DROP TABLE gate", composite),
+        ),
+        ("replace the same key", composite, "(2,35)", ("DROP TABLE gate", composite)),
+        ("truncate the same key", composite, "(2,35)", ("TRUNCATE TABLE gate",)),
+    ):
+        setup = (
+            old_table,
+            f"INSERT INTO gate VALUES {old_row}",
+            "CREATE TABLE sibling(id INT PRIMARY KEY)",
+            "INSERT INTO sibling VALUES (1)",
+        )
+        with fixture(port, schema, mysql, setup) as (_, admin, older, reader, probe):
+            execute(older, "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            execute(older, "BEGIN")
+            expect(
+                label + " older snapshot", scalar(older, "SELECT id FROM sibling"), 1
+            )
+            for sql in replacement:
+                execute(admin, sql)
+            execute(admin, "INSERT INTO gate VALUES (2,10),(2,20),(2,30),(2,40)")
+            execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            execute(reader, "BEGIN")
+            expect(
+                label + " newest matching row",
+                scalar(
+                    reader,
+                    "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a=2 AND b BETWEEN 20 AND 30 ORDER BY b DESC LIMIT 1",
+                ),
+                30,
+            )
+            for value in (34, 36):
+                expect(
+                    f"{label} gap at {value}",
+                    rolled_back_outcome(probe, f"INSERT INTO gate VALUES (2,{value})"),
+                    TIMEOUT,
+                )
+            execute(reader, "ROLLBACK")
+            execute(older, "ROLLBACK")
+
     print(f"{engine} {version}: {checks - failures}/{checks} schedule checks matched")
     return failures
 

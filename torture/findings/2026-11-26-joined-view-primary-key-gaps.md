@@ -352,16 +352,38 @@ A separate schedule held a repeatable-read transaction open after
 reading a sibling table. A second connection dropped `gate`, whose
 primary key was `(a)`, and recreated it with `(a,b DESC)`. A third
 connection began a serializable transaction and read the new table with
-`WHERE a=2 ORDER BY b DESC LIMIT 2`. MySQL returned `40, 30`. Fsdb
-returned 1105. Its server log showed a primary-index key width mismatch.
+`WHERE a=2 ORDER BY b DESC LIMIT 2`. MySQL returned `40, 30`. Before the
+fix, Fsdb returned 1105 and logged a primary-index key width mismatch.
 The older transaction had read the sibling only, leaving it free of a
 MySQL metadata lock on `gate`.
 
-The same schedule can shorten a gap lock when the primary key stays
+The same schedule shortened a gap lock when the primary key stayed
 `(a,b)`. The old table had `(2,35)`. The replacement had `(2,30)` and
 `(2,40)` with no key between them. A backward scan returned `30` on
 both engines. MySQL blocked inserts at `(2,34)` and `(2,36)`. Fsdb
 blocked `(2,34)` and allowed `(2,36)`.
+
+Fsdb now gives new table schema versions process-unique revisions. A
+replacement gets a fresh revision through `CREATE TABLE` or
+`TRUNCATE TABLE`, so a snapshot of the previous table cannot contribute
+records to the replacement's lock bounds. Updates to rows keep their
+table's revision, so existing transactions still protect gaps that
+older snapshots can see. Snapshot recovery keeps its existing baseline
+revision so separately decoded prepared XA catalogs can recognize the
+same table version. Subsequent DDL uses fresh revisions, and the
+persistence format stays the same.
+MySQL and both Fsdb modes passed all 340 maintained schedule checks,
+including replacement with a wider key, replacement with the same key,
+and `TRUNCATE`. A separate run checked the gap after loading a snapshot.
+
+#### Table metadata locks
+
+When the older transaction reads `gate` itself, MySQL holds its metadata
+lock through the transaction. A competing `DROP TABLE gate` returned
+1205 with `lock_wait_timeout=1`. An uncommitted `UPDATE gate` produced
+the same result. Fsdb let the drop complete in both schedules. The
+replacement fix covers an older snapshot that read only a sibling
+table, so no metadata lock on `gate` is expected for that schedule.
 
 Run the live schedules against disposable servers. Use `--data-dir`
 to run Fsdb with WAL. Omit `FSDB_PORT` for the MySQL reference alone.

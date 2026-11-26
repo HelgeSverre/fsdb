@@ -273,7 +273,7 @@ type TableStatistics =
 /// parent side), gated by `Store.ForeignKeyChecks`.
 type Table =
     { OriginalName: string
-      /// In-memory DDL revision; prepared handles do not survive recovery.
+      /// Process-local schema revision, zero for versions decoded from a snapshot.
       SchemaRevision: int64
       Columns: ColumnDef list
       /// Published pages are immutable so captured catalog roots remain
@@ -314,6 +314,10 @@ type Table =
     /// copy on every access, for external validators/tools that walk a
     /// snapshot with `List.*`; every hot path reads `RowsArray` directly.
     member this.Rows: Value[] list = List.ofSeq this.RowsArray
+
+let mutable private schemaRevision = 0L
+
+let private nextSchemaRevision () = Interlocked.Increment(&schemaRevision)
 
 let private isPrimaryIndex (index: IndexDef) =
     String.Equals(index.Name, "PRIMARY", StringComparison.OrdinalIgnoreCase)
@@ -5223,7 +5227,7 @@ let private rootUserRow: Value[] =
 let private sysTableWithIndexes (name: string) (columns: ColumnDef list) (indexes: IndexDef list) (rows: Value[] list) : Table =
     let table =
         { OriginalName = name
-          SchemaRevision = 0L
+          SchemaRevision = nextSchemaRevision ()
           Columns = columns
           RowsArray = RowStore.ofSeq rows
           NextAutoId = 1L
@@ -7797,7 +7801,7 @@ let private retargetForeignKeys
                 table
             else
                 { table with
-                    SchemaRevision = table.SchemaRevision + 1L
+                    SchemaRevision = nextSchemaRevision ()
                     ForeignKeys =
                         table.ForeignKeys
                         |> List.map (fun foreignKey ->
@@ -8635,7 +8639,7 @@ let createTableSeeded
 
                                         let table =
                                             { OriginalName = tableName
-                                              SchemaRevision = 0L
+                                              SchemaRevision = nextSchemaRevision ()
                                               Columns = columns
                                               RowsArray = RowStore.empty
                                               NextAutoId = autoIncrementSeed |> Option.defaultValue 1L
@@ -8799,7 +8803,13 @@ let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, 
                     )
                 | _ ->
                     let createTime = DateTime.Now
-                    let table = reindexTableWithFullTextSettings store.NgramTokenSize store.FullTextWordLengths (fullTextStopwordSettings store) { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = createTime }
+                    let emptied =
+                        { table with
+                            SchemaRevision = nextSchemaRevision ()
+                            RowsArray = RowStore.empty
+                            NextAutoId = 1L
+                            CreateTime = createTime }
+                    let table = reindexTableWithFullTextSettings store.NgramTokenSize store.FullTextWordLengths (fullTextStopwordSettings store) emptied
                     let database = Map.add address.Table table db
                     invalidateAutoIncrementCounter store dbName tableName
                     Ok(setCatalogDatabase address.Database database catalog, createTime)))
@@ -9708,7 +9718,7 @@ let private retargetAlterForeignKeyColumns
                             { foreignKey with RefColumns = foreignKey.RefColumns |> List.map (renameForeignKeyColumn oldName newName) }
                         else foreignKey)
                     if foreignKeys = table.ForeignKeys then table
-                    else { table with ForeignKeys = foreignKeys; SchemaRevision = table.SchemaRevision + 1L }))) (setCatalogTable address candidate catalog)
+                    else { table with ForeignKeys = foreignKeys; SchemaRevision = nextSchemaRevision () }))) (setCatalogTable address candidate catalog)
     let candidate = tryCatalogTable address updated |> Option.get
     let validateColumns () =
         let dropped =
@@ -10019,7 +10029,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                         retargetAlterForeignKeyColumns catalog (tableAddress dbName origKey) finalTable actions)
                     |> Result.map (fun (catalog, finalTable) ->
                         let db = tryCatalogDatabase dbName catalog |> Option.get
-                        let finalTable = { finalTable with SchemaRevision = table.SchemaRevision + 1L }
+                        let finalTable = { finalTable with SchemaRevision = nextSchemaRevision () }
                         let database = Map.remove origKey db |> Map.add finalKey (reindexAfterAlter store.NgramTokenSize store.FullTextWordLengths (fullTextStopwordSettings store) actions preserveFullText table finalTable)
                         let updatedCatalog = setCatalogDatabase dbName database catalog
                         invalidateAutoIncrementCounter store dbName origKey
@@ -10101,7 +10111,7 @@ let private moveTableInCatalog
                 let moved =
                     { table with
                         OriginalName = targetTableName
-                        SchemaRevision = table.SchemaRevision + 1L
+                        SchemaRevision = nextSchemaRevision ()
                         ForeignKeys = foreignKeys }
 
                 let withoutSource =
